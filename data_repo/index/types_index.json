@@ -1,0 +1,16 @@
+{
+  "config": [
+    "config/peer_tokens.json"
+  ],
+  "journal_entry": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "memory": [
+    "memory/episodic/events-2026-02.jsonl",
+    "memory/core/long_term_facts.json"
+  ],
+  "core_memory": [
+    "memory/core/identity.md",
+    "memory/core/values.md"
+  ]
+}

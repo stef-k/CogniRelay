@@ -1,0 +1,21 @@
+[Unit]
+Description=CogniRelay API Service
+After=network.target
+
+[Service]
+Type=simple
+User=cognirelay
+Group=cognirelay
+WorkingDirectory=/opt/cognirelay
+EnvironmentFile=/etc/cognirelay/cognirelay.env
+ExecStart=/opt/cognirelay/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/cognirelay/repo /var/lib/cognirelay/security
+
+[Install]
+WantedBy=multi-user.target

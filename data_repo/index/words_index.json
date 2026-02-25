@@ -1,0 +1,301 @@
+{
+  "peer_id": [
+    "config/peer_tokens.json"
+  ],
+  "json": [
+    "config/peer_tokens.json",
+    "memory/core/long_term_facts.json"
+  ],
+  "files": [
+    "config/peer_tokens.json"
+  ],
+  "compact": [
+    "config/peer_tokens.json"
+  ],
+  "messages": [
+    "config/peer_tokens.json"
+  ],
+  "read_namespaces": [
+    "config/peer_tokens.json"
+  ],
+  "journal": [
+    "config/peer_tokens.json",
+    "journal/2026/2026-02-25.md"
+  ],
+  "index": [
+    "config/peer_tokens.json"
+  ],
+  "tokens": [
+    "config/peer_tokens.json"
+  ],
+  "projects": [
+    "config/peer_tokens.json"
+  ],
+  "trigger": [
+    "config/peer_tokens.json"
+  ],
+  "peer_tokens": [
+    "config/peer_tokens.json"
+  ],
+  "search": [
+    "config/peer_tokens.json"
+  ],
+  "admin": [
+    "config/peer_tokens.json"
+  ],
+  "token": [
+    "config/peer_tokens.json"
+  ],
+  "scopes": [
+    "config/peer_tokens.json"
+  ],
+  "write": [
+    "config/peer_tokens.json"
+  ],
+  "peers": [
+    "config/peer_tokens.json"
+  ],
+  "change-me-local-dev-token": [
+    "config/peer_tokens.json"
+  ],
+  "local-dev": [
+    "config/peer_tokens.json"
+  ],
+  "read": [
+    "config/peer_tokens.json"
+  ],
+  "config": [
+    "config/peer_tokens.json"
+  ],
+  "md": [
+    "journal/2026/2026-02-25.md",
+    "memory/core/identity.md",
+    "memory/core/values.md"
+  ],
+  "created_at": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "entry": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "repo": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "journal_entry": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "importance": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl",
+    "memory/core/identity.md",
+    "memory/core/values.md"
+  ],
+  "type": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl",
+    "memory/core/identity.md",
+    "memory/core/values.md",
+    "memory/core/long_term_facts.json"
+  ],
+  "tags": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "id": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl",
+    "memory/core/identity.md",
+    "memory/core/values.md"
+  ],
+  "ai": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "memory": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl",
+    "memory/core/identity.md",
+    "memory/core/values.md",
+    "memory/core/long_term_facts.json"
+  ],
+  "collaboration": [
+    "journal/2026/2026-02-25.md",
+    "memory/core/values.md"
+  ],
+  "00z": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "the": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "2026": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "2026-02-25": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "for": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "mvp": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "bootstrap": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "---": [
+    "journal/2026/2026-02-25.md",
+    "memory/core/identity.md",
+    "memory/core/values.md"
+  ],
+  "journal-2026-02-25-001": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "initial": [
+    "journal/2026/2026-02-25.md"
+  ],
+  "2026-02-25t00": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "00": [
+    "journal/2026/2026-02-25.md",
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "initialized": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "ts": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "data": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "summary": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "evt_bootstrap_1": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "seed": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "events-2026-02": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "jsonl": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "episodic": [
+    "memory/episodic/events-2026-02.jsonl"
+  ],
+  "identity": [
+    "memory/core/identity.md"
+  ],
+  "operating": [
+    "memory/core/identity.md"
+  ],
+  "stable": [
+    "memory/core/identity.md"
+  ],
+  "constraints": [
+    "memory/core/identity.md"
+  ],
+  "mission": [
+    "memory/core/identity.md"
+  ],
+  "core-identity": [
+    "memory/core/identity.md"
+  ],
+  "core_memory": [
+    "memory/core/identity.md",
+    "memory/core/values.md",
+    "memory/core/long_term_facts.json"
+  ],
+  "describe": [
+    "memory/core/identity.md"
+  ],
+  "and": [
+    "memory/core/identity.md",
+    "memory/core/long_term_facts.json"
+  ],
+  "core": [
+    "memory/core/identity.md",
+    "memory/core/values.md",
+    "memory/core/long_term_facts.json"
+  ],
+  "here": [
+    "memory/core/identity.md"
+  ],
+  "reversible": [
+    "memory/core/values.md"
+  ],
+  "prefer": [
+    "memory/core/values.md"
+  ],
+  "core-values": [
+    "memory/core/values.md"
+  ],
+  "auditable": [
+    "memory/core/values.md"
+  ],
+  "small": [
+    "memory/core/values.md"
+  ],
+  "keep": [
+    "memory/core/values.md"
+  ],
+  "preserve": [
+    "memory/core/values.md",
+    "memory/core/long_term_facts.json"
+  ],
+  "values": [
+    "memory/core/values.md"
+  ],
+  "continuity": [
+    "memory/core/values.md"
+  ],
+  "changes": [
+    "memory/core/values.md"
+  ],
+  "experience": [
+    "memory/core/long_term_facts.json"
+  ],
+  "api-driven": [
+    "memory/core/long_term_facts.json"
+  ],
+  "should": [
+    "memory/core/long_term_facts.json"
+  ],
+  "git-backed": [
+    "memory/core/long_term_facts.json"
+  ],
+  "long_term_facts": [
+    "memory/core/long_term_facts.json"
+  ],
+  "summaries": [
+    "memory/core/long_term_facts.json"
+  ],
+  "this": [
+    "memory/core/long_term_facts.json"
+  ],
+  "facts": [
+    "memory/core/long_term_facts.json"
+  ],
+  "system": [
+    "memory/core/long_term_facts.json"
+  ],
+  "is": [
+    "memory/core/long_term_facts.json"
+  ],
+  "compaction": [
+    "memory/core/long_term_facts.json"
+  ],
+  "important": [
+    "memory/core/long_term_facts.json"
+  ]
+}

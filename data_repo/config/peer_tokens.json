@@ -1,0 +1,45 @@
+{
+  "tokens": [
+    {
+      "peer_id": "local-dev",
+      "token": "change-me-local-dev-token",
+      "scopes": [
+        "read:files",
+        "read:index",
+        "write:journal",
+        "write:messages",
+        "write:projects",
+        "search",
+        "compact:trigger",
+        "admin:peers"
+      ],
+      "read_namespaces": ["*"],
+      "write_namespaces": ["*"],
+      "notes": "Trusted local operator token"
+    },
+    {
+      "peer_id": "friday",
+      "token_sha256": "REPLACE_WITH_SHA256_OF_REAL_FRIDAY_TOKEN",
+      "scopes": ["read:files", "read:index", "search", "write:messages"],
+      "read_namespaces": ["memory", "messages"],
+      "write_namespaces": ["messages"],
+      "notes": "Can read shared/public memory + send messages, but cannot write memory/projects"
+    },
+    {
+      "peer_id": "lumen",
+      "token_sha256": "REPLACE_WITH_SHA256_OF_REAL_LUMEN_TOKEN",
+      "scopes": ["read:files", "search", "write:messages"],
+      "read_namespaces": ["messages", "memory"],
+      "write_namespaces": ["messages"],
+      "notes": "Message-only writer with shared-context reads"
+    },
+    {
+      "peer_id": "peer-relay-example",
+      "token_sha256": "REPLACE_WITH_SHA256_OF_REAL_RELAY_TOKEN",
+      "scopes": ["read:files", "write:messages", "search"],
+      "read_namespaces": ["messages"],
+      "write_namespaces": ["messages"],
+      "notes": "Relay peer logs/forwards messages only"
+    }
+  ]
+}

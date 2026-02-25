@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CogniRelay security.rotation_check daily at 01:00
+
+[Timer]
+OnCalendar=*-*-* 01:00:00
+Persistent=true
+Unit=cognirelay-ops-rotation-check.service
+
+[Install]
+WantedBy=timers.target

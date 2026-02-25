@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CogniRelay compact.plan daily at 03:15
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=cognirelay-ops-compact-plan.service
+
+[Install]
+WantedBy=timers.target

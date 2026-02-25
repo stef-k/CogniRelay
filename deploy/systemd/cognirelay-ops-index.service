@@ -1,0 +1,10 @@
+[Unit]
+Description=CogniRelay Ops Job: index.rebuild_incremental
+After=cognirelay.service
+Wants=cognirelay.service
+
+[Service]
+Type=oneshot
+User=cognirelay
+Group=cognirelay
+ExecStart=/usr/local/bin/cognirelay-ops-run.sh index.rebuild_incremental

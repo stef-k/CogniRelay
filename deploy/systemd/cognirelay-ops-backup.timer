@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CogniRelay backup.create daily at 02:00
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+Unit=cognirelay-ops-backup.service
+
+[Install]
+WantedBy=timers.target

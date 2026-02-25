@@ -1,0 +1,63 @@
+{
+  "generated_at": "2026-02-25T20:37:54.730612+00:00",
+  "file_count": 6,
+  "files": [
+    {
+      "path": "config/peer_tokens.json",
+      "type": "config",
+      "size": 1428,
+      "modified_at": "2026-02-25T20:24:07+00:00",
+      "snippet": "{ \"tokens\": [ { \"peer_id\": \"local-dev\", \"token\": \"change-me-local-dev-token\", \"scopes\": [ \"read:files\", \"read:index\", \"write:journal\", \"write:messages\", \"write:projects\", \"search\", \"compact:trigger\", \"admin:peers\" ], \"read_namespaces\": [\"*\"...",
+      "tags": [],
+      "importance": null
+    },
+    {
+      "path": "journal/2026/2026-02-25.md",
+      "type": "journal_entry",
+      "size": 213,
+      "modified_at": "2026-02-25T14:08:59+00:00",
+      "snippet": "--- id: journal-2026-02-25-001 type: journal_entry created_at: 2026-02-25T00:00:00Z tags: [mvp, memory, collaboration] importance: 0.8 --- Initial bootstrap journal entry for the AI memory repo MVP. #mvp #memory",
+      "tags": [
+        "memory",
+        "mvp"
+      ],
+      "importance": 0.8
+    },
+    {
+      "path": "memory/core/identity.md",
+      "type": "core_memory",
+      "size": 140,
+      "modified_at": "2026-02-25T14:17:51+00:00",
+      "snippet": "--- id: core-identity type: core_memory importance: 1.0 --- # Identity Describe stable identity, mission, and operating constraints here.",
+      "tags": [],
+      "importance": 1.0
+    },
+    {
+      "path": "memory/core/long_term_facts.json",
+      "type": "memory",
+      "size": 160,
+      "modified_at": "2026-02-25T14:17:51+00:00",
+      "snippet": "{ \"type\": \"core_memory\", \"facts\": [ \"This system is git-backed and API-driven.\", \"Compaction summaries should preserve important experience.\" ] }",
+      "tags": [],
+      "importance": null
+    },
+    {
+      "path": "memory/core/values.md",
+      "type": "core_memory",
+      "size": 156,
+      "modified_at": "2026-02-25T14:17:51+00:00",
+      "snippet": "--- id: core-values type: core_memory importance: 1.0 --- # Values - Preserve continuity - Prefer small reversible changes - Keep collaboration auditable",
+      "tags": [],
+      "importance": 1.0
+    },
+    {
+      "path": "memory/episodic/events-2026-02.jsonl",
+      "type": "memory",
+      "size": 169,
+      "modified_at": "2026-02-25T14:08:59+00:00",
+      "snippet": "{\"id\":\"evt_bootstrap_1\",\"ts\":\"2026-02-25T00:00:00Z\",\"type\":\"bootstrap\",\"summary\":\"Initialized AI memory repo MVP seed data\",\"importance\":0.9,\"tags\":[\"mvp\",\"bootstrap\"]}",
+      "tags": [],
+      "importance": null
+    }
+  ]
+}

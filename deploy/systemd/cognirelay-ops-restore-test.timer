@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CogniRelay backup.restore_test every Sunday at 02:30
+
+[Timer]
+OnCalendar=Sun *-*-* 02:30:00
+Persistent=true
+Unit=cognirelay-ops-restore-test.service
+
+[Install]
+WantedBy=timers.target

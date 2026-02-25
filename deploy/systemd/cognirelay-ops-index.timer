@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CogniRelay index.rebuild_incremental every 2 minutes
+
+[Timer]
+OnCalendar=*:0/2
+Persistent=true
+Unit=cognirelay-ops-index.service
+
+[Install]
+WantedBy=timers.target

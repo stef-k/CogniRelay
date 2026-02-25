@@ -1,0 +1,7 @@
+{
+  "type": "core_memory",
+  "facts": [
+    "This system is git-backed and API-driven.",
+    "Compaction summaries should preserve important experience."
+  ]
+}
