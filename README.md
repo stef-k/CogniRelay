@@ -17,6 +17,7 @@ This is not a Git forge. It is an AI-native substrate for memory, retrieval, mes
 
 - [System Overview](docs/system-overview.md)
 - [API Surface](docs/api-surface.md)
+- [MCP Guide](docs/mcp.md)
 - [Design Doc](DESIGN_DOC.md)
 - [Go-live Runbook](deploy/GO_LIVE_RUNBOOK.md)
 - [Production Signoff Checklist](deploy/PRODUCTION_SIGNOFF_CHECKLIST.md)
@@ -47,6 +48,8 @@ For non-local exposure, prefer file-based peer tokens in `data_repo/config/peer_
 - Search layer: stdlib `sqlite3` FTS5 with JSON-index fallback
 - Auth model: bearer tokens with scopes and split read/write namespace restrictions
 - Machine discoverability: `/v1/manifest`, `/v1/discovery/*`, and `POST /v1/mcp`
+
+For agent integration details, including the MCP bootstrap flow and tool mapping, see [docs/mcp.md](docs/mcp.md).
 
 ## Development
 
