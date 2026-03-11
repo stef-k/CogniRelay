@@ -71,6 +71,10 @@ from .storage import StorageError, append_jsonl, read_text_file, safe_path, writ
 app = FastAPI(title="CogniRelay", version="0.3.0")
 
 
+def _expanded_candidate_limit(limit: int) -> int:
+    return max(limit, min(100, max(limit * 5, 50)))
+
+
 def _services() -> tuple:
     settings = get_settings()
     gm = GitManager(
@@ -1898,10 +1902,12 @@ def index_status(auth: AuthContext = Depends(require_auth)) -> dict:
 def search(req: SearchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
     auth.require("search")
-    results = search_index(settings.repo_root, req.query, req.limit, include_types=req.include_types or None)
+    candidate_limit = _expanded_candidate_limit(req.limit) if (req.sort_by == "recent" or req.time_window_hours is not None) else req.limit
+    results = search_index(settings.repo_root, req.query, candidate_limit, include_types=req.include_types or None)
     results = filter_results_by_time_window(results, time_window_hours=req.time_window_hours)
     if req.sort_by == "recent":
         results = sort_results_by_recent(results)
+    results = results[: req.limit]
     results = _filter_search_results_for_auth(results, auth)
     _audit(settings, auth, "search", {"query": req.query, "count": len(results), "sort_by": req.sort_by})
     return {"ok": True, "query": req.query, "sort_by": req.sort_by, "count": len(results), "results": results}
@@ -1943,7 +1949,8 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
                 continue
             core_memory.append({"path": rel, "snippet": read_text_file(p)[:300]})
 
-    recent = search_index(settings.repo_root, req.task, req.limit, include_types=req.include_types or None)
+    candidate_limit = _expanded_candidate_limit(req.limit) if req.time_window_days is not None else req.limit
+    recent = search_index(settings.repo_root, req.task, candidate_limit, include_types=req.include_types or None)
     recent = filter_results_by_time_window(recent, time_window_days=req.time_window_days)
     recent = _filter_search_results_for_auth(recent, auth)
     # Simple AI-first shaping: prioritize summaries and messages for collaboration continuity.

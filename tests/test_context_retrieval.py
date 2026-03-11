@@ -69,6 +69,37 @@ class TestContextRetrieval(unittest.TestCase):
             self.assertEqual(result["results"][0]["path"], "journal/2026/2026-03-11.md")
             self.assertEqual(result["results"][1]["path"], "journal/2026/2026-03-09.md")
 
+    def test_search_recent_expands_candidates_before_truncating(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
+
+            for i in range(1, 8):
+                path = repo_root / "journal" / "2026" / f"2026-03-{i:02d}.md"
+                path.write_text(
+                    f"---\ntype: journal_entry\n---\nneedle {'needle ' * 8}older item {i}.",
+                    encoding="utf-8",
+                )
+                dt = datetime.now(timezone.utc) - timedelta(days=10 + i)
+                os.utime(path, (dt.timestamp(), dt.timestamp()))
+
+            newest = repo_root / "journal" / "2026" / "2026-03-20.md"
+            newest.write_text("---\ntype: journal_entry\n---\nneedle newest item.", encoding="utf-8")
+            now = datetime.now(timezone.utc)
+            os.utime(newest, (now.timestamp(), now.timestamp()))
+            rebuild_index(repo_root)
+
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                result = search(
+                    SearchRequest(query="needle", sort_by="recent", include_types=["journal_entry"], limit=1),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["results"][0]["path"], "journal/2026/2026-03-20.md")
+
     def test_recent_list_returns_latest_files_with_time_filter(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -126,6 +157,48 @@ class TestContextRetrieval(unittest.TestCase):
             self.assertTrue(result["ok"])
             bundle = result["bundle"]
             self.assertEqual(len(bundle["recent_relevant"]), 10)
+
+    def test_context_retrieve_time_window_filters_before_final_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
+            (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory" / "core" / "identity.md").write_text(
+                "---\ntype: core_memory\n---\nAgent identity.",
+                encoding="utf-8",
+            )
+
+            for i in range(1, 8):
+                path = repo_root / "journal" / "2026" / f"2026-03-{i:02d}.md"
+                path.write_text(
+                    f"---\ntype: journal_entry\n---\nstartup {'startup ' * 8}older item {i}.",
+                    encoding="utf-8",
+                )
+                dt = datetime.now(timezone.utc) - timedelta(days=10 + i)
+                os.utime(path, (dt.timestamp(), dt.timestamp()))
+
+            newest = repo_root / "journal" / "2026" / "2026-03-20.md"
+            newest.write_text("---\ntype: journal_entry\n---\nstartup recent item.", encoding="utf-8")
+            now = datetime.now(timezone.utc)
+            os.utime(newest, (now.timestamp(), now.timestamp()))
+            rebuild_index(repo_root)
+
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                result = context_retrieve(
+                    ContextRetrieveRequest(
+                        task="startup",
+                        include_types=["journal_entry"],
+                        time_window_days=7,
+                        limit=1,
+                    ),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(result["ok"])
+            bundle = result["bundle"]
+            self.assertEqual(len(bundle["recent_relevant"]), 1)
+            self.assertEqual(bundle["recent_relevant"][0]["path"], "journal/2026/2026-03-20.md")
 
 
 if __name__ == "__main__":
