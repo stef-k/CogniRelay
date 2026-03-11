@@ -164,8 +164,10 @@ This service is passive: it responds to calls and persists state.
 
 Retrieval semantics:
 - `POST /v1/search` is query-driven. `sort_by: "recent"` still matches by query first, then orders matching results by `modified_at DESC`.
+- `POST /v1/search` uses term-based matching for multi-word queries, not strict phrase matching.
 - `POST /v1/recent` is queryless and returns the latest indexed items after applying any type/time filters.
 - `POST /v1/context/retrieve` remains a task-bundle endpoint; use `POST /v1/recent` when you want latest items regardless of keyword relevance.
+- `POST /v1/context/retrieve` is continuity-shaped output, so summaries and messages may be prioritized over raw search ranking.
 
 ## Example API calls
 
