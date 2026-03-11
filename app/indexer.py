@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -172,6 +172,52 @@ def load_files_index(repo_root: Path) -> Dict[str, Any]:
     if not p.exists():
         return {'generated_at': None, 'file_count': 0, 'files': []}
     return json.loads(p.read_text(encoding='utf-8'))
+
+
+def _parse_modified_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def list_recent_files(
+    repo_root: Path,
+    limit: int = 10,
+    include_types: list[str] | None = None,
+    time_window_days: int | None = None,
+    time_window_hours: int | None = None,
+) -> List[Dict[str, Any]]:
+    include_set = {t.lower() for t in (include_types or []) if t}
+    now = datetime.now(timezone.utc)
+    cutoff: datetime | None = None
+    if time_window_hours is not None:
+        cutoff = now - timedelta(hours=time_window_hours)
+    elif time_window_days is not None:
+        cutoff = now - timedelta(days=time_window_days)
+
+    out: List[Dict[str, Any]] = []
+    for row in load_files_index(repo_root).get('files', []):
+        if include_set and str(row.get('type') or '').lower() not in include_set:
+            continue
+        modified_at = _parse_modified_at(row.get('modified_at'))
+        if cutoff is not None and (modified_at is None or modified_at < cutoff):
+            continue
+        out.append({**row, 'score': row.get('importance')})
+
+    out.sort(
+        key=lambda x: (
+            _parse_modified_at(x.get('modified_at')) or datetime.fromtimestamp(0, tz=timezone.utc),
+            x.get('path', ''),
+        ),
+        reverse=True,
+    )
+    return out[: max(1, min(limit, 100))]
 
 
 def _load_index_state(repo_root: Path) -> dict[str, Any]:

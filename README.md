@@ -384,6 +384,13 @@ curl -X POST http://127.0.0.1:8080/v1/replication/push \
 curl -X POST http://127.0.0.1:8080/v1/search   -H "Authorization: Bearer change-me-local-dev-token"   -H "Content-Type: application/json"   -d '{"query": "essay relay collaboration", "include_types": ["compaction_report", "journal_entry"], "limit": 5}'
 ```
 
+```bash
+curl -X POST http://127.0.0.1:8080/v1/search \
+  -H "Authorization: Bearer change-me-local-dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "", "sort_by": "recent", "include_types": ["journal_entry"], "time_window_hours": 24, "limit": 10}'
+```
+
 ### Relay forward (peer/relay mode)
 
 ```bash

@@ -25,7 +25,7 @@ from .audit import append_audit
 from .auth import AuthContext, require_auth
 from .config import ALL_SCOPES, get_settings, sha256_token
 from .git_manager import GitManager
-from .indexer import load_files_index, rebuild_index, incremental_rebuild_index, search_index
+from .indexer import incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from .models import (
     AppendRequest,
     CodeCheckRunRequest,
@@ -1877,10 +1877,18 @@ def index_status(auth: AuthContext = Depends(require_auth)) -> dict:
 def search(req: SearchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
     auth.require("search")
-    results = search_index(settings.repo_root, req.query, req.limit, include_types=req.include_types or None)
+    if req.sort_by == "recent":
+        results = list_recent_files(
+            settings.repo_root,
+            req.limit,
+            include_types=req.include_types or None,
+            time_window_hours=req.time_window_hours,
+        )
+    else:
+        results = search_index(settings.repo_root, req.query, req.limit, include_types=req.include_types or None)
     results = _filter_search_results_for_auth(results, auth)
-    _audit(settings, auth, "search", {"query": req.query, "count": len(results)})
-    return {"ok": True, "query": req.query, "count": len(results), "results": results}
+    _audit(settings, auth, "search", {"query": req.query, "count": len(results), "sort_by": req.sort_by})
+    return {"ok": True, "query": req.query, "sort_by": req.sort_by, "count": len(results), "results": results}
 
 
 @app.post("/v1/context/retrieve")
@@ -1903,17 +1911,28 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
                 continue
             core_memory.append({"path": rel, "snippet": read_text_file(p)[:300]})
 
-    recent = search_index(settings.repo_root, req.task, req.limit, include_types=req.include_types or None)
+    if req.sort_by == "recent":
+        recent = list_recent_files(
+            settings.repo_root,
+            req.limit,
+            include_types=req.include_types or None,
+            time_window_days=req.time_window_days,
+        )
+    else:
+        recent = search_index(settings.repo_root, req.task, req.limit, include_types=req.include_types or None)
     recent = _filter_search_results_for_auth(recent, auth)
-    # Simple AI-first shaping: prioritize summaries and messages for collaboration continuity.
-    recent = sorted(
-        recent,
-        key=lambda x: (
-            0 if str(x.get("path", "")).startswith("memory/summaries/") else 1,
-            0 if str(x.get("path", "")).startswith("messages/") else 1,
-            -float(x.get("score", 0) or 0),
-        ),
-    )[: req.limit]
+    if req.sort_by == "recent":
+        recent = recent[: req.limit]
+    else:
+        # Simple AI-first shaping: prioritize summaries and messages for collaboration continuity.
+        recent = sorted(
+            recent,
+            key=lambda x: (
+                0 if str(x.get("path", "")).startswith("memory/summaries/") else 1,
+                0 if str(x.get("path", "")).startswith("messages/") else 1,
+                -float(x.get("score", 0) or 0),
+            ),
+        )[: req.limit]
 
     open_questions = []
     for item in recent[:10]:
@@ -1927,12 +1946,15 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
         "recent_relevant": recent,
         "open_questions": open_questions[:5],
         "token_budget_hint": min(req.max_tokens_estimate, 4000),
+        "sort_by": req.sort_by,
+        "time_window_days": req.time_window_days,
         "notes": [
             "For best continuity, run /v1/index/rebuild before retrieve if many files changed.",
             "Use include_types to reduce noise (e.g. ['journal_entry','messages']).",
+            "Use sort_by='recent' for startup continuity when you want the latest entries instead of keyword-ranked matches.",
         ],
     }
-    _audit(settings, auth, "context_retrieve", {"task": req.task[:120], "count": len(recent)})
+    _audit(settings, auth, "context_retrieve", {"task": req.task[:120], "count": len(recent), "sort_by": req.sort_by})
     return {"ok": True, "bundle": bundle}
 
 
