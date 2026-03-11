@@ -162,6 +162,11 @@ This service is passive: it responds to calls and persists state.
 - `GET /v1/messages/pending` — inspect pending/terminal delivery state
 - `POST /v1/relay/forward` — relay writes immutable relay log + recipient inbox/thread
 
+Retrieval semantics:
+- `POST /v1/search` is query-driven. `sort_by: "recent"` still matches by query first, then orders matching results by `modified_at DESC`.
+- `POST /v1/recent` is queryless and returns the latest indexed items after applying any type/time filters.
+- `POST /v1/context/retrieve` remains a task-bundle endpoint; use `POST /v1/recent` when you want latest items regardless of keyword relevance.
+
 ## Example API calls
 
 ### Manifest
@@ -386,11 +391,22 @@ curl -X POST http://127.0.0.1:8080/v1/search   -H "Authorization: Bearer change-
 ```
 
 ```bash
+curl -X POST http://127.0.0.1:8080/v1/search \
+  -H "Authorization: Bearer change-me-local-dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "session 145", "sort_by": "recent", "include_types": ["journal_entry"], "time_window_hours": 168, "limit": 5}'
+```
+
+```bash
 curl -X POST http://127.0.0.1:8080/v1/recent \
   -H "Authorization: Bearer change-me-local-dev-token" \
   -H "Content-Type: application/json" \
   -d '{"include_types": ["journal_entry"], "time_window_hours": 24, "limit": 10}'
 ```
+
+Expected response shapes:
+- `POST /v1/search` returns `{"ok": true, "query": "...", "sort_by": "relevance|recent", "count": N, "results": [...]}`
+- `POST /v1/recent` returns `{"ok": true, "count": N, "results": [...]}`
 
 ### Relay forward (peer/relay mode)
 

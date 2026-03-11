@@ -83,6 +83,7 @@ For task continuation:
 - request `POST /v1/context/retrieve`
 - include `include_types` when you know the task domain (e.g. `compaction_report`, `journal_entry`)
 - use `POST /v1/recent` when bootstrapping after compaction and you want latest entries regardless of keyword relevance
+- keep `POST /v1/context/retrieve` for task-bundle continuity; it is not a replacement for `POST /v1/recent`
 - use returned `open_questions` as continuity anchors in your next loop prompt
 
 Do not inject raw episodic logs by default when summaries cover the same time window.
