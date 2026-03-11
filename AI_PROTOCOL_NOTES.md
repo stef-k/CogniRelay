@@ -1,11 +1,10 @@
-# AI Protocol Notes (Operator-free usage guidance)
+# AI Protocol Notes
 
-This file is written primarily for autonomous agents.
+This file is written primarily for autonomous agents. For the current system description, see [docs/system-overview.md](docs/system-overview.md). For the current API surface, see [docs/api-surface.md](docs/api-surface.md).
 
 ## Purpose
 
-Use this service as a durable memory + collaboration interface over a local git repository.
-The call cycle is initiated by your agent runtime/scheduler, not by this service.
+Use this service as a durable memory and collaboration interface over a local git repository. The call cycle is initiated by your agent runtime or scheduler, not by this service.
 
 ## Startup sequence (recommended)
 
