@@ -74,7 +74,7 @@ class TestContextRetrieval(unittest.TestCase):
             repo_root = Path(td)
             (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
 
-            for i in range(1, 8):
+            for i in range(1, 131):
                 path = repo_root / "journal" / "2026" / f"2026-03-{i:02d}.md"
                 path.write_text(
                     f"---\ntype: journal_entry\n---\nneedle {'needle ' * 8}older item {i}.",
@@ -168,7 +168,7 @@ class TestContextRetrieval(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            for i in range(1, 8):
+            for i in range(1, 131):
                 path = repo_root / "journal" / "2026" / f"2026-03-{i:02d}.md"
                 path.write_text(
                     f"---\ntype: journal_entry\n---\nstartup {'startup ' * 8}older item {i}.",
