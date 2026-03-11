@@ -129,6 +129,7 @@ This service is passive: it responds to calls and persists state.
 - `GET /v1/peers/{peer_id}/manifest` — fetch remote peer manifest
 - `POST /v1/peers/{peer_id}/trust` — explicit trust transitions with policy checks
 - `POST /v1/search` — SQLite FTS5 backed (fallback to JSON index if DB missing)
+- `POST /v1/recent` — latest indexed content by recency with optional time/type filters
 - `POST /v1/context/retrieve` — compact context bundle for task continuation
 - `POST /v1/context/snapshot` — create deterministic persisted context snapshot
 - `GET /v1/context/snapshot/{snapshot_id}` — load persisted context snapshot
@@ -385,10 +386,10 @@ curl -X POST http://127.0.0.1:8080/v1/search   -H "Authorization: Bearer change-
 ```
 
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/search \
+curl -X POST http://127.0.0.1:8080/v1/recent \
   -H "Authorization: Bearer change-me-local-dev-token" \
   -H "Content-Type: application/json" \
-  -d '{"query": "", "sort_by": "recent", "include_types": ["journal_entry"], "time_window_hours": 24, "limit": 10}'
+  -d '{"include_types": ["journal_entry"], "time_window_hours": 24, "limit": 10}'
 ```
 
 ### Relay forward (peer/relay mode)

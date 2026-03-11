@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from app.config import Settings
 from app.indexer import rebuild_index
-from app.main import context_retrieve, search
-from app.models import ContextRetrieveRequest, SearchRequest
+from app.main import context_retrieve, recent_list, search
+from app.models import ContextRetrieveRequest, RecentRequest, SearchRequest
 
 
 class _AuthStub:
@@ -37,7 +37,39 @@ class TestContextRetrieval(unittest.TestCase):
             audit_log_enabled=False,
         )
 
-    def test_search_recent_returns_latest_files_with_time_filter(self) -> None:
+    def test_search_recent_orders_only_matching_results(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
+            older_match = repo_root / "journal" / "2026" / "2026-03-09.md"
+            newer_match = repo_root / "journal" / "2026" / "2026-03-11.md"
+            newer_non_match = repo_root / "journal" / "2026" / "2026-03-12.md"
+            older_match.write_text("---\ntype: journal_entry\n---\nSession 145 older note.", encoding="utf-8")
+            newer_match.write_text("---\ntype: journal_entry\n---\nSession 145 latest note.", encoding="utf-8")
+            newer_non_match.write_text("---\ntype: journal_entry\n---\nDifferent session entirely.", encoding="utf-8")
+
+            now = datetime.now(timezone.utc)
+            os.utime(newer_non_match, (now.timestamp(), now.timestamp()))
+            older_dt = now - timedelta(hours=24)
+            newer_dt = now - timedelta(hours=1)
+            os.utime(older_match, (older_dt.timestamp(), older_dt.timestamp()))
+            os.utime(newer_match, (newer_dt.timestamp(), newer_dt.timestamp()))
+            rebuild_index(repo_root)
+
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                result = search(
+                    SearchRequest(query="145", sort_by="recent", include_types=["journal_entry"], time_window_hours=48, limit=5),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["sort_by"], "recent")
+            self.assertEqual(result["count"], 2)
+            self.assertEqual(result["results"][0]["path"], "journal/2026/2026-03-11.md")
+            self.assertEqual(result["results"][1]["path"], "journal/2026/2026-03-09.md")
+
+    def test_recent_list_returns_latest_files_with_time_filter(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
@@ -54,17 +86,16 @@ class TestContextRetrieval(unittest.TestCase):
 
             settings = self._settings(repo_root)
             with patch("app.main._services", return_value=(settings, _GitManagerStub())):
-                result = search(
-                    SearchRequest(query="", sort_by="recent", include_types=["journal_entry"], time_window_hours=24, limit=5),
+                result = recent_list(
+                    RecentRequest(include_types=["journal_entry"], time_window_hours=24, limit=5),
                     auth=_AuthStub(),
                 )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["sort_by"], "recent")
             self.assertEqual(result["count"], 1)
             self.assertEqual(result["results"][0]["path"], "journal/2026/2026-03-11.md")
 
-    def test_context_retrieve_recent_prefers_latest_entries_over_keyword_score(self) -> None:
+    def test_context_retrieve_default_limit_stays_ten(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
@@ -73,16 +104,12 @@ class TestContextRetrieval(unittest.TestCase):
             identity = repo_root / "memory" / "core" / "identity.md"
             identity.write_text("---\ntype: core_memory\n---\nAgent identity.", encoding="utf-8")
 
-            older_path = repo_root / "journal" / "2026" / "2026-03-09.md"
-            newer_path = repo_root / "journal" / "2026" / "2026-03-11.md"
-            older_path.write_text("---\ntype: journal_entry\n---\nSession 140 startup startup startup.", encoding="utf-8")
-            newer_path.write_text("---\ntype: journal_entry\n---\nSession 145 handoff state.", encoding="utf-8")
+            for day in range(1, 13):
+                path = repo_root / "journal" / "2026" / f"2026-03-{day:02d}.md"
+                path.write_text(f"---\ntype: journal_entry\n---\nstartup session {day}.", encoding="utf-8")
+                dt = datetime.now(timezone.utc) - timedelta(hours=day)
+                os.utime(path, (dt.timestamp(), dt.timestamp()))
 
-            now = datetime.now(timezone.utc)
-            newer_dt = now - timedelta(hours=2)
-            older_dt = now - timedelta(days=3)
-            os.utime(newer_path, (newer_dt.timestamp(), newer_dt.timestamp()))
-            os.utime(older_path, (older_dt.timestamp(), older_dt.timestamp()))
             rebuild_index(repo_root)
 
             settings = self._settings(repo_root)
@@ -91,17 +118,14 @@ class TestContextRetrieval(unittest.TestCase):
                     ContextRetrieveRequest(
                         task="startup",
                         include_types=["journal_entry"],
-                        sort_by="recent",
                         time_window_days=7,
-                        limit=5,
                     ),
                     auth=_AuthStub(),
                 )
 
             self.assertTrue(result["ok"])
             bundle = result["bundle"]
-            self.assertEqual(bundle["sort_by"], "recent")
-            self.assertEqual(bundle["recent_relevant"][0]["path"], "journal/2026/2026-03-11.md")
+            self.assertEqual(len(bundle["recent_relevant"]), 10)
 
 
 if __name__ == "__main__":

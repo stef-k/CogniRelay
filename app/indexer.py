@@ -186,6 +186,38 @@ def _parse_modified_at(value: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def filter_results_by_time_window(
+    results: List[Dict[str, Any]],
+    time_window_days: int | None = None,
+    time_window_hours: int | None = None,
+) -> List[Dict[str, Any]]:
+    cutoff: datetime | None = None
+    now = datetime.now(timezone.utc)
+    if time_window_hours is not None:
+        cutoff = now - timedelta(hours=time_window_hours)
+    elif time_window_days is not None:
+        cutoff = now - timedelta(days=time_window_days)
+    if cutoff is None:
+        return list(results)
+    out: List[Dict[str, Any]] = []
+    for row in results:
+        modified_at = _parse_modified_at(row.get('modified_at'))
+        if modified_at is None or modified_at < cutoff:
+            continue
+        out.append(row)
+    return out
+
+
+def sort_results_by_recent(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        results,
+        key=lambda x: (
+            -((_parse_modified_at(x.get('modified_at')) or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp()),
+            str(x.get('path', '')),
+        ),
+    )
+
+
 def list_recent_files(
     repo_root: Path,
     limit: int = 10,
@@ -194,29 +226,14 @@ def list_recent_files(
     time_window_hours: int | None = None,
 ) -> List[Dict[str, Any]]:
     include_set = {t.lower() for t in (include_types or []) if t}
-    now = datetime.now(timezone.utc)
-    cutoff: datetime | None = None
-    if time_window_hours is not None:
-        cutoff = now - timedelta(hours=time_window_hours)
-    elif time_window_days is not None:
-        cutoff = now - timedelta(days=time_window_days)
 
     out: List[Dict[str, Any]] = []
     for row in load_files_index(repo_root).get('files', []):
         if include_set and str(row.get('type') or '').lower() not in include_set:
             continue
-        modified_at = _parse_modified_at(row.get('modified_at'))
-        if cutoff is not None and (modified_at is None or modified_at < cutoff):
-            continue
         out.append({**row, 'score': row.get('importance')})
-
-    out.sort(
-        key=lambda x: (
-            _parse_modified_at(x.get('modified_at')) or datetime.fromtimestamp(0, tz=timezone.utc),
-            x.get('path', ''),
-        ),
-        reverse=True,
-    )
+    out = filter_results_by_time_window(out, time_window_days=time_window_days, time_window_hours=time_window_hours)
+    out = sort_results_by_recent(out)
     return out[: max(1, min(limit, 100))]
 
 

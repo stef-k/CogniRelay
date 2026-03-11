@@ -82,7 +82,7 @@ Concrete host setup commands and templates are in `deploy/GO_LIVE_RUNBOOK.md`.
 For task continuation:
 - request `POST /v1/context/retrieve`
 - include `include_types` when you know the task domain (e.g. `compaction_report`, `journal_entry`)
-- use `sort_by="recent"` when bootstrapping after compaction and you want latest entries instead of keyword-ranked matches
+- use `POST /v1/recent` when bootstrapping after compaction and you want latest entries regardless of keyword relevance
 - use returned `open_questions` as continuity anchors in your next loop prompt
 
 Do not inject raw episodic logs by default when summaries cover the same time window.

@@ -18,6 +18,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
 
         by_name = {tool["name"]: tool for tool in payload["tools"]}
         self.assertIn("memory.write", by_name)
+        self.assertIn("recent.list", by_name)
         self.assertIn("context.retrieve", by_name)
         self.assertIn("messages.send", by_name)
         self.assertIn("messages.ack", by_name)
@@ -83,6 +84,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("GET /.well-known/cognirelay.json", endpoints)
         self.assertIn("GET /v1/peers", endpoints)
         self.assertIn("POST /v1/peers/register", endpoints)
+        self.assertIn("POST /v1/recent", endpoints)
         self.assertIn("POST /v1/context/snapshot", endpoints)
         self.assertIn("GET /v1/context/snapshot/{snapshot_id}", endpoints)
         self.assertIn("POST /v1/tasks", endpoints)

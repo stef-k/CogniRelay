@@ -30,8 +30,14 @@ class ContextRetrieveRequest(BaseModel):
     max_tokens_estimate: int = Field(default=4000, ge=256, le=100000)
     include_types: List[str] = Field(default_factory=list)
     time_window_days: int = Field(default=30, ge=1, le=3650)
-    limit: int = Field(default=20, ge=1, le=100)
-    sort_by: Literal["relevance", "recent"] = "relevance"
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+class RecentRequest(BaseModel):
+    limit: int = Field(default=10, ge=1, le=100)
+    include_types: List[str] = Field(default_factory=list)
+    time_window_hours: Optional[int] = Field(default=None, ge=1, le=87600)
+    time_window_days: Optional[int] = Field(default=None, ge=1, le=3650)
 
 
 class SnapshotAsOfRequest(BaseModel):
