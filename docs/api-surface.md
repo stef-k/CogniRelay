@@ -22,6 +22,8 @@ The sections below mirror that runtime shape and group endpoints by behavior rat
 - `GET /.well-known/mcp.json`: MCP compatibility descriptor
 - `POST /v1/mcp`: JSON-RPC bridge for `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`
 
+For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, see `docs/mcp.md`.
+
 ## Memory, file, and index operations
 
 - `POST /v1/write`: write text content to a repo-relative path

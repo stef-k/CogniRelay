@@ -102,6 +102,8 @@ For an agent cold start, the recommended sequence is:
 
 If the runtime prefers MCP-style JSON-RPC, use `GET /.well-known/mcp.json` and then `POST /v1/mcp` for `initialize`, `notifications/initialized`, and `tools/list`.
 
+For the complete MCP integration notes, including what is and is not mirrored through the tool catalog, see `docs/mcp.md`.
+
 ### Write behavior
 
 - Prefer small writes and append-only JSONL records for event and message flows
