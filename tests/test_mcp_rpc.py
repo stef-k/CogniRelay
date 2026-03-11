@@ -82,6 +82,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         by_name = {t["name"]: t for t in tools}
         self.assertIn("system.discovery", by_name)
         self.assertIn("memory.write", by_name)
+        self.assertIn("recent.list", by_name)
         self.assertIn("peers.list", by_name)
         self.assertIn("context.snapshot_create", by_name)
         self.assertIn("tasks.create", by_name)

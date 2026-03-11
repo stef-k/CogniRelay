@@ -25,7 +25,13 @@ from .audit import append_audit
 from .auth import AuthContext, require_auth
 from .config import ALL_SCOPES, get_settings, sha256_token
 from .git_manager import GitManager
-from .indexer import load_files_index, rebuild_index, incremental_rebuild_index, search_index
+from .indexer import (
+    incremental_rebuild_index,
+    list_recent_files,
+    load_files_index,
+    rebuild_index,
+    search_index,
+)
 from .models import (
     AppendRequest,
     CodeCheckRunRequest,
@@ -49,6 +55,7 @@ from .models import (
     BackupCreateRequest,
     BackupRestoreTestRequest,
     OpsRunRequest,
+    RecentRequest,
     RelayForwardRequest,
     SecurityKeysRotateRequest,
     SearchRequest,
@@ -296,6 +303,15 @@ def _tool_catalog() -> list[dict[str, Any]]:
             "scopes": ["search", "read_namespaces"],
             "idempotent": True,
             "input_schema": _schema_for_model(SearchRequest),
+        },
+        {
+            "name": "recent.list",
+            "description": "List recently modified indexed content without a query string.",
+            "method": "POST",
+            "path": "/v1/recent",
+            "scopes": ["search", "read_namespaces"],
+            "idempotent": True,
+            "input_schema": _schema_for_model(RecentRequest),
         },
         {
             "name": "context.retrieve",
@@ -952,6 +968,8 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         return peer_manifest(peer_id=str(args["peer_id"]), auth=auth)  # type: ignore[arg-type]
     if name == "search.query":
         return search(SearchRequest(**args), auth=auth)  # type: ignore[arg-type]
+    if name == "recent.list":
+        return recent_list(RecentRequest(**args), auth=auth)  # type: ignore[arg-type]
     if name == "context.retrieve":
         return context_retrieve(ContextRetrieveRequest(**args), auth=auth)  # type: ignore[arg-type]
     if name == "context.snapshot_create":
@@ -1263,6 +1281,7 @@ def manifest() -> dict:
             "POST /v1/peers/{peer_id}/trust": {"scope": "admin:peers"},
             "GET /v1/peers/{peer_id}/manifest": {"scope": "read:files"},
             "POST /v1/search": {"scope": "search"},
+            "POST /v1/recent": {"scope": "search"},
             "POST /v1/context/retrieve": {"scope": "search"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},
             "GET /v1/context/snapshot/{snapshot_id}": {"scope": "read:files"},
@@ -1877,10 +1896,33 @@ def index_status(auth: AuthContext = Depends(require_auth)) -> dict:
 def search(req: SearchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
     auth.require("search")
-    results = search_index(settings.repo_root, req.query, req.limit, include_types=req.include_types or None)
+    results = search_index(
+        settings.repo_root,
+        req.query,
+        req.limit,
+        include_types=req.include_types or None,
+        sort_by=req.sort_by,
+        time_window_hours=req.time_window_hours,
+    )
     results = _filter_search_results_for_auth(results, auth)
-    _audit(settings, auth, "search", {"query": req.query, "count": len(results)})
-    return {"ok": True, "query": req.query, "count": len(results), "results": results}
+    _audit(settings, auth, "search", {"query": req.query, "count": len(results), "sort_by": req.sort_by})
+    return {"ok": True, "query": req.query, "sort_by": req.sort_by, "count": len(results), "results": results}
+
+
+@app.post("/v1/recent")
+def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    settings, _ = _services()
+    auth.require("search")
+    results = list_recent_files(
+        settings.repo_root,
+        req.limit,
+        include_types=req.include_types or None,
+        time_window_days=req.time_window_days,
+        time_window_hours=req.time_window_hours,
+    )
+    results = _filter_search_results_for_auth(results, auth)
+    _audit(settings, auth, "search", {"query": "", "count": len(results), "sort_by": "recent"})
+    return {"ok": True, "count": len(results), "results": results}
 
 
 @app.post("/v1/context/retrieve")
@@ -1903,7 +1945,13 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
                 continue
             core_memory.append({"path": rel, "snippet": read_text_file(p)[:300]})
 
-    recent = search_index(settings.repo_root, req.task, req.limit, include_types=req.include_types or None)
+    recent = search_index(
+        settings.repo_root,
+        req.task,
+        req.limit,
+        include_types=req.include_types or None,
+        time_window_days=req.time_window_days,
+    )
     recent = _filter_search_results_for_auth(recent, auth)
     # Simple AI-first shaping: prioritize summaries and messages for collaboration continuity.
     recent = sorted(
@@ -1927,9 +1975,11 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
         "recent_relevant": recent,
         "open_questions": open_questions[:5],
         "token_budget_hint": min(req.max_tokens_estimate, 4000),
+        "time_window_days": req.time_window_days,
         "notes": [
             "For best continuity, run /v1/index/rebuild before retrieve if many files changed.",
             "Use include_types to reduce noise (e.g. ['journal_entry','messages']).",
+            "Use /v1/recent for startup continuity when you need latest entries regardless of keyword relevance.",
         ],
     }
     _audit(settings, auth, "context_retrieve", {"task": req.task[:120], "count": len(recent)})

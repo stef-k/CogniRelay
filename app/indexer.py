@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -174,6 +174,69 @@ def load_files_index(repo_root: Path) -> Dict[str, Any]:
     return json.loads(p.read_text(encoding='utf-8'))
 
 
+def _parse_modified_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def filter_results_by_time_window(
+    results: List[Dict[str, Any]],
+    time_window_days: int | None = None,
+    time_window_hours: int | None = None,
+) -> List[Dict[str, Any]]:
+    cutoff: datetime | None = None
+    now = datetime.now(timezone.utc)
+    if time_window_hours is not None:
+        cutoff = now - timedelta(hours=time_window_hours)
+    elif time_window_days is not None:
+        cutoff = now - timedelta(days=time_window_days)
+    if cutoff is None:
+        return list(results)
+    out: List[Dict[str, Any]] = []
+    for row in results:
+        modified_at = _parse_modified_at(row.get('modified_at'))
+        if modified_at is None or modified_at < cutoff:
+            continue
+        out.append(row)
+    return out
+
+
+def sort_results_by_recent(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        results,
+        key=lambda x: (
+            -((_parse_modified_at(x.get('modified_at')) or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp()),
+            str(x.get('path', '')),
+        ),
+    )
+
+
+def list_recent_files(
+    repo_root: Path,
+    limit: int = 10,
+    include_types: list[str] | None = None,
+    time_window_days: int | None = None,
+    time_window_hours: int | None = None,
+) -> List[Dict[str, Any]]:
+    include_set = {t.lower() for t in (include_types or []) if t}
+
+    out: List[Dict[str, Any]] = []
+    for row in load_files_index(repo_root).get('files', []):
+        if include_set and str(row.get('type') or '').lower() not in include_set:
+            continue
+        out.append({**row, 'score': row.get('importance')})
+    out = filter_results_by_time_window(out, time_window_days=time_window_days, time_window_hours=time_window_hours)
+    out = sort_results_by_recent(out)
+    return out[: max(1, min(limit, 100))]
+
+
 def _load_index_state(repo_root: Path) -> dict[str, Any]:
     p = repo_root / 'index' / 'index_state.json'
     if not p.exists():
@@ -208,7 +271,15 @@ def incremental_rebuild_index(repo_root: Path) -> dict[str, Any]:
     return payload
 
 
-def search_index(repo_root: Path, query: str, limit: int = 10, include_types: list[str] | None = None) -> List[Dict[str, Any]]:
+def search_index(
+    repo_root: Path,
+    query: str,
+    limit: int = 10,
+    include_types: list[str] | None = None,
+    sort_by: str = "relevance",
+    time_window_days: int | None = None,
+    time_window_hours: int | None = None,
+) -> List[Dict[str, Any]]:
     include_set = {t.lower() for t in (include_types or []) if t}
     # Try SQLite FTS first
     dbp = _sqlite_path(repo_root)
@@ -220,10 +291,22 @@ def search_index(repo_root: Path, query: str, limit: int = 10, include_types: li
                 q_terms = [t.lower() for t in WORD_REGEX.findall(query)]
                 if q_terms:
                     fts_query = ' OR '.join(q_terms)
+                    cutoff = None
+                    params: list[Any] = [fts_query]
+                    where = 'WHERE files_fts MATCH ?'
+                    if time_window_hours is not None:
+                        cutoff = (datetime.now(timezone.utc) - timedelta(hours=time_window_hours)).isoformat()
+                    elif time_window_days is not None:
+                        cutoff = (datetime.now(timezone.utc) - timedelta(days=time_window_days)).isoformat()
+                    if cutoff is not None:
+                        where += ' AND f.modified_at >= ?'
+                        params.append(cutoff)
+                    order = 'ORDER BY f.modified_at DESC, f.path ASC' if sort_by == "recent" else 'ORDER BY rank ASC, f.path ASC'
+                    params.append(max(1, min(limit, 100)))
                     rows = conn.execute(
                         'SELECT f.path, f.type, f.size, f.modified_at, f.snippet, f.importance, bm25(files_fts) as rank '
-                        'FROM files_fts JOIN files f ON f.path = files_fts.path WHERE files_fts MATCH ? LIMIT ?',
-                        (fts_query, max(20, min(limit * 5, 200)))
+                        f'FROM files_fts JOIN files f ON f.path = files_fts.path {where} {order} LIMIT ?',
+                        tuple(params)
                     ).fetchall()
                 else:
                     rows = []
@@ -241,7 +324,10 @@ def search_index(repo_root: Path, query: str, limit: int = 10, include_types: li
                         'path': row['path'], 'type': row['type'], 'size': row['size'], 'modified_at': row['modified_at'],
                         'snippet': row['snippet'], 'importance': row['importance'], 'score': score,
                     })
-                out.sort(key=lambda x: (-float(x.get('score',0)), x['path']))
+                if sort_by == "recent":
+                    out = sort_results_by_recent(out)
+                else:
+                    out.sort(key=lambda x: (-float(x.get('score',0)), x['path']))
                 if out:
                     return out[: max(1, min(limit, 100))]
             finally:
@@ -267,5 +353,9 @@ def search_index(repo_root: Path, query: str, limit: int = 10, include_types: li
                 pass
         if score > 0:
             results.append({**f, 'score': round(score, 3)})
-    results.sort(key=lambda x: (-x['score'], x['path']))
+    results = filter_results_by_time_window(results, time_window_days=time_window_days, time_window_hours=time_window_hours)
+    if sort_by == "recent":
+        results = sort_results_by_recent(results)
+    else:
+        results.sort(key=lambda x: (-x['score'], x['path']))
     return results[: max(1, min(limit, 100))]
