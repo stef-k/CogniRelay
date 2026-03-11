@@ -17,7 +17,6 @@ This is not a Git forge. It is an AI-native substrate for memory, retrieval, mes
 
 - [System Overview](docs/system-overview.md)
 - [API Surface](docs/api-surface.md)
-- [AI Protocol Notes](AI_PROTOCOL_NOTES.md)
 - [Design Doc](DESIGN_DOC.md)
 - [Go-live Runbook](deploy/GO_LIVE_RUNBOOK.md)
 - [Production Signoff Checklist](deploy/PRODUCTION_SIGNOFF_CHECKLIST.md)

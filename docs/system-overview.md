@@ -82,9 +82,73 @@ The runtime repo under `data_repo/` is organized around durable memory and colla
 - `config/` for token and runtime configuration data
 - `logs/` for audit and operational traces
 
+## Agent Usage
+
+### Startup sequence
+
+For an agent cold start, the recommended sequence is:
+
+1. `GET /v1/discovery`
+2. `GET /v1/manifest`
+3. `GET /v1/contracts`
+4. `GET /v1/governance/policy`
+5. `GET /health`
+6. `POST /v1/index/rebuild-incremental` when writes occurred since the last cycle
+7. `POST /v1/context/retrieve` for the active task
+8. `GET /v1/tasks/query` for shared planning state
+9. `GET /v1/messages/pending` for tracked delivery state
+10. `GET /v1/metrics` for backlog, check, and replication health
+11. `POST /v1/context/snapshot` when reproducible continuation context is needed
+
+If the runtime prefers MCP-style JSON-RPC, use `GET /.well-known/mcp.json` and then `POST /v1/mcp` for `initialize`, `notifications/initialized`, and `tools/list`.
+
+### Write behavior
+
+- Prefer small writes and append-only JSONL records for event and message flows
+- Put durable facts in `memory/core/*`
+- Put transient observations in `memory/episodic/*.jsonl`
+- Put collaboration traffic in `messages/*`
+- Use `POST /v1/messages/send` for tracked direct delivery
+- Use `POST /v1/relay/forward` for relay transport logging plus inbox/thread fan-out
+- Use tasks and patch flows for collaborative work instead of ad hoc file mutation where coordination matters
+
+### Retrieval behavior
+
+- Use `POST /v1/context/retrieve` for continuity-shaped task bundles
+- Use `POST /v1/recent` when you want the latest indexed material without query matching
+- Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches
+- Prefer summaries over raw episodic logs when both cover the same time window
+- Treat returned `open_questions` as continuation anchors for the next loop
+
+### Indexing and compaction guidance
+
+- Prefer `POST /v1/index/rebuild-incremental` for normal loops
+- Use full rebuild when index state is missing, many files moved, or search behavior looks inconsistent
+- Treat SQLite FTS and JSON indexes as derived state
+- Treat compaction as summarization and promotion planning, not deletion
+- Preserve `memory/core/*` as durable memory and move older raw material to summaries or archive
+
+### Peer and token guidance
+
+- Prefer narrow peer scopes and namespace restrictions
+- For collaboration peers, a typical split is read access to shared memory and messages, with write access limited to `messages`
+- Prefer API-driven token lifecycle operations over manual file edits so audit state stays consistent
+- Keep trust transitions explicit through `POST /v1/peers/{peer_id}/trust`
+
+### Host-local authority boundary
+
+Treat the following as host-local authority actions rather than normal remote peer operations:
+
+- trust transitions and emergency peer revocations
+- token and signing-key lifecycle authority actions
+- backup creation and restore drills
+- compaction apply and recovery overrides
+- ops runner control endpoints under `/v1/ops/*`
+
+If automated, run these through a local scheduler such as `systemd` or `cron` and invoke the service through a local boundary such as `127.0.0.1` or a Unix socket.
+
 ## How To Navigate The Docs
 
 - Start here for product shape and system boundaries
 - Use [API Surface](api-surface.md) for the currently implemented HTTP surface
-- Use [`AI_PROTOCOL_NOTES.md`](../AI_PROTOCOL_NOTES.md) for agent operating guidance
 - Use [`DESIGN_DOC.md`](../DESIGN_DOC.md) for architecture rationale
