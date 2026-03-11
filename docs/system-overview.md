@@ -147,6 +147,15 @@ Treat the following as host-local authority actions rather than normal remote pe
 
 If automated, run these through a local scheduler such as `systemd` or `cron` and invoke the service through a local boundary such as `127.0.0.1` or a Unix socket.
 
+### Failure handling and observability
+
+- If an API call fails, prefer degraded continuation over retry storms
+- Use bounded retry with backoff and jitter for transient failures
+- Rebuild indexes when retrieval or search behavior looks stale or inconsistent
+- Read `logs/api_audit.jsonl` periodically to detect repeated failed writes, stale indexing cycles, and abnormal relay traffic
+- Use `GET /v1/metrics` to inspect delivery backlog, check results, audit retention, and replication state
+- Treat `messages/state/delivery_index.json` and `peers/replication_state.json` as important operational state artifacts
+
 ## How To Navigate The Docs
 
 - Start here for product shape and system boundaries

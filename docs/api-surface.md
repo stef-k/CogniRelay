@@ -112,4 +112,19 @@ Most mutating endpoints require bearer-token scopes plus namespace restrictions.
 - search/retrieval: `search` and read namespace checks
 - authority actions: security and governance scopes with host-local restrictions where applicable
 
+Implementation notes that matter for operators and client authors:
+
+- split namespace controls use `read_namespaces` and `write_namespaces`
+- legacy `namespaces` is still supported as a shorthand applying to both read and write
+- signed message verification includes nonce replay protection
+- metrics and audit behavior depend on persisted delivery, replication, and audit-log state under the repo
+
+## Operational Semantics
+
+- incremental indexing reflects working-tree state by default, so search can temporarily include uncommitted files after a write and before commit
+- compaction is a planner/orchestrator that emits structured reports; it is not the summarizing model itself
+- context snapshots persist deterministic artifacts under `snapshots/context/`
+- relay and direct messaging rely on persisted delivery state and replay tracking rather than in-memory status only
+- host-local ops endpoints should rely on local transport boundaries; forwarded headers are proxy metadata, not a remote trust substitute
+
 For exact runtime expectations, use `GET /v1/discovery/tools` and `GET /v1/manifest`.

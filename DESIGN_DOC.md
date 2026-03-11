@@ -147,27 +147,6 @@ Security basics:
 - keep signing secrets in external key store (`COGNIRELAY_USE_EXTERNAL_KEY_STORE=true`)
 - enforce bounded ingress (`COGNIRELAY_MAX_PAYLOAD_BYTES`, token/IP limits, verification failure throttling)
 
-## Agent-initiated loop integration
-
-The loop is initiated by the autonomous agent runtime or an external scheduler. The service does not self-trigger.
-
-Example cycle:
-1. Retrieve discovery + manifest (cached) and health
-2. Incremental index rebuild (periodic)
-3. Retrieve compact context bundle for current task
-4. Query/update shared tasks
-5. Propose/apply patches for docs/code
-6. Run checks and merge if policy requirements pass
-7. Reconcile peer tokens with `/v1/security/tokens` and apply issue/revoke/rotate operations when needed
-8. Verify signed envelopes (nonce-protected) when federation requires signed transport
-9. Persist outputs via write/append
-10. Send or relay messages
-11. Check pending deliveries, replay dead letters when needed, and ack tracked messages
-12. Replicate shared namespaces to peers when required
-13. Inspect metrics for backlog/check/replication health
-14. Create deterministic snapshot when continuity requires reproducibility
-15. Run compaction less frequently (daily/weekly)
-
 ## Design principle
 
 **Git is the storage engine; the API is the memory interface.**
@@ -176,19 +155,6 @@ That distinction keeps the system AI-native while staying simple, local, and aud
 
 
 ## Implementation clarifications
-
-### Incremental indexing semantics
-The implementation indexes the **working tree** by default using file mtimes/content. This can reflect uncommitted state after a write and before a git commit (useful for crash recovery). Git remains the source of durable committed history.
-
-### Compaction semantics
-The compaction endpoint is a **planner/orchestrator**, not an LLM summarizer. It emits structured Markdown + JSON reports with candidate categories and policy metadata. The AI client is expected to generate and write the actual summaries.
-
-### Context snapshot semantics
-`POST /v1/context/snapshot` persists a deterministic context artifact in `snapshots/context/*`.
-It supports `as_of.mode`:
-- `working_tree`
-- `commit`
-- `timestamp` (resolved to nearest commit at/before timestamp)
 
 ### Token capability split
 The implementation supports split namespace controls:
@@ -202,6 +168,3 @@ Host-dependent actions (backup drills, key/token rotation checks, trust governan
 The runner is scheduled by host facilities (`systemd` timers or `cron`) and should call CogniRelay over local boundary only.
 Client IP enforcement should prefer transport peer address; forwarded headers are secondary and only used to preserve origin behind local proxy hops.
 This keeps privileged operations off public interfaces while preserving direct host-agent API control.
-
-### Decay + promotion model
-Compaction policy is class-aware (`ephemeral`, `working`, `durable`, `core`) and combines age, size, access recency/frequency, and declared importance. Some items can become **promotion candidates** over time (e.g. relationship/identity/decision facts) instead of merely aging out.
