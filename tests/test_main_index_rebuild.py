@@ -1,3 +1,5 @@
+"""Tests for the index rebuild endpoint wrapper."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,25 +10,36 @@ from app.main import index_rebuild
 
 
 class _AuthStub:
+    """Minimal auth stub for index rebuild endpoint tests."""
+
     def require(self, scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         if scope != "read:index":
             raise AssertionError(f"unexpected scope: {scope}")
 
 
 class _GitManagerStub:
+    """Git manager stub that records committed paths."""
+
     def __init__(self) -> None:
+        """Initialize the commit recorder."""
         self.committed: list[str] = []
 
     def commit_file(self, path: Path, _message: str) -> bool:
+        """Record a committed file path and report success."""
         self.committed.append(str(path))
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class TestIndexRebuildEndpoint(unittest.TestCase):
+    """Validate the route wrapper around index rebuild behavior."""
+
     def test_full_rebuild_commits_all_derived_outputs(self) -> None:
+        """Full rebuild should commit every derived index artifact."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()

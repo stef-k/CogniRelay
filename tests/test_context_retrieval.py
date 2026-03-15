@@ -1,3 +1,5 @@
+"""Tests for context retrieval search, recency, and limit behavior."""
+
 import os
 import tempfile
 import unittest
@@ -12,22 +14,32 @@ from app.models import ContextRetrieveRequest, RecentRequest, SearchRequest
 
 
 class _AuthStub:
+    """Auth stub that permits all reads used in context retrieval tests."""
+
     peer_id = "peer-test"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub for retrieval tests."""
+
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class TestContextRetrieval(unittest.TestCase):
+    """Validate search ordering, filtering, and retrieval defaults."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -38,6 +50,7 @@ class TestContextRetrieval(unittest.TestCase):
         )
 
     def test_search_recent_orders_only_matching_results(self) -> None:
+        """Recent search should order matching results by recency."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
@@ -70,6 +83,7 @@ class TestContextRetrieval(unittest.TestCase):
             self.assertEqual(result["results"][1]["path"], "journal/2026/2026-03-09.md")
 
     def test_search_recent_expands_candidates_before_truncating(self) -> None:
+        """Recent search should expand candidates before applying final limits."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
@@ -101,6 +115,7 @@ class TestContextRetrieval(unittest.TestCase):
             self.assertEqual(result["results"][0]["path"], "journal/2026/2026-03-20.md")
 
     def test_recent_list_returns_latest_files_with_time_filter(self) -> None:
+        """Recent listing should respect the time window filter before limiting."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
@@ -127,6 +142,7 @@ class TestContextRetrieval(unittest.TestCase):
             self.assertEqual(result["results"][0]["path"], "journal/2026/2026-03-11.md")
 
     def test_context_retrieve_default_limit_stays_ten(self) -> None:
+        """Default context retrieval should preserve the ten-result limit."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
@@ -159,6 +175,7 @@ class TestContextRetrieval(unittest.TestCase):
             self.assertEqual(len(bundle["recent_relevant"]), 10)
 
     def test_context_retrieve_time_window_filters_before_final_limit(self) -> None:
+        """Time-window filtering should happen before the final result truncation."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
