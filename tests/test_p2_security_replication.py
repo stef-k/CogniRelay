@@ -1,3 +1,5 @@
+"""Tests for phase-2 security, messaging, metrics, and replication behavior."""
+
 import hashlib
 import hmac
 import json
@@ -31,42 +33,60 @@ from app.models import (
 
 
 class _AuthStub:
+    """Auth stub that permits the scopes used by security and replication tests."""
+
     peer_id = "peer-test"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class _FakeHTTPResponse:
+    """Minimal HTTP response stub for outbound replication calls."""
+
     def __init__(self, payload: dict):
+        """Serialize the provided JSON payload into the fake response body."""
         self._raw = json.dumps(payload).encode("utf-8")
 
     def read(self) -> bytes:
+        """Return the serialized response payload."""
         return self._raw
 
     def __enter__(self):
+        """Support use as a context manager."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Propagate exceptions raised inside the response context."""
         return False
 
 
 class TestP2SecurityReplication(unittest.TestCase):
+    """Validate security, replay, metrics, and replication integrations."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -77,6 +97,7 @@ class TestP2SecurityReplication(unittest.TestCase):
         )
 
     def test_keys_rotate_and_verify_with_nonce_replay_guard(self) -> None:
+        """Signature verification should reject nonce replay after first success."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -125,6 +146,7 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertFalse(second["valid"])
             self.assertEqual(second["reason"], "replay_detected")
     def test_keys_rotate_can_return_secret_when_explicitly_requested(self) -> None:
+        """Key rotation may return the secret only when explicitly requested."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -140,6 +162,7 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertEqual(out["key"]["secret"], "secret-b")
 
     def test_strict_signed_ingress_for_send_and_relay(self) -> None:
+        """Strict signed-ingress mode should require valid signed envelopes."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = Settings(
@@ -265,6 +288,7 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertTrue(relay_ok["signature_verification"]["valid"])
 
     def test_replay_messages_from_dead_letter(self) -> None:
+        """Dead-letter messages should replay into a new tracked delivery record."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             delivery_state = repo_root / "messages" / "state" / "delivery_index.json"
@@ -322,6 +346,7 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertTrue((repo_root / "messages" / "inbox" / "peer-b.jsonl").exists())
 
     def test_metrics_aggregation(self) -> None:
+        """Metrics endpoint should aggregate delivery, audit, check, and replication data."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "messages" / "state").mkdir(parents=True, exist_ok=True)
@@ -373,6 +398,7 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertIn("test:passed", out["checks"]["summary"])
 
     def test_replication_pull_and_push(self) -> None:
+        """Replication pull and push should persist state and honor dry-run behavior."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -421,6 +447,7 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertTrue(pushed["remote"]["ok"])
 
     def test_replication_push_resolves_target_base_from_peer_registry(self) -> None:
+        """Replication push should resolve the target base URL from peer registry metadata."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)

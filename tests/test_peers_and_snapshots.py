@@ -1,3 +1,5 @@
+"""Tests for peer registry operations and context snapshot behavior."""
+
 import json
 import subprocess
 import tempfile
@@ -18,42 +20,60 @@ from app.models import ContextSnapshotRequest, PeerRegisterRequest
 
 
 class _AuthStub:
+    """Auth stub that permits the scopes used by peer and snapshot tests."""
+
     peer_id = "peer-test"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class _FakeHTTPResponse:
+    """Minimal HTTP response stub for peer manifest fetches."""
+
     def __init__(self, payload: dict):
+        """Serialize the provided JSON payload into the fake response body."""
         self._raw = json.dumps(payload).encode("utf-8")
 
     def read(self) -> bytes:
+        """Return the serialized response payload."""
         return self._raw
 
     def __enter__(self):
+        """Support use as a context manager."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Propagate exceptions raised inside the response context."""
         return False
 
 
 class TestPeersAndSnapshots(unittest.TestCase):
+    """Validate peer operations and context snapshot creation modes."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -64,6 +84,7 @@ class TestPeersAndSnapshots(unittest.TestCase):
         )
 
     def test_peer_register_and_list(self) -> None:
+        """Registered peers should appear in peer listing results."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -84,6 +105,7 @@ class TestPeersAndSnapshots(unittest.TestCase):
             self.assertEqual(listing["peers"][0]["peer_id"], "peer-beta")
 
     def test_peer_manifest_fetch(self) -> None:
+        """Peer manifest fetch should proxy the remote manifest payload."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -98,6 +120,7 @@ class TestPeersAndSnapshots(unittest.TestCase):
             self.assertEqual(out["manifest"]["service"], "peer-beta")
 
     def test_context_snapshot_working_tree_create_and_get(self) -> None:
+        """Working-tree snapshots should be creatable and reloadable by id."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
@@ -125,6 +148,7 @@ class TestPeersAndSnapshots(unittest.TestCase):
             self.assertEqual(loaded["snapshot"]["snapshot_id"], created["snapshot_id"])
 
     def test_context_snapshot_commit_mode(self) -> None:
+        """Commit-mode snapshots should resolve and record the requested commit ref."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
