@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from app.auth import AuthContext
 from app.git_manager import GitManager
 from app.models import (
+    ContinuityArchiveRequest,
     ContinuityCapsule,
     ContinuityListRequest,
     ContinuityReadRequest,
@@ -588,6 +589,61 @@ def continuity_list_service(
         },
     )
     return {"ok": True, "count": len(summaries), "capsules": summaries}
+
+
+def continuity_archive_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityArchiveRequest,
+    now: datetime,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Archive one active continuity capsule and remove the active file in one commit."""
+    auth.require("write:projects")
+    rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+    archive_rel = f"{CONTINUITY_DIR_REL}/archive/{req.subject_kind}-{_normalize_subject_id(req.subject_id)}-{timestamp}.json"
+    auth.require_read_path(rel)
+    auth.require_write_path(rel)
+    auth.require_write_path(archive_rel)
+
+    capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+    archive_payload = {
+        "schema_type": "continuity_archive_envelope",
+        "schema_version": "1.0",
+        "archived_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "archived_by": auth.peer_id,
+        "reason": req.reason,
+        "active_path": rel,
+        "capsule": capsule,
+    }
+
+    archive_path = safe_path(repo_root, archive_rel)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    active_path = safe_path(repo_root, rel)
+    write_text_file(archive_path, _canonical_json(archive_payload))
+    active_path.unlink()
+    gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
+
+    audit(
+        auth,
+        "continuity_archive",
+        {
+            "subject_kind": req.subject_kind,
+            "subject_id": req.subject_id,
+            "archived_path": archive_rel,
+            "removed_active_path": rel,
+            "reason": req.reason,
+        },
+    )
+    return {
+        "ok": True,
+        "archived_path": archive_rel,
+        "removed_active_path": rel,
+        "latest_commit": gm.latest_commit(),
+    }
 
 
 def build_continuity_state(

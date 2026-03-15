@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -47,12 +48,14 @@ class GitManager:
         else:
             raise RuntimeError(f"Git repo not initialized at {self.repo_root}")
 
-    def commit_file(self, path: Path, message: str) -> bool:
-        """Commit a single file if it has staged changes."""
-        rel = str(path.relative_to(self.repo_root))
-        self._run("add", rel)
+    def commit_paths(self, paths: list[Path], message: str) -> bool:
+        """Commit one or more repository-relative paths if any have staged changes."""
+        rels = [str(path.relative_to(self.repo_root)) for path in paths]
+        if not rels:
+            return False
+        self._run("add", *rels)
 
-        status = self._run("status", "--porcelain", rel)
+        status = self._run("status", "--porcelain", "--", *rels)
         if not status.stdout.strip():
             return False
 
@@ -68,9 +71,13 @@ class GitManager:
             check=True,
             text=True,
             capture_output=True,
-            env={**env, **__import__("os").environ},
+            env={**env, **os.environ},
         )
         return True
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        """Commit a single file if it has staged changes."""
+        return self.commit_paths([path], message)
 
     def latest_commit(self) -> Optional[str]:
         """Return the current HEAD commit SHA if the repo is initialized."""
