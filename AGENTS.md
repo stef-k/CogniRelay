@@ -34,7 +34,7 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 ## Tooling
 
 - The project currently uses `.venv` and `requirements.txt`.
-- Once Ruff is configured in-repo, run the repo-standard Ruff command before each commit and again before opening a PR.
+- Run the repo-standard Ruff command before each commit and again before opening a PR.
 - Do not mix broad tooling churn into feature or refactor PRs unless the issue is specifically about tooling.
 
 ## Documentation
