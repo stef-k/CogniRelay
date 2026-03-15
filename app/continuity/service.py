@@ -46,6 +46,7 @@ CONTINUITY_WARNING_TRUNCATED = "continuity_truncated_to_zero"
 CONTINUITY_WARNING_TRUNCATED_MULTI = "continuity_capsule_truncated_to_zero"
 CONTINUITY_WARNING_DEGRADED = "continuity_degraded"
 CONTINUITY_WARNING_CONFLICTED = "continuity_conflicted"
+CONTINUITY_WARNING_INVALID = "continuity_invalid_capsule"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -429,9 +430,20 @@ def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_
 
 def _restore_failed_archive(active_path: Path, archive_path: Path, active_bytes: bytes) -> None:
     """Restore the active capsule and discard the archive envelope after a failed archive commit."""
-    write_text_file(active_path, active_bytes.decode("utf-8"))
-    if archive_path.exists():
-        archive_path.unlink()
+    restore_error: Exception | None = None
+    try:
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        active_path.write_bytes(active_bytes)
+    except Exception as exc:
+        restore_error = exc
+    try:
+        if archive_path.exists():
+            archive_path.unlink()
+    except Exception as exc:
+        if restore_error is None:
+            restore_error = exc
+    if restore_error is not None:
+        raise RuntimeError(f"Failed to restore archived continuity capsule: {restore_error}") from restore_error
 
 
 def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str], list[str]]:
@@ -742,28 +754,16 @@ def continuity_upsert_service(
     capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
     created = not path.exists()
     changed = old_bytes != new_bytes
-    if changed:
-        write_text_file(path, canonical)
     committed = False
     if changed:
-        try:
-            committed = gm.commit_file(path, req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}")
-            if not committed:
-                raise RuntimeError("git commit produced no changes")
-        except Exception as exc:
-            restore_error: Exception | None = None
-            try:
-                if old_bytes is None:
-                    if path.exists():
-                        path.unlink()
-                else:
-                    path.write_bytes(old_bytes)
-            except Exception as restore_exc:
-                restore_error = restore_exc
-            detail = f"Failed to persist continuity capsule: {exc}"
-            if restore_error is not None:
-                detail = f"{detail}; rollback failed: {restore_error}"
-            raise HTTPException(status_code=500, detail=detail) from exc
+        _persist_active_capsule(
+            repo_root=repo_root,
+            gm=gm,
+            path=path,
+            canonical=canonical,
+            commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
+        )
+        committed = True
     audit(
         auth,
         "continuity_upsert",
@@ -1141,7 +1141,14 @@ def build_continuity_state(
         if not path.exists():
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             continue
-        capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
+        try:
+            capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
+        except HTTPException as exc:
+            if exc.status_code == 400 and len(selectors) > 1:
+                state["omitted_selectors"].append(_format_selector(kind, subject_id))
+                warnings.append(_qualify_warning(CONTINUITY_WARNING_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+                continue
+            raise
         phase, phase_warnings = _continuity_phase(capsule, now)
         warnings.extend(_qualify_warning(warning, kind, subject_id, multi_mode=multi_warning_mode) for warning in phase_warnings)
         if phase in {"expired", "expired_by_age"}:

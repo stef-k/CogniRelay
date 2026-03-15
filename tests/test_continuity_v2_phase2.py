@@ -302,3 +302,30 @@ class TestContinuityV2Phase2(unittest.TestCase):
                     context_retrieve(req=req, auth=_AuthStub())
 
             self.assertEqual(cm.exception.status_code, 400)
+
+    def test_multi_selector_invalid_capsule_is_omitted_when_other_capsules_survive(self) -> None:
+        """Multi-selector retrieval should degrade past one invalid capsule when others still load."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            self._write_capsule(repo_root, subject_kind="user", subject_id="good")
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            (continuity_dir / "user-bad.json").write_text("{not-json", encoding="utf-8")
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[
+                    {"subject_kind": "user", "subject_id": "good"},
+                    {"subject_kind": "user", "subject_id": "bad"},
+                ],
+                continuity_max_capsules=2,
+            )
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = context_retrieve(req=req, auth=_AuthStub())
+
+            state = out["bundle"]["continuity_state"]
+            self.assertTrue(state["present"])
+            self.assertEqual([capsule["subject_id"] for capsule in state["capsules"]], ["good"])
+            self.assertEqual(state["omitted_selectors"], ["user:bad"])
+            self.assertIn("continuity_invalid_capsule:user:bad", state["warnings"])
