@@ -330,12 +330,12 @@ class ContinuityFreshness(BaseModel):
 
 
 class ContinuityState(BaseModel):
-    top_priorities: List[str] = Field(default_factory=list, max_length=5)
-    active_concerns: List[str] = Field(default_factory=list, max_length=5)
-    active_constraints: List[str] = Field(default_factory=list, max_length=5)
-    open_loops: List[str] = Field(default_factory=list, max_length=5)
+    top_priorities: List[str] = Field(max_length=5)
+    active_concerns: List[str] = Field(max_length=5)
+    active_constraints: List[str] = Field(max_length=5)
+    open_loops: List[str] = Field(max_length=5)
     stance_summary: str = Field(max_length=240)
-    drift_signals: List[str] = Field(default_factory=list, max_length=5)
+    drift_signals: List[str] = Field(max_length=5)
     working_hypotheses: List[str] = Field(default_factory=list, max_length=5)
     relationship_model: Optional[ContinuityRelationshipModel] = None
     retrieval_hints: Optional[ContinuityRetrievalHints] = None

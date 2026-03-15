@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.main import continuity_upsert, context_retrieve
@@ -138,6 +139,19 @@ class TestContinuityV1(unittest.TestCase):
                     )
             self.assertEqual(cm.exception.status_code, 404)
 
+    def test_context_retrieve_partial_subject_selector_raises_400(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    context_retrieve(
+                        req=ContextRetrieveRequest(task="resume", subject_kind="user"),
+                        auth=_AuthStub(),
+                    )
+            self.assertEqual(cm.exception.status_code, 400)
+
     def test_context_retrieve_stale_soft_adds_warning(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -154,6 +168,32 @@ class TestContinuityV1(unittest.TestCase):
                     auth=_AuthStub(),
                 )
             self.assertIn("continuity_stale_soft", out["bundle"]["continuity_state"]["warnings"])
+
+    def test_continuity_upsert_same_bytes_reports_update_false(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=self._capsule_payload())  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                first = continuity_upsert(req=req, auth=_AuthStub())
+                second = continuity_upsert(req=req, auth=_AuthStub())
+
+            self.assertTrue(first["created"])
+            self.assertFalse(second["created"])
+            self.assertFalse(second["updated"])
+            self.assertEqual(len(gm.commits), 1)
+
+    def test_continuity_upsert_missing_drift_signals_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            payload = self._capsule_payload()
+            payload["continuity"].pop("drift_signals")
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(ValidationError):
+                    ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

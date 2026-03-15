@@ -338,7 +338,7 @@ def continuity_upsert_service(
     created = not path.exists()
     changed = old_bytes != new_bytes
     if changed:
-        write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        write_text_file(path, canonical)
     committed = False
     if changed:
         committed = gm.commit_file(path, req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}")
