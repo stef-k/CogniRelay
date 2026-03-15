@@ -47,6 +47,8 @@ Notable behavior:
 - `POST /v1/context/retrieve` is continuity-shaped output rather than a raw ranked search dump
 - `POST /v1/context/retrieve` now supports optional continuity subject selection and returns additive `continuity_state` metadata when available
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
+- continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
+- `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`
 
 ## Peers and messaging
 

@@ -31,6 +31,13 @@ CONTINUITY_WARNING_STALE_SOFT = "continuity_stale_soft"
 CONTINUITY_WARNING_STALE_HARD = "continuity_stale_hard"
 CONTINUITY_WARNING_EXPIRED = "continuity_expired"
 CONTINUITY_WARNING_TRUNCATED = "continuity_truncated_to_zero"
+CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
+    "person_switch",
+    "thread_switch",
+    "task_switch",
+    "public_reply",
+    "manual_checkpoint",
+}
 
 
 def _canonical_json(data: Any) -> str:
@@ -115,6 +122,9 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
         for value in list(getattr(capsule.continuity, field_name)):
             if len(value) > 160:
                 raise HTTPException(status_code=400, detail=f"Value too long in {field_name}")
+    for value in list(capsule.continuity.session_trajectory):
+        if len(value) > 80:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.session_trajectory")
     if len(capsule.continuity.stance_summary) > 240:
         raise HTTPException(status_code=400, detail="Value too long in continuity.stance_summary")
     if capsule.continuity.relationship_model:
@@ -143,6 +153,14 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
             raise HTTPException(status_code=400, detail="Invalid metadata key")
         if isinstance(value, (dict, list)):
             raise HTTPException(status_code=400, detail="Metadata values must be scalar")
+    boundary_kind = capsule.metadata.get("interaction_boundary_kind")
+    if boundary_kind is not None:
+        if capsule.source.update_reason != "interaction_boundary":
+            raise HTTPException(status_code=400, detail="metadata.interaction_boundary_kind requires source.update_reason=interaction_boundary")
+        if boundary_kind not in CONTINUITY_INTERACTION_BOUNDARY_KINDS:
+            raise HTTPException(status_code=400, detail="Invalid metadata.interaction_boundary_kind")
+    elif capsule.source.update_reason == "interaction_boundary":
+        raise HTTPException(status_code=400, detail="metadata.interaction_boundary_kind is required when source.update_reason=interaction_boundary")
     payload = capsule.model_dump(mode="json", exclude_none=True)
     canonical = _canonical_json(payload)
     if len(canonical.encode("utf-8")) > 12 * 1024:

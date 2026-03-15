@@ -123,6 +123,8 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Prefer summaries over raw episodic logs when both cover the same time window
 - Treat returned `open_questions` as continuation anchors for the next loop
 - Use `POST /v1/continuity/upsert` to persist or replace continuity capsules under `memory/continuity/`
+- continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
+- interaction-boundary upserts require `source.update_reason=interaction_boundary` plus a valid scalar `metadata.interaction_boundary_kind`
 
 ### Indexing and compaction guidance
 

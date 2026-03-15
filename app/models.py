@@ -36,6 +36,8 @@ class ContextRetrieveRequest(BaseModel):
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     subject_id: Optional[str] = Field(default=None, max_length=200)
     continuity_mode: Literal["auto", "required", "off"] = "auto"
+    continuity_selectors: List["ContinuitySelector"] = Field(default_factory=list, max_length=4)
+    continuity_max_capsules: int = Field(default=1, ge=1, le=4)
     max_tokens_estimate: int = Field(default=4000, ge=256, le=100000)
     include_types: List[str] = Field(default_factory=list)
     time_window_days: int = Field(default=30, ge=1, le=3650)
@@ -370,6 +372,12 @@ class ContinuityFreshness(BaseModel):
     stale_after_seconds: Optional[int] = Field(default=None, ge=300, le=31536000)
 
 
+class ContinuitySelector(BaseModel):
+    """Explicit continuity subject selector used by V2 retrieval."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+
+
 class ContinuityState(BaseModel):
     """Operational orientation state preserved across resets and compaction."""
     top_priorities: List[str] = Field(max_length=5)
@@ -382,6 +390,7 @@ class ContinuityState(BaseModel):
     relationship_model: Optional[ContinuityRelationshipModel] = None
     retrieval_hints: Optional[ContinuityRetrievalHints] = None
     long_horizon_commitments: List[str] = Field(default_factory=list, max_length=5)
+    session_trajectory: List[str] = Field(default_factory=list, max_length=5)
 
 
 class ContinuityCapsule(BaseModel):
@@ -408,3 +417,22 @@ class ContinuityUpsertRequest(BaseModel):
     capsule: ContinuityCapsule
     commit_message: Optional[str] = None
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
+
+
+class ContinuityReadRequest(BaseModel):
+    """Exact-selector request for reading one active continuity capsule."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+
+
+class ContinuityListRequest(BaseModel):
+    """Filter parameters for listing active continuity capsules."""
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ContinuityArchiveRequest(BaseModel):
+    """Exact-selector request for archiving one active continuity capsule."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=3, max_length=240)
