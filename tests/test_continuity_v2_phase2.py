@@ -13,32 +13,15 @@ from app.config import Settings
 from app.continuity.service import build_continuity_state
 from app.main import context_retrieve
 from app.models import ContextRetrieveRequest
+from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
-class _AuthStub:
+class _AuthStub(AllowAllAuthStub):
     """Auth stub that permits all scopes used by continuity tests."""
 
-    peer_id = "peer-test"
 
-    def require(self, _scope: str) -> None:
-        """Accept any requested scope for test purposes."""
-        return None
-
-    def require_read_path(self, _path: str) -> None:
-        """Accept any requested read path for test purposes."""
-        return None
-
-    def require_write_path(self, _path: str) -> None:
-        """Accept any requested write path for test purposes."""
-        return None
-
-
-class _GitManagerStub:
+class _GitManagerStub(SimpleGitManagerStub):
     """Git manager stub used to satisfy the service bundle patch."""
-
-    def latest_commit(self) -> str:
-        """Return a stable fake commit hash."""
-        return "test-sha"
 
 
 class TestContinuityV2Phase2(unittest.TestCase):
@@ -178,7 +161,7 @@ class TestContinuityV2Phase2(unittest.TestCase):
                 out = context_retrieve(req=req, auth=_AuthStub())
 
             state = out["bundle"]["continuity_state"]
-            self.assertEqual(state["requested_selectors"], ["user:a", "user:b"])
+            self.assertEqual(state["requested_selectors"], ["user:a", "user:b", "user:c"])
             self.assertEqual(state["omitted_selectors"], ["user:c"])
 
     def test_budget_sharing_uses_even_split_without_redistribution(self) -> None:

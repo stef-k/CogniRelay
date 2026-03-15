@@ -13,27 +13,14 @@ from app.config import Settings
 from app.continuity.service import continuity_archive_service, continuity_list_service, continuity_read_service
 from app.main import continuity_archive
 from app.models import ContinuityArchiveRequest, ContinuityListRequest, ContinuityReadRequest
+from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
-class _AuthStub:
+class _AuthStub(AllowAllAuthStub):
     """Auth stub that permits all scopes used by continuity tests."""
 
-    peer_id = "peer-test"
 
-    def require(self, _scope: str) -> None:
-        """Accept any requested scope for test purposes."""
-        return None
-
-    def require_read_path(self, _path: str) -> None:
-        """Accept any requested read path for test purposes."""
-        return None
-
-    def require_write_path(self, _path: str) -> None:
-        """Accept any requested write path for test purposes."""
-        return None
-
-
-class _GitManagerStub:
+class _GitManagerStub(SimpleGitManagerStub):
     """Git manager stub that records archive commit-path calls."""
 
     def __init__(self) -> None:
@@ -44,10 +31,6 @@ class _GitManagerStub:
         """Record the multi-path commit request and report success."""
         self.commit_calls.append(([str(path) for path in paths], message))
         return True
-
-    def latest_commit(self) -> str:
-        """Return a stable fake commit hash."""
-        return "test-sha"
 
 
 class _FailingGitManagerStub(_GitManagerStub):

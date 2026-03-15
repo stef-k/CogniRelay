@@ -13,36 +13,19 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.main import continuity_upsert
 from app.models import ContinuityUpsertRequest, ContextRetrieveRequest
+from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
-class _AuthStub:
+class _AuthStub(AllowAllAuthStub):
     """Auth stub that permits all scopes used by continuity tests."""
 
-    peer_id = "peer-test"
 
-    def require(self, _scope: str) -> None:
-        """Accept any requested scope for test purposes."""
-        return None
-
-    def require_read_path(self, _path: str) -> None:
-        """Accept any requested read path for test purposes."""
-        return None
-
-    def require_write_path(self, _path: str) -> None:
-        """Accept any requested write path for test purposes."""
-        return None
-
-
-class _GitManagerStub:
+class _GitManagerStub(SimpleGitManagerStub):
     """Git manager stub that records committed files for continuity tests."""
 
     def __init__(self) -> None:
         """Initialize the fake commit ledger."""
         self.commits: list[tuple[str, str]] = []
-
-    def latest_commit(self) -> str:
-        """Return a stable fake commit hash."""
-        return "test-sha"
 
     def commit_file(self, path: Path, message: str) -> bool:
         """Record a committed file path and report success."""

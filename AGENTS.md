@@ -52,8 +52,11 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 
 ## Continuity Resilience
 
+- CogniRelay is a mission-critical system. Agents may depend on it continuously as 24/7 orientation and memory infrastructure.
+- Treat any change that could break continuity retrieval, corrupt stored state, or weaken durability guarantees as a production risk requiring extra verification.
 - Treat continuity features as mission-critical agent-orientation infrastructure.
 - Multi-step continuity mutations must preserve existing data on failure; never leave an agent without its last durable capsule because a later archive or commit step failed.
 - When a continuity operation can degrade safely under the current contract, prefer returning the best available result over failing the whole aggregate operation.
 - Skip unreadable or concurrently removed entries in list-style continuity views when doing so preserves a deterministic response.
+- At no point should a refactor, feature addition, or tooling change knowingly leave the system in a state where a running agent could lose its continuity data without a recovery path.
 - Do not silently change established continuity API semantics in implementation code. If stronger resilience requires a contract change, record it in the appropriate roadmap/spec issue first.

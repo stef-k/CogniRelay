@@ -215,8 +215,8 @@ def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_
     return f"{warning}:{subject_kind}:{subject_id}"
 
 
-def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str]]:
-    """Build the deduplicated selector set plus selector-limit omissions for retrieval."""
+def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str], list[str]]:
+    """Build selected selectors, requested selectors, and selector-limit omissions for retrieval."""
     selectors: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
@@ -246,16 +246,18 @@ def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, st
 
     omitted: list[str] = []
     if selectors:
+        requested = [_format_selector(item["subject_kind"], item["subject_id"]) for item in selectors]
         if len(selectors) > req.continuity_max_capsules:
             omitted = [_format_selector(item["subject_kind"], item["subject_id"]) for item in selectors[req.continuity_max_capsules :]]
             selectors = selectors[: req.continuity_max_capsules]
-        return selectors, omitted
+        return selectors, requested, omitted
 
     inferred = _resolve_selector(req)
     if inferred is None:
-        return [], omitted
+        return [], [], omitted
     kind, subject_id, resolution = inferred
-    return [{"subject_kind": kind, "subject_id": subject_id, "resolution": resolution}], omitted
+    requested = [_format_selector(kind, subject_id)]
+    return [{"subject_kind": kind, "subject_id": subject_id, "resolution": resolution}], requested, omitted
 
 
 def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str] | None = None) -> dict[str, Any]:
@@ -680,8 +682,8 @@ def build_continuity_state(
     if req.continuity_mode == "off":
         return state
     multi_warning_mode = _warning_mode_is_multi(req)
-    selectors, pre_load_omitted = _effective_selectors(req)
-    state["requested_selectors"] = [_format_selector(item["subject_kind"], item["subject_id"]) for item in selectors]
+    selectors, requested_selectors, pre_load_omitted = _effective_selectors(req)
+    state["requested_selectors"] = requested_selectors
     state["omitted_selectors"] = list(pre_load_omitted)
     if not selectors:
         if req.continuity_mode == "required":

@@ -13,24 +13,11 @@ from app.config import Settings
 from app.continuity.service import continuity_list_service
 from app.main import continuity_list, continuity_read
 from app.models import ContinuityListRequest, ContinuityReadRequest
+from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
-class _AuthStub:
+class _AuthStub(AllowAllAuthStub):
     """Auth stub that permits all scopes used by continuity tests."""
-
-    peer_id = "peer-test"
-
-    def require(self, _scope: str) -> None:
-        """Accept any requested scope for test purposes."""
-        return None
-
-    def require_read_path(self, _path: str) -> None:
-        """Accept any requested read path for test purposes."""
-        return None
-
-    def require_write_path(self, _path: str) -> None:
-        """Accept any requested write path for test purposes."""
-        return None
 
 
 class _SelectiveReadAuth(_AuthStub):
@@ -47,12 +34,8 @@ class _SelectiveReadAuth(_AuthStub):
                 raise HTTPException(status_code=403, detail="forbidden")
 
 
-class _GitManagerStub:
+class _GitManagerStub(SimpleGitManagerStub):
     """Git manager stub used to satisfy the service bundle patch."""
-
-    def latest_commit(self) -> str:
-        """Return a stable fake commit hash."""
-        return "test-sha"
 
 
 class TestContinuityV2Phase3(unittest.TestCase):

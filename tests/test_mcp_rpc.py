@@ -11,22 +11,11 @@ from starlette.responses import Response
 from app.auth import AuthContext
 from app.config import Settings
 from app.main import mcp_rpc, well_known_mcp
+from tests.helpers import SimpleGitManagerStub
 
 
-class _GitManagerStub:
+class _GitManagerStub(SimpleGitManagerStub):
     """Git manager stub that pretends every file commit succeeds."""
-
-    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
-        """Report a successful multi-path commit without touching git."""
-        return True
-
-    def commit_file(self, _path: Path, _message: str) -> bool:
-        """Report a successful commit without touching git."""
-        return True
-
-    def latest_commit(self) -> str:
-        """Return a stable fake commit hash."""
-        return "test-sha"
 
 
 class _RequestStub:
