@@ -18,6 +18,9 @@ from app.models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
+    ContinuityArchiveRequest,
+    ContinuityListRequest,
+    ContinuityReadRequest,
     ContinuityUpsertRequest,
     ContextRetrieveRequest,
     ContextSnapshotRequest,
@@ -268,6 +271,33 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
             "input_schema": schema_for_model(ContinuityUpsertRequest),
+        },
+        {
+            "name": "continuity.read",
+            "description": "Read one active continuity capsule by exact selector.",
+            "method": "POST",
+            "path": "/v1/continuity/read",
+            "scopes": ["read:files", "read_namespaces"],
+            "idempotent": True,
+            "input_schema": schema_for_model(ContinuityReadRequest),
+        },
+        {
+            "name": "continuity.list",
+            "description": "List active continuity capsule summaries.",
+            "method": "POST",
+            "path": "/v1/continuity/list",
+            "scopes": ["read:files", "read_namespaces"],
+            "idempotent": True,
+            "input_schema": schema_for_model(ContinuityListRequest),
+        },
+        {
+            "name": "continuity.archive",
+            "description": "Archive one active continuity capsule and remove the active file.",
+            "method": "POST",
+            "path": "/v1/continuity/archive",
+            "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(ContinuityArchiveRequest),
         },
         {
             "name": "context.snapshot_create",
@@ -840,6 +870,9 @@ def invoke_tool_by_name(
     recent_list: Callable[[RecentRequest, AuthContext | None], dict[str, Any]],
     context_retrieve: Callable[[ContextRetrieveRequest, AuthContext | None], dict[str, Any]],
     continuity_upsert: Callable[[ContinuityUpsertRequest, AuthContext | None], dict[str, Any]],
+    continuity_read: Callable[[ContinuityReadRequest, AuthContext | None], dict[str, Any]],
+    continuity_list: Callable[[ContinuityListRequest, AuthContext | None], dict[str, Any]],
+    continuity_archive: Callable[[ContinuityArchiveRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_create: Callable[[ContextSnapshotRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_get: Callable[[str, AuthContext | None], dict[str, Any]],
     tasks_create: Callable[[TaskCreateRequest, AuthContext | None], dict[str, Any]],
@@ -925,6 +958,12 @@ def invoke_tool_by_name(
         return context_retrieve(ContextRetrieveRequest(**args), auth)
     if name == "continuity.upsert":
         return continuity_upsert(ContinuityUpsertRequest(**args), auth)
+    if name == "continuity.read":
+        return continuity_read(ContinuityReadRequest(**args), auth)
+    if name == "continuity.list":
+        return continuity_list(ContinuityListRequest(**args), auth)
+    if name == "continuity.archive":
+        return continuity_archive(ContinuityArchiveRequest(**args), auth)
     if name == "context.snapshot_create":
         return context_snapshot_create(ContextSnapshotRequest(**args), auth)
     if name == "context.snapshot_get":
@@ -1241,6 +1280,9 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "POST /v1/recent": {"scope": "search"},
             "POST /v1/context/retrieve": {"scope": "search"},
             "POST /v1/continuity/upsert": {"scope": "write:projects"},
+            "POST /v1/continuity/read": {"scope": "read:files"},
+            "POST /v1/continuity/list": {"scope": "read:files"},
+            "POST /v1/continuity/archive": {"scope": "write:projects"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},
             "GET /v1/context/snapshot/{snapshot_id}": {"scope": "read:files"},
             "POST /v1/tasks": {"scope": "write:projects"},
