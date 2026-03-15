@@ -3,19 +3,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
+from fastapi import Depends, FastAPI, Header, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
 
 from .auth import AuthContext, require_auth
 from .context import (
+    append_record_service,
     context_retrieve_service,
     context_snapshot_create_service,
     context_snapshot_get_service,
     index_rebuild_incremental_service,
     index_rebuild_service,
     index_status_service,
+    read_file_service,
     recent_list_service,
     search_service,
+    write_file_service,
 )
 from .continuity import continuity_upsert_service
 from .config import get_settings
@@ -26,6 +29,7 @@ from .discovery import (
     discovery_tools_payload,
     discovery_workflows_payload,
     health_payload,
+    invoke_tool_by_name,
     manifest_payload,
     rpc_error_payload,
     tool_catalog,
@@ -104,7 +108,6 @@ from .runtime import (
     scope_for_path as _scope_for_path,
     verification_failure_count as _verification_failure_count,
 )
-from .storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
 from .security import governance_policy_service, load_token_config, load_security_keys, messages_verify_service, security_keys_rotate_service, security_tokens_issue_service, security_tokens_list_service, security_tokens_revoke_service, security_tokens_rotate_service, verify_signed_payload_service
 from .tasks import (
     code_checks_run_service,
@@ -178,151 +181,66 @@ def well_known_mcp() -> dict:
 
 
 def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext | None) -> dict[str, Any]:
-    args = arguments or {}
-    if not isinstance(args, dict):
-        raise ValueError("arguments must be an object")
-
-    if name == "system.health":
-        return health()
-    if name == "system.capabilities":
-        return capabilities()
-    if name == "system.manifest":
-        return manifest()
-    if name == "system.contracts":
-        return contracts()
-    if name == "system.governance_policy":
-        return governance_policy()
-    if name == "system.discovery":
-        return discovery()
-    if name == "system.discovery_tools":
-        return discovery_tools()
-    if name == "system.discovery_workflows":
-        return discovery_workflows()
-    if name == "memory.write":
-        return write_file(WriteRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "memory.append_jsonl":
-        return append_record(AppendRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "memory.read":
-        return read_file(path=str(args["path"]), auth=auth)  # type: ignore[arg-type]
-    if name == "index.rebuild_full":
-        return index_rebuild(auth=auth)  # type: ignore[arg-type]
-    if name == "index.rebuild_incremental":
-        return index_rebuild_incremental(auth=auth)  # type: ignore[arg-type]
-    if name == "index.status":
-        return index_status(auth=auth)  # type: ignore[arg-type]
-    if name == "peers.list":
-        return peers_list(auth=auth)  # type: ignore[arg-type]
-    if name == "peers.register":
-        return peers_register(PeerRegisterRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "peers.trust_transition":
-        req_args = dict(args)
-        peer_id = str(req_args.pop("peer_id"))
-        return peers_trust_transition(peer_id=peer_id, req=PeerTrustTransitionRequest(**req_args), auth=auth)  # type: ignore[arg-type]
-    if name == "peers.fetch_manifest":
-        return peer_manifest(peer_id=str(args["peer_id"]), auth=auth)  # type: ignore[arg-type]
-    if name == "search.query":
-        return search(SearchRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "recent.list":
-        return recent_list(RecentRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "context.retrieve":
-        return context_retrieve(ContextRetrieveRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "continuity.upsert":
-        return continuity_upsert(ContinuityUpsertRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "context.snapshot_create":
-        return context_snapshot_create(ContextSnapshotRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "context.snapshot_get":
-        return context_snapshot_get(snapshot_id=str(args["snapshot_id"]), auth=auth)  # type: ignore[arg-type]
-    if name == "tasks.create":
-        return tasks_create(TaskCreateRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "tasks.update":
-        req_args = dict(args)
-        task_id = str(req_args.pop("task_id"))
-        return tasks_update(task_id=task_id, req=TaskUpdateRequest(**req_args), auth=auth)  # type: ignore[arg-type]
-    if name == "tasks.query":
-        return tasks_query(
-            status=args.get("status"),
-            owner_peer=args.get("owner_peer"),
-            collaborator=args.get("collaborator"),
-            thread_id=args.get("thread_id"),
-            limit=int(args.get("limit", 100)),
-            auth=auth,  # type: ignore[arg-type]
-        )
-    if name == "docs.patch_propose":
-        return docs_patch_propose(PatchProposeRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "docs.patch_apply":
-        return docs_patch_apply(PatchApplyRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "code.patch_propose":
-        return code_patch_propose(PatchProposeRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "code.checks_run":
-        return code_checks_run(CodeCheckRunRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "code.merge":
-        return code_merge(CodeMergeRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "security.tokens_list":
-        return security_tokens_list(
-            peer_id=args.get("peer_id"),
-            status=args.get("status"),
-            include_inactive=bool(args.get("include_inactive", False)),
-            auth=auth,  # type: ignore[arg-type]
-        )
-    if name == "security.tokens_issue":
-        return security_tokens_issue(SecurityTokenIssueRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "security.tokens_revoke":
-        return security_tokens_revoke(SecurityTokenRevokeRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "security.tokens_rotate":
-        return security_tokens_rotate(SecurityTokenRotateRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "security.keys_rotate":
-        return security_keys_rotate(SecurityKeysRotateRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "messages.verify":
-        return messages_verify(MessageVerifyRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "metrics.get":
-        return metrics(auth=auth)  # type: ignore[arg-type]
-    if name == "messages.replay":
-        return replay_messages(MessageReplayRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "replication.pull":
-        return replication_pull(ReplicationPullRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "replication.push":
-        return replication_push(ReplicationPushRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "messages.send":
-        return messages_send(MessageSendRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "messages.ack":
-        return messages_ack(MessageAckRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "messages.pending":
-        return messages_pending(
-            recipient=args.get("recipient"),
-            status=args.get("status"),
-            include_terminal=bool(args.get("include_terminal", False)),
-            limit=int(args.get("limit", 50)),
-            auth=auth,  # type: ignore[arg-type]
-        )
-    if name == "messages.inbox":
-        return messages_inbox(
-            recipient=str(args["recipient"]),
-            limit=int(args.get("limit", 20)),
-            auth=auth,  # type: ignore[arg-type]
-        )
-    if name == "messages.thread":
-        return messages_thread(
-            thread_id=str(args["thread_id"]),
-            limit=int(args.get("limit", 100)),
-            auth=auth,  # type: ignore[arg-type]
-        )
-    if name == "messages.relay_forward":
-        return relay_forward(RelayForwardRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "memory.compaction_plan":
-        return compact_run(CompactRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "backup.create":
-        return backup_create(BackupCreateRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "backup.restore_test":
-        return backup_restore_test(BackupRestoreTestRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "ops.catalog":
-        return ops_catalog(auth=auth)  # type: ignore[arg-type]
-    if name == "ops.status":
-        return ops_status(limit=int(args.get("limit", 50)), auth=auth)  # type: ignore[arg-type]
-    if name == "ops.run":
-        return ops_run(OpsRunRequest(**args), auth=auth)  # type: ignore[arg-type]
-    if name == "ops.schedule_export":
-        return ops_schedule_export(format=str(args.get("format", "systemd")), auth=auth)  # type: ignore[arg-type]
-    raise ValueError(f"Unknown tool: {name}")
+    return invoke_tool_by_name(
+        name,
+        arguments,
+        auth,
+        health=health,
+        capabilities=capabilities,
+        manifest=manifest,
+        contracts=contracts,
+        governance_policy=governance_policy,
+        discovery=discovery,
+        discovery_tools=discovery_tools,
+        discovery_workflows=discovery_workflows,
+        write_file=lambda req, auth_ctx: write_file(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        append_record=lambda req, auth_ctx: append_record(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        read_file=lambda path, auth_ctx: read_file(path=path, auth=auth_ctx),  # type: ignore[arg-type]
+        index_rebuild=lambda auth_ctx: index_rebuild(auth=auth_ctx),  # type: ignore[arg-type]
+        index_rebuild_incremental=lambda auth_ctx: index_rebuild_incremental(auth=auth_ctx),  # type: ignore[arg-type]
+        index_status=lambda auth_ctx: index_status(auth=auth_ctx),  # type: ignore[arg-type]
+        peers_list=lambda auth_ctx: peers_list(auth=auth_ctx),  # type: ignore[arg-type]
+        peers_register=lambda req, auth_ctx: peers_register(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        peers_trust_transition=lambda peer_id, req, auth_ctx: peers_trust_transition(peer_id=peer_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        peer_manifest=lambda peer_id, auth_ctx: peer_manifest(peer_id=peer_id, auth=auth_ctx),  # type: ignore[arg-type]
+        search=lambda req, auth_ctx: search(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        recent_list=lambda req, auth_ctx: recent_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        context_retrieve=lambda req, auth_ctx: context_retrieve(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_upsert=lambda req, auth_ctx: continuity_upsert(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        context_snapshot_get=lambda snapshot_id, auth_ctx: context_snapshot_get(snapshot_id=snapshot_id, auth=auth_ctx),  # type: ignore[arg-type]
+        tasks_create=lambda req, auth_ctx: tasks_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        tasks_update=lambda task_id, req, auth_ctx: tasks_update(task_id=task_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        tasks_query=tasks_query,
+        docs_patch_propose=lambda req, auth_ctx: docs_patch_propose(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        docs_patch_apply=lambda req, auth_ctx: docs_patch_apply(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        code_patch_propose=lambda req, auth_ctx: code_patch_propose(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        code_checks_run=lambda req, auth_ctx: code_checks_run(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        code_merge=lambda req, auth_ctx: code_merge(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        security_tokens_list=security_tokens_list,
+        security_tokens_issue=lambda req, auth_ctx: security_tokens_issue(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        security_tokens_revoke=lambda req, auth_ctx: security_tokens_revoke(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        security_tokens_rotate=lambda req, auth_ctx: security_tokens_rotate(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        security_keys_rotate=lambda req, auth_ctx: security_keys_rotate(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        messages_verify=lambda req, auth_ctx: messages_verify(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        metrics=lambda auth_ctx: metrics(auth=auth_ctx),  # type: ignore[arg-type]
+        replay_messages=lambda req, auth_ctx: replay_messages(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        replication_pull=lambda req, auth_ctx: replication_pull(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        replication_push=lambda req, auth_ctx: replication_push(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        messages_send=lambda req, auth_ctx: messages_send(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        messages_ack=lambda req, auth_ctx: messages_ack(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        messages_pending=messages_pending,
+        messages_inbox=lambda recipient, limit, auth_ctx: messages_inbox(recipient=recipient, limit=limit, auth=auth_ctx),  # type: ignore[arg-type]
+        messages_thread=lambda thread_id, limit, auth_ctx: messages_thread(thread_id=thread_id, limit=limit, auth=auth_ctx),  # type: ignore[arg-type]
+        relay_forward=lambda req, auth_ctx: relay_forward(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        compact_run=lambda req, auth_ctx: compact_run(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        backup_create=lambda req, auth_ctx: backup_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        backup_restore_test=lambda req, auth_ctx: backup_restore_test(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        ops_catalog=lambda auth_ctx: ops_catalog(auth=auth_ctx),  # type: ignore[arg-type]
+        ops_status=lambda limit, auth_ctx: ops_status(limit=limit, auth=auth_ctx),  # type: ignore[arg-type]
+        ops_run=lambda req, auth_ctx: ops_run(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        ops_schedule_export=lambda format, auth_ctx: ops_schedule_export(format=format, auth=auth_ctx),  # type: ignore[arg-type]
+    )
 
 
 @app.post("/v1/mcp")
@@ -484,56 +402,44 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
 @app.post("/v1/write")
 def write_file(req: WriteRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    _enforce_rate_limit(settings, auth, "write")
-    _enforce_payload_limit(settings, {"path": req.path, "content": req.content}, "write")
-    auth.require(_scope_for_path(req.path))
-    auth.require_write_path(req.path)
-    try:
-        path = safe_path(settings.repo_root, req.path)
-    except StorageError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    write_text_file(path, req.content)
-    committed = gm.commit_file(path, req.commit_message or f"write: {req.path}")
-    _audit(settings, auth, "write", {"path": req.path, "committed": committed})
-    return {
-        "ok": True,
-        "path": req.path,
-        "committed": committed,
-        "latest_commit": gm.latest_commit(),
-    }
+    return write_file_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        scope_for_path=_scope_for_path,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.get("/v1/read")
 def read_file(path: str = Query(...), auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    auth.require("read:files")
-    auth.require_read_path(path)
-    try:
-        p = safe_path(settings.repo_root, path)
-    except StorageError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if not p.exists() or not p.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    _audit(settings, auth, "read", {"path": path})
-    return {"ok": True, "path": path, "content": read_text_file(p)}
+    return read_file_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        path=path,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/append")
 def append_record(req: AppendRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    _enforce_rate_limit(settings, auth, "append")
-    _enforce_payload_limit(settings, {"path": req.path, "record": req.record}, "append")
-    auth.require(_scope_for_path(req.path))
-    auth.require_write_path(req.path)
-    try:
-        path = safe_path(settings.repo_root, req.path)
-    except StorageError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    append_jsonl(path, req.record)
-    committed = gm.commit_file(path, req.commit_message or f"append: {req.path}")
-    _audit(settings, auth, "append", {"path": req.path, "committed": committed})
-    return {"ok": True, "path": req.path, "committed": committed, "latest_commit": gm.latest_commit()}
+    return append_record_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        scope_for_path=_scope_for_path,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/index/rebuild")

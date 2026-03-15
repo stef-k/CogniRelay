@@ -13,8 +13,8 @@ from fastapi import HTTPException
 from app.auth import AuthContext
 from app.continuity import build_continuity_state
 from app.indexer import incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
-from app.models import ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest
-from app.storage import read_text_file, safe_path, write_text_file
+from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
+from app.storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
 
 SNAPSHOT_DIR_REL = "snapshots/context"
 SNAPSHOT_TEXT_SUFFIXES = {".md", ".json", ".jsonl", ".txt"}
@@ -103,6 +103,72 @@ def index_status_service(*, repo_root: Path, auth: AuthContext) -> dict[str, Any
         "sqlite_fts": sqlite_path.exists(),
         "state_file": state_path.exists(),
     }
+
+
+def write_file_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: AuthContext,
+    req: WriteRequest,
+    enforce_rate_limit: Callable[[Any, AuthContext, str], None],
+    enforce_payload_limit: Callable[[Any, Any, str], None],
+    scope_for_path: Callable[[str], str],
+    settings: Any,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    enforce_rate_limit(settings, auth, "write")
+    enforce_payload_limit(settings, {"path": req.path, "content": req.content}, "write")
+    auth.require(scope_for_path(req.path))
+    auth.require_write_path(req.path)
+    try:
+        path = safe_path(repo_root, req.path)
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    write_text_file(path, req.content)
+    committed = gm.commit_file(path, req.commit_message or f"write: {req.path}")
+    audit(auth, "write", {"path": req.path, "committed": committed})
+    return {"ok": True, "path": req.path, "committed": committed, "latest_commit": gm.latest_commit()}
+
+
+def read_file_service(*, repo_root: Path, auth: AuthContext, path: str, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    auth.require("read:files")
+    auth.require_read_path(path)
+    try:
+        file_path = safe_path(repo_root, path)
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    audit(auth, "read", {"path": path})
+    return {"ok": True, "path": path, "content": read_text_file(file_path)}
+
+
+def append_record_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: AuthContext,
+    req: AppendRequest,
+    enforce_rate_limit: Callable[[Any, AuthContext, str], None],
+    enforce_payload_limit: Callable[[Any, Any, str], None],
+    scope_for_path: Callable[[str], str],
+    settings: Any,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    enforce_rate_limit(settings, auth, "append")
+    enforce_payload_limit(settings, {"path": req.path, "record": req.record}, "append")
+    auth.require(scope_for_path(req.path))
+    auth.require_write_path(req.path)
+    try:
+        path = safe_path(repo_root, req.path)
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    append_jsonl(path, req.record)
+    committed = gm.commit_file(path, req.commit_message or f"append: {req.path}")
+    audit(auth, "append", {"path": req.path, "committed": committed})
+    return {"ok": True, "path": req.path, "committed": committed, "latest_commit": gm.latest_commit()}
 
 
 def search_service(*, repo_root: Path, auth: AuthContext, req: SearchRequest, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
