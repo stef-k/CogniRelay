@@ -800,6 +800,206 @@ def rpc_error_payload(request_id: Any, code: int, message: str, data: Any | None
     return _rpc_error(request_id, code, message, data)
 
 
+def invoke_tool_by_name(
+    name: str,
+    arguments: dict[str, Any],
+    auth: AuthContext | None,
+    *,
+    health: Callable[[], dict[str, Any]],
+    capabilities: Callable[[], dict[str, Any]],
+    manifest: Callable[[], dict[str, Any]],
+    contracts: Callable[[], dict[str, Any]],
+    governance_policy: Callable[[], dict[str, Any]],
+    discovery: Callable[[], dict[str, Any]],
+    discovery_tools: Callable[[], dict[str, Any]],
+    discovery_workflows: Callable[[], dict[str, Any]],
+    write_file: Callable[[WriteRequest, AuthContext | None], dict[str, Any]],
+    append_record: Callable[[AppendRequest, AuthContext | None], dict[str, Any]],
+    read_file: Callable[[str, AuthContext | None], dict[str, Any]],
+    index_rebuild: Callable[[AuthContext | None], dict[str, Any]],
+    index_rebuild_incremental: Callable[[AuthContext | None], dict[str, Any]],
+    index_status: Callable[[AuthContext | None], dict[str, Any]],
+    peers_list: Callable[[AuthContext | None], dict[str, Any]],
+    peers_register: Callable[[PeerRegisterRequest, AuthContext | None], dict[str, Any]],
+    peers_trust_transition: Callable[[str, PeerTrustTransitionRequest, AuthContext | None], dict[str, Any]],
+    peer_manifest: Callable[[str, AuthContext | None], dict[str, Any]],
+    search: Callable[[SearchRequest, AuthContext | None], dict[str, Any]],
+    recent_list: Callable[[RecentRequest, AuthContext | None], dict[str, Any]],
+    context_retrieve: Callable[[ContextRetrieveRequest, AuthContext | None], dict[str, Any]],
+    continuity_upsert: Callable[[ContinuityUpsertRequest, AuthContext | None], dict[str, Any]],
+    context_snapshot_create: Callable[[ContextSnapshotRequest, AuthContext | None], dict[str, Any]],
+    context_snapshot_get: Callable[[str, AuthContext | None], dict[str, Any]],
+    tasks_create: Callable[[TaskCreateRequest, AuthContext | None], dict[str, Any]],
+    tasks_update: Callable[[str, TaskUpdateRequest, AuthContext | None], dict[str, Any]],
+    tasks_query: Callable[..., dict[str, Any]],
+    docs_patch_propose: Callable[[PatchProposeRequest, AuthContext | None], dict[str, Any]],
+    docs_patch_apply: Callable[[PatchApplyRequest, AuthContext | None], dict[str, Any]],
+    code_patch_propose: Callable[[PatchProposeRequest, AuthContext | None], dict[str, Any]],
+    code_checks_run: Callable[[CodeCheckRunRequest, AuthContext | None], dict[str, Any]],
+    code_merge: Callable[[CodeMergeRequest, AuthContext | None], dict[str, Any]],
+    security_tokens_list: Callable[..., dict[str, Any]],
+    security_tokens_issue: Callable[[SecurityTokenIssueRequest, AuthContext | None], dict[str, Any]],
+    security_tokens_revoke: Callable[[SecurityTokenRevokeRequest, AuthContext | None], dict[str, Any]],
+    security_tokens_rotate: Callable[[SecurityTokenRotateRequest, AuthContext | None], dict[str, Any]],
+    security_keys_rotate: Callable[[SecurityKeysRotateRequest, AuthContext | None], dict[str, Any]],
+    messages_verify: Callable[[MessageVerifyRequest, AuthContext | None], dict[str, Any]],
+    metrics: Callable[[AuthContext | None], dict[str, Any]],
+    replay_messages: Callable[[MessageReplayRequest, AuthContext | None], dict[str, Any]],
+    replication_pull: Callable[[ReplicationPullRequest, AuthContext | None], dict[str, Any]],
+    replication_push: Callable[[ReplicationPushRequest, AuthContext | None], dict[str, Any]],
+    messages_send: Callable[[MessageSendRequest, AuthContext | None], dict[str, Any]],
+    messages_ack: Callable[[MessageAckRequest, AuthContext | None], dict[str, Any]],
+    messages_pending: Callable[..., dict[str, Any]],
+    messages_inbox: Callable[[str, int, AuthContext | None], dict[str, Any]],
+    messages_thread: Callable[[str, int, AuthContext | None], dict[str, Any]],
+    relay_forward: Callable[[RelayForwardRequest, AuthContext | None], dict[str, Any]],
+    compact_run: Callable[[CompactRequest, AuthContext | None], dict[str, Any]],
+    backup_create: Callable[[BackupCreateRequest, AuthContext | None], dict[str, Any]],
+    backup_restore_test: Callable[[BackupRestoreTestRequest, AuthContext | None], dict[str, Any]],
+    ops_catalog: Callable[[AuthContext | None], dict[str, Any]],
+    ops_status: Callable[[int, AuthContext | None], dict[str, Any]],
+    ops_run: Callable[[OpsRunRequest, AuthContext | None], dict[str, Any]],
+    ops_schedule_export: Callable[[str, AuthContext | None], dict[str, Any]],
+) -> dict[str, Any]:
+    args = arguments or {}
+    if not isinstance(args, dict):
+        raise ValueError("arguments must be an object")
+
+    if name == "system.health":
+        return health()
+    if name == "system.capabilities":
+        return capabilities()
+    if name == "system.manifest":
+        return manifest()
+    if name == "system.contracts":
+        return contracts()
+    if name == "system.governance_policy":
+        return governance_policy()
+    if name == "system.discovery":
+        return discovery()
+    if name == "system.discovery_tools":
+        return discovery_tools()
+    if name == "system.discovery_workflows":
+        return discovery_workflows()
+    if name == "memory.write":
+        return write_file(WriteRequest(**args), auth)
+    if name == "memory.append_jsonl":
+        return append_record(AppendRequest(**args), auth)
+    if name == "memory.read":
+        return read_file(str(args["path"]), auth)
+    if name == "index.rebuild_full":
+        return index_rebuild(auth)
+    if name == "index.rebuild_incremental":
+        return index_rebuild_incremental(auth)
+    if name == "index.status":
+        return index_status(auth)
+    if name == "peers.list":
+        return peers_list(auth)
+    if name == "peers.register":
+        return peers_register(PeerRegisterRequest(**args), auth)
+    if name == "peers.trust_transition":
+        req_args = dict(args)
+        peer_id = str(req_args.pop("peer_id"))
+        return peers_trust_transition(peer_id, PeerTrustTransitionRequest(**req_args), auth)
+    if name == "peers.fetch_manifest":
+        return peer_manifest(str(args["peer_id"]), auth)
+    if name == "search.query":
+        return search(SearchRequest(**args), auth)
+    if name == "recent.list":
+        return recent_list(RecentRequest(**args), auth)
+    if name == "context.retrieve":
+        return context_retrieve(ContextRetrieveRequest(**args), auth)
+    if name == "continuity.upsert":
+        return continuity_upsert(ContinuityUpsertRequest(**args), auth)
+    if name == "context.snapshot_create":
+        return context_snapshot_create(ContextSnapshotRequest(**args), auth)
+    if name == "context.snapshot_get":
+        return context_snapshot_get(str(args["snapshot_id"]), auth)
+    if name == "tasks.create":
+        return tasks_create(TaskCreateRequest(**args), auth)
+    if name == "tasks.update":
+        req_args = dict(args)
+        task_id = str(req_args.pop("task_id"))
+        return tasks_update(task_id, TaskUpdateRequest(**req_args), auth)
+    if name == "tasks.query":
+        return tasks_query(
+            status=args.get("status"),
+            owner_peer=args.get("owner_peer"),
+            collaborator=args.get("collaborator"),
+            thread_id=args.get("thread_id"),
+            limit=int(args.get("limit", 100)),
+            auth=auth,
+        )
+    if name == "docs.patch_propose":
+        return docs_patch_propose(PatchProposeRequest(**args), auth)
+    if name == "docs.patch_apply":
+        return docs_patch_apply(PatchApplyRequest(**args), auth)
+    if name == "code.patch_propose":
+        return code_patch_propose(PatchProposeRequest(**args), auth)
+    if name == "code.checks_run":
+        return code_checks_run(CodeCheckRunRequest(**args), auth)
+    if name == "code.merge":
+        return code_merge(CodeMergeRequest(**args), auth)
+    if name == "security.tokens_list":
+        return security_tokens_list(
+            peer_id=args.get("peer_id"),
+            status=args.get("status"),
+            include_inactive=bool(args.get("include_inactive", False)),
+            auth=auth,
+        )
+    if name == "security.tokens_issue":
+        return security_tokens_issue(SecurityTokenIssueRequest(**args), auth)
+    if name == "security.tokens_revoke":
+        return security_tokens_revoke(SecurityTokenRevokeRequest(**args), auth)
+    if name == "security.tokens_rotate":
+        return security_tokens_rotate(SecurityTokenRotateRequest(**args), auth)
+    if name == "security.keys_rotate":
+        return security_keys_rotate(SecurityKeysRotateRequest(**args), auth)
+    if name == "messages.verify":
+        return messages_verify(MessageVerifyRequest(**args), auth)
+    if name == "metrics.get":
+        return metrics(auth)
+    if name == "messages.replay":
+        return replay_messages(MessageReplayRequest(**args), auth)
+    if name == "replication.pull":
+        return replication_pull(ReplicationPullRequest(**args), auth)
+    if name == "replication.push":
+        return replication_push(ReplicationPushRequest(**args), auth)
+    if name == "messages.send":
+        return messages_send(MessageSendRequest(**args), auth)
+    if name == "messages.ack":
+        return messages_ack(MessageAckRequest(**args), auth)
+    if name == "messages.pending":
+        return messages_pending(
+            recipient=args.get("recipient"),
+            status=args.get("status"),
+            include_terminal=bool(args.get("include_terminal", False)),
+            limit=int(args.get("limit", 50)),
+            auth=auth,
+        )
+    if name == "messages.inbox":
+        return messages_inbox(str(args["recipient"]), int(args.get("limit", 20)), auth)
+    if name == "messages.thread":
+        return messages_thread(str(args["thread_id"]), int(args.get("limit", 100)), auth)
+    if name == "messages.relay_forward":
+        return relay_forward(RelayForwardRequest(**args), auth)
+    if name == "memory.compaction_plan":
+        return compact_run(CompactRequest(**args), auth)
+    if name == "backup.create":
+        return backup_create(BackupCreateRequest(**args), auth)
+    if name == "backup.restore_test":
+        return backup_restore_test(BackupRestoreTestRequest(**args), auth)
+    if name == "ops.catalog":
+        return ops_catalog(auth)
+    if name == "ops.status":
+        return ops_status(int(args.get("limit", 50)), auth)
+    if name == "ops.run":
+        return ops_run(OpsRunRequest(**args), auth)
+    if name == "ops.schedule_export":
+        return ops_schedule_export(str(args.get("format", "systemd")), auth)
+    raise ValueError(f"Unknown tool: {name}")
+
+
 def _mcp_list_tools_result(tools: list[dict[str, Any]]) -> dict[str, Any]:
     rows = []
     for t in tools:
