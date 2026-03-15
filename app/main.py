@@ -29,6 +29,7 @@ from .discovery import (
     discovery_workflows_payload,
     health_payload,
     manifest_payload,
+    rpc_error_payload,
     tool_catalog,
     well_known_cognirelay_payload,
     well_known_mcp_payload,
@@ -339,7 +340,7 @@ def mcp_rpc(
         authorization = None
     if isinstance(payload, list):
         if not payload:
-            return _rpc_error(None, -32600, "Invalid Request: empty batch")
+            return rpc_error_payload(None, -32600, "Invalid Request: empty batch")
         out = []
         for item in payload:
             result = _handle_mcp_rpc_request(

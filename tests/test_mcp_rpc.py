@@ -254,6 +254,13 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIsInstance(res, Response)
         self.assertEqual(res.status_code, 204)
 
+    def test_empty_batch_returns_invalid_request_error(self) -> None:
+        res = mcp_rpc([])
+        self.assertEqual(res["jsonrpc"], "2.0")
+        self.assertIsNone(res["id"])
+        self.assertEqual(res["error"]["code"], -32600)
+        self.assertIn("empty batch", res["error"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()
