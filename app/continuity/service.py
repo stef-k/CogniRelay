@@ -21,6 +21,7 @@ from app.models import (
     ContinuityListRequest,
     ContinuityReadRequest,
     ContinuityUpsertRequest,
+    ContinuityVerificationSignal,
     ContextRetrieveRequest,
 )
 from app.storage import StorageError, safe_path, write_text_file
@@ -45,6 +46,13 @@ CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "task_switch",
     "public_reply",
     "manual_checkpoint",
+}
+CONTINUITY_SIGNAL_RANK = {
+    "self_review": 0,
+    "external_observation": 1,
+    "peer_confirmation": 2,
+    "user_confirmation": 3,
+    "system_check": 4,
 }
 
 
@@ -174,6 +182,35 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     if len(canonical.encode("utf-8")) > 12 * 1024:
         raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
+
+
+def _strip_v3_verification_fields(capsule: ContinuityCapsule) -> ContinuityCapsule:
+    """Return a capsule copy with V3 verification-only fields removed for upsert."""
+    payload = capsule.model_dump(mode="json", exclude_none=True, exclude={"verification_state", "capsule_health"})
+    return ContinuityCapsule.model_validate(payload)
+
+
+def _validate_verification_signals(signals: list[ContinuityVerificationSignal]) -> None:
+    """Validate V3 verification signals using the continuity timestamp rules."""
+    for signal in signals:
+        _require_utc_timestamp(signal.observed_at, "signals.observed_at")
+
+
+def _strongest_signal_kind(signals: list[ContinuityVerificationSignal]) -> str:
+    """Return the strongest verification signal kind preserving request order on ties."""
+    strongest = signals[0].kind
+    for signal in signals[1:]:
+        if CONTINUITY_SIGNAL_RANK[signal.kind] > CONTINUITY_SIGNAL_RANK[strongest]:
+            strongest = signal.kind
+    return strongest
+
+
+def _validate_candidate_selector_match(subject_kind: str, subject_id: str, candidate_capsule: ContinuityCapsule) -> None:
+    """Require a candidate capsule to match the exact request selector after normalization."""
+    if candidate_capsule.subject_kind != subject_kind:
+        raise HTTPException(status_code=400, detail="Candidate capsule subject does not match request subject")
+    if _normalize_subject_id(candidate_capsule.subject_id) != _normalize_subject_id(subject_id):
+        raise HTTPException(status_code=400, detail="Candidate capsule subject does not match request subject")
 
 
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
@@ -486,17 +523,25 @@ def continuity_upsert_service(
 ) -> dict[str, Any]:
     """Validate and persist one continuity capsule with commit-on-change behavior."""
     auth.require("write:projects")
-    if req.capsule.subject_kind != req.subject_kind or req.capsule.subject_id != req.subject_id:
+    capsule = _strip_v3_verification_fields(req.capsule)
+    if capsule.subject_kind != req.subject_kind or capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_write_path(rel)
-    _validate_capsule(repo_root, req.capsule)
+    _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
-    canonical = _canonical_json(req.capsule.model_dump(mode="json", exclude_none=True))
+    canonical = _canonical_json(capsule.model_dump(mode="json", exclude_none=True))
     new_bytes = canonical.encode("utf-8")
     old_bytes = path.read_bytes() if path.exists() else None
     if old_bytes != new_bytes:
-        _reject_stale_or_conflicting_write(path, req)
+        stripped_req = ContinuityUpsertRequest(
+            subject_kind=req.subject_kind,
+            subject_id=req.subject_id,
+            capsule=capsule,
+            commit_message=req.commit_message,
+            idempotency_key=req.idempotency_key,
+        )
+        _reject_stale_or_conflicting_write(path, stripped_req)
     capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
     created = not path.exists()
     changed = old_bytes != new_bytes

@@ -365,11 +365,35 @@ class ContinuityConfidence(BaseModel):
     relationship_model: float = Field(ge=0.0, le=1.0)
 
 
+class ContinuityVerificationState(BaseModel):
+    """Verification status recorded for one continuity capsule."""
+    status: Literal[
+        "unverified",
+        "self_attested",
+        "externally_supported",
+        "user_confirmed",
+        "peer_confirmed",
+        "system_confirmed",
+        "conflicted",
+    ]
+    last_revalidated_at: str
+    strongest_signal: Literal["self_review", "external_observation", "user_confirmation", "peer_confirmation", "system_check"]
+    evidence_refs: List[str] = Field(default_factory=list, max_length=4)
+    conflict_summary: Optional[str] = Field(default=None, max_length=240)
+
+
 class ContinuityFreshness(BaseModel):
     """Freshness metadata for continuity decay and expiration rules."""
     freshness_class: Optional[Literal["persistent", "durable", "situational", "ephemeral"]] = None
     expires_at: Optional[str] = None
     stale_after_seconds: Optional[int] = Field(default=None, ge=300, le=31536000)
+
+
+class ContinuityCapsuleHealth(BaseModel):
+    """Operational health state recorded for one continuity capsule."""
+    status: Literal["healthy", "degraded", "conflicted"]
+    reasons: List[str] = Field(default_factory=list, max_length=5)
+    last_checked_at: str
 
 
 class ContinuitySelector(BaseModel):
@@ -408,6 +432,8 @@ class ContinuityCapsule(BaseModel):
     freshness: Optional[ContinuityFreshness] = None
     canonical_sources: List[str] = Field(default_factory=list, max_length=8)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    verification_state: Optional[ContinuityVerificationState] = None
+    capsule_health: Optional[ContinuityCapsuleHealth] = None
 
 
 class ContinuityUpsertRequest(BaseModel):
@@ -436,3 +462,29 @@ class ContinuityArchiveRequest(BaseModel):
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=3, max_length=240)
+
+
+class ContinuityVerificationSignal(BaseModel):
+    """Structured verification signal used by V3 compare and revalidate workflows."""
+    kind: Literal["self_review", "external_observation", "user_confirmation", "peer_confirmation", "system_check"]
+    source_ref: str = Field(min_length=1, max_length=200)
+    observed_at: str
+    summary: str = Field(min_length=1, max_length=240)
+
+
+class ContinuityCompareRequest(BaseModel):
+    """Exact-selector request for comparing an active continuity capsule to a candidate."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    candidate_capsule: ContinuityCapsule
+    signals: List[ContinuityVerificationSignal] = Field(min_length=1, max_length=8)
+
+
+class ContinuityRevalidateRequest(BaseModel):
+    """Exact-selector request for confirming or correcting one active continuity capsule."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    outcome: Literal["confirm", "correct", "degrade", "conflict"]
+    signals: List[ContinuityVerificationSignal] = Field(min_length=1, max_length=8)
+    candidate_capsule: Optional[ContinuityCapsule] = None
+    reason: Optional[str] = Field(default=None, min_length=1, max_length=120)
