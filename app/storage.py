@@ -1,3 +1,5 @@
+"""Low-level repository path and file helpers."""
+
 from __future__ import annotations
 
 import json
@@ -25,10 +27,12 @@ ALLOWED_TOP_LEVEL = {
 
 
 class StorageError(ValueError):
+    """Raised when a storage path or file operation violates repo constraints."""
     pass
 
 
 def safe_path(repo_root: Path, relative_path: str) -> Path:
+    """Resolve a repository-relative path while enforcing top-level guards."""
     if not relative_path or relative_path.startswith("/"):
         raise StorageError("Path must be a non-empty relative path")
 
@@ -43,15 +47,18 @@ def safe_path(repo_root: Path, relative_path: str) -> Path:
 
 
 def read_text_file(path: Path) -> str:
+    """Read a UTF-8 text file from disk."""
     return path.read_text(encoding="utf-8")
 
 
 def write_text_file(path: Path, content: str) -> None:
+    """Write UTF-8 text content, creating parent directories as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
 def append_jsonl(path: Path, record: Any) -> None:
+    """Append one JSON line record to a file, creating parents as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")

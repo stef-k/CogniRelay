@@ -1,3 +1,5 @@
+"""Host-local operations endpoints and scheduled job execution logic."""
+
 from __future__ import annotations
 
 import json
@@ -30,6 +32,7 @@ OPS_JOBS = {
 
 
 def _is_local_client_ip(client_ip: str | None) -> bool:
+    """Return whether the client IP belongs to the local host."""
     if not client_ip:
         return False
     value = str(client_ip).strip().lower()
@@ -43,6 +46,7 @@ def _is_local_client_ip(client_ip: str | None) -> bool:
 
 
 def _require_local_ops_access(auth: AuthContext) -> str:
+    """Enforce the local-only policy for host operations endpoints."""
     auth.require("admin:peers")
     ip = getattr(auth, "client_ip", None)
     if not _is_local_client_ip(ip):
@@ -51,15 +55,18 @@ def _require_local_ops_access(auth: AuthContext) -> str:
 
 
 def _ops_runs_path(repo_root: Path) -> Path:
+    """Return the repository path for ops run history."""
     return safe_path(repo_root, OPS_RUNS_REL)
 
 
 def _ops_lock_path(repo_root: Path, job_id: str) -> Path:
+    """Return the lockfile path for a job identifier."""
     safe_job = re.sub(r"[^A-Za-z0-9_.-]+", "_", job_id)
     return safe_path(repo_root, f"{OPS_LOCKS_DIR_REL}/{safe_job}.lock")
 
 
 def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
+    """Load recent ops run history entries."""
     path = _ops_runs_path(repo_root)
     if not path.exists():
         return []
@@ -75,12 +82,14 @@ def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
 
 
 def _append_ops_run(repo_root: Path, payload: dict[str, Any]) -> Path:
+    """Append an ops run record to the run log."""
     path = _ops_runs_path(repo_root)
     append_jsonl(path, payload)
     return path
 
 
 def _acquire_ops_lock(repo_root: Path, job_id: str, run_id: str, started_at: str) -> Path:
+    """Acquire an exclusive lockfile for an ops job run."""
     path = _ops_lock_path(repo_root, job_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -93,6 +102,7 @@ def _acquire_ops_lock(repo_root: Path, job_id: str, run_id: str, started_at: str
 
 
 def _release_ops_lock(lock_path: Path) -> None:
+    """Release an ops job lockfile, ignoring cleanup failures."""
     try:
         lock_path.unlink(missing_ok=True)
     except Exception:
@@ -100,6 +110,7 @@ def _release_ops_lock(lock_path: Path) -> None:
 
 
 def _list_ops_locks(repo_root: Path) -> list[dict[str, Any]]:
+    """Return normalized metadata for active ops lockfiles."""
     directory = safe_path(repo_root, OPS_LOCKS_DIR_REL)
     if not directory.exists() or not directory.is_dir():
         return []
@@ -117,6 +128,7 @@ def _list_ops_locks(repo_root: Path) -> list[dict[str, Any]]:
 
 
 def _ops_job_catalog() -> list[dict[str, Any]]:
+    """Return the static catalog of supported host ops jobs."""
     return [
         {
             "job_id": "index.rebuild_incremental",
@@ -194,6 +206,7 @@ def _ops_job_catalog() -> list[dict[str, Any]]:
 
 
 def _latest_backup_archive_rel(repo_root: Path, backups_dir_rel: str) -> str | None:
+    """Return the newest backup archive relative path, if any."""
     directory = safe_path(repo_root, backups_dir_rel)
     if not directory.exists() or not directory.is_dir():
         return None
@@ -211,6 +224,7 @@ def _ops_rotation_check(
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
 ) -> dict[str, Any]:
+    """Inspect upcoming token expiry and active key status for host ops reporting."""
     now = datetime.now(timezone.utc)
     lookahead = now + timedelta(hours=max(1, int(lookahead_hours)))
 
@@ -259,6 +273,7 @@ def _ops_replay_dead_letter_sweep(
     replay_messages: Callable[..., dict[str, Any]],
     replay_request_factory: Callable[..., Any],
 ) -> dict[str, Any]:
+    """Replay a bounded set of dead-letter deliveries as a scheduled ops job."""
     limit = int(arguments.get("limit", 20))
     force = bool(arguments.get("force", False))
     reason = str(arguments.get("reason") or "ops_dead_letter_sweep")
@@ -318,6 +333,7 @@ def _ops_execute_job(
     replay_messages: Callable[..., dict[str, Any]],
     replay_request_factory: Callable[..., Any],
 ) -> dict[str, Any]:
+    """Dispatch a single host ops job and return its result payload."""
     args = dict(req.arguments or {})
 
     if req.dry_run:
@@ -365,6 +381,7 @@ def _ops_execute_job(
 
 
 def ops_catalog_service(*, settings: Any, auth: AuthContext, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Return the supported host operations catalog."""
     ip = _require_local_ops_access(auth)
     jobs = _ops_job_catalog()
     audit(auth, "ops_catalog", {"count": len(jobs), "client_ip": ip})
@@ -388,6 +405,7 @@ def ops_status_service(
     limit: int,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Return the current ops lock and recent run status summary."""
     ip = _require_local_ops_access(auth)
     runs = _load_ops_runs(repo_root, limit=limit)
     locks = _list_ops_locks(repo_root)
@@ -416,6 +434,7 @@ def ops_status_service(
 
 
 def ops_schedule_export_service(*, settings: Any, auth: AuthContext, format: str, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Render example cron or systemd schedules for the supported ops jobs."""
     ip = _require_local_ops_access(auth)
     fmt = str(format or "systemd").strip().lower()
     if fmt not in {"systemd", "cron"}:
@@ -475,6 +494,7 @@ def ops_run_service(
     replay_request_factory: Callable[..., Any],
     backups_dir_rel: str,
 ) -> dict[str, Any]:
+    """Execute a single local-only ops job with locking and audit recording."""
     enforce_rate_limit(settings, auth, "ops_run")
     enforce_payload_limit(settings, req.model_dump(), "ops_run")
     ip = _require_local_ops_access(auth)

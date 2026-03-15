@@ -1,3 +1,5 @@
+"""Task, patch, check, and merge business logic."""
+
 from __future__ import annotations
 
 import json
@@ -44,6 +46,7 @@ CHECK_PROFILE_COMMANDS = {
 
 
 def _resolve_commit_ref(repo_root: Path, ref: str, run_git: Callable[..., subprocess.CompletedProcess[str]]) -> str:
+    """Resolve and validate a git commit reference."""
     cp = run_git(repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}")
     if cp.returncode != 0:
         raise HTTPException(status_code=400, detail=f"Invalid git ref: {ref}")
@@ -51,11 +54,13 @@ def _resolve_commit_ref(repo_root: Path, ref: str, run_git: Callable[..., subpro
 
 
 def _task_rel(task_id: str, status: str) -> str:
+    """Return the repository-relative path for a task in the given status bucket."""
     base = TASKS_DONE_DIR_REL if status == "done" else TASKS_OPEN_DIR_REL
     return f"{base}/{task_id}.json"
 
 
 def _find_task(repo_root: Path, task_id: str) -> tuple[str, Path, dict[str, Any]] | tuple[None, None, None]:
+    """Find a task file and payload by task id."""
     for rel in (f"{TASKS_OPEN_DIR_REL}/{task_id}.json", f"{TASKS_DONE_DIR_REL}/{task_id}.json"):
         path = safe_path(repo_root, rel)
         if not path.exists():
@@ -71,6 +76,7 @@ def _find_task(repo_root: Path, task_id: str) -> tuple[str, Path, dict[str, Any]
 
 
 def _iter_task_files(repo_root: Path) -> list[tuple[str, Path]]:
+    """List task files across open and done task directories."""
     out: list[tuple[str, Path]] = []
     for base in (TASKS_OPEN_DIR_REL, TASKS_DONE_DIR_REL):
         directory = safe_path(repo_root, base)
@@ -82,6 +88,7 @@ def _iter_task_files(repo_root: Path) -> list[tuple[str, Path]]:
 
 
 def _extract_patch_paths(diff: str) -> set[str]:
+    """Extract the repository paths touched by a unified diff payload."""
     paths: set[str] = set()
     for line in diff.splitlines():
         if line.startswith("diff --git "):
@@ -109,6 +116,7 @@ def _run_check_command(
     profile: str,
     run_git: Callable[..., subprocess.CompletedProcess[str]],
 ) -> tuple[int, str, str]:
+    """Run a check profile against a detached worktree at the target ref."""
     cmd = CHECK_PROFILE_COMMANDS[profile]
     tmp_dir = tempfile.mkdtemp(prefix="amr-check-")
     try:
@@ -123,6 +131,7 @@ def _run_check_command(
 
 
 def load_check_artifacts(repo_root: Path) -> list[dict[str, Any]]:
+    """Load stored code-check artifacts from disk."""
     directory = safe_path(repo_root, RUN_CHECKS_DIR_REL)
     if not directory.exists() or not directory.is_dir():
         return []
@@ -145,6 +154,7 @@ def tasks_create_service(
     req: TaskCreateRequest,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Create and persist a new task record."""
     auth.require("write:projects")
     existing_rel, _, _ = _find_task(repo_root, req.task_id)
     if existing_rel:
@@ -173,6 +183,7 @@ def tasks_update_service(
     req: TaskUpdateRequest,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Update an existing task and move it if the status bucket changes."""
     auth.require("write:projects")
     rel, path, task = _find_task(repo_root, task_id)
     if not rel or not path or not isinstance(task, dict):
@@ -218,6 +229,7 @@ def tasks_query_service(
     limit: int,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Query tasks with optional filters and stable reverse-chronological ordering."""
     auth.require("read:files")
     auth.require_read_path(f"{TASKS_OPEN_DIR_REL}/x.json")
     auth.require_read_path(f"{TASKS_DONE_DIR_REL}/x.json")
@@ -258,6 +270,7 @@ def _patch_propose_service(
     run_git: Callable[..., subprocess.CompletedProcess[str]],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Persist a patch proposal after validating target path and diff scope."""
     auth.require("write:projects")
     auth.require_write_path(req.target_path)
     safe_path(repo_root, req.target_path)
@@ -309,6 +322,7 @@ def docs_patch_propose_service(
     run_git: Callable[..., subprocess.CompletedProcess[str]],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Create a documentation patch proposal."""
     return _patch_propose_service(kind="doc_patch", repo_root=repo_root, gm=gm, auth=auth, req=req, run_git=run_git, audit=audit)
 
 
@@ -321,6 +335,7 @@ def code_patch_propose_service(
     run_git: Callable[..., subprocess.CompletedProcess[str]],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Create a code patch proposal."""
     return _patch_propose_service(kind="code_patch", repo_root=repo_root, gm=gm, auth=auth, req=req, run_git=run_git, audit=audit)
 
 
@@ -334,6 +349,7 @@ def docs_patch_apply_service(
     read_commit_file: Callable[[Path, str, str], str | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Apply a proposed patch or inline diff to a documentation target file."""
     auth.require("write:projects")
 
     proposal_rel = f"{PATCH_PROPOSALS_DIR_REL}/{req.patch_id}.json"
@@ -422,6 +438,7 @@ def code_checks_run_service(
     run_git: Callable[..., subprocess.CompletedProcess[str]],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Run a check profile against a repository reference and persist the artifact."""
     auth.require("write:projects")
     ref_resolved = _resolve_commit_ref(repo_root, req.ref, run_git)
     rc, stdout_text, stderr_text = _run_check_command(repo_root, ref_resolved, req.profile, run_git)
@@ -459,6 +476,7 @@ def code_merge_service(
     run_git: Callable[..., subprocess.CompletedProcess[str]],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Merge a reviewed reference into a target branch after required checks pass."""
     auth.require("write:projects")
     if req.target_ref != "HEAD":
         raise HTTPException(status_code=400, detail="Only target_ref=HEAD is currently supported")

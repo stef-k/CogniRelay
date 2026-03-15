@@ -1,3 +1,5 @@
+"""Context, retrieval, indexing, and snapshot business logic."""
+
 from __future__ import annotations
 
 import json
@@ -36,6 +38,7 @@ _CORE_MEMORY_PATHS = (
 
 
 def _filter_search_results_for_auth(results: list[dict[str, Any]], auth: AuthContext) -> list[dict[str, Any]]:
+    """Drop search results the caller cannot read."""
     out: list[dict[str, Any]] = []
     for row in results:
         rel = str(row.get("path", ""))
@@ -48,10 +51,12 @@ def _filter_search_results_for_auth(results: list[dict[str, Any]], auth: AuthCon
 
 
 def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command inside the repository without raising on failure."""
     return subprocess.run(["git", *args], cwd=repo_root, text=True, capture_output=True, check=False)
 
 
 def _commit_index_artifacts(repo_root: Path, gm: Any, message_prefix: str) -> list[str]:
+    """Commit generated index artifacts and return the committed relative paths."""
     commits: list[str] = []
     for rel in _INDEX_ARTIFACTS:
         path = repo_root / rel
@@ -61,6 +66,7 @@ def _commit_index_artifacts(repo_root: Path, gm: Any, message_prefix: str) -> li
 
 
 def index_rebuild_service(*, repo_root: Path, gm: Any, auth: AuthContext, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Rebuild all derived search indexes and commit changed artifacts."""
     auth.require("read:index")
     payload = rebuild_index(repo_root)
     commits = _commit_index_artifacts(repo_root, gm, "index: update")
@@ -74,6 +80,7 @@ def index_rebuild_service(*, repo_root: Path, gm: Any, auth: AuthContext, audit:
 
 
 def index_rebuild_incremental_service(*, repo_root: Path, gm: Any, auth: AuthContext, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Incrementally rebuild search indexes from repository changes."""
     auth.require("read:index")
     payload = incremental_rebuild_index(repo_root)
     commits = _commit_index_artifacts(repo_root, gm, "index: incremental update")
@@ -92,6 +99,7 @@ def index_rebuild_incremental_service(*, repo_root: Path, gm: Any, auth: AuthCon
 
 
 def index_status_service(*, repo_root: Path, auth: AuthContext) -> dict[str, Any]:
+    """Return the current state of generated index artifacts."""
     auth.require("read:index")
     idx = load_files_index(repo_root)
     sqlite_path = repo_root / "index" / "search.db"
@@ -117,6 +125,7 @@ def write_file_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Write a text file into the repository with auth, limits, and audit handling."""
     enforce_rate_limit(settings, auth, "write")
     enforce_payload_limit(settings, {"path": req.path, "content": req.content}, "write")
     auth.require(scope_for_path(req.path))
@@ -133,6 +142,7 @@ def write_file_service(
 
 
 def read_file_service(*, repo_root: Path, auth: AuthContext, path: str, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Read a text file from the repository after scope and path checks."""
     auth.require("read:files")
     auth.require_read_path(path)
     try:
@@ -157,6 +167,7 @@ def append_record_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Append one JSONL record to a repository file with commit-on-change behavior."""
     enforce_rate_limit(settings, auth, "append")
     enforce_payload_limit(settings, {"path": req.path, "record": req.record}, "append")
     auth.require(scope_for_path(req.path))
@@ -172,6 +183,7 @@ def append_record_service(
 
 
 def search_service(*, repo_root: Path, auth: AuthContext, req: SearchRequest, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Run an indexed search and filter results by caller visibility."""
     auth.require("search")
     results = search_index(
         repo_root,
@@ -187,6 +199,7 @@ def search_service(*, repo_root: Path, auth: AuthContext, req: SearchRequest, au
 
 
 def recent_list_service(*, repo_root: Path, auth: AuthContext, req: RecentRequest, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """List recent repository files that the caller may read."""
     auth.require("search")
     results = list_recent_files(
         repo_root,
@@ -201,6 +214,7 @@ def recent_list_service(*, repo_root: Path, auth: AuthContext, req: RecentReques
 
 
 def _load_core_memory(repo_root: Path, auth: AuthContext) -> list[dict[str, Any]]:
+    """Load the fixed set of core memory files for context retrieval."""
     core_memory: list[dict[str, Any]] = []
     for rel in _CORE_MEMORY_PATHS:
         path = repo_root / rel
@@ -222,6 +236,7 @@ def context_retrieve_service(
     now: datetime,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Assemble a continuation bundle from core memory, search, and continuity state."""
     auth.require("search")
     core_memory = _load_core_memory(repo_root, auth)
     recent = search_index(
@@ -262,11 +277,13 @@ def context_retrieve_service(
 
 
 def _snippet_text(text: str, limit: int = 280) -> str:
+    """Collapse text into a one-line snippet with a hard character cap."""
     normalized = " ".join(text.split())
     return normalized[:limit] + ("..." if len(normalized) > limit else "")
 
 
 def _parse_frontmatter_map(text: str) -> dict[str, str]:
+    """Parse a minimal frontmatter block into a flat string map."""
     match = SNAPSHOT_FRONTMATTER_RE.match(text)
     if not match:
         return {}
@@ -280,6 +297,7 @@ def _parse_frontmatter_map(text: str) -> dict[str, str]:
 
 
 def _record_type_importance(rel: str, content: str) -> tuple[str, float | None]:
+    """Infer a record type and optional importance value from file content."""
     frontmatter = _parse_frontmatter_map(content) if rel.endswith(".md") else {}
     record_type = str(frontmatter.get("type") or (Path(rel).parts[0] if Path(rel).parts else "unknown"))
     importance = None
@@ -292,6 +310,7 @@ def _record_type_importance(rel: str, content: str) -> tuple[str, float | None]:
 
 
 def _task_score(task_terms: list[str], rel: str, content: str, importance: float | None) -> float:
+    """Score a file for snapshot inclusion using task terms and importance."""
     score = 0.0
     if task_terms:
         low_path = rel.lower()
@@ -307,6 +326,7 @@ def _task_score(task_terms: list[str], rel: str, content: str, importance: float
 
 
 def _read_commit_file(repo_root: Path, commit_ref: str, rel_path: str) -> str | None:
+    """Read a file from a historical commit, returning ``None`` if absent."""
     cp = _run_git(repo_root, "show", f"{commit_ref}:{rel_path}")
     if cp.returncode != 0:
         return None
@@ -314,6 +334,7 @@ def _read_commit_file(repo_root: Path, commit_ref: str, rel_path: str) -> str | 
 
 
 def _resolve_as_of_ref(repo_root: Path, mode: str, value: str | None) -> dict[str, Any]:
+    """Resolve a snapshot selector into a working-tree or commit reference."""
     if mode == "working_tree":
         return {"mode": "working_tree", "value": None}
     if mode == "commit":
@@ -342,6 +363,7 @@ def _build_snapshot_from_working_tree(
     limit: int,
     include_core: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Build snapshot entries from the current working tree."""
     core_memory: list[dict[str, Any]] = []
     if include_core:
         for rel in _CORE_MEMORY_PATHS:
@@ -370,6 +392,7 @@ def _build_snapshot_from_commit(
     include_core: bool,
     commit_ref: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Build snapshot entries from a historical commit."""
     include_set = {item.lower() for item in include_types if item}
     task_terms = [term.lower() for term in SNAPSHOT_WORD_RE.findall(task)]
     cp = _run_git(repo_root, "ls-tree", "-r", "--name-only", commit_ref)
@@ -433,6 +456,7 @@ def context_snapshot_create_service(
     service_version: str,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Create and persist a deterministic context snapshot."""
     auth.require("search")
     auth.require("write:projects")
     as_of = _resolve_as_of_ref(repo_root, req.as_of.mode, req.as_of.value)
@@ -482,6 +506,7 @@ def context_snapshot_get_service(
     snapshot_id: str,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Load a previously persisted context snapshot by id."""
     auth.require("read:files")
     rel = f"{SNAPSHOT_DIR_REL}/{snapshot_id}.json"
     auth.require_read_path(rel)

@@ -1,3 +1,5 @@
+"""Tests for MCP-compatible RPC handling and tool dispatch behavior."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,24 +13,37 @@ from app.main import mcp_rpc, well_known_mcp
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class _RequestStub:
+    """Minimal request object used to exercise request-aware auth paths."""
+
     class _Client:
+        """Simple client holder exposing only a host field."""
+
         def __init__(self, host: str) -> None:
+            """Store the client host used by the request stub."""
             self.host = host
 
     def __init__(self, host: str) -> None:
+        """Construct the request stub with the desired client host."""
         self.client = self._Client(host)
 
 
 class TestMcpRpcCompatibility(unittest.TestCase):
+    """Validate the MCP-compatible JSON-RPC surface and edge cases."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -39,6 +54,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         )
 
     def test_well_known_mcp_descriptor(self) -> None:
+        """The well-known descriptor should advertise the MCP endpoint surface."""
         payload = well_known_mcp()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["endpoint"], "/v1/mcp")
@@ -48,6 +64,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("tools/call", payload["methods"])
 
     def test_initialize(self) -> None:
+        """Initialize should return capabilities and the requested protocol version."""
         req = {
             "jsonrpc": "2.0",
             "id": 99,
@@ -61,12 +78,14 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("tools", res["result"]["capabilities"])
 
     def test_notifications_initialized_no_response_body(self) -> None:
+        """Initialization notifications should return an empty 204 response."""
         req = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
         res = mcp_rpc(req)
         self.assertIsInstance(res, Response)
         self.assertEqual(res.status_code, 204)
 
     def test_ping(self) -> None:
+        """Ping should return a basic success payload."""
         req = {"jsonrpc": "2.0", "id": 5, "method": "ping", "params": {}}
         res = mcp_rpc(req)
         self.assertEqual(res["jsonrpc"], "2.0")
@@ -74,6 +93,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertTrue(res["result"]["ok"])
 
     def test_tools_list(self) -> None:
+        """Tools list should expose the expected public tool catalog."""
         req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
         res = mcp_rpc(req)
         self.assertEqual(res["jsonrpc"], "2.0")
@@ -111,6 +131,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("inputSchema", by_name["memory.write"])
 
     def test_tools_call_system_manifest_without_auth(self) -> None:
+        """Public tools should be invokable without auth when designed that way."""
         req = {
             "jsonrpc": "2.0",
             "id": "abc",
@@ -124,6 +145,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("endpoints", structured)
 
     def test_tools_call_protected_tool_requires_auth(self) -> None:
+        """Protected tools should fail with an auth error when auth is absent."""
         req = {
             "jsonrpc": "2.0",
             "id": 7,
@@ -135,6 +157,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["error"]["code"], -32001)
 
     def test_tools_call_ops_catalog_forbidden_when_non_local(self) -> None:
+        """Local-only ops tools should reject non-local callers."""
         req = {
             "jsonrpc": "2.0",
             "id": 71,
@@ -161,6 +184,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["error"]["code"], -32002)
 
     def test_tools_call_ops_catalog_allowed_when_local(self) -> None:
+        """Local-only ops tools should work for loopback callers."""
         req = {
             "jsonrpc": "2.0",
             "id": 72,
@@ -189,6 +213,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertTrue(structured["local_only"])
 
     def test_mcp_rpc_passes_request_to_auth(self) -> None:
+        """RPC auth resolution should receive the incoming HTTP request context."""
         req = {
             "jsonrpc": "2.0",
             "id": 73,
@@ -225,11 +250,13 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(seen["host"], "127.0.0.1")
 
     def test_invalid_method(self) -> None:
+        """Unknown RPC methods should return the JSON-RPC method-not-found error."""
         req = {"jsonrpc": "2.0", "id": "x", "method": "tools/unknown", "params": {}}
         res = mcp_rpc(req)
         self.assertEqual(res["error"]["code"], -32601)
 
     def test_batch_request(self) -> None:
+        """Batch requests should return one response per request entry."""
         req = [
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
             {
@@ -246,6 +273,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("result", res[1])
 
     def test_batch_notifications_only_returns_204(self) -> None:
+        """Notification-only batches should return an empty 204 response."""
         req = [
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
@@ -255,6 +283,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res.status_code, 204)
 
     def test_empty_batch_returns_invalid_request_error(self) -> None:
+        """Empty batches should return the JSON-RPC invalid-request error."""
         res = mcp_rpc([])
         self.assertEqual(res["jsonrpc"], "2.0")
         self.assertIsNone(res["id"])

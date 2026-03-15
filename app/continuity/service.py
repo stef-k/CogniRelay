@@ -1,3 +1,5 @@
+"""Continuity capsule validation, storage, and retrieval shaping."""
+
 from __future__ import annotations
 
 import hashlib
@@ -32,10 +34,12 @@ CONTINUITY_WARNING_TRUNCATED = "continuity_truncated_to_zero"
 
 
 def _canonical_json(data: Any) -> str:
+    """Serialize JSON deterministically for hashing and idempotency checks."""
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _parse_iso(value: str | None) -> datetime | None:
+    """Parse an ISO timestamp into a timezone-aware UTC datetime when possible."""
     if not value:
         return None
     raw = value.strip()
@@ -51,6 +55,7 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 
 def _require_utc_timestamp(value: str, field_name: str) -> datetime:
+    """Require a valid UTC timestamp or raise an HTTP 400 error."""
     dt = _parse_iso(value)
     if dt is None:
         raise HTTPException(status_code=400, detail=f"Invalid UTC timestamp for {field_name}")
@@ -60,6 +65,7 @@ def _require_utc_timestamp(value: str, field_name: str) -> datetime:
 
 
 def _normalize_subject_id(subject_id: str) -> str:
+    """Normalize a subject id into a filesystem-safe continuity key."""
     raw = subject_id.strip().lower()
     normalized = re.sub(r"[^a-z0-9._-]+", "-", raw)
     normalized = normalized.strip("-")
@@ -72,11 +78,13 @@ def _normalize_subject_id(subject_id: str) -> str:
 
 
 def continuity_rel_path(subject_kind: str, subject_id: str) -> str:
+    """Return the repository-relative path for a continuity capsule."""
     normalized = _normalize_subject_id(subject_id)
     return f"{CONTINUITY_DIR_REL}/{subject_kind}-{normalized}.json"
 
 
 def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name: str) -> None:
+    """Validate that repo-relative paths stay within the repository root."""
     for rel in paths:
         if not rel or not CONTINUITY_PATH_RE.match(rel):
             raise HTTPException(status_code=400, detail=f"Invalid repo-relative path in {field_name}")
@@ -87,6 +95,7 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
 
 
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
+    """Validate a capsule and return normalized payload plus canonical JSON."""
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
     if capsule.freshness and capsule.freshness.expires_at:
@@ -142,6 +151,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
 
 
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
+    """Resolve an explicit or inferred continuity selector from a request."""
     if bool(req.subject_kind) != bool(req.subject_id):
         raise HTTPException(status_code=400, detail="subject_kind and subject_id must be provided together")
     if req.subject_kind and req.subject_id:
@@ -156,6 +166,7 @@ def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | Non
 
 
 def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str] | None = None) -> dict[str, Any]:
+    """Load one capsule from disk and enforce optional subject matching."""
     path = safe_path(repo_root, rel)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Continuity capsule not found")
@@ -174,6 +185,7 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
 
 
 def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
+    """Compute the effective stale threshold for a capsule."""
     freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
     explicit = freshness.get("stale_after_seconds")
     if explicit is not None:
@@ -183,6 +195,7 @@ def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
 
 
 def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list[str]]:
+    """Determine freshness phase and warnings for the given capsule."""
     warnings: list[str] = []
     freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
     verified_at = _require_utc_timestamp(str(capsule.get("verified_at", "")), "verified_at")
@@ -208,10 +221,12 @@ def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list
 
 
 def _estimated_tokens(text: str) -> int:
+    """Estimate token usage with the V1 four-characters-per-token heuristic."""
     return int(math.ceil(len(text) / 4.0))
 
 
 def _render_value(value: Any) -> str:
+    """Render a JSON-like value into the internal token-accounting form."""
     if isinstance(value, list):
         return "\n".join(f"- {item}" for item in value)
     if isinstance(value, dict):
@@ -220,6 +235,7 @@ def _render_value(value: Any) -> str:
 
 
 def _truncate_string(value: str, max_tokens: int) -> str:
+    """Truncate a string to fit a token budget using a character heuristic."""
     if max_tokens <= 0:
         return ""
     max_chars = max_tokens * 4
@@ -231,6 +247,7 @@ def _truncate_string(value: str, max_tokens: int) -> str:
 
 
 def _truncate_list(items: list[str], max_tokens: int) -> list[str]:
+    """Trim list entries until the rendered list fits the token budget."""
     if max_tokens <= 0:
         return []
     out = list(items)
@@ -246,6 +263,7 @@ def _truncate_list(items: list[str], max_tokens: int) -> list[str]:
 
 
 def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
+    """Drop a dotted nested key from a JSON-like payload when present."""
     parts = dotted.split(".")
     cur: Any = payload
     for key in parts[:-1]:
@@ -257,6 +275,7 @@ def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
 
 
 def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | None:
+    """Trim a capsule deterministically to fit the reserved continuity budget."""
     payload = json.loads(json.dumps(capsule, ensure_ascii=False))
     for dotted in (
         "metadata",
@@ -323,6 +342,7 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | 
 
 
 def _budget(requested_max_tokens: int) -> dict[str, int]:
+    """Compute the continuity token reservation from the requested budget."""
     token_budget_hint = min(requested_max_tokens, 4000)
     if token_budget_hint < 1000:
         reserved = min(150, max(0, int(token_budget_hint * 0.2)))
@@ -337,6 +357,7 @@ def _budget(requested_max_tokens: int) -> dict[str, int]:
 
 
 def _reject_stale_or_conflicting_write(path: Path, req: ContinuityUpsertRequest) -> None:
+    """Reject older or equal-timestamp conflicting writes against the stored capsule."""
     if not path.exists() or not path.is_file():
         return
     try:
@@ -359,6 +380,7 @@ def continuity_upsert_service(
     req: ContinuityUpsertRequest,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Validate and persist one continuity capsule with commit-on-change behavior."""
     auth.require("write:projects")
     if req.capsule.subject_kind != req.subject_kind or req.capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
@@ -410,6 +432,7 @@ def build_continuity_state(
     req: ContextRetrieveRequest,
     now: datetime,
 ) -> dict[str, Any]:
+    """Load, trim, and package continuity state for context retrieval."""
     budget = _budget(req.max_tokens_estimate)
     state = {
         "present": False,

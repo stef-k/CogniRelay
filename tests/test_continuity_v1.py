@@ -1,3 +1,5 @@
+"""Tests for continuity-state V1 retrieval, validation, and write behavior."""
+
 import json
 import tempfile
 import unittest
@@ -15,32 +17,45 @@ from app.models import ContinuityUpsertRequest, ContextRetrieveRequest
 
 
 class _AuthStub:
+    """Auth stub that permits all scopes used by continuity tests."""
+
     peer_id = "peer-test"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that records committed files for continuity tests."""
+
     def __init__(self) -> None:
+        """Initialize the fake commit ledger."""
         self.commits: list[tuple[str, str]] = []
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
     def commit_file(self, path: Path, message: str) -> bool:
+        """Record a committed file path and report success."""
         self.commits.append((str(path), message))
         return True
 
 
 class TestContinuityV1(unittest.TestCase):
+    """Validate continuity-state V1 contracts, edge cases, and safeguards."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -51,6 +66,7 @@ class TestContinuityV1(unittest.TestCase):
         )
 
     def _capsule_payload(self, *, subject_kind: str = "user", subject_id: str = "stef", verified_at: str | None = None) -> dict:
+        """Return a valid baseline capsule payload with optional overrides."""
         now = verified_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         return {
             "schema_version": "1.0",
@@ -77,6 +93,7 @@ class TestContinuityV1(unittest.TestCase):
         }
 
     def test_continuity_upsert_creates_expected_path(self) -> None:
+        """Upsert should create the expected continuity file path."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -94,6 +111,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(payload["subject_id"], "stef")
 
     def test_context_retrieve_continuity_mode_off_skips_capsule(self) -> None:
+        """Retrieval should skip continuity when continuity_mode is off."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -108,6 +126,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertFalse(out["bundle"]["continuity_state"]["present"])
 
     def test_context_retrieve_explicit_subject_returns_capsule(self) -> None:
+        """Explicit subject selection should return the matching capsule."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -128,6 +147,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(state["capsules"][0]["subject_id"], "stef")
 
     def test_context_retrieve_required_missing_capsule_raises_404(self) -> None:
+        """Required continuity mode should fail when no capsule is available."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -141,6 +161,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 404)
 
     def test_context_retrieve_partial_subject_selector_raises_400(self) -> None:
+        """Partial subject selectors should be rejected as invalid."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -154,6 +175,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_context_retrieve_stale_soft_adds_warning(self) -> None:
+        """Soft-stale continuity should still load but include a warning."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -171,6 +193,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertIn("continuity_stale_soft", out["bundle"]["continuity_state"]["warnings"])
 
     def test_context_retrieve_uses_verified_at_not_updated_at_for_staleness(self) -> None:
+        """Staleness should be computed from verified_at rather than updated_at."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -189,6 +212,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertIn("continuity_stale_soft", out["bundle"]["continuity_state"]["warnings"])
 
     def test_context_retrieve_infers_task_selector(self) -> None:
+        """Task requests should infer a task continuity selector when possible."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -207,6 +231,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(state["selection_order"], ["inferred:task:build-v1"])
 
     def test_continuity_upsert_same_bytes_reports_update_false(self) -> None:
+        """Writing identical capsule bytes should report a no-op update."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -222,6 +247,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(len(gm.commits), 1)
 
     def test_continuity_upsert_older_capsule_rejected_when_newer_exists(self) -> None:
+        """Older capsules should not overwrite newer continuity state."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -246,6 +272,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(written["updated_at"], newer["updated_at"])
 
     def test_context_retrieve_rejects_subject_mismatch_inside_capsule(self) -> None:
+        """Retrieval should reject capsules whose embedded subject mismatches the selector."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -263,6 +290,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_continuity_upsert_equal_updated_at_conflict_rejected(self) -> None:
+        """Equal updated_at writes with different content should be rejected."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -280,6 +308,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 409)
 
     def test_continuity_upsert_missing_drift_signals_rejected(self) -> None:
+        """Capsules missing required drift_signals should be rejected."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -291,6 +320,7 @@ class TestContinuityV1(unittest.TestCase):
                     ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
 
     def test_continuity_upsert_invalid_canonical_source_rejected(self) -> None:
+        """Invalid canonical source paths should be rejected."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -304,6 +334,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_continuity_upsert_invalid_load_next_rejected(self) -> None:
+        """Invalid load_next paths should be rejected."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -317,6 +348,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_continuity_upsert_non_utc_expires_at_rejected(self) -> None:
+        """Non-UTC expires_at timestamps should be rejected."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -330,6 +362,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_continuity_upsert_presence_bias_override_too_long_rejected(self) -> None:
+        """Overlong presence bias overrides should be rejected."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -343,6 +376,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_continuity_upsert_oversized_capsule_rejected(self) -> None:
+        """Oversized capsules should be rejected before persistence."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -356,6 +390,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_context_retrieve_expired_capsule_not_loaded(self) -> None:
+        """Expired capsules should be omitted from retrieval results."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -375,6 +410,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertIn("continuity_expired", state["warnings"])
 
     def test_continuity_upsert_metadata_scalar_only(self) -> None:
+        """Metadata values should be limited to scalar types."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -388,6 +424,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400)
 
     def test_trim_capsule_drops_lower_priority_optional_fields_before_constraints(self) -> None:
+        """Trimming should drop lower-priority optional fields before active constraints."""
         capsule = self._capsule_payload()
         capsule["continuity"]["working_hypotheses"] = [
             "x" * 160,
@@ -417,6 +454,7 @@ class TestContinuityV1(unittest.TestCase):
         self.assertNotIn("freshness", trimmed)
 
     def test_render_value_preserves_insertion_order_for_objects(self) -> None:
+        """Rendered object values should preserve insertion order for budgeting."""
         rendered = _render_value({"b": "second", "a": "first"})
         self.assertEqual(rendered, "b: second\na: first")
 

@@ -1,3 +1,5 @@
+"""Discovery catalogs, manifest payloads, and MCP-compatible request handling."""
+
 from __future__ import annotations
 
 import hashlib
@@ -44,10 +46,12 @@ from app.models import (
 
 
 def _canonical_json(data: Any) -> str:
+    """Serialize JSON deterministically for hashing and catalog stability."""
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the machine-readable tool catalog exposed by the service."""
     return [
         {
             "name": "system.health",
@@ -631,6 +635,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
 
 
 def workflow_catalog() -> list[dict[str, Any]]:
+    """Return recommended autonomous workflows built from the tool surface."""
     return [
         {
             "name": "bootstrap_cycle",
@@ -711,6 +716,7 @@ def workflow_catalog() -> list[dict[str, Any]]:
 
 
 def discovery_payload(contract_version: str, *, tools: list[dict[str, Any]], workflows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the top-level discovery payload used by autonomous clients."""
     return {
         "ok": True,
         "protocol": {
@@ -756,6 +762,7 @@ def discovery_payload(contract_version: str, *, tools: list[dict[str, Any]], wor
 
 
 def discovery_tools_payload(contract_version: str, *, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the discovery payload containing only tool definitions."""
     return {
         "ok": True,
         "protocol": {"name": "cognirelay-http", "style": "mcp-like", "version": contract_version},
@@ -765,14 +772,17 @@ def discovery_tools_payload(contract_version: str, *, tools: list[dict[str, Any]
 
 
 def discovery_workflows_payload(*, workflows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the discovery payload containing only workflow definitions."""
     return {"ok": True, "count": len(workflows), "workflows": workflows}
 
 
 def well_known_cognirelay_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the HTTP-native well-known discovery payload unchanged."""
     return payload
 
 
 def well_known_mcp_payload(contract_version: str) -> dict[str, Any]:
+    """Build the well-known MCP-compatible descriptor for the service."""
     return {
         "ok": True,
         "protocol": "jsonrpc-2.0",
@@ -786,10 +796,12 @@ def well_known_mcp_payload(contract_version: str) -> dict[str, Any]:
 
 
 def _rpc_ok(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+    """Build a JSON-RPC success response."""
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
 def _rpc_error(request_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any]:
+    """Build a JSON-RPC error response."""
     err: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
@@ -797,6 +809,7 @@ def _rpc_error(request_id: Any, code: int, message: str, data: Any | None = None
 
 
 def rpc_error_payload(request_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any]:
+    """Public wrapper for building a JSON-RPC error response."""
     return _rpc_error(request_id, code, message, data)
 
 
@@ -861,6 +874,7 @@ def invoke_tool_by_name(
     ops_run: Callable[[OpsRunRequest, AuthContext | None], dict[str, Any]],
     ops_schedule_export: Callable[[str, AuthContext | None], dict[str, Any]],
 ) -> dict[str, Any]:
+    """Dispatch one discovery tool invocation onto the provided route callbacks."""
     args = arguments or {}
     if not isinstance(args, dict):
         raise ValueError("arguments must be an object")
@@ -1001,6 +1015,7 @@ def invoke_tool_by_name(
 
 
 def _mcp_list_tools_result(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """Convert the internal tool catalog into the MCP tools/list result shape."""
     rows = []
     for t in tools:
         rows.append(
@@ -1021,6 +1036,7 @@ def _mcp_list_tools_result(tools: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _mcp_initialize_result(contract_version: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Build the MCP initialize result payload."""
     requested_protocol = params.get("protocolVersion", contract_version)
     return {
         "protocolVersion": str(requested_protocol),
@@ -1040,6 +1056,7 @@ def _mcp_initialize_result(contract_version: str, params: dict[str, Any]) -> dic
 
 
 def tool_schema_lookup(name: str, tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Look up one tool definition by name from the catalog."""
     for t in tools:
         if t["name"] == name:
             return t
@@ -1058,6 +1075,7 @@ def handle_mcp_rpc_request(
     resolve_auth_context: Callable[..., AuthContext | None],
     invoke_tool_by_name: Callable[[str, dict[str, Any], AuthContext | None], dict[str, Any]],
 ) -> dict[str, Any] | None:
+    """Handle one MCP-compatible JSON-RPC request payload."""
     if not isinstance(request_payload, dict):
         return _rpc_error(None, -32600, "Invalid Request")
 
@@ -1132,6 +1150,7 @@ def handle_mcp_rpc_request(
 
 
 def health_payload(*, app_version: str, contract_version: str, repo_root: str, git_initialized: bool, latest_commit: str | None, signed_ingress_required: bool) -> dict:
+    """Build the public health payload for the service."""
     return {
         "ok": True,
         "service": "cognirelay",
@@ -1146,6 +1165,7 @@ def health_payload(*, app_version: str, contract_version: str, repo_root: str, g
 
 
 def capabilities_payload() -> dict[str, Any]:
+    """Return the high-level feature flags exposed by the service."""
     return {
         "features": [
             "write",
@@ -1190,6 +1210,7 @@ def capabilities_payload() -> dict[str, Any]:
 
 
 def manifest_payload(*, app_version: str) -> dict[str, Any]:
+    """Build the machine-first endpoint manifest for autonomous clients."""
     return {
         "service": "cognirelay",
         "version": app_version,
@@ -1258,6 +1279,7 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
 
 
 def contracts_payload(*, contract_version: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the frozen contract metadata payload for tool compatibility checks."""
     return {
         "ok": True,
         "contract_version": contract_version,

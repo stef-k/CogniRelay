@@ -1,3 +1,5 @@
+"""Token, key, governance, and signed-message verification business logic."""
+
 from __future__ import annotations
 
 import hashlib
@@ -29,6 +31,7 @@ GOVERNANCE_POLICY_REL = "config/governance_policy.json"
 
 
 def _parse_iso(value: str | None):
+    """Parse an ISO timestamp string into a datetime when possible."""
     if not value:
         return None
     try:
@@ -38,10 +41,12 @@ def _parse_iso(value: str | None):
 
 
 def _sha256_text(content: str) -> str:
+    """Return the SHA-256 digest for a text payload."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _message_signing_blob(payload: dict[str, Any], key_id: str, nonce: str, expires_at: str | None) -> bytes:
+    """Build the canonical byte payload used for message signing and verification."""
     canonical = json.dumps(
         {"payload": payload, "key_id": key_id, "nonce": nonce, "expires_at": expires_at},
         ensure_ascii=False,
@@ -52,10 +57,12 @@ def _message_signing_blob(payload: dict[str, Any], key_id: str, nonce: str, expi
 
 
 def _hmac_sha256(secret: str, blob: bytes) -> str:
+    """Return the HMAC-SHA256 digest for the provided blob."""
     return hmac.new(secret.encode("utf-8"), blob, hashlib.sha256).hexdigest()
 
 
 def _default_governance_policy() -> dict[str, Any]:
+    """Return the default governance policy for token and key management."""
     return {
         "schema_version": "1.0",
         "authority_model": {
@@ -92,6 +99,7 @@ def _default_governance_policy() -> dict[str, Any]:
 
 
 def load_governance_policy(repo_root: Path) -> dict[str, Any]:
+    """Load governance policy from disk with defaults merged in."""
     path = safe_path(repo_root, GOVERNANCE_POLICY_REL)
     default = _default_governance_policy()
     if not path.exists():
@@ -108,14 +116,17 @@ def load_governance_policy(repo_root: Path) -> dict[str, Any]:
 
 
 def governance_policy_service(*, repo_root: Path) -> dict[str, Any]:
+    """Return the effective governance policy payload."""
     return {"ok": True, "policy": load_governance_policy(repo_root)}
 
 
 def _external_key_store_path(settings) -> Path:
+    """Resolve the external key-store path from settings."""
     return Path(settings.key_store_path).expanduser().resolve()
 
 
 def _load_external_key_store(settings) -> dict[str, Any]:
+    """Load the external signing key store with normalized defaults."""
     path = _external_key_store_path(settings)
     if not path.exists():
         return {"schema_version": "1.0", "keys": {}}
@@ -132,6 +143,7 @@ def _load_external_key_store(settings) -> dict[str, Any]:
 
 
 def _write_external_key_store(settings, payload: dict[str, Any]) -> Path:
+    """Persist the external signing key store with restricted permissions."""
     path = _external_key_store_path(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -143,6 +155,7 @@ def _write_external_key_store(settings, payload: dict[str, Any]) -> Path:
 
 
 def _resolve_signing_secret(settings, key_id: str, row: dict[str, Any]) -> str | None:
+    """Resolve a signing secret from inline or external key-store data."""
     secret = row.get("secret")
     if isinstance(secret, str) and secret:
         return secret
@@ -159,6 +172,7 @@ def _resolve_signing_secret(settings, key_id: str, row: dict[str, Any]) -> str |
 
 
 def load_security_keys(repo_root: Path) -> dict[str, Any]:
+    """Load normalized signing key metadata from disk."""
     path = safe_path(repo_root, SECURITY_KEYS_REL)
     if not path.exists():
         return {"schema_version": "1.0", "active_key_id": None, "keys": {}}
@@ -175,12 +189,14 @@ def load_security_keys(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_security_keys(repo_root: Path, payload: dict[str, Any]) -> Path:
+    """Persist signing key metadata to disk."""
     path = safe_path(repo_root, SECURITY_KEYS_REL)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 
 def _load_token_config(repo_root: Path) -> dict[str, Any]:
+    """Load normalized peer token configuration from disk."""
     path = safe_path(repo_root, TOKEN_CONFIG_REL)
     if not path.exists():
         return {"schema_version": "1.0", "tokens": []}
@@ -197,16 +213,19 @@ def _load_token_config(repo_root: Path) -> dict[str, Any]:
 
 
 def load_token_config(repo_root: Path) -> dict[str, Any]:
+    """Return the normalized token configuration payload."""
     return _load_token_config(repo_root)
 
 
 def _write_token_config(repo_root: Path, payload: dict[str, Any]) -> Path:
+    """Persist token configuration to disk."""
     path = safe_path(repo_root, TOKEN_CONFIG_REL)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 
 def _resolve_token_expiry(expires_at: str | None, ttl_seconds: int | None) -> str | None:
+    """Resolve token expiry from either an explicit timestamp or TTL seconds."""
     if expires_at and ttl_seconds:
         raise HTTPException(status_code=400, detail="Provide either expires_at or ttl_seconds, not both")
     if ttl_seconds:
@@ -220,6 +239,7 @@ def _resolve_token_expiry(expires_at: str | None, ttl_seconds: int | None) -> st
 
 
 def _token_effective_status(entry: dict[str, Any], now: datetime) -> str:
+    """Return the effective token status at the provided time."""
     status = str(entry.get("status") or "active")
     if status != "active":
         return status
@@ -230,6 +250,7 @@ def _token_effective_status(entry: dict[str, Any], now: datetime) -> str:
 
 
 def _token_public_view(entry: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Return the public-facing token representation used by API responses."""
     return {
         "token_id": entry.get("token_id"),
         "peer_id": entry.get("peer_id"),
@@ -251,6 +272,7 @@ def _token_public_view(entry: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 
 def _normalize_token_sha(value: str | None) -> str | None:
+    """Normalize optional token digest input to a bare SHA-256 hex digest."""
     if not value:
         return None
     normalized = str(value).strip()
@@ -260,6 +282,7 @@ def _normalize_token_sha(value: str | None) -> str | None:
 
 
 def _load_nonce_index(repo_root: Path) -> dict[str, Any]:
+    """Load the nonce replay-prevention index with normalized defaults."""
     path = safe_path(repo_root, NONCE_INDEX_REL)
     if not path.exists():
         return {"schema_version": "1.0", "entries": {}}
@@ -276,12 +299,14 @@ def _load_nonce_index(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_nonce_index(repo_root: Path, payload: dict[str, Any]) -> Path:
+    """Persist the nonce replay-prevention index."""
     path = safe_path(repo_root, NONCE_INDEX_REL)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 
 def _prune_nonce_entries(payload: dict[str, Any], now: datetime) -> int:
+    """Remove expired nonce entries and return the number removed."""
     entries = payload.setdefault("entries", {})
     if not isinstance(entries, dict):
         payload["entries"] = {}
@@ -309,6 +334,7 @@ def security_tokens_list_service(
     enforce_rate_limit: Callable[[Any, AuthContext, str], None],
     settings: Any,
 ) -> dict:
+    """List token metadata visible to an admin caller."""
     enforce_rate_limit(settings, auth, "security_tokens_list")
     auth.require("admin:peers")
     auth.require_read_path(TOKEN_CONFIG_REL)
@@ -343,6 +369,7 @@ def security_tokens_issue_service(
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
     refresh_settings: Callable[[], Any],
 ) -> dict:
+    """Issue a new peer token and persist the updated token configuration."""
     enforce_rate_limit(settings, auth, "security_tokens_issue")
     enforce_payload_limit(settings, req.model_dump(), "security_tokens_issue")
     auth.require("admin:peers")
@@ -402,6 +429,7 @@ def security_tokens_revoke_service(
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
     refresh_settings: Callable[[], Any],
 ) -> dict:
+    """Revoke an existing peer token by token id or digest."""
     enforce_rate_limit(settings, auth, "security_tokens_revoke")
     enforce_payload_limit(settings, req.model_dump(), "security_tokens_revoke")
     auth.require("admin:peers")
@@ -472,6 +500,7 @@ def security_tokens_rotate_service(
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
     refresh_settings: Callable[[], Any],
 ) -> dict:
+    """Rotate a peer token by issuing a replacement and revoking the prior one."""
     enforce_rate_limit(settings, auth, "security_tokens_rotate")
     enforce_payload_limit(settings, req.model_dump(), "security_tokens_rotate")
     auth.require("admin:peers")
@@ -601,6 +630,7 @@ def security_keys_rotate_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Rotate signing keys and update active key metadata."""
     enforce_rate_limit(settings, auth, "security_keys_rotate")
     enforce_payload_limit(settings, req.model_dump(), "security_keys_rotate")
     auth.require("admin:peers")
@@ -684,6 +714,7 @@ def verify_signed_payload_service(
     record_verification_failure: Callable[[Any, AuthContext, str], None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Verify a signed payload against key material, expiry, and nonce rules."""
     if consume_nonce:
         auth.require_write_path(NONCE_INDEX_REL)
 
@@ -784,6 +815,7 @@ def messages_verify_service(
     record_verification_failure: Callable[[Any, AuthContext, str], None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Verify a message signature without mutating delivery state."""
     enforce_rate_limit(settings, auth, "messages_verify")
     enforce_payload_limit(settings, req.model_dump(), "messages_verify")
     auth.require("write:messages")

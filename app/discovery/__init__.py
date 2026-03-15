@@ -1,3 +1,5 @@
+"""Discovery, manifest, and MCP helper exports."""
+
 from .service import (
     capabilities_payload,
     contracts_payload,

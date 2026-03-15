@@ -1,3 +1,5 @@
+"""Tests for phase-1 code check execution and merge guard behavior."""
+
 import json
 import subprocess
 import tempfile
@@ -14,28 +16,40 @@ from app.models import CodeCheckRunRequest, CodeMergeRequest
 
 
 class _AuthStub:
+    """Auth stub that permits the scopes used by code-check tests."""
+
     peer_id = "peer-test"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class TestP1CodeChecksAndMerge(unittest.TestCase):
+    """Validate code-check artifact generation and merge gating."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -46,17 +60,20 @@ class TestP1CodeChecksAndMerge(unittest.TestCase):
         )
 
     def _init_git_repo(self, repo_root: Path) -> None:
+        """Initialize a temporary git repository with test author metadata."""
         subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.name", "tester"], cwd=repo_root, check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.email", "tester@example.local"], cwd=repo_root, check=True, capture_output=True, text=True)
 
     def _seed_repo(self, repo_root: Path) -> None:
+        """Seed the repository with an initial tracked source file and commit."""
         (repo_root / "projects").mkdir(parents=True, exist_ok=True)
         (repo_root / "projects" / "seed.py").write_text("print('ok')\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
         subprocess.run(["git", "commit", "-m", "seed"], cwd=repo_root, check=True, capture_output=True, text=True)
 
     def test_code_checks_run_writes_artifact(self) -> None:
+        """Code checks should persist an artifact describing the executed profile."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             self._init_git_repo(repo_root)
@@ -75,6 +92,7 @@ class TestP1CodeChecksAndMerge(unittest.TestCase):
             self.assertTrue(path.exists())
 
     def test_code_merge_blocks_when_required_check_is_missing(self) -> None:
+        """Merges should fail when the required check artifact is missing."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             self._init_git_repo(repo_root)
@@ -92,6 +110,7 @@ class TestP1CodeChecksAndMerge(unittest.TestCase):
             self.assertIn("Required checks not passed", str(err.exception.detail))
 
     def test_code_merge_allows_when_required_check_passed(self) -> None:
+        """Merges should succeed when the required check artifact has passed."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             self._init_git_repo(repo_root)

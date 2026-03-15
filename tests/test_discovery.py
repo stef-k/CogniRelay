@@ -1,10 +1,15 @@
+"""Tests for discovery, manifest, and workflow catalog endpoints."""
+
 import unittest
 
 from app.main import discovery, discovery_tools, discovery_workflows, manifest
 
 
 class TestDiscoveryEndpoints(unittest.TestCase):
+    """Validate the public discovery surface exposed by the API."""
+
     def test_discovery_has_mcp_like_metadata(self) -> None:
+        """Discovery should advertise MCP-compatible metadata fields."""
         payload = discovery()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["protocol"]["style"], "mcp-like")
@@ -12,6 +17,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("/v1/discovery/workflows", payload["entrypoints"]["workflows"])
 
     def test_tool_catalog_includes_core_tools(self) -> None:
+        """Tool catalog should list the core public tool entries."""
         payload = discovery_tools()
         self.assertTrue(payload["ok"])
         self.assertGreater(payload["count"], 0)
@@ -58,6 +64,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("content", write_schema.get("properties", {}))
 
     def test_workflow_catalog_has_bootstrap(self) -> None:
+        """Workflow catalog should expose the bootstrap workflow."""
         payload = discovery_workflows()
         self.assertTrue(payload["ok"])
         by_name = {wf["name"]: wf for wf in payload["workflows"]}
@@ -76,6 +83,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("backup.restore_test", maintenance_tools)
 
     def test_manifest_exposes_discovery_endpoints(self) -> None:
+        """Manifest should link back to the discovery endpoints."""
         m = manifest()
         endpoints = m["endpoints"]
         self.assertIn("GET /v1/discovery", endpoints)

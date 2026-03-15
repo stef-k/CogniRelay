@@ -1,3 +1,5 @@
+"""Tests for token configuration loading and environment fallback behavior."""
+
 import json
 import os
 import tempfile
@@ -9,7 +11,10 @@ from app.config import get_settings
 
 
 class TestConfigTokens(unittest.TestCase):
+    """Cover token loading behavior for config file and environment sources."""
+
     def test_no_implicit_dev_token_when_env_tokens_unset(self) -> None:
+        """Ensure no synthetic dev token is created when env tokens are absent."""
         with tempfile.TemporaryDirectory() as td:
             with patch.dict(os.environ, {"COGNIRELAY_REPO_ROOT": td}, clear=True):
                 settings = get_settings(force_reload=True)
@@ -17,6 +22,7 @@ class TestConfigTokens(unittest.TestCase):
                 self.assertNotIn("change-me-local-dev-token", settings.tokens)
 
     def test_tokens_load_from_file_without_env_tokens(self) -> None:
+        """Ensure token config is loaded from disk when env tokens are not supplied."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             config_dir = repo_root / "config"

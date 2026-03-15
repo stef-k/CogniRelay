@@ -1,3 +1,5 @@
+"""Tests for phase-1 task lifecycle and patch application behavior."""
+
 import json
 import subprocess
 import tempfile
@@ -14,28 +16,40 @@ from app.models import PatchApplyRequest, PatchProposeRequest, TaskCreateRequest
 
 
 class _AuthStub:
+    """Auth stub that permits the scopes used by task and patch tests."""
+
     peer_id = "peer-test"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class TestP1TasksAndPatches(unittest.TestCase):
+    """Validate the task lifecycle and documentation patch flows."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -46,11 +60,13 @@ class TestP1TasksAndPatches(unittest.TestCase):
         )
 
     def _init_git_repo(self, repo_root: Path) -> None:
+        """Initialize a temporary git repository with test author metadata."""
         subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.name", "tester"], cwd=repo_root, check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.email", "tester@example.local"], cwd=repo_root, check=True, capture_output=True, text=True)
 
     def test_tasks_lifecycle_query_and_transition_guard(self) -> None:
+        """Tasks should transition through valid states and reject invalid ones."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -94,6 +110,7 @@ class TestP1TasksAndPatches(unittest.TestCase):
             self.assertEqual(err.exception.status_code, 409)
 
     def test_docs_patch_propose_and_apply_success(self) -> None:
+        """A proposed documentation patch should apply and archive successfully."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             self._init_git_repo(repo_root)
@@ -140,6 +157,7 @@ class TestP1TasksAndPatches(unittest.TestCase):
             self.assertEqual(applied_payload["status"], "applied")
 
     def test_docs_patch_apply_fails_on_base_ref_mismatch(self) -> None:
+        """Patch apply should fail when HEAD diverges from the proposal base ref."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             self._init_git_repo(repo_root)

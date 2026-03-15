@@ -1,3 +1,5 @@
+"""Tests for token issuance, revocation, rotation, and auth transport handling."""
+
 import os
 import tempfile
 import unittest
@@ -13,37 +15,55 @@ from app.models import SecurityTokenIssueRequest, SecurityTokenRevokeRequest, Se
 
 
 class _AuthStub:
+    """Auth stub that permits the scopes used by token lifecycle tests."""
+
     peer_id = "peer-admin"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class _RequestStub:
+    """Minimal request object used to exercise auth transport IP handling."""
+
     class _Client:
+        """Simple client holder exposing only a host field."""
+
         def __init__(self, host: str) -> None:
+            """Store the client host used by the request stub."""
             self.host = host
 
     def __init__(self, host: str) -> None:
+        """Construct the request stub with the desired client host."""
         self.client = self._Client(host)
 
 
 class TestTokenLifecycle(unittest.TestCase):
+    """Validate token lifecycle behavior and request-IP selection rules."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -54,6 +74,7 @@ class TestTokenLifecycle(unittest.TestCase):
         )
 
     def test_issue_and_revoke_token(self) -> None:
+        """Issued tokens should authenticate until revoked."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -94,6 +115,7 @@ class TestTokenLifecycle(unittest.TestCase):
             self.assertIn("revoked", str(err.exception.detail).lower())
 
     def test_rotate_token_reissues_and_invalidates_previous(self) -> None:
+        """Token rotation should revoke the old token and issue a working replacement."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -140,6 +162,7 @@ class TestTokenLifecycle(unittest.TestCase):
                 self.assertEqual(require_auth(f"Bearer {rotated['token']}").peer_id, "peer-beta")
 
     def test_expired_token_is_rejected(self) -> None:
+        """Expired tokens should be rejected by auth resolution."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -161,6 +184,7 @@ class TestTokenLifecycle(unittest.TestCase):
             self.assertIn("expired", str(err.exception.detail).lower())
 
     def test_tokens_list_filters_inactive(self) -> None:
+        """Token listing should optionally hide inactive tokens."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -179,6 +203,7 @@ class TestTokenLifecycle(unittest.TestCase):
             self.assertEqual(all_tokens["count"], 2)
 
     def test_require_auth_client_ip_prefers_transport_and_proxy_safety(self) -> None:
+        """Auth should prefer transport IPs unless a trusted local proxy forwards them."""
         with tempfile.TemporaryDirectory() as td:
             env = {
                 "COGNIRELAY_REPO_ROOT": td,

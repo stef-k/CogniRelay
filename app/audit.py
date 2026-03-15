@@ -1,3 +1,5 @@
+"""Audit log helpers for repository-backed API events."""
+
 from __future__ import annotations
 
 import json
@@ -7,6 +9,7 @@ from typing import Any
 
 
 def append_audit(repo_root: Path, event: str, peer_id: str, detail: dict[str, Any]) -> None:
+    """Append one structured API audit event to the repository log."""
     path = repo_root / "logs" / "api_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     row = {

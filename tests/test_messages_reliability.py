@@ -1,3 +1,5 @@
+"""Tests for message delivery tracking, acknowledgements, and replay semantics."""
+
 import json
 import tempfile
 import unittest
@@ -10,28 +12,40 @@ from app.models import MessageAckRequest, MessageSendRequest
 
 
 class _AuthStub:
+    """Auth stub that permits the scopes used by messaging tests."""
+
     peer_id = "peer-test"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class TestMessageReliability(unittest.TestCase):
+    """Validate message delivery tracking and acknowledgement behavior."""
+
     def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         return Settings(
             repo_root=repo_root,
             auto_init_git=False,
@@ -42,6 +56,7 @@ class TestMessageReliability(unittest.TestCase):
         )
 
     def test_idempotent_send_deduplicates_writes(self) -> None:
+        """Sending with the same idempotency key should not duplicate persisted messages."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -73,6 +88,7 @@ class TestMessageReliability(unittest.TestCase):
             self.assertEqual(len(state["idempotency"]), 1)
 
     def test_ack_updates_delivery_state_to_acked(self) -> None:
+        """A successful ack should move the tracked delivery state to acked."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -97,6 +113,7 @@ class TestMessageReliability(unittest.TestCase):
             self.assertNotIn(msg_id, ids)
 
     def test_pending_reports_overdue_dead_letter(self) -> None:
+        """Pending listing should surface overdue tracked messages as dead letters."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "messages" / "state").mkdir(parents=True, exist_ok=True)

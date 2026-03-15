@@ -1,3 +1,5 @@
+"""Messaging, relay, replay, and delivery-state business logic."""
+
 from __future__ import annotations
 
 import json
@@ -16,10 +18,12 @@ DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
 
 def _delivery_state_path(repo_root: Path) -> Path:
+    """Return the repository path for delivery-state persistence."""
     return safe_path(repo_root, DELIVERY_STATE_REL)
 
 
 def load_delivery_state(repo_root: Path) -> dict[str, Any]:
+    """Load normalized delivery state from disk."""
     path = _delivery_state_path(repo_root)
     if not path.exists():
         return {"version": "1", "records": {}, "idempotency": {}}
@@ -39,12 +43,14 @@ def load_delivery_state(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_delivery_state(repo_root: Path, state: dict[str, Any]) -> Path:
+    """Persist the delivery-state file."""
     path = _delivery_state_path(repo_root)
     write_text_file(path, json.dumps(state, ensure_ascii=False, indent=2))
     return path
 
 
 def effective_delivery_status(record: dict[str, Any], now: datetime, *, parse_iso: Callable[[str | None], datetime | None]) -> str:
+    """Return the effective delivery status for a record at the given time."""
     status = str(record.get("status") or "pending_ack")
     if status != "pending_ack":
         return status
@@ -57,12 +63,14 @@ def effective_delivery_status(record: dict[str, Any], now: datetime, *, parse_is
 
 
 def delivery_record_view(record: dict[str, Any], now: datetime, *, parse_iso: Callable[[str | None], datetime | None]) -> dict[str, Any]:
+    """Return a delivery record with the computed effective status attached."""
     out = dict(record)
     out["effective_status"] = effective_delivery_status(record, now, parse_iso=parse_iso)
     return out
 
 
 def _idempotency_scope_key(sender: str, recipient: str, idempotency_key: str) -> str:
+    """Build the stable idempotency key used for send deduplication."""
     return f"{sender}|{recipient}|{idempotency_key}"
 
 
@@ -80,6 +88,7 @@ def messages_send_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Persist a message, optional signature verification, and delivery tracking state."""
     enforce_rate_limit(settings, auth, "messages_send")
     enforce_payload_limit(settings, req.model_dump(), "messages_send")
     auth.require("write:messages")
@@ -254,6 +263,7 @@ def messages_ack_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Record an acknowledgement against a tracked delivery record."""
     auth.require("write:messages")
     auth.require_write_path(DELIVERY_STATE_REL)
 
@@ -316,6 +326,7 @@ def messages_pending_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """List pending or dead-letter delivery records visible to the caller."""
     auth.require("read:files")
     auth.require_read_path(DELIVERY_STATE_REL)
 
@@ -344,6 +355,7 @@ def messages_pending_service(
 
 
 def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str, limit: int, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict:
+    """Return recent inbox messages for a recipient."""
     auth.require("read:files")
     auth.require_read_path(f"messages/inbox/{recipient}.jsonl")
     path = safe_path(repo_root, f"messages/inbox/{recipient}.jsonl")
@@ -362,6 +374,7 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
 
 
 def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int) -> dict:
+    """Return recent messages for a thread."""
     auth.require("read:files")
     rel = f"messages/threads/{thread_id}.jsonl"
     auth.require_read_path(rel)
@@ -390,6 +403,7 @@ def relay_forward_service(
     record_verification_failure: Callable[[Any, AuthContext, str], None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Forward a relay envelope to the local message send flow after verification."""
     enforce_rate_limit(settings, auth, "relay_forward")
     enforce_payload_limit(settings, req.model_dump(), "relay_forward")
     auth.require("write:messages")
@@ -472,6 +486,7 @@ def replay_messages_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Retry one or more tracked dead-letter deliveries."""
     auth.require("write:messages")
     auth.require_write_path("messages/inbox/x.jsonl")
     auth.require_write_path(DELIVERY_STATE_REL)
