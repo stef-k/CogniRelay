@@ -383,7 +383,7 @@ def _persist_active_capsule(
                 path.write_bytes(old_bytes)
         except Exception as restore_exc:
             restore_error = restore_exc
-        detail = f"Failed to persist revalidated continuity capsule: {exc}"
+        detail = f"Failed to persist continuity capsule: {exc}"
         if restore_error is not None:
             detail = f"{detail}; rollback failed: {restore_error}"
         raise HTTPException(status_code=500, detail=detail) from exc
@@ -1074,11 +1074,21 @@ def continuity_archive_service(
     active_path.unlink()
     try:
         committed = gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
-    except Exception:
-        _restore_failed_archive(active_path, archive_path, active_bytes)
+    except Exception as exc:
+        try:
+            _restore_failed_archive(active_path, archive_path, active_bytes)
+        except Exception as restore_exc:
+            raise RuntimeError(
+                f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}"
+            ) from exc
         raise
     if not committed:
-        _restore_failed_archive(active_path, archive_path, active_bytes)
+        try:
+            _restore_failed_archive(active_path, archive_path, active_bytes)
+        except Exception as restore_exc:
+            raise RuntimeError(
+                f"Continuity archive commit produced no changes; rollback failed: {restore_exc}"
+            ) from restore_exc
         raise RuntimeError("Continuity archive commit produced no changes")
 
     audit(

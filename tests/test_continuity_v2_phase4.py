@@ -272,4 +272,6 @@ class TestContinuityV2Phase4(unittest.TestCase):
                         audit=lambda *_args: None,
                     )
 
-            self.assertIn("Failed to restore archived continuity capsule", str(cm.exception))
+            self.assertIn("Continuity archive commit failed", str(cm.exception))
+            self.assertIn("git commit failed", str(cm.exception))
+            self.assertIn("rollback failed", str(cm.exception))
