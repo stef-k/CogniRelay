@@ -116,8 +116,10 @@ def _upsert_sqlite(repo_root: Path, records: list[dict[str, Any]], removed_paths
         for r in records:
             conn.execute(
                 'INSERT INTO files(path,type,modified_at,mtime_ns,size,importance,snippet) VALUES(?,?,?,?,?,?,?) '
-                'ON CONFLICT(path) DO UPDATE SET type=excluded.type, modified_at=excluded.modified_at, mtime_ns=excluded.mtime_ns, size=excluded.size, importance=excluded.importance, snippet=excluded.snippet',
-                (r['path'], r['type'], r['modified_at'], r['mtime_ns'], r['size'], r.get('importance'), r['snippet'])
+                'ON CONFLICT(path) DO UPDATE SET '
+                'type=excluded.type, modified_at=excluded.modified_at, mtime_ns=excluded.mtime_ns, '
+                'size=excluded.size, importance=excluded.importance, snippet=excluded.snippet',
+                (r['path'], r['type'], r['modified_at'], r['mtime_ns'], r['size'], r.get('importance'), r['snippet']),
             )
             conn.execute('DELETE FROM tags WHERE path = ?', (r['path'],))
             conn.executemany('INSERT OR IGNORE INTO tags(tag,path) VALUES(?,?)', [(t, r['path']) for t in r.get('tags', [])])

@@ -168,7 +168,7 @@ class TestTokenLifecycle(unittest.TestCase):
 
             with patch("app.main._services", return_value=(settings, gm)):
                 a = security_tokens_issue(req=SecurityTokenIssueRequest(peer_id="peer-a"), auth=_AuthStub())
-                b = security_tokens_issue(req=SecurityTokenIssueRequest(peer_id="peer-b"), auth=_AuthStub())
+                security_tokens_issue(req=SecurityTokenIssueRequest(peer_id="peer-b"), auth=_AuthStub())
                 security_tokens_revoke(req=SecurityTokenRevokeRequest(token_id=a["token_meta"]["token_id"]), auth=_AuthStub())
                 active_only = security_tokens_list(include_inactive=False, auth=_AuthStub())
                 all_tokens = security_tokens_list(include_inactive=True, auth=_AuthStub())
