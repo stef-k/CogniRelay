@@ -121,11 +121,13 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `continuity_selectors` plus `continuity_max_capsules` on `POST /v1/context/retrieve` when you need deterministic multi-capsule continuity loading in one request
 - Use `POST /v1/continuity/read` when you need the full active capsule for one exact selector
 - Use `POST /v1/continuity/list` when you need active capsule summaries, ordering, and freshness phase without loading full retrieval bundles
+- Use `POST /v1/continuity/archive` when you need to remove an active capsule from retrieval while preserving its final archived envelope
 - Use `POST /v1/recent` when you want the latest indexed material without query matching
 - Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches
 - Prefer summaries over raw episodic logs when both cover the same time window
 - Treat returned `open_questions` as continuation anchors for the next loop
 - Use `POST /v1/continuity/upsert` to persist or replace continuity capsules under `memory/continuity/`
+- Use `POST /v1/continuity/archive` to move an active capsule into `memory/continuity/archive/` through one git-backed archive commit
 - continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
 - interaction-boundary upserts require `source.update_reason=interaction_boundary` plus a valid scalar `metadata.interaction_boundary_kind`
 

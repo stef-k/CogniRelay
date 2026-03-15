@@ -22,7 +22,7 @@ from .context import (
     search_service,
     write_file_service,
 )
-from .continuity import continuity_list_service, continuity_read_service, continuity_upsert_service
+from .continuity import continuity_archive_service, continuity_list_service, continuity_read_service, continuity_upsert_service
 from .config import get_settings
 from .discovery import (
     capabilities_payload,
@@ -46,6 +46,7 @@ from .models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
+    ContinuityArchiveRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
     ContinuityUpsertRequest,
@@ -565,6 +566,20 @@ def continuity_list(req: ContinuityListRequest, auth: AuthContext = Depends(requ
     settings, _ = _services()
     return continuity_list_service(
         repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/archive")
+def continuity_archive(req: ContinuityArchiveRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Archive one active continuity capsule and remove its active file."""
+    settings, gm = _services()
+    return continuity_archive_service(
+        repo_root=settings.repo_root,
+        gm=gm,
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
