@@ -262,6 +262,23 @@ class TestContinuityV1(unittest.TestCase):
                     )
             self.assertEqual(cm.exception.status_code, 400)
 
+    def test_continuity_upsert_equal_updated_at_conflict_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            current = self._capsule_payload(verified_at=ts)
+            incoming = self._capsule_payload(verified_at=ts)
+            incoming["continuity"]["stance_summary"] = "A different stance with the same updated_at must conflict."
+            current_req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=current)  # type: ignore[arg-type]
+            incoming_req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=incoming)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                continuity_upsert(req=current_req, auth=_AuthStub())
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=incoming_req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 409)
+
     def test_continuity_upsert_missing_drift_signals_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)

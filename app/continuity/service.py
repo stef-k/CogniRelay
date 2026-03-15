@@ -348,10 +348,7 @@ def _reject_stale_or_conflicting_write(path: Path, req: ContinuityUpsertRequest)
     if incoming_updated < current_updated:
         raise HTTPException(status_code=409, detail="Incoming continuity capsule is older than the current stored capsule")
     if incoming_updated == current_updated:
-        incoming_verified = _require_utc_timestamp(req.capsule.verified_at, "verified_at")
-        current_verified = _require_utc_timestamp(current.verified_at, "verified_at")
-        if incoming_verified <= current_verified:
-            raise HTTPException(status_code=409, detail="Incoming continuity capsule conflicts with the current stored capsule timestamp")
+        raise HTTPException(status_code=409, detail="Incoming continuity capsule conflicts with the current stored capsule timestamp")
 
 
 def continuity_upsert_service(
