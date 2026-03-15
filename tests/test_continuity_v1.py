@@ -221,6 +221,47 @@ class TestContinuityV1(unittest.TestCase):
             self.assertFalse(second["updated"])
             self.assertEqual(len(gm.commits), 1)
 
+    def test_continuity_upsert_older_capsule_rejected_when_newer_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            newer_time = datetime.now(timezone.utc).replace(microsecond=0)
+            older_time = newer_time - timedelta(hours=2)
+            newer = self._capsule_payload(
+                verified_at=newer_time.isoformat().replace("+00:00", "Z"),
+            )
+            older = self._capsule_payload(
+                verified_at=older_time.isoformat().replace("+00:00", "Z"),
+            )
+            older["updated_at"] = older_time.isoformat().replace("+00:00", "Z")
+            newer_req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=newer)  # type: ignore[arg-type]
+            older_req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=older)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                continuity_upsert(req=newer_req, auth=_AuthStub())
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=older_req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 409)
+            written = json.loads((repo_root / "memory" / "continuity" / "user-stef.json").read_text(encoding="utf-8"))
+            self.assertEqual(written["updated_at"], newer["updated_at"])
+
+    def test_context_retrieve_rejects_subject_mismatch_inside_capsule(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            capsule = self._capsule_payload(subject_kind="user", subject_id="alice")
+            (continuity_dir / "user-stef.json").write_text(json.dumps(capsule), encoding="utf-8")
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    context_retrieve(
+                        req=ContextRetrieveRequest(task="resume", subject_kind="user", subject_id="stef"),
+                        auth=_AuthStub(),
+                    )
+            self.assertEqual(cm.exception.status_code, 400)
+
     def test_continuity_upsert_missing_drift_signals_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -252,6 +293,32 @@ class TestContinuityV1(unittest.TestCase):
             settings = self._settings(repo_root)
             payload = self._capsule_payload()
             payload["continuity"]["retrieval_hints"] = {"load_next": ["../escape.json"]}
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 400)
+
+    def test_continuity_upsert_non_utc_expires_at_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            payload = self._capsule_payload()
+            payload["freshness"]["expires_at"] = "2026-03-15T10:00:00+02:00"
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 400)
+
+    def test_continuity_upsert_presence_bias_override_too_long_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            payload = self._capsule_payload()
+            payload["attention_policy"] = {"presence_bias_overrides": ["x" * 161]}
             req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
             with patch("app.main._services", return_value=(settings, gm)):
                 with self.assertRaises(HTTPException) as cm:

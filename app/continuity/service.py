@@ -89,6 +89,8 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
+    if capsule.freshness and capsule.freshness.expires_at:
+        _require_utc_timestamp(capsule.freshness.expires_at, "freshness.expires_at")
     for source_input in list(capsule.source.inputs):
         if len(source_input) > 200:
             raise HTTPException(status_code=400, detail="Value too long in source.inputs")
@@ -113,6 +115,10 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
         for value in capsule.continuity.relationship_model.sensitivity_notes:
             if len(value) > 120:
                 raise HTTPException(status_code=400, detail="Value too long in relationship_model.sensitivity_notes")
+    if capsule.attention_policy:
+        for value in capsule.attention_policy.presence_bias_overrides:
+            if len(value) > 160:
+                raise HTTPException(status_code=400, detail="Value too long in attention_policy.presence_bias_overrides")
     if capsule.continuity.retrieval_hints:
         for field_name in ("must_include", "avoid"):
             for value in list(getattr(capsule.continuity.retrieval_hints, field_name)):
@@ -149,13 +155,18 @@ def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | Non
     return kind, value, "inferred"
 
 
-def _load_capsule(repo_root: Path, rel: str) -> dict[str, Any]:
+def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str] | None = None) -> dict[str, Any]:
     path = safe_path(repo_root, rel)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Continuity capsule not found")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
+        capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
+        if expected_subject is not None:
+            expected_kind, expected_id = expected_subject
+            if capsule.get("subject_kind") != expected_kind or capsule.get("subject_id") != expected_id:
+                raise HTTPException(status_code=400, detail="Continuity capsule subject does not match requested subject")
+        return capsule
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity capsule: {e}") from e
     except json.JSONDecodeError as e:
@@ -325,6 +336,24 @@ def _budget(requested_max_tokens: int) -> dict[str, int]:
     }
 
 
+def _reject_stale_or_conflicting_write(path: Path, req: ContinuityUpsertRequest) -> None:
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        current = ContinuityCapsule.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    except (ValidationError, json.JSONDecodeError):
+        return
+    incoming_updated = _require_utc_timestamp(req.capsule.updated_at, "updated_at")
+    current_updated = _require_utc_timestamp(current.updated_at, "updated_at")
+    if incoming_updated < current_updated:
+        raise HTTPException(status_code=409, detail="Incoming continuity capsule is older than the current stored capsule")
+    if incoming_updated == current_updated:
+        incoming_verified = _require_utc_timestamp(req.capsule.verified_at, "verified_at")
+        current_verified = _require_utc_timestamp(current.verified_at, "verified_at")
+        if incoming_verified <= current_verified:
+            raise HTTPException(status_code=409, detail="Incoming continuity capsule conflicts with the current stored capsule timestamp")
+
+
 def continuity_upsert_service(
     *,
     repo_root: Path,
@@ -338,10 +367,13 @@ def continuity_upsert_service(
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_write_path(rel)
-    payload, canonical = _validate_capsule(repo_root, req.capsule)
+    _validate_capsule(repo_root, req.capsule)
     path = safe_path(repo_root, rel)
-    old_bytes = path.read_bytes() if path.exists() else None
+    canonical = _canonical_json(req.capsule.model_dump(mode="json", exclude_none=True))
     new_bytes = canonical.encode("utf-8")
+    old_bytes = path.read_bytes() if path.exists() else None
+    if old_bytes != new_bytes:
+        _reject_stale_or_conflicting_write(path, req)
     capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
     created = not path.exists()
     changed = old_bytes != new_bytes
@@ -404,7 +436,7 @@ def build_continuity_state(
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         return state
-    capsule = _load_capsule(repo_root, rel)
+    capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
     phase, warnings = _continuity_phase(capsule, now)
     if phase not in {"expired", "expired_by_age"}:
         trimmed = _trim_capsule(capsule, budget["continuity_tokens_reserved"])
