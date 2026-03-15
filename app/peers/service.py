@@ -1,3 +1,5 @@
+"""Peer registry, trust transitions, and remote manifest lookup logic."""
+
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +21,7 @@ TRUST_POLICIES_REL = "peers/trust_policies.json"
 
 
 def load_peers_registry(repo_root: Path) -> dict[str, Any]:
+    """Load normalized peer registry state from disk."""
     path = safe_path(repo_root, PEERS_REGISTRY_REL)
     if not path.exists():
         return {"schema_version": "1.0", "updated_at": None, "peers": {}}
@@ -35,16 +38,19 @@ def load_peers_registry(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_peers_registry(repo_root: Path, registry: dict[str, Any]) -> Path:
+    """Persist the peer registry payload."""
     path = safe_path(repo_root, PEERS_REGISTRY_REL)
     write_text_file(path, json.dumps(registry, ensure_ascii=False, indent=2))
     return path
 
 
 def _public_key_fingerprint(public_key: str) -> str:
+    """Return the canonical fingerprint for a peer public key."""
     return "sha256:" + hashlib.sha256(public_key.encode("utf-8")).hexdigest()
 
 
 def _normalize_fingerprint(value: str | None) -> str | None:
+    """Normalize optional fingerprint input to the canonical sha256 form."""
     if not value:
         return None
     normalized = str(value).strip()
@@ -56,6 +62,7 @@ def _normalize_fingerprint(value: str | None) -> str | None:
 
 
 def _load_trust_policies(repo_root: Path, trust_policies_rel: str) -> dict[str, Any]:
+    """Load trust transition policy with defaults applied."""
     path = safe_path(repo_root, trust_policies_rel)
     default = {
         "schema_version": "1.0",
@@ -87,12 +94,14 @@ def _load_trust_policies(repo_root: Path, trust_policies_rel: str) -> dict[str, 
 
 
 def _write_trust_policies(repo_root: Path, trust_policies_rel: str, payload: dict[str, Any]) -> Path:
+    """Persist the trust policy payload."""
     path = safe_path(repo_root, trust_policies_rel)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 
 def _assert_trust_transition_allowed(policies: dict[str, Any], current: str, target: str, reason: str | None) -> None:
+    """Validate a requested trust transition against policy rules."""
     if current == target:
         return
     allowed = policies.get("allowed_transitions", {}).get(current)
@@ -104,6 +113,7 @@ def _assert_trust_transition_allowed(policies: dict[str, Any], current: str, tar
 
 
 def peers_list_service(*, repo_root: Path, auth: AuthContext, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Return the visible peer registry list."""
     auth.require("read:files")
     auth.require_read_path(PEERS_REGISTRY_REL)
     registry = load_peers_registry(repo_root)
@@ -128,6 +138,7 @@ def peers_register_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Create or update a peer registry entry under the trust policy rules."""
     enforce_rate_limit(settings, auth, "peers_register")
     enforce_payload_limit(settings, req.model_dump(), "peers_register")
     auth.require("admin:peers")
@@ -220,6 +231,7 @@ def peers_trust_transition_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
+    """Apply a trust-level transition to an existing peer."""
     enforce_rate_limit(settings, auth, "peers_trust_transition")
     enforce_payload_limit(settings, req.model_dump(), "peers_trust_transition")
     auth.require("admin:peers")
@@ -259,6 +271,7 @@ def peers_trust_transition_service(
 
 
 def peer_manifest_service(*, repo_root: Path, auth: AuthContext, peer_id: str, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
+    """Fetch and return the remote manifest for a registered peer."""
     auth.require("read:files")
     auth.require_read_path(PEERS_REGISTRY_REL)
     registry = load_peers_registry(repo_root)

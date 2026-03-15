@@ -88,6 +88,7 @@ def messages_send_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Persist a message, optional signature verification, and delivery tracking state."""
     enforce_rate_limit(settings, auth, "messages_send")
     enforce_payload_limit(settings, req.model_dump(), "messages_send")
     auth.require("write:messages")
@@ -262,6 +263,7 @@ def messages_ack_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Record an acknowledgement against a tracked delivery record."""
     auth.require("write:messages")
     auth.require_write_path(DELIVERY_STATE_REL)
 
@@ -324,6 +326,7 @@ def messages_pending_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """List pending or dead-letter delivery records visible to the caller."""
     auth.require("read:files")
     auth.require_read_path(DELIVERY_STATE_REL)
 
@@ -352,6 +355,7 @@ def messages_pending_service(
 
 
 def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str, limit: int, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict:
+    """Return recent inbox messages for a recipient."""
     auth.require("read:files")
     auth.require_read_path(f"messages/inbox/{recipient}.jsonl")
     path = safe_path(repo_root, f"messages/inbox/{recipient}.jsonl")
@@ -370,6 +374,7 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
 
 
 def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int) -> dict:
+    """Return recent messages for a thread."""
     auth.require("read:files")
     rel = f"messages/threads/{thread_id}.jsonl"
     auth.require_read_path(rel)
@@ -398,6 +403,7 @@ def relay_forward_service(
     record_verification_failure: Callable[[Any, AuthContext, str], None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Forward a relay envelope to the local message send flow after verification."""
     enforce_rate_limit(settings, auth, "relay_forward")
     enforce_payload_limit(settings, req.model_dump(), "relay_forward")
     auth.require("write:messages")
@@ -480,6 +486,7 @@ def replay_messages_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Retry one or more tracked dead-letter deliveries."""
     auth.require("write:messages")
     auth.require_write_path("messages/inbox/x.jsonl")
     auth.require_write_path(DELIVERY_STATE_REL)

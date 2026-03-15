@@ -1,3 +1,5 @@
+"""Replication, backup, metrics, and compaction business logic."""
+
 from __future__ import annotations
 
 import hashlib
@@ -26,6 +28,7 @@ BACKUPS_DIR_REL = "backups"
 
 
 def _load_replication_tombstones(repo_root: Path) -> dict[str, Any]:
+    """Load replication tombstone state with a normalized fallback payload."""
     path = safe_path(repo_root, REPLICATION_TOMBSTONES_REL)
     if not path.exists():
         return {"schema_version": "1.0", "entries": {}}
@@ -42,12 +45,14 @@ def _load_replication_tombstones(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_replication_tombstones(repo_root: Path, payload: dict[str, Any]) -> Path:
+    """Persist the replication tombstone payload."""
     path = safe_path(repo_root, REPLICATION_TOMBSTONES_REL)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 
 def _parse_dt_or_epoch(iso_value: str | None, fallback_epoch: float, *, parse_iso: Callable[[str | None], datetime | None]) -> float:
+    """Return a parsed timestamp or the provided fallback epoch seconds."""
     dt = parse_iso(iso_value)
     if dt is None:
         return fallback_epoch
@@ -55,6 +60,7 @@ def _parse_dt_or_epoch(iso_value: str | None, fallback_epoch: float, *, parse_is
 
 
 def load_replication_state(repo_root: Path) -> dict[str, Any]:
+    """Load normalized replication state from disk."""
     path = safe_path(repo_root, REPLICATION_STATE_REL)
     if not path.exists():
         return {"schema_version": "1.0", "last_pull_by_source": {}, "last_push": None, "pull_idempotency": {}}
@@ -72,20 +78,24 @@ def load_replication_state(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_replication_state(repo_root: Path, payload: dict[str, Any]) -> Path:
+    """Persist replication state to disk."""
     path = safe_path(repo_root, REPLICATION_STATE_REL)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 
 def _sha256_text(content: str) -> str:
+    """Return the SHA-256 digest for text content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _canonical_json(data: Any) -> str:
+    """Serialize data using the canonical JSON form used in replication hashes."""
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def iter_replication_files(repo_root: Path, include_prefixes: list[str], max_files: int, include_deleted: bool = True) -> list[dict[str, Any]]:
+    """Enumerate replication candidates and optional tombstones under allowed prefixes."""
     prefixes = []
     for raw in include_prefixes:
         rel = str(raw or "").strip().strip("/")
@@ -162,6 +172,7 @@ def metrics_service(
     load_rate_limit_state: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
 ) -> dict:
+    """Assemble operational metrics, summaries, and alarm conditions."""
     auth.require("read:index")
     auth.require_read_path("messages/state/delivery_index.json")
     auth.require_read_path("logs/api_audit.jsonl")
@@ -315,6 +326,7 @@ def replication_pull_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Pull a replication bundle from a peer and apply accepted file updates."""
     enforce_rate_limit(settings, auth, "replication_pull")
     enforce_payload_limit(settings, req.model_dump(), "replication_pull")
     auth.require("admin:peers")
@@ -491,6 +503,7 @@ def replication_push_service(
     url_request_factory: Callable[..., Any] | None = None,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Push a replication bundle to a peer target using the current repository state."""
     if urlopen_fn is None:
         urlopen_fn = urlopen
     if url_request_factory is None:
@@ -613,6 +626,7 @@ def backup_create_service(
     enforce_payload_limit: Callable[[Any, Any, str], None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Create a deterministic backup archive and accompanying manifest."""
     enforce_rate_limit(settings, auth, "backup_create")
     enforce_payload_limit(settings, req.model_dump(), "backup_create")
     auth.require("admin:peers")
@@ -684,6 +698,7 @@ def backup_restore_test_service(
     rebuild_index: Callable[[Path], dict[str, Any]],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Run a restore drill against an existing backup archive inside a temp directory."""
     enforce_rate_limit(settings, auth, "backup_restore_test")
     enforce_payload_limit(settings, req.model_dump(), "backup_restore_test")
     auth.require("admin:peers")
@@ -749,6 +764,7 @@ def backup_restore_test_service(
 
 
 def _load_access_stats(repo_root: Path) -> dict[str, dict]:
+    """Load normalized access statistics used by compaction planning."""
     out: dict[str, dict] = {}
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
@@ -773,6 +789,7 @@ def _load_access_stats(repo_root: Path) -> dict[str, dict]:
 
 
 def _memory_class_for_path(rel: str) -> str:
+    """Classify a repository path into the compaction memory buckets."""
     if rel.startswith("memory/core/"):
         return "core"
     if rel.startswith("memory/summaries/") or rel.startswith("messages/threads/") or rel.startswith("projects/"):
@@ -785,6 +802,7 @@ def _memory_class_for_path(rel: str) -> str:
 
 
 def _candidate_policy(repo_root: Path, path: Path, access_stats: dict[str, dict], *, parse_iso: Callable[[str | None], datetime | None]) -> dict | None:
+    """Build the compaction policy candidate for a single repository file."""
     rel = str(path.relative_to(repo_root))
     if rel.startswith("index/") or ".git" in path.parts:
         return None
@@ -866,6 +884,7 @@ def compact_run_service(
     parse_iso: Callable[[str | None], datetime | None],
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    """Generate a compaction planning report for eligible repository files."""
     auth.require("compact:trigger")
     auth.require_write_path("memory/summaries/weekly/x.md")
 
