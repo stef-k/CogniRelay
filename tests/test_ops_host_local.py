@@ -107,9 +107,11 @@ class TestOpsHostLocal(unittest.TestCase):
         self.assertTrue(systemd["ok"])
         self.assertEqual(systemd["format"], "systemd")
         self.assertIn("service_unit", systemd["examples"])
+        self.assertIn('{"job_id":"metrics.poll_and_alarm_eval"}', systemd["examples"]["service_unit"]["ExecStart"])
         self.assertTrue(cron["ok"])
         self.assertEqual(cron["format"], "cron")
         self.assertIn("cron_examples", cron["examples"])
+        self.assertIn('{"job_id":"index.rebuild_incremental"}', cron["examples"]["cron_examples"][0])
 
 
 if __name__ == "__main__":

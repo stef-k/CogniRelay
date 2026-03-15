@@ -428,17 +428,17 @@ def ops_schedule_export_service(*, settings: Any, auth: AuthContext, format: str
         examples = {
             "service_unit": {
                 "Description": "CogniRelay host ops runner",
-                "ExecStart": f"/bin/sh -lc \"{command} -d '{{\\\"job_id\\\":\\\"metrics.poll_and_alarm_eval\\\"}}'\"",
+                "ExecStart": f"/bin/sh -lc \"{command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'\"",
             },
             "timer_unit": {"OnCalendar": "*:0/5", "Persistent": True},
         }
     else:
         examples = {
             "cron_examples": [
-                f"*/5 * * * * {command} -d '{{\\\"job_id\\\":\\\"index.rebuild_incremental\\\"}}'",
-                f"0 * * * * {command} -d '{{\\\"job_id\\\":\\\"metrics.poll_and_alarm_eval\\\"}}'",
-                f"0 2 * * * {command} -d '{{\\\"job_id\\\":\\\"backup.create\\\"}}'",
-                f"30 2 * * 0 {command} -d '{{\\\"job_id\\\":\\\"backup.restore_test\\\"}}'",
+                f"*/5 * * * * {command} -d '{{\"job_id\":\"index.rebuild_incremental\"}}'",
+                f"0 * * * * {command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'",
+                f"0 2 * * * {command} -d '{{\"job_id\":\"backup.create\"}}'",
+                f"30 2 * * 0 {command} -d '{{\"job_id\":\"backup.restore_test\"}}'",
             ]
         }
 
