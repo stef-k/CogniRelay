@@ -1,5 +1,6 @@
 """Tests for MCP-compatible RPC handling and tool dispatch behavior."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,18 +11,11 @@ from starlette.responses import Response
 from app.auth import AuthContext
 from app.config import Settings
 from app.main import mcp_rpc, well_known_mcp
+from tests.helpers import SimpleGitManagerStub
 
 
-class _GitManagerStub:
+class _GitManagerStub(SimpleGitManagerStub):
     """Git manager stub that pretends every file commit succeeds."""
-
-    def commit_file(self, _path: Path, _message: str) -> bool:
-        """Report a successful commit without touching git."""
-        return True
-
-    def latest_commit(self) -> str:
-        """Return a stable fake commit hash."""
-        return "test-sha"
 
 
 class _RequestStub:
@@ -103,6 +97,9 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("system.discovery", by_name)
         self.assertIn("memory.write", by_name)
         self.assertIn("recent.list", by_name)
+        self.assertIn("continuity.read", by_name)
+        self.assertIn("continuity.list", by_name)
+        self.assertIn("continuity.archive", by_name)
         self.assertIn("peers.list", by_name)
         self.assertIn("context.snapshot_create", by_name)
         self.assertIn("tasks.create", by_name)
@@ -129,6 +126,68 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("ops.run", by_name)
         self.assertIn("ops.schedule_export", by_name)
         self.assertIn("inputSchema", by_name["memory.write"])
+
+    def test_tools_call_continuity_read_with_auth(self) -> None:
+        """Continuity read should be invokable through MCP tool dispatch."""
+        req = {
+            "jsonrpc": "2.0",
+            "id": 74,
+            "method": "tools/call",
+            "params": {
+                "name": "continuity.read",
+                "arguments": {"subject_kind": "user", "subject_id": "stef"},
+            },
+        }
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes={"read:files"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            (continuity_dir / "user-stef.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "subject_kind": "user",
+                        "subject_id": "stef",
+                        "updated_at": "2026-03-15T14:30:22Z",
+                        "verified_at": "2026-03-15T14:30:22Z",
+                        "verification_kind": "self_review",
+                        "source": {
+                            "producer": "handoff-hook",
+                            "update_reason": "pre_compaction",
+                            "inputs": ["memory/core/identity.md"],
+                        },
+                        "continuity": {
+                            "top_priorities": ["reply"],
+                            "active_concerns": ["none"],
+                            "active_constraints": ["stay deterministic"],
+                            "open_loops": ["follow up"],
+                            "stance_summary": "keep context stable",
+                            "drift_signals": [],
+                        },
+                        "confidence": {"continuity": 0.82, "relationship_model": 0.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
+                "app.main.require_auth", return_value=auth
+            ):
+                res = mcp_rpc(req, authorization="Bearer token")
+
+        self.assertIn("result", res)
+        structured = res["result"]["structuredContent"]
+        self.assertTrue(structured["ok"])
+        self.assertEqual(structured["capsule"]["subject_id"], "stef")
 
     def test_tools_call_system_manifest_without_auth(self) -> None:
         """Public tools should be invokable without auth when designed that way."""

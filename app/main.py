@@ -22,7 +22,7 @@ from .context import (
     search_service,
     write_file_service,
 )
-from .continuity import continuity_upsert_service
+from .continuity import continuity_archive_service, continuity_list_service, continuity_read_service, continuity_upsert_service
 from .config import get_settings
 from .discovery import (
     capabilities_payload,
@@ -46,6 +46,9 @@ from .models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
+    ContinuityArchiveRequest,
+    ContinuityListRequest,
+    ContinuityReadRequest,
     ContinuityUpsertRequest,
     ContextSnapshotRequest,
     ContextRetrieveRequest,
@@ -230,6 +233,9 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         recent_list=lambda req, auth_ctx: recent_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_retrieve=lambda req, auth_ctx: context_retrieve(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_upsert=lambda req, auth_ctx: continuity_upsert(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_read=lambda req, auth_ctx: continuity_read(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_list=lambda req, auth_ctx: continuity_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_archive=lambda req, auth_ctx: continuity_archive(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_get=lambda snapshot_id, auth_ctx: context_snapshot_get(snapshot_id=snapshot_id, auth=auth_ctx),  # type: ignore[arg-type]
         tasks_create=lambda req, auth_ctx: tasks_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
@@ -541,6 +547,45 @@ def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(
         gm=gm,
         auth=auth,
         req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/read")
+def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read one active continuity capsule by exact selector."""
+    settings, _ = _services()
+    return continuity_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/list")
+def continuity_list(req: ContinuityListRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """List active continuity capsule summaries."""
+    settings, _ = _services()
+    return continuity_list_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/archive")
+def continuity_archive(req: ContinuityArchiveRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Archive one active continuity capsule and remove its active file."""
+    settings, gm = _services()
+    return continuity_archive_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 
