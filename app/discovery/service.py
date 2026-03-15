@@ -796,6 +796,10 @@ def _rpc_error(request_id: Any, code: int, message: str, data: Any | None = None
     return {"jsonrpc": "2.0", "id": request_id, "error": err}
 
 
+def rpc_error_payload(request_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any]:
+    return _rpc_error(request_id, code, message, data)
+
+
 def _mcp_list_tools_result(tools: list[dict[str, Any]]) -> dict[str, Any]:
     rows = []
     for t in tools:

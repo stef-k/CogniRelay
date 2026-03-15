@@ -15,6 +15,7 @@ from app.models import PeerRegisterRequest, PeerTrustTransitionRequest
 from app.storage import safe_path, write_text_file
 
 PEERS_REGISTRY_REL = "peers/registry.json"
+TRUST_POLICIES_REL = "peers/trust_policies.json"
 
 
 def load_peers_registry(repo_root: Path) -> dict[str, Any]:

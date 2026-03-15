@@ -1,26 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import subprocess
-import tarfile
-from datetime import datetime, timedelta, timezone
-import math
-import re
-import shutil
-import tempfile
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin
 from urllib.request import Request as UrlRequest, urlopen
-from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 
-from .audit import append_audit
 from .auth import AuthContext, require_auth
 from .context import (
     context_retrieve_service,
@@ -33,23 +19,23 @@ from .context import (
     search_service,
 )
 from .continuity import continuity_upsert_service
-from .config import ALL_SCOPES, get_settings, sha256_token
+from .config import get_settings
 from .discovery import (
     capabilities_payload,
     contracts_payload,
     discovery_payload,
     discovery_tools_payload,
     discovery_workflows_payload,
-    handle_mcp_rpc_request,
     health_payload,
     manifest_payload,
+    rpc_error_payload,
     tool_catalog,
     well_known_cognirelay_payload,
     well_known_mcp_payload,
     workflow_catalog,
 )
 from .git_manager import GitManager
-from .indexer import incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
+from .indexer import rebuild_index
 from .models import (
     AppendRequest,
     CodeCheckRunRequest,
@@ -83,16 +69,8 @@ from .models import (
     WriteRequest,
 )
 from .ops import ops_catalog_service, ops_run_service, ops_schedule_export_service, ops_status_service
-from .peers import (
-    PEERS_REGISTRY_REL,
-    load_peers_registry,
-    peer_manifest_service,
-    peers_list_service,
-    peers_register_service,
-    peers_trust_transition_service,
-)
+from .peers import TRUST_POLICIES_REL, load_peers_registry, peer_manifest_service, peers_list_service, peers_register_service, peers_trust_transition_service
 from .messages import (
-    DELIVERY_STATE_REL,
     delivery_record_view,
     effective_delivery_status,
     load_delivery_state,
@@ -106,37 +84,30 @@ from .messages import (
 )
 from .maintenance import (
     BACKUPS_DIR_REL,
-    REPLICATION_ALLOWED_PREFIXES,
-    REPLICATION_STATE_REL,
-    REPLICATION_TOMBSTONES_REL,
     backup_create_service,
     backup_restore_test_service,
     compact_run_service,
-    iter_replication_files,
-    load_replication_state,
     metrics_service,
     replication_pull_service,
     replication_push_service,
 )
-from .storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
-from .security import (
-    GOVERNANCE_POLICY_REL,
-    NONCE_INDEX_REL,
-    SECURITY_KEYS_REL,
-    TOKEN_CONFIG_REL,
-    governance_policy_service,
-    load_token_config,
-    load_security_keys,
-    messages_verify_service,
-    security_keys_rotate_service,
-    security_tokens_issue_service,
-    security_tokens_list_service,
-    security_tokens_revoke_service,
-    security_tokens_rotate_service,
-    verify_signed_payload_service,
+from .runtime import (
+    audit_event as _audit,
+    enforce_payload_limit as _enforce_payload_limit,
+    enforce_rate_limit as _enforce_rate_limit,
+    handle_mcp_request as _handle_mcp_rpc_request,
+    load_rate_limit_state as _load_rate_limit_state,
+    parse_iso as _parse_iso,
+    read_commit_file as _read_commit_file,
+    record_verification_failure as _record_verification_failure,
+    resolve_auth_context as _resolve_auth_context,
+    run_git as _run_git,
+    scope_for_path as _scope_for_path,
+    verification_failure_count as _verification_failure_count,
 )
+from .storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
+from .security import governance_policy_service, load_token_config, load_security_keys, messages_verify_service, security_keys_rotate_service, security_tokens_issue_service, security_tokens_list_service, security_tokens_revoke_service, security_tokens_rotate_service, verify_signed_payload_service
 from .tasks import (
-    RUN_CHECKS_DIR_REL,
     code_checks_run_service,
     code_merge_service,
     code_patch_propose_service,
@@ -161,21 +132,6 @@ def _services() -> tuple:
     )
     gm.ensure_repo(settings.auto_init_git)
     return settings, gm
-
-
-def _audit(settings, auth: AuthContext | None, event: str, detail: dict) -> None:
-    if not settings.audit_log_enabled:
-        return
-    append_audit(settings.repo_root, event, auth.peer_id if auth else "anonymous", detail)
-def _scope_for_path(path: str) -> str:
-    top = Path(path).parts[0] if Path(path).parts else ""
-    if top == "journal":
-        return "write:journal"
-    if top == "messages":
-        return "write:messages"
-    if top in {"projects", "memory", "essays", "archive", "config", "logs"}:
-        return "write:projects"
-    return "write:projects"
 
 
 def _schema_for_model(model_cls: Any) -> dict[str, Any]:
@@ -220,25 +176,6 @@ def well_known_cognirelay() -> dict:
 def well_known_mcp() -> dict:
     settings = get_settings()
     return well_known_mcp_payload(settings.contract_version)
-
-
-def _resolve_auth_context(
-    authorization: str | None,
-    required: bool,
-    x_forwarded_for: str | None = None,
-    x_real_ip: str | None = None,
-    request: FastAPIRequest | None = None,
-) -> AuthContext | None:
-    if not authorization:
-        if required:
-            raise HTTPException(status_code=401, detail="Missing Authorization header")
-        return None
-    return require_auth(
-        authorization=authorization,
-        x_forwarded_for=x_forwarded_for,
-        x_real_ip=x_real_ip,
-        request=request,
-    )
 
 
 def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext | None) -> dict[str, Any]:
@@ -389,26 +326,6 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
     raise ValueError(f"Unknown tool: {name}")
 
 
-def _handle_mcp_rpc_request(
-    request_payload: Any,
-    authorization: str | None,
-    x_forwarded_for: str | None = None,
-    x_real_ip: str | None = None,
-    request: FastAPIRequest | None = None,
-) -> dict[str, Any] | None:
-    return handle_mcp_rpc_request(
-        request_payload,
-        authorization=authorization,
-        x_forwarded_for=x_forwarded_for,
-        x_real_ip=x_real_ip,
-        request=request,
-        contract_version=get_settings().contract_version,
-        tools=_tool_catalog(),
-        resolve_auth_context=_resolve_auth_context,
-        invoke_tool_by_name=_invoke_tool_by_name,
-    )
-
-
 @app.post("/v1/mcp")
 def mcp_rpc(
     payload: Any,
@@ -422,15 +339,24 @@ def mcp_rpc(
         authorization = None
     if isinstance(payload, list):
         if not payload:
-            return _rpc_error(None, -32600, "Invalid Request: empty batch")
+            return rpc_error_payload(None, -32600, "Invalid Request: empty batch")
         out = []
         for item in payload:
             result = _handle_mcp_rpc_request(
                 item,
-                authorization,
+                authorization=authorization,
                 x_forwarded_for=x_forwarded_for,
                 x_real_ip=x_real_ip,
                 request=http_request,
+                contract_version=get_settings().contract_version,
+                tools=_tool_catalog(),
+                resolve_auth_context_fn=lambda authz, required, **kwargs: _resolve_auth_context(
+                    require_auth,
+                    authz,
+                    required,
+                    **kwargs,
+                ),
+                invoke_tool_by_name=_invoke_tool_by_name,
             )
             if result is not None:
                 out.append(result)
@@ -439,10 +365,19 @@ def mcp_rpc(
         return out
     result = _handle_mcp_rpc_request(
         payload,
-        authorization,
+        authorization=authorization,
         x_forwarded_for=x_forwarded_for,
         x_real_ip=x_real_ip,
         request=http_request,
+        contract_version=get_settings().contract_version,
+        tools=_tool_catalog(),
+        resolve_auth_context_fn=lambda authz, required, **kwargs: _resolve_auth_context(
+            require_auth,
+            authz,
+            required,
+            **kwargs,
+        ),
+        invoke_tool_by_name=_invoke_tool_by_name,
     )
     if result is None:
         return Response(status_code=204)
@@ -484,14 +419,6 @@ def contracts() -> dict:
 def governance_policy() -> dict:
     settings, _ = _services()
     return governance_policy_service(repo_root=settings.repo_root)
-def _latest_backup_archive_rel(repo_root: Path) -> str | None:
-    d = safe_path(repo_root, BACKUPS_DIR_REL)
-    if not d.exists() or not d.is_dir():
-        return None
-    candidates = sorted(d.glob("backup_*.tar.gz"), key=lambda x: x.stat().st_mtime, reverse=True)
-    if not candidates:
-        return None
-    return f"{BACKUPS_DIR_REL}/{candidates[0].name}"
 
 
 @app.get("/v1/ops/catalog")
@@ -682,15 +609,7 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
         now=datetime.now(timezone.utc),
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
-def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=repo_root, text=True, capture_output=True, check=False)
 
-
-def _read_commit_file(repo_root: Path, commit_ref: str, rel_path: str) -> str | None:
-    cp = _run_git(repo_root, "show", f"{commit_ref}:{rel_path}")
-    if cp.returncode != 0:
-        return None
-    return cp.stdout
 @app.get("/v1/peers")
 def peers_list(auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
@@ -880,180 +799,6 @@ def code_merge(req: CodeMergeRequest, auth: AuthContext = Depends(require_auth))
         run_git=_run_git,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
-
-
-DELIVERY_STATE_REL = "messages/state/delivery_index.json"
-RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
-TRUST_POLICIES_REL = "peers/trust_policies.json"
-def _estimate_payload_bytes(payload: Any) -> int:
-    try:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    except Exception:
-        encoded = str(payload).encode("utf-8", errors="ignore")
-    return len(encoded)
-
-
-def _enforce_payload_limit(settings, payload: Any, label: str) -> None:
-    size = _estimate_payload_bytes(payload)
-    if size > int(settings.max_payload_bytes):
-        raise HTTPException(
-            status_code=413,
-            detail=f"Payload too large for {label}: {size} bytes > limit {settings.max_payload_bytes}",
-        )
-
-
-def _rate_limit_path(repo_root: Path) -> Path:
-    return safe_path(repo_root, RATE_LIMIT_STATE_REL)
-
-
-def _load_rate_limit_state(repo_root: Path) -> dict[str, Any]:
-    p = _rate_limit_path(repo_root)
-    if not p.exists():
-        return {"schema_version": "1.0", "events": [], "verification_failures": []}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {"schema_version": "1.0", "events": [], "verification_failures": []}
-    if not isinstance(data, dict):
-        return {"schema_version": "1.0", "events": [], "verification_failures": []}
-    events = data.get("events")
-    fails = data.get("verification_failures")
-    if not isinstance(events, list):
-        events = []
-    if not isinstance(fails, list):
-        fails = []
-    return {"schema_version": "1.0", "events": events, "verification_failures": fails}
-
-
-def _write_rate_limit_state(repo_root: Path, payload: dict[str, Any]) -> Path:
-    p = _rate_limit_path(repo_root)
-    write_text_file(p, json.dumps(payload, ensure_ascii=False, indent=2))
-    return p
-
-
-def _auth_refs(auth: Any) -> tuple[str, str]:
-    raw_token = getattr(auth, "token", None)
-    if isinstance(raw_token, str) and raw_token:
-        token_ref = sha256_token(raw_token)[:24]
-    else:
-        # Backward-compatible fallback for internal/test auth stubs.
-        peer_id = getattr(auth, "peer_id", None)
-        token_ref = sha256_token(f"peer:{peer_id or 'unknown'}")[:24]
-    client_ip = getattr(auth, "client_ip", None)
-    ip_ref = (client_ip or "unknown").strip() or "unknown"
-    return token_ref, ip_ref
-
-
-def _prune_rate_limit_state(payload: dict[str, Any], now: datetime, max_window_seconds: int) -> None:
-    cutoff = now - timedelta(seconds=max_window_seconds)
-    kept_events = []
-    for row in payload.get("events", []):
-        if not isinstance(row, dict):
-            continue
-        at = _parse_iso(row.get("at"))
-        if at is not None and at >= cutoff:
-            kept_events.append(row)
-    payload["events"] = kept_events
-
-    kept_fails = []
-    for row in payload.get("verification_failures", []):
-        if not isinstance(row, dict):
-            continue
-        at = _parse_iso(row.get("at"))
-        if at is not None and at >= cutoff:
-            kept_fails.append(row)
-    payload["verification_failures"] = kept_fails
-
-
-def _enforce_rate_limit(settings, auth: AuthContext, bucket: str) -> None:
-    now = datetime.now(timezone.utc)
-    token_ref, ip_ref = _auth_refs(auth)
-    payload = _load_rate_limit_state(settings.repo_root)
-    max_window = max(60, int(settings.verify_failure_window_seconds))
-    _prune_rate_limit_state(payload, now, max_window)
-
-    events = payload.setdefault("events", [])
-    token_count = 0
-    ip_count = 0
-    cutoff = now - timedelta(seconds=60)
-    for row in events:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("bucket") or "") != bucket:
-            continue
-        at = _parse_iso(row.get("at"))
-        if at is None or at < cutoff:
-            continue
-        if str(row.get("token_ref") or "") == token_ref:
-            token_count += 1
-        if str(row.get("ip_ref") or "") == ip_ref:
-            ip_count += 1
-
-    if token_count >= int(settings.token_rate_limit_per_minute):
-        raise HTTPException(status_code=429, detail=f"Token rate limit exceeded for bucket {bucket}")
-    if ip_count >= int(settings.ip_rate_limit_per_minute):
-        raise HTTPException(status_code=429, detail=f"IP rate limit exceeded for bucket {bucket}")
-
-    events.append(
-        {
-            "at": now.isoformat(),
-            "bucket": bucket,
-            "token_ref": token_ref,
-            "ip_ref": ip_ref,
-            "peer_id": auth.peer_id,
-        }
-    )
-    _write_rate_limit_state(settings.repo_root, payload)
-
-
-def _record_verification_failure(settings, auth: AuthContext, reason: str) -> None:
-    now = datetime.now(timezone.utc)
-    token_ref, ip_ref = _auth_refs(auth)
-    payload = _load_rate_limit_state(settings.repo_root)
-    max_window = max(60, int(settings.verify_failure_window_seconds))
-    _prune_rate_limit_state(payload, now, max_window)
-    failures = payload.setdefault("verification_failures", [])
-    failures.append(
-        {
-            "at": now.isoformat(),
-            "token_ref": token_ref,
-            "ip_ref": ip_ref,
-            "peer_id": auth.peer_id,
-            "reason": reason,
-        }
-    )
-    _write_rate_limit_state(settings.repo_root, payload)
-
-
-def _verification_failure_count(settings, auth: AuthContext) -> int:
-    now = datetime.now(timezone.utc)
-    token_ref, _ = _auth_refs(auth)
-    payload = _load_rate_limit_state(settings.repo_root)
-    max_window = max(60, int(settings.verify_failure_window_seconds))
-    _prune_rate_limit_state(payload, now, max_window)
-    cutoff = now - timedelta(seconds=max_window)
-    count = 0
-    for row in payload.get("verification_failures", []):
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("token_ref") or "") != token_ref:
-            continue
-        at = _parse_iso(row.get("at"))
-        if at is None or at < cutoff:
-            continue
-        count += 1
-    _write_rate_limit_state(settings.repo_root, payload)
-    return count
-
-
-def _canonical_json(data: Any) -> str:
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-
-def _sha256_text(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
 @app.post("/v1/messages/send")
 def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
@@ -1324,17 +1069,6 @@ def backup_restore_test(req: BackupRestoreTestRequest, auth: AuthContext = Depen
         rebuild_index=rebuild_index,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
-
-
-def _parse_iso(sv: str | None):
-    if not sv:
-        return None
-    try:
-        return datetime.fromisoformat(str(sv).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 @app.post("/v1/compact/run")
 def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
