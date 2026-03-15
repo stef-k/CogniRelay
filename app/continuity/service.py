@@ -183,6 +183,73 @@ def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | Non
     return kind, value, "inferred"
 
 
+def _warning_mode_is_multi(req: ContextRetrieveRequest) -> bool:
+    """Return whether retrieval should use V2 multi-capsule warning strings."""
+    return "continuity_selectors" in req.model_fields_set and bool(req.continuity_selectors)
+
+
+def _selector_key(subject_kind: str, subject_id: str) -> tuple[str, str]:
+    """Return the normalized selector identity key used for deduplication."""
+    return subject_kind, _normalize_subject_id(subject_id)
+
+
+def _format_selector(subject_kind: str, subject_id: str) -> str:
+    """Format a selector string using the original subject identifier."""
+    return f"{subject_kind}:{subject_id}"
+
+
+def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_mode: bool) -> str:
+    """Return a warning string in either V1 or V2 retrieval format."""
+    if not multi_mode:
+        if warning == "continuity_capsule_truncated_to_zero":
+            return CONTINUITY_WARNING_TRUNCATED
+        return warning
+    return f"{warning}:{subject_kind}:{subject_id}"
+
+
+def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str]]:
+    """Build the deduplicated selector set plus selector-limit omissions for retrieval."""
+    selectors: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    if req.subject_kind and req.subject_id:
+        key = _selector_key(req.subject_kind, req.subject_id)
+        selectors.append(
+            {
+                "subject_kind": req.subject_kind,
+                "subject_id": req.subject_id,
+                "resolution": "explicit",
+            }
+        )
+        seen.add(key)
+
+    for selector in req.continuity_selectors:
+        key = _selector_key(selector.subject_kind, selector.subject_id)
+        if key in seen:
+            continue
+        selectors.append(
+            {
+                "subject_kind": selector.subject_kind,
+                "subject_id": selector.subject_id,
+                "resolution": "explicit",
+            }
+        )
+        seen.add(key)
+
+    omitted: list[str] = []
+    if selectors:
+        if len(selectors) > req.continuity_max_capsules:
+            omitted = [_format_selector(item["subject_kind"], item["subject_id"]) for item in selectors[req.continuity_max_capsules :]]
+            selectors = selectors[: req.continuity_max_capsules]
+        return selectors, omitted
+
+    inferred = _resolve_selector(req)
+    if inferred is None:
+        return [], omitted
+    kind, subject_id, resolution = inferred
+    return [{"subject_kind": kind, "subject_id": subject_id, "resolution": resolution}], omitted
+
+
 def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str] | None = None) -> dict[str, Any]:
     """Load one capsule from disk and enforce optional subject matching."""
     path = safe_path(repo_root, rel)
@@ -193,7 +260,9 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
         capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
         if expected_subject is not None:
             expected_kind, expected_id = expected_subject
-            if capsule.get("subject_kind") != expected_kind or capsule.get("subject_id") != expected_id:
+            capsule_kind = str(capsule.get("subject_kind") or "")
+            capsule_subject_id = str(capsule.get("subject_id") or "")
+            if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
                 raise HTTPException(status_code=400, detail="Continuity capsule subject does not match requested subject")
         return capsule
     except ValidationError as e:
@@ -454,6 +523,8 @@ def build_continuity_state(
     budget = _budget(req.max_tokens_estimate)
     state = {
         "present": False,
+        "requested_selectors": [],
+        "omitted_selectors": [],
         "capsules": [],
         "selection_order": [],
         "budget": budget,
@@ -461,31 +532,71 @@ def build_continuity_state(
     }
     if req.continuity_mode == "off":
         return state
-    selector = _resolve_selector(req)
-    if selector is None:
+    multi_warning_mode = _warning_mode_is_multi(req)
+    selectors, pre_load_omitted = _effective_selectors(req)
+    state["requested_selectors"] = [_format_selector(item["subject_kind"], item["subject_id"]) for item in selectors]
+    state["omitted_selectors"] = list(pre_load_omitted)
+    if not selectors:
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         return state
-    kind, subject_id, resolution = selector
-    rel = continuity_rel_path(kind, subject_id)
-    auth.require_read_path(rel)
-    path = repo_root / rel
-    if not path.exists():
+
+    loaded: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for item in selectors:
+        kind = item["subject_kind"]
+        subject_id = item["subject_id"]
+        resolution = item["resolution"]
+        rel = continuity_rel_path(kind, subject_id)
+        auth.require_read_path(rel)
+        path = repo_root / rel
+        if not path.exists():
+            state["omitted_selectors"].append(_format_selector(kind, subject_id))
+            continue
+        capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
+        phase, phase_warnings = _continuity_phase(capsule, now)
+        warnings.extend(_qualify_warning(warning, kind, subject_id, multi_mode=multi_warning_mode) for warning in phase_warnings)
+        if phase in {"expired", "expired_by_age"}:
+            state["omitted_selectors"].append(_format_selector(kind, subject_id))
+            continue
+        loaded.append({"selector": item, "capsule": capsule})
+
+    if not loaded:
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
+        state["warnings"] = warnings
         return state
-    capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
-    phase, warnings = _continuity_phase(capsule, now)
-    if phase not in {"expired", "expired_by_age"}:
-        trimmed = _trim_capsule(capsule, budget["continuity_tokens_reserved"])
-        if trimmed is not None:
-            state["present"] = True
-            state["capsules"] = [trimmed]
-            state["selection_order"] = [f"{resolution}:{kind}:{subject_id}"]
-            state["warnings"] = warnings
-            state["budget"]["continuity_tokens_used"] = _estimated_tokens(_render_value(trimmed))
-            return state
-        state["warnings"] = warnings + [CONTINUITY_WARNING_TRUNCATED]
+
+    reserve = budget["continuity_tokens_reserved"]
+    count = len(loaded)
+    base = reserve // count
+    remainder = reserve % count
+
+    trimmed_capsules: list[dict[str, Any]] = []
+    trimmed_selection_order: list[str] = []
+    for idx, row in enumerate(loaded):
+        allocation = base + (1 if idx < remainder else 0)
+        selector = row["selector"]
+        kind = selector["subject_kind"]
+        subject_id = selector["subject_id"]
+        resolution = selector["resolution"]
+        trimmed = _trim_capsule(row["capsule"], allocation)
+        if trimmed is None:
+            state["omitted_selectors"].append(_format_selector(kind, subject_id))
+            warnings.append(_qualify_warning("continuity_capsule_truncated_to_zero", kind, subject_id, multi_mode=multi_warning_mode))
+            continue
+        trimmed_capsules.append(trimmed)
+        trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
+
+    if not trimmed_capsules:
+        if req.continuity_mode == "required":
+            raise HTTPException(status_code=404, detail="Continuity capsule not found")
+        state["warnings"] = warnings
         return state
+
+    state["present"] = True
+    state["capsules"] = trimmed_capsules
+    state["selection_order"] = trimmed_selection_order
     state["warnings"] = warnings
+    state["budget"]["continuity_tokens_used"] = sum(_estimated_tokens(_render_value(item)) for item in trimmed_capsules)
     return state
