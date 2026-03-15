@@ -42,6 +42,15 @@ class _FailingGitManagerStub(_GitManagerStub):
         raise RuntimeError("git commit failed")
 
 
+class _NoOpGitManagerStub(_GitManagerStub):
+    """Git manager stub that reports a no-op commit result."""
+
+    def commit_paths(self, paths: list[Path], message: str) -> bool:
+        """Record the attempted commit and report that no commit was created."""
+        super().commit_paths(paths, message)
+        return False
+
+
 class TestContinuityV2Phase4(unittest.TestCase):
     """Validate the Phase 4 archive lifecycle contract."""
 
@@ -206,6 +215,28 @@ class TestContinuityV2Phase4(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _FailingGitManagerStub()
+            self._write_capsule(repo_root, subject_kind="user", subject_id="stef")
+
+            with self.assertRaises(RuntimeError):
+                continuity_archive_service(
+                    repo_root=repo_root,
+                    gm=gm,
+                    auth=_AuthStub(),
+                    req=ContinuityArchiveRequest(subject_kind="user", subject_id="stef", reason="superseded"),
+                    now=datetime(2026, 3, 15, 14, 30, 22, tzinfo=timezone.utc),
+                    audit=lambda *_args: None,
+                )
+
+            active_path = repo_root / "memory" / "continuity" / "user-stef.json"
+            archive_path = repo_root / "memory" / "continuity" / "archive" / "user-stef-20260315T143022Z.json"
+            self.assertTrue(active_path.exists())
+            self.assertFalse(archive_path.exists())
+
+    def test_archive_noop_commit_restores_active_capsule_without_data_loss(self) -> None:
+        """Archive no-op commit results should also restore the active capsule."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _NoOpGitManagerStub()
             self._write_capsule(repo_root, subject_kind="user", subject_id="stef")
 
             with self.assertRaises(RuntimeError):

@@ -215,6 +215,13 @@ def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_
     return f"{warning}:{subject_kind}:{subject_id}"
 
 
+def _restore_failed_archive(active_path: Path, archive_path: Path, active_bytes: bytes) -> None:
+    """Restore the active capsule and discard the archive envelope after a failed archive commit."""
+    write_text_file(active_path, active_bytes.decode("utf-8"))
+    if archive_path.exists():
+        archive_path.unlink()
+
+
 def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str], list[str]]:
     """Build selected selectors, requested selectors, and selector-limit omissions for retrieval."""
     selectors: list[dict[str, str]] = []
@@ -628,18 +635,17 @@ def continuity_archive_service(
     active_path = safe_path(repo_root, rel)
     active_bytes = active_path.read_bytes()
     write_text_file(archive_path, _canonical_json(archive_payload))
+    # The active-path deletion must be staged before the git commit can atomically
+    # record the archive write plus active-file removal. If the commit step fails,
+    # restore the active capsule and discard the archive envelope immediately.
     active_path.unlink()
     try:
         committed = gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
     except Exception:
-        write_text_file(active_path, active_bytes.decode("utf-8"))
-        if archive_path.exists():
-            archive_path.unlink()
+        _restore_failed_archive(active_path, archive_path, active_bytes)
         raise
     if not committed:
-        write_text_file(active_path, active_bytes.decode("utf-8"))
-        if archive_path.exists():
-            archive_path.unlink()
+        _restore_failed_archive(active_path, archive_path, active_bytes)
         raise RuntimeError("Continuity archive commit produced no changes")
 
     audit(
