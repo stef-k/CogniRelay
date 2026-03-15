@@ -1,3 +1,5 @@
+"""Peer registry and trust-management service exports."""
+
 from .service import (
     PEERS_REGISTRY_REL,
     TRUST_POLICIES_REL,

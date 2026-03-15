@@ -1,3 +1,5 @@
+"""Shared runtime helpers for routing, auditing, and rate limiting."""
+
 from .service import (
     RATE_LIMIT_STATE_REL,
     audit_event,

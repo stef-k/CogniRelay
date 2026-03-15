@@ -1,3 +1,5 @@
+"""Security and signing service exports."""
+
 from .service import (
     GOVERNANCE_POLICY_REL,
     NONCE_INDEX_REL,

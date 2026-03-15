@@ -1,3 +1,5 @@
+"""Context, retrieval, indexing, and snapshot services."""
+
 from .service import (
     append_record_service,
     context_retrieve_service,

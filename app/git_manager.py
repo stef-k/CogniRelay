@@ -1,3 +1,5 @@
+"""Small git wrapper used for repository-backed persistence."""
+
 from __future__ import annotations
 
 import subprocess
@@ -6,12 +8,15 @@ from typing import Optional
 
 
 class GitManager:
+    """Manage git operations for the configured repository root."""
     def __init__(self, repo_root: Path, author_name: str, author_email: str) -> None:
+        """Store repository and author information for later git calls."""
         self.repo_root = repo_root
         self.author_name = author_name
         self.author_email = author_email
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run a git command inside the repository root."""
         return subprocess.run(
             ["git", *args],
             cwd=self.repo_root,
@@ -21,9 +26,11 @@ class GitManager:
         )
 
     def is_repo(self) -> bool:
+        """Return whether the repository root already contains a git repository."""
         return (self.repo_root / ".git").exists()
 
     def init_repo(self) -> None:
+        """Initialize the repository and configure the commit author if needed."""
         self.repo_root.mkdir(parents=True, exist_ok=True)
         if not self.is_repo():
             self._run("init")
@@ -31,6 +38,7 @@ class GitManager:
             self._run("config", "user.email", self.author_email)
 
     def ensure_repo(self, auto_init: bool) -> None:
+        """Ensure a git repository exists, optionally initializing it."""
         self.repo_root.mkdir(parents=True, exist_ok=True)
         if self.is_repo():
             return
@@ -40,6 +48,7 @@ class GitManager:
             raise RuntimeError(f"Git repo not initialized at {self.repo_root}")
 
     def commit_file(self, path: Path, message: str) -> bool:
+        """Commit a single file if it has staged changes."""
         rel = str(path.relative_to(self.repo_root))
         self._run("add", rel)
 
@@ -64,6 +73,7 @@ class GitManager:
         return True
 
     def latest_commit(self) -> Optional[str]:
+        """Return the current HEAD commit SHA if the repo is initialized."""
         if not self.is_repo():
             return None
         cp = self._run("rev-parse", "HEAD", check=False)

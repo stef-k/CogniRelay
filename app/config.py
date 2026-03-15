@@ -1,3 +1,5 @@
+"""Settings and token configuration loading for CogniRelay."""
+
 from __future__ import annotations
 
 import hashlib
@@ -27,6 +29,7 @@ ALL_SCOPES = {
 
 @dataclass(frozen=True)
 class PeerToken:
+    """Normalized peer token record loaded from env or file configuration."""
     peer_id: str
     scopes: Set[str]
     read_namespaces: Set[str]
@@ -40,6 +43,7 @@ class PeerToken:
 
 @dataclass(frozen=True)
 class Settings:
+    """Runtime settings derived from environment variables and repository files."""
     repo_root: Path
     auto_init_git: bool
     git_author_name: str
@@ -66,12 +70,14 @@ _cached: Settings | None = None
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
+    """Parse a boolean-like environment value with a default fallback."""
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_int(value: str | None, default: int, minimum: int | None = None) -> int:
+    """Parse an integer-like environment value with default and minimum guards."""
     if value is None:
         return default
     try:
@@ -84,6 +90,7 @@ def _parse_int(value: str | None, default: int, minimum: int | None = None) -> i
 
 
 def _env_first(*names: str, default: str | None = None) -> str | None:
+    """Return the first populated environment variable from a candidate list."""
     for name in names:
         value = os.getenv(name)
         if value is not None:
@@ -92,10 +99,12 @@ def _env_first(*names: str, default: str | None = None) -> str | None:
 
 
 def sha256_token(token: str) -> str:
+    """Hash a raw token into the repo-stored SHA256 representation."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _parse_tokens_inline(raw: str | None) -> Dict[str, PeerToken]:
+    """Parse inline token configuration from the environment."""
     if not raw:
         return {}
 
@@ -112,6 +121,7 @@ def _parse_tokens_inline(raw: str | None) -> Dict[str, PeerToken]:
 
 
 def _load_tokens_file(repo_root: Path) -> Dict[str, PeerToken]:
+    """Load peer tokens from the repository config file if present."""
     cfg_path = repo_root / "config" / "peer_tokens.json"
     if not cfg_path.exists():
         return {}
@@ -151,6 +161,7 @@ def _load_tokens_file(repo_root: Path) -> Dict[str, PeerToken]:
 
 
 def _merge_tokens(repo_root: Path) -> Dict[str, PeerToken]:
+    """Merge file-based tokens with environment-provided tokens."""
     file_tokens = _load_tokens_file(repo_root)
     env_tokens = _parse_tokens_inline(_env_first("COGNIRELAY_TOKENS", "AMR_TOKENS"))
     # Env tokens override same raw key names.
@@ -159,6 +170,7 @@ def _merge_tokens(repo_root: Path) -> Dict[str, PeerToken]:
 
 
 def get_settings(force_reload: bool = False) -> Settings:
+    """Load and cache runtime settings for the current process."""
     global _cached
     if _cached is not None and not force_reload:
         return _cached

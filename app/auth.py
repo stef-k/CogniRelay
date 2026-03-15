@@ -1,3 +1,5 @@
+"""Authentication and request authorization helpers."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -13,6 +15,7 @@ from .config import get_settings, sha256_token
 
 @dataclass
 class AuthContext:
+    """Authenticated caller context used by route and service authorization checks."""
     token: str
     peer_id: str
     scopes: Set[str]
@@ -21,6 +24,7 @@ class AuthContext:
     client_ip: str | None = None
 
     def require(self, scope: str) -> None:
+        """Require a scope or raise an HTTP 403 error."""
         if scope not in self.scopes and "admin:peers" not in self.scopes:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -28,6 +32,7 @@ class AuthContext:
             )
 
     def _require_path_mode(self, relative_path: str, mode: str) -> None:
+        """Require read or write access for a repository-relative path."""
         top = Path(relative_path).parts[0] if Path(relative_path).parts else ""
         allowed = self.write_namespaces if mode == "write" else self.read_namespaces
         if "*" in allowed or top in allowed or "admin:peers" in self.scopes:
@@ -38,16 +43,20 @@ class AuthContext:
         )
 
     def require_path(self, relative_path: str) -> None:
+        """Require write access for a repository-relative path."""
         self._require_path_mode(relative_path, "write")
 
     def require_read_path(self, relative_path: str) -> None:
+        """Require read access for a repository-relative path."""
         self._require_path_mode(relative_path, "read")
 
     def require_write_path(self, relative_path: str) -> None:
+        """Require write access for a repository-relative path."""
         self._require_path_mode(relative_path, "write")
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
+    """Extract the bearer token string from an Authorization header."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     parts = authorization.split(" ", 1)
@@ -57,6 +66,7 @@ def _extract_bearer_token(authorization: str | None) -> str:
 
 
 def _parse_iso(sv: str | None):
+    """Parse an ISO timestamp and return ``None`` on invalid input."""
     if not sv:
         return None
     try:
@@ -66,6 +76,7 @@ def _parse_iso(sv: str | None):
 
 
 def _normalize_ip(value: str | None) -> str | None:
+    """Normalize a candidate IP or hostname string for comparison."""
     if not value:
         return None
     out = str(value).strip()
@@ -77,6 +88,7 @@ def _normalize_ip(value: str | None) -> str | None:
 
 
 def _is_loopback_host(value: str | None) -> bool:
+    """Return whether the provided host value resolves to loopback."""
     ip = _normalize_ip(value)
     if not ip:
         return False
@@ -89,6 +101,7 @@ def _is_loopback_host(value: str | None) -> bool:
 
 
 def _extract_client_ip(x_forwarded_for: str | None, x_real_ip: str | None, request_client_host: str | None) -> str | None:
+    """Choose the safest client IP from transport and proxy headers."""
     forwarded = None
     if x_forwarded_for:
         forwarded = _normalize_ip(str(x_forwarded_for).split(",", 1)[0])
@@ -116,6 +129,7 @@ def require_auth(
     x_real_ip: str | None = Header(default=None, alias="X-Real-IP"),
     request: Request = None,  # type: ignore[assignment]
 ) -> AuthContext:
+    """Resolve and validate the current caller from the configured token store."""
     # Force reload so token issue/revoke endpoints take effect immediately.
     settings = get_settings(force_reload=True)
     if authorization is not None and not isinstance(authorization, str):
