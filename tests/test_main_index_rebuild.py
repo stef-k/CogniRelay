@@ -55,7 +55,7 @@ class TestIndexRebuildEndpoint(unittest.TestCase):
                 return {"file_count": 1}
 
             with patch("app.main._services", return_value=(settings, gm)):
-                with patch("app.main.rebuild_index", side_effect=_fake_rebuild):
+                with patch("app.context.service.rebuild_index", side_effect=_fake_rebuild):
                     result = index_rebuild(auth=_AuthStub())
 
             expected = {

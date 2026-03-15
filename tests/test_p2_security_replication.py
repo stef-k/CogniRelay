@@ -406,7 +406,7 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertGreaterEqual(dry["file_count"], 2)
 
             with patch("app.main._services", return_value=(settings, gm)):
-                with patch("app.main.urlopen", return_value=_FakeHTTPResponse({"ok": True, "accepted": True})):
+                with patch("app.maintenance.service.urlopen", return_value=_FakeHTTPResponse({"ok": True, "accepted": True})):
                     pushed = replication_push(
                         req=ReplicationPushRequest(
                             dry_run=False,
@@ -437,7 +437,7 @@ class TestP2SecurityReplication(unittest.TestCase):
                     req=PeerRegisterRequest(peer_id="peer-beta", base_url="https://peer-beta.example.net"),
                     auth=_AuthStub(),
                 )
-                with patch("app.main.urlopen", return_value=_FakeHTTPResponse({"ok": True, "accepted": True})):
+                with patch("app.maintenance.service.urlopen", return_value=_FakeHTTPResponse({"ok": True, "accepted": True})):
                     pushed = replication_push(
                         req=ReplicationPushRequest(peer_id="peer-beta", include_prefixes=["memory"], target_token="tok"),
                         auth=_AuthStub(),
