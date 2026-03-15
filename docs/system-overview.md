@@ -119,6 +119,8 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/context/retrieve` for continuity-shaped task bundles
 - Use optional `subject_kind` and `subject_id` on `POST /v1/context/retrieve` when you need exact continuity capsule selection instead of task-text inference
 - Use `continuity_selectors` plus `continuity_max_capsules` on `POST /v1/context/retrieve` when you need deterministic multi-capsule continuity loading in one request
+- Use `POST /v1/continuity/read` when you need the full active capsule for one exact selector
+- Use `POST /v1/continuity/list` when you need active capsule summaries, ordering, and freshness phase without loading full retrieval bundles
 - Use `POST /v1/recent` when you want the latest indexed material without query matching
 - Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches
 - Prefer summaries over raw episodic logs when both cover the same time window

@@ -22,7 +22,7 @@ from .context import (
     search_service,
     write_file_service,
 )
-from .continuity import continuity_upsert_service
+from .continuity import continuity_list_service, continuity_read_service, continuity_upsert_service
 from .config import get_settings
 from .discovery import (
     capabilities_payload,
@@ -46,6 +46,8 @@ from .models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
+    ContinuityListRequest,
+    ContinuityReadRequest,
     ContinuityUpsertRequest,
     ContextSnapshotRequest,
     ContextRetrieveRequest,
@@ -541,6 +543,31 @@ def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(
         gm=gm,
         auth=auth,
         req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/read")
+def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read one active continuity capsule by exact selector."""
+    settings, _ = _services()
+    return continuity_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/list")
+def continuity_list(req: ContinuityListRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """List active continuity capsule summaries."""
+    settings, _ = _services()
+    return continuity_list_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 

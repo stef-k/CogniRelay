@@ -36,6 +36,8 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `POST /v1/recent`: latest indexed items without a search query
 - `POST /v1/context/retrieve`: compact continuity-oriented context bundle
 - `POST /v1/continuity/upsert`: create or replace one continuity capsule
+- `POST /v1/continuity/read`: load one active continuity capsule by exact selector
+- `POST /v1/continuity/list`: list active continuity capsule summaries
 - `POST /v1/context/snapshot`: persist deterministic context snapshot
 - `GET /v1/context/snapshot/{snapshot_id}`: load a persisted snapshot
 - `POST /v1/compact/run`: compaction planning and summary/report generation
@@ -48,6 +50,8 @@ Notable behavior:
 - `POST /v1/context/retrieve` now supports optional continuity subject selection and returns additive `continuity_state` metadata when available
 - `POST /v1/context/retrieve` now also accepts bounded `continuity_selectors` plus `continuity_max_capsules` for deterministic multi-capsule continuity loading
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
+- `POST /v1/continuity/read` returns the raw active capsule payload for one exact selector
+- `POST /v1/continuity/list` returns active-only summaries, skipping archive entries and invalid active files
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
 - `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`
 

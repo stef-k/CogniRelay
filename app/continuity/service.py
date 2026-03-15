@@ -15,7 +15,13 @@ from pydantic import ValidationError
 
 from app.auth import AuthContext
 from app.git_manager import GitManager
-from app.models import ContinuityCapsule, ContinuityUpsertRequest, ContextRetrieveRequest
+from app.models import (
+    ContinuityCapsule,
+    ContinuityListRequest,
+    ContinuityReadRequest,
+    ContinuityUpsertRequest,
+    ContextRetrieveRequest,
+)
 from app.storage import StorageError, safe_path, write_text_file
 
 CONTINUITY_DIR_REL = "memory/continuity"
@@ -510,6 +516,78 @@ def continuity_upsert_service(
         "latest_commit": gm.latest_commit(),
         "capsule_sha256": capsule_sha256,
     }
+
+
+def continuity_read_service(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    req: ContinuityReadRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Read one active continuity capsule by exact selector."""
+    auth.require("read:files")
+    rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    auth.require_read_path(rel)
+    capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+    audit(auth, "continuity_read", {"subject_kind": req.subject_kind, "subject_id": req.subject_id, "path": rel})
+    return {"ok": True, "path": rel, "capsule": capsule, "archived": False}
+
+
+def continuity_list_service(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    req: ContinuityListRequest,
+    now: datetime,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """List active continuity capsule summaries under the repository namespace."""
+    auth.require("read:files")
+    base = repo_root / CONTINUITY_DIR_REL
+    summaries: list[dict[str, Any]] = []
+    if base.exists() and base.is_dir():
+        for path in sorted(base.iterdir(), key=lambda item: item.name):
+            if path.is_dir() or path.suffix.lower() != ".json":
+                continue
+            if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
+                continue
+            rel = str(path.relative_to(repo_root))
+            try:
+                auth.require_read_path(rel)
+            except HTTPException:
+                continue
+            try:
+                capsule = _load_capsule(repo_root, rel)
+            except HTTPException as exc:
+                if exc.status_code == 400:
+                    continue
+                raise
+            phase, _ = _continuity_phase(capsule, now)
+            freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
+            summaries.append(
+                {
+                    "subject_kind": capsule["subject_kind"],
+                    "subject_id": capsule["subject_id"],
+                    "path": rel,
+                    "updated_at": capsule["updated_at"],
+                    "verified_at": capsule["verified_at"],
+                    "verification_kind": capsule.get("verification_kind"),
+                    "freshness_class": freshness.get("freshness_class"),
+                    "phase": phase,
+                }
+            )
+    summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"])))
+    summaries = summaries[: req.limit]
+    audit(
+        auth,
+        "continuity_list",
+        {
+            "subject_kind": req.subject_kind,
+            "count": len(summaries),
+        },
+    )
+    return {"ok": True, "count": len(summaries), "capsules": summaries}
 
 
 def build_continuity_state(
