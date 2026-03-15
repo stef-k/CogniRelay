@@ -420,6 +420,32 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertFalse(pushed["dry_run"])
             self.assertTrue(pushed["remote"]["ok"])
 
+    def test_replication_push_resolves_target_base_from_peer_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+
+            (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory" / "core" / "identity.md").write_text("# identity\n", encoding="utf-8")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                from app.main import peers_register
+                from app.models import PeerRegisterRequest
+
+                peers_register(
+                    req=PeerRegisterRequest(peer_id="peer-beta", base_url="https://peer-beta.example.net"),
+                    auth=_AuthStub(),
+                )
+                with patch("app.main.urlopen", return_value=_FakeHTTPResponse({"ok": True, "accepted": True})):
+                    pushed = replication_push(
+                        req=ReplicationPushRequest(peer_id="peer-beta", include_prefixes=["memory"], target_token="tok"),
+                        auth=_AuthStub(),
+                    )
+
+            self.assertTrue(pushed["ok"])
+            self.assertEqual(pushed["target_url"], "https://peer-beta.example.net/v1/replication/pull")
+
 
 if __name__ == "__main__":
     unittest.main()

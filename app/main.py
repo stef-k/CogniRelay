@@ -3079,7 +3079,7 @@ def replication_push(req: ReplicationPushRequest, auth: AuthContext = Depends(re
 
     target_base = req.base_url
     if not target_base and req.peer_id:
-        registry = _load_peers_registry(settings.repo_root)
+        registry = load_peers_registry(settings.repo_root)
         peer = registry.get("peers", {}).get(req.peer_id)
         if isinstance(peer, dict):
             target_base = str(peer.get("base_url") or "").strip() or None
