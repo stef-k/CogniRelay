@@ -91,7 +91,7 @@ class TestPeersAndSnapshots(unittest.TestCase):
             req = PeerRegisterRequest(peer_id="peer-beta", base_url="https://peer-beta.example.net")
             with patch("app.main._services", return_value=(settings, gm)):
                 peers_register(req=req, auth=_AuthStub())
-                with patch("app.main.urlopen", return_value=_FakeHTTPResponse({"service": "peer-beta", "ok": True})):
+                with patch("app.peers.service.urlopen", return_value=_FakeHTTPResponse({"service": "peer-beta", "ok": True})):
                     out = peer_manifest(peer_id="peer-beta", auth=_AuthStub())
 
             self.assertTrue(out["ok"])
