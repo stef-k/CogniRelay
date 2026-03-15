@@ -119,8 +119,11 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/context/retrieve` for continuity-shaped task bundles
 - Use optional `subject_kind` and `subject_id` on `POST /v1/context/retrieve` when you need exact continuity capsule selection instead of task-text inference
 - Use `continuity_selectors` plus `continuity_max_capsules` on `POST /v1/context/retrieve` when you need deterministic multi-capsule continuity loading in one request
+- Use `continuity_verification_policy` on `POST /v1/context/retrieve` when you need to allow degraded continuity, prefer healthy continuity first, or require healthy capsules only
 - Use `POST /v1/continuity/read` when you need the full active capsule for one exact selector
-- Use `POST /v1/continuity/list` when you need active capsule summaries, ordering, and freshness phase without loading full retrieval bundles
+- Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
+- Use `POST /v1/continuity/revalidate` when you need to confirm, correct, degrade, or conflict-mark one active capsule through the audited write path
+- Use `POST /v1/continuity/list` when you need active capsule summaries, ordering, freshness phase, and additive verification/health status without loading full retrieval bundles
 - Use `POST /v1/continuity/archive` when you need to remove an active capsule from retrieval while preserving its final archived envelope
 - Use `POST /v1/recent` when you want the latest indexed material without query matching
 - Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches

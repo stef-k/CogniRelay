@@ -19,8 +19,10 @@ from app.models import (
     CodeMergeRequest,
     CompactRequest,
     ContinuityArchiveRequest,
+    ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     ContextRetrieveRequest,
     ContextSnapshotRequest,
@@ -280,6 +282,24 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["read:files", "read_namespaces"],
             "idempotent": True,
             "input_schema": schema_for_model(ContinuityReadRequest),
+        },
+        {
+            "name": "continuity.compare",
+            "description": "Compare one active continuity capsule against a candidate capsule without mutating storage.",
+            "method": "POST",
+            "path": "/v1/continuity/compare",
+            "scopes": ["read:files", "read_namespaces"],
+            "idempotent": True,
+            "input_schema": schema_for_model(ContinuityCompareRequest),
+        },
+        {
+            "name": "continuity.revalidate",
+            "description": "Confirm, correct, degrade, or conflict-mark one active continuity capsule through an auditable git-backed write.",
+            "method": "POST",
+            "path": "/v1/continuity/revalidate",
+            "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(ContinuityRevalidateRequest),
         },
         {
             "name": "continuity.list",
@@ -871,6 +891,8 @@ def invoke_tool_by_name(
     context_retrieve: Callable[[ContextRetrieveRequest, AuthContext | None], dict[str, Any]],
     continuity_upsert: Callable[[ContinuityUpsertRequest, AuthContext | None], dict[str, Any]],
     continuity_read: Callable[[ContinuityReadRequest, AuthContext | None], dict[str, Any]],
+    continuity_compare: Callable[[ContinuityCompareRequest, AuthContext | None], dict[str, Any]],
+    continuity_revalidate: Callable[[ContinuityRevalidateRequest, AuthContext | None], dict[str, Any]],
     continuity_list: Callable[[ContinuityListRequest, AuthContext | None], dict[str, Any]],
     continuity_archive: Callable[[ContinuityArchiveRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_create: Callable[[ContextSnapshotRequest, AuthContext | None], dict[str, Any]],
@@ -960,6 +982,10 @@ def invoke_tool_by_name(
         return continuity_upsert(ContinuityUpsertRequest(**args), auth)
     if name == "continuity.read":
         return continuity_read(ContinuityReadRequest(**args), auth)
+    if name == "continuity.compare":
+        return continuity_compare(ContinuityCompareRequest(**args), auth)
+    if name == "continuity.revalidate":
+        return continuity_revalidate(ContinuityRevalidateRequest(**args), auth)
     if name == "continuity.list":
         return continuity_list(ContinuityListRequest(**args), auth)
     if name == "continuity.archive":
@@ -1281,6 +1307,8 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "POST /v1/context/retrieve": {"scope": "search"},
             "POST /v1/continuity/upsert": {"scope": "write:projects"},
             "POST /v1/continuity/read": {"scope": "read:files"},
+            "POST /v1/continuity/compare": {"scope": "read:files"},
+            "POST /v1/continuity/revalidate": {"scope": "write:projects"},
             "POST /v1/continuity/list": {"scope": "read:files"},
             "POST /v1/continuity/archive": {"scope": "write:projects"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},

@@ -22,7 +22,14 @@ from .context import (
     search_service,
     write_file_service,
 )
-from .continuity import continuity_archive_service, continuity_list_service, continuity_read_service, continuity_upsert_service
+from .continuity import (
+    continuity_archive_service,
+    continuity_compare_service,
+    continuity_list_service,
+    continuity_read_service,
+    continuity_revalidate_service,
+    continuity_upsert_service,
+)
 from .config import get_settings
 from .discovery import (
     capabilities_payload,
@@ -47,8 +54,10 @@ from .models import (
     CodeMergeRequest,
     CompactRequest,
     ContinuityArchiveRequest,
+    ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     ContextSnapshotRequest,
     ContextRetrieveRequest,
@@ -234,6 +243,8 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         context_retrieve=lambda req, auth_ctx: context_retrieve(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_upsert=lambda req, auth_ctx: continuity_upsert(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_read=lambda req, auth_ctx: continuity_read(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_compare=lambda req, auth_ctx: continuity_compare(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_revalidate=lambda req, auth_ctx: continuity_revalidate(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_list=lambda req, auth_ctx: continuity_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_archive=lambda req, auth_ctx: continuity_archive(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
@@ -557,6 +568,31 @@ def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(requ
     settings, _ = _services()
     return continuity_read_service(
         repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/compare")
+def continuity_compare(req: ContinuityCompareRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Compare one active continuity capsule to a candidate capsule."""
+    settings, _ = _services()
+    return continuity_compare_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/revalidate")
+def continuity_revalidate(req: ContinuityRevalidateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Confirm, correct, degrade, or conflict-mark one active continuity capsule."""
+    settings, gm = _services()
+    return continuity_revalidate_service(
+        repo_root=settings.repo_root,
+        gm=gm,
         auth=auth,
         req=req,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),

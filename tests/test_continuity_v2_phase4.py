@@ -253,3 +253,25 @@ class TestContinuityV2Phase4(unittest.TestCase):
             archive_path = repo_root / "memory" / "continuity" / "archive" / "user-stef-20260315T143022Z.json"
             self.assertTrue(active_path.exists())
             self.assertFalse(archive_path.exists())
+
+    def test_archive_restore_failure_surfaces_explicit_rollback_error(self) -> None:
+        """Archive rollback failures should raise an explicit restore error."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _FailingGitManagerStub()
+            self._write_capsule(repo_root, subject_kind="user", subject_id="stef")
+
+            with patch("app.continuity.service.Path.write_bytes", side_effect=OSError("disk full")):
+                with self.assertRaises(RuntimeError) as cm:
+                    continuity_archive_service(
+                        repo_root=repo_root,
+                        gm=gm,
+                        auth=_AuthStub(),
+                        req=ContinuityArchiveRequest(subject_kind="user", subject_id="stef", reason="superseded"),
+                        now=datetime(2026, 3, 15, 14, 30, 22, tzinfo=timezone.utc),
+                        audit=lambda *_args: None,
+                    )
+
+            self.assertIn("Continuity archive commit failed", str(cm.exception))
+            self.assertIn("git commit failed", str(cm.exception))
+            self.assertIn("rollback failed", str(cm.exception))

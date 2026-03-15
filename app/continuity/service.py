@@ -17,10 +17,15 @@ from app.auth import AuthContext
 from app.git_manager import GitManager
 from app.models import (
     ContinuityArchiveRequest,
+    ContinuityCapsuleHealth,
     ContinuityCapsule,
+    ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
+    ContinuityVerificationState,
+    ContinuityVerificationSignal,
     ContextRetrieveRequest,
 )
 from app.storage import StorageError, safe_path, write_text_file
@@ -39,6 +44,9 @@ CONTINUITY_WARNING_STALE_HARD = "continuity_stale_hard"
 CONTINUITY_WARNING_EXPIRED = "continuity_expired"
 CONTINUITY_WARNING_TRUNCATED = "continuity_truncated_to_zero"
 CONTINUITY_WARNING_TRUNCATED_MULTI = "continuity_capsule_truncated_to_zero"
+CONTINUITY_WARNING_DEGRADED = "continuity_degraded"
+CONTINUITY_WARNING_CONFLICTED = "continuity_conflicted"
+CONTINUITY_WARNING_INVALID = "continuity_invalid_capsule"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -46,6 +54,56 @@ CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "public_reply",
     "manual_checkpoint",
 }
+CONTINUITY_SIGNAL_RANK = {
+    "self_review": 0,
+    "external_observation": 1,
+    "peer_confirmation": 2,
+    "user_confirmation": 3,
+    "system_check": 4,
+}
+CONTINUITY_COMPARE_TOP_LEVEL_ORDER = [
+    "subject_kind",
+    "subject_id",
+    "schema_version",
+    "updated_at",
+    "source",
+    "continuity",
+    "confidence",
+    "attention_policy",
+    "freshness",
+    "canonical_sources",
+    "metadata",
+]
+CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
+    "source": ["producer", "update_reason", "inputs"],
+    "confidence": ["continuity", "relationship_model"],
+    "freshness": ["freshness_class", "expires_at", "stale_after_seconds"],
+    "attention_policy": ["early_load", "presence_bias_overrides"],
+    "continuity": [
+        "top_priorities",
+        "active_concerns",
+        "active_constraints",
+        "open_loops",
+        "stance_summary",
+        "drift_signals",
+        "working_hypotheses",
+        "long_horizon_commitments",
+        "session_trajectory",
+        "relationship_model",
+        "retrieval_hints",
+    ],
+    "relationship_model": ["trust_level", "preferred_style", "sensitivity_notes"],
+    "retrieval_hints": ["must_include", "avoid", "load_next"],
+}
+CONTINUITY_COMPARE_IGNORED_FIELDS = {"verified_at", "verification_kind", "verification_state", "capsule_health"}
+CONTINUITY_SIGNAL_STATUS = {
+    "self_review": "self_attested",
+    "external_observation": "externally_supported",
+    "peer_confirmation": "peer_confirmed",
+    "user_confirmation": "user_confirmed",
+    "system_check": "system_confirmed",
+}
+CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
 
 
 def _canonical_json(data: Any) -> str:
@@ -176,6 +234,161 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     return payload, canonical
 
 
+def _validate_v3_capsule_fields(capsule: ContinuityCapsule) -> None:
+    """Validate V3 verification and health fields when present on a capsule."""
+    if capsule.verification_state is not None:
+        _require_utc_timestamp(capsule.verification_state.last_revalidated_at, "verification_state.last_revalidated_at")
+        for ref in capsule.verification_state.evidence_refs:
+            if len(ref) > 200:
+                raise HTTPException(status_code=400, detail="Value too long in verification_state.evidence_refs")
+        if capsule.verification_state.status == "conflicted" and not capsule.verification_state.conflict_summary:
+            raise HTTPException(status_code=400, detail="verification_state.conflict_summary is required when status=conflicted")
+    if capsule.capsule_health is not None:
+        _require_utc_timestamp(capsule.capsule_health.last_checked_at, "capsule_health.last_checked_at")
+        for reason in capsule.capsule_health.reasons:
+            if len(reason) > 120:
+                raise HTTPException(status_code=400, detail="Value too long in capsule_health.reasons")
+        if capsule.capsule_health.status in {"degraded", "conflicted"} and not capsule.capsule_health.reasons:
+            raise HTTPException(status_code=400, detail="capsule_health.reasons is required when status is degraded or conflicted")
+
+
+def _strip_v3_verification_fields(capsule: ContinuityCapsule) -> ContinuityCapsule:
+    """Return a capsule copy with V3 verification-only fields removed for upsert."""
+    payload = capsule.model_dump(mode="json", exclude_none=True, exclude={"verification_state", "capsule_health"})
+    try:
+        return ContinuityCapsule.model_validate(payload)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Capsule invalid after V3 field stripping: {e}") from e
+
+
+def _validate_verification_signals(signals: list[ContinuityVerificationSignal]) -> None:
+    """Validate V3 verification signals using the continuity timestamp rules."""
+    for signal in signals:
+        _require_utc_timestamp(signal.observed_at, "signals.observed_at")
+
+
+def _strongest_signal_kind(signals: list[ContinuityVerificationSignal]) -> str:
+    """Return the strongest verification signal kind preserving request order on ties."""
+    strongest = signals[0].kind
+    for signal in signals[1:]:
+        if CONTINUITY_SIGNAL_RANK[signal.kind] > CONTINUITY_SIGNAL_RANK[strongest]:
+            strongest = signal.kind
+    return strongest
+
+
+def _normalize_compare_payload(repo_root: Path, capsule: ContinuityCapsule) -> dict[str, Any]:
+    """Validate and normalize a capsule payload for V3 compare semantics."""
+    _validate_capsule(repo_root, capsule)
+    _validate_v3_capsule_fields(capsule)
+    return capsule.model_dump(mode="json", exclude_none=True)
+
+
+def _validate_candidate_selector_match(subject_kind: str, subject_id: str, candidate_capsule: ContinuityCapsule) -> None:
+    """Require a candidate capsule to match the exact request selector after normalization."""
+    if candidate_capsule.subject_kind != subject_kind:
+        raise HTTPException(status_code=400, detail="Candidate capsule subject does not match request subject")
+    if _normalize_subject_id(candidate_capsule.subject_id) != _normalize_subject_id(subject_id):
+        raise HTTPException(status_code=400, detail="Candidate capsule subject does not match request subject")
+
+
+def _compare_values(left: Any, right: Any, *, path: str = "", order_name: str | None = None) -> list[str]:
+    """Compare two normalized capsule values and return shallowest changed paths."""
+    if left == right:
+        return []
+    if left is None and right is None:
+        return []
+    if isinstance(left, list) and isinstance(right, list):
+        return [path] if left != right else []
+    if isinstance(left, dict) and isinstance(right, dict):
+        if order_name == "metadata":
+            keys = sorted(set(left) | set(right))
+        else:
+            explicit = CONTINUITY_COMPARE_NESTED_ORDERS.get(order_name or "", [])
+            keys = list(explicit)
+            for key in sorted(set(left) | set(right)):
+                if key not in keys and key not in CONTINUITY_COMPARE_IGNORED_FIELDS:
+                    keys.append(key)
+        changes: list[str] = []
+        for key in keys:
+            if key in CONTINUITY_COMPARE_IGNORED_FIELDS:
+                continue
+            l_has = key in left
+            r_has = key in right
+            l_val = left.get(key) if l_has else None
+            r_val = right.get(key) if r_has else None
+            if l_val is None and r_val is None and (l_has or r_has):
+                continue
+            child_path = f"{path}.{key}" if path else key
+            next_order = key if key in CONTINUITY_COMPARE_NESTED_ORDERS else ("metadata" if key == "metadata" else None)
+            child_changes = _compare_values(l_val, r_val, path=child_path, order_name=next_order)
+            if child_changes:
+                changes.extend(child_changes)
+        return changes
+    return [path]
+
+
+def _compare_capsules(active: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
+    """Compare two normalized capsules using the V3 canonical traversal order."""
+    changes: list[str] = []
+    for key in CONTINUITY_COMPARE_TOP_LEVEL_ORDER:
+        if key in CONTINUITY_COMPARE_IGNORED_FIELDS:
+            continue
+        active_has = key in active
+        candidate_has = key in candidate
+        active_value = active.get(key) if active_has else None
+        candidate_value = candidate.get(key) if candidate_has else None
+        if active_value is None and candidate_value is None and (active_has or candidate_has):
+            continue
+        order_name = key if key in CONTINUITY_COMPARE_NESTED_ORDERS else ("metadata" if key == "metadata" else None)
+        changes.extend(_compare_values(active_value, candidate_value, path=key, order_name=order_name))
+    return changes
+
+
+def _signals_to_evidence_refs(signals: list[ContinuityVerificationSignal]) -> list[str]:
+    """Derive bounded evidence refs from ordered verification signals."""
+    return [signal.source_ref for signal in signals[:4]]
+
+
+def _final_capsule_payload(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
+    """Validate a final assembled capsule including V3 fields and return canonical JSON."""
+    payload, canonical = _validate_capsule(repo_root, capsule)
+    _validate_v3_capsule_fields(capsule)
+    if len(canonical.encode("utf-8")) > 12 * 1024:
+        raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+    return payload, canonical
+
+
+def _persist_active_capsule(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    path: Path,
+    canonical: str,
+    commit_message: str,
+) -> None:
+    """Persist an active capsule safely, restoring the prior durable file on commit failure."""
+    old_bytes = path.read_bytes() if path.exists() else None
+    write_text_file(path, canonical)
+    try:
+        committed = gm.commit_file(path, commit_message)
+        if not committed:
+            raise RuntimeError("git commit produced no changes")
+    except Exception as exc:
+        restore_error: Exception | None = None
+        try:
+            if old_bytes is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.write_bytes(old_bytes)
+        except Exception as restore_exc:
+            restore_error = restore_exc
+        detail = f"Failed to persist continuity capsule: {exc}"
+        if restore_error is not None:
+            detail = f"{detail}; rollback failed: {restore_error}"
+        raise HTTPException(status_code=500, detail=detail) from exc
+
+
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
     """Resolve an explicit or inferred continuity selector from a request."""
     if bool(req.subject_kind) != bool(req.subject_id):
@@ -217,9 +430,20 @@ def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_
 
 def _restore_failed_archive(active_path: Path, archive_path: Path, active_bytes: bytes) -> None:
     """Restore the active capsule and discard the archive envelope after a failed archive commit."""
-    write_text_file(active_path, active_bytes.decode("utf-8"))
-    if archive_path.exists():
-        archive_path.unlink()
+    restore_error: Exception | None = None
+    try:
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        active_path.write_bytes(active_bytes)
+    except Exception as exc:
+        restore_error = exc
+    try:
+        if archive_path.exists():
+            archive_path.unlink()
+    except Exception as exc:
+        if restore_error is None:
+            restore_error = exc
+    if restore_error is not None:
+        raise RuntimeError(f"Failed to restore archived continuity capsule: {restore_error}") from restore_error
 
 
 def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str], list[str]]:
@@ -296,6 +520,28 @@ def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
         return int(explicit)
     freshness_class = str(freshness.get("freshness_class") or "situational")
     return CONTINUITY_DEFAULT_STALE.get(freshness_class)
+
+
+def _verification_status(capsule: dict[str, Any]) -> str:
+    """Return the persisted or implicit V3 verification status for one capsule."""
+    verification_state = capsule.get("verification_state")
+    if isinstance(verification_state, dict):
+        status = verification_state.get("status")
+        if isinstance(status, str) and status:
+            return status
+    return "unverified"
+
+
+def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
+    """Return the persisted or implicit V3 capsule health summary."""
+    capsule_health = capsule.get("capsule_health")
+    if isinstance(capsule_health, dict):
+        status = capsule_health.get("status")
+        reasons = capsule_health.get("reasons")
+        if isinstance(status, str) and status:
+            return status, list(reasons or [])
+        return "degraded", ["invalid capsule_health payload"]
+    return "healthy", []
 
 
 def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list[str]]:
@@ -486,25 +732,38 @@ def continuity_upsert_service(
 ) -> dict[str, Any]:
     """Validate and persist one continuity capsule with commit-on-change behavior."""
     auth.require("write:projects")
-    if req.capsule.subject_kind != req.subject_kind or req.capsule.subject_id != req.subject_id:
+    capsule = _strip_v3_verification_fields(req.capsule)
+    if capsule.subject_kind != req.subject_kind or capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_write_path(rel)
-    _validate_capsule(repo_root, req.capsule)
+    _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
-    canonical = _canonical_json(req.capsule.model_dump(mode="json", exclude_none=True))
+    canonical = _canonical_json(capsule.model_dump(mode="json", exclude_none=True))
     new_bytes = canonical.encode("utf-8")
     old_bytes = path.read_bytes() if path.exists() else None
     if old_bytes != new_bytes:
-        _reject_stale_or_conflicting_write(path, req)
+        stripped_req = ContinuityUpsertRequest(
+            subject_kind=req.subject_kind,
+            subject_id=req.subject_id,
+            capsule=capsule,
+            commit_message=req.commit_message,
+            idempotency_key=req.idempotency_key,
+        )
+        _reject_stale_or_conflicting_write(path, stripped_req)
     capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
     created = not path.exists()
     changed = old_bytes != new_bytes
-    if changed:
-        write_text_file(path, canonical)
     committed = False
     if changed:
-        committed = gm.commit_file(path, req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}")
+        _persist_active_capsule(
+            repo_root=repo_root,
+            gm=gm,
+            path=path,
+            canonical=canonical,
+            commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
+        )
+        committed = True
     audit(
         auth,
         "continuity_upsert",
@@ -576,6 +835,8 @@ def continuity_list_service(
                 raise
             phase, _ = _continuity_phase(capsule, now)
             freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
+            verification_status = _verification_status(capsule)
+            health_status, health_reasons = _capsule_health_summary(capsule)
             summaries.append(
                 {
                     "subject_kind": capsule["subject_kind"],
@@ -586,6 +847,9 @@ def continuity_list_service(
                     "verification_kind": capsule.get("verification_kind"),
                     "freshness_class": freshness.get("freshness_class"),
                     "phase": phase,
+                    "verification_status": verification_status,
+                    "health_status": health_status,
+                    "health_reasons": health_reasons,
                 }
             )
     summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"])))
@@ -599,6 +863,175 @@ def continuity_list_service(
         },
     )
     return {"ok": True, "count": len(summaries), "capsules": summaries}
+
+
+def continuity_compare_service(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    req: ContinuityCompareRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Compare one active continuity capsule to a candidate without mutating storage."""
+    auth.require("read:files")
+    _validate_verification_signals(req.signals)
+    _validate_candidate_selector_match(req.subject_kind, req.subject_id, req.candidate_capsule)
+    candidate = _normalize_compare_payload(repo_root, req.candidate_capsule)
+    rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    auth.require_read_path(rel)
+    active = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+    changed_fields = _compare_capsules(active, candidate)
+    identical = not changed_fields
+    strongest_signal = _strongest_signal_kind(req.signals)
+    recommended_outcome = "confirm" if identical else ("correct" if strongest_signal != "self_review" else "conflict")
+    audit(
+        auth,
+        "continuity_compare",
+        {
+            "subject_kind": req.subject_kind,
+            "subject_id": req.subject_id,
+            "path": rel,
+            "strongest_signal": strongest_signal,
+            "identical": identical,
+            "recommended_outcome": recommended_outcome,
+        },
+    )
+    return {
+        "ok": True,
+        "path": rel,
+        "identical": identical,
+        "changed_fields": changed_fields,
+        "strongest_signal": strongest_signal,
+        "recommended_outcome": recommended_outcome,
+    }
+
+
+def continuity_revalidate_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityRevalidateRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Confirm, correct, degrade, or conflict-mark one active continuity capsule."""
+    auth.require("write:projects")
+    _validate_verification_signals(req.signals)
+    if req.outcome == "correct":
+        if req.candidate_capsule is None:
+            raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
+        _validate_candidate_selector_match(req.subject_kind, req.subject_id, req.candidate_capsule)
+        _normalize_compare_payload(repo_root, req.candidate_capsule)
+    elif req.candidate_capsule is not None:
+        raise HTTPException(status_code=400, detail=f"candidate_capsule is not allowed for outcome={req.outcome}")
+    if req.outcome == "confirm" and req.reason is not None:
+        raise HTTPException(status_code=400, detail="reason is not allowed for outcome=confirm")
+    if req.outcome in {"degrade", "conflict"} and not req.reason:
+        raise HTTPException(status_code=400, detail=f"reason is required for outcome={req.outcome}")
+
+    rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    auth.require_read_path(rel)
+    auth.require_write_path(rel)
+    active_path = safe_path(repo_root, rel)
+    active = ContinuityCapsule.model_validate(
+        _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now_iso = now.isoformat().replace("+00:00", "Z")
+    strongest_signal = _strongest_signal_kind(req.signals)
+    derived_status = CONTINUITY_SIGNAL_STATUS[strongest_signal]
+    evidence_refs = _signals_to_evidence_refs(req.signals)
+    compare_changed_fields: list[str] = []
+    result_outcome = req.outcome
+    updated = False
+
+    if req.outcome == "correct":
+        candidate = req.candidate_capsule
+        if candidate is None:
+            raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
+        compare_changed_fields = _compare_capsules(
+            _normalize_compare_payload(repo_root, active),
+            _normalize_compare_payload(repo_root, candidate),
+        )
+        if not compare_changed_fields:
+            result_outcome = "confirm"
+            final_capsule = active.model_copy(deep=True)
+        else:
+            updated = True
+            final_capsule = candidate.model_copy(deep=True)
+    else:
+        final_capsule = active.model_copy(deep=True)
+
+    final_capsule.verified_at = now_iso
+    final_capsule.verification_kind = strongest_signal  # type: ignore[assignment]
+
+    if result_outcome == "conflict":
+        final_capsule.verification_state = ContinuityVerificationState.model_validate({
+            "status": "conflicted",
+            "last_revalidated_at": now_iso,
+            "strongest_signal": strongest_signal,
+            "evidence_refs": evidence_refs,
+            "conflict_summary": req.reason,
+        })
+        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+            "status": "conflicted",
+            "reasons": [req.reason],
+            "last_checked_at": now_iso,
+        })
+    elif result_outcome == "degrade":
+        final_capsule.verification_state = ContinuityVerificationState.model_validate({
+            "status": derived_status,
+            "last_revalidated_at": now_iso,
+            "strongest_signal": strongest_signal,
+            "evidence_refs": evidence_refs,
+        })
+        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+            "status": "degraded",
+            "reasons": [req.reason],
+            "last_checked_at": now_iso,
+        })
+    else:
+        final_capsule.verification_state = ContinuityVerificationState.model_validate({
+            "status": derived_status,
+            "last_revalidated_at": now_iso,
+            "strongest_signal": strongest_signal,
+            "evidence_refs": evidence_refs,
+        })
+        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+            "status": "healthy",
+            "reasons": [],
+            "last_checked_at": now_iso,
+        })
+
+    _, canonical = _final_capsule_payload(repo_root, final_capsule)
+    _persist_active_capsule(
+        repo_root=repo_root,
+        gm=gm,
+        path=active_path,
+        canonical=canonical,
+        commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
+    )
+    audit(
+        auth,
+        "continuity_revalidate",
+        {
+            "subject_kind": req.subject_kind,
+            "subject_id": req.subject_id,
+            "path": rel,
+            "outcome": result_outcome,
+            "strongest_signal": strongest_signal,
+            "updated": updated,
+        },
+    )
+    return {
+        "ok": True,
+        "path": rel,
+        "outcome": result_outcome,
+        "updated": updated,
+        "verification_state": final_capsule.verification_state.model_dump(mode="json", exclude_none=True),
+        "capsule_health": final_capsule.capsule_health.model_dump(mode="json", exclude_none=True),
+        "latest_commit": gm.latest_commit(),
+    }
 
 
 def continuity_archive_service(
@@ -641,11 +1074,21 @@ def continuity_archive_service(
     active_path.unlink()
     try:
         committed = gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
-    except Exception:
-        _restore_failed_archive(active_path, archive_path, active_bytes)
+    except Exception as exc:
+        try:
+            _restore_failed_archive(active_path, archive_path, active_bytes)
+        except Exception as restore_exc:
+            raise RuntimeError(
+                f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}"
+            ) from exc
         raise
     if not committed:
-        _restore_failed_archive(active_path, archive_path, active_bytes)
+        try:
+            _restore_failed_archive(active_path, archive_path, active_bytes)
+        except Exception as restore_exc:
+            raise RuntimeError(
+                f"Continuity archive commit produced no changes; rollback failed: {restore_exc}"
+            ) from restore_exc
         raise RuntimeError("Continuity archive commit produced no changes")
 
     audit(
@@ -708,13 +1151,50 @@ def build_continuity_state(
         if not path.exists():
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             continue
-        capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
+        try:
+            capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
+        except HTTPException as exc:
+            if exc.status_code == 400 and len(selectors) > 1:
+                state["omitted_selectors"].append(_format_selector(kind, subject_id))
+                warnings.append(_qualify_warning(CONTINUITY_WARNING_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+                continue
+            raise
         phase, phase_warnings = _continuity_phase(capsule, now)
         warnings.extend(_qualify_warning(warning, kind, subject_id, multi_mode=multi_warning_mode) for warning in phase_warnings)
         if phase in {"expired", "expired_by_age"}:
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             continue
-        loaded.append({"selector": item, "capsule": capsule})
+        health_status, health_reasons = _capsule_health_summary(capsule)
+        loaded.append(
+            {
+                "selector": item,
+                "capsule": capsule,
+                "verification_status": _verification_status(capsule),
+                "health_status": health_status,
+                "health_reasons": health_reasons,
+            }
+        )
+
+    if not loaded:
+        if req.continuity_mode == "required":
+            raise HTTPException(status_code=404, detail="Continuity capsule not found")
+        state["warnings"] = warnings
+        return state
+
+    if req.continuity_verification_policy == "prefer_healthy":
+        loaded = sorted(
+            loaded,
+            key=lambda row: CONTINUITY_HEALTH_ORDER.get(str(row["health_status"]), CONTINUITY_HEALTH_ORDER["conflicted"]),
+        )
+    elif req.continuity_verification_policy == "require_healthy":
+        filtered: list[dict[str, Any]] = []
+        for row in loaded:
+            if row["health_status"] == "healthy":
+                filtered.append(row)
+                continue
+            selector = row["selector"]
+            state["omitted_selectors"].append(_format_selector(selector["subject_kind"], selector["subject_id"]))
+        loaded = filtered
 
     if not loaded:
         if req.continuity_mode == "required":
@@ -742,6 +1222,10 @@ def build_continuity_state(
             continue
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
+        if row["health_status"] == "degraded":
+            warnings.append(_qualify_warning(CONTINUITY_WARNING_DEGRADED, kind, subject_id, multi_mode=multi_warning_mode))
+        elif row["health_status"] == "conflicted":
+            warnings.append(_qualify_warning(CONTINUITY_WARNING_CONFLICTED, kind, subject_id, multi_mode=multi_warning_mode))
 
     if not trimmed_capsules:
         if req.continuity_mode == "required":

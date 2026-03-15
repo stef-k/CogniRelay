@@ -98,6 +98,8 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("memory.write", by_name)
         self.assertIn("recent.list", by_name)
         self.assertIn("continuity.read", by_name)
+        self.assertIn("continuity.compare", by_name)
+        self.assertIn("continuity.revalidate", by_name)
         self.assertIn("continuity.list", by_name)
         self.assertIn("continuity.archive", by_name)
         self.assertIn("peers.list", by_name)
@@ -188,6 +190,152 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         structured = res["result"]["structuredContent"]
         self.assertTrue(structured["ok"])
         self.assertEqual(structured["capsule"]["subject_id"], "stef")
+
+    def test_tools_call_continuity_compare_with_auth(self) -> None:
+        """Continuity compare should be invokable through MCP tool dispatch."""
+        candidate_capsule = {
+            "schema_version": "1.0",
+            "subject_kind": "user",
+            "subject_id": "stef",
+            "updated_at": "2026-03-15T14:30:22Z",
+            "verified_at": "2026-03-15T14:30:22Z",
+            "verification_kind": "self_review",
+            "source": {
+                "producer": "handoff-hook",
+                "update_reason": "pre_compaction",
+                "inputs": ["memory/core/identity.md"],
+            },
+            "continuity": {
+                "top_priorities": ["reply"],
+                "active_concerns": ["none"],
+                "active_constraints": ["stay deterministic"],
+                "open_loops": ["follow up"],
+                "stance_summary": "keep context stable",
+                "drift_signals": [],
+            },
+            "confidence": {"continuity": 0.82, "relationship_model": 0.0},
+        }
+        req = {
+            "jsonrpc": "2.0",
+            "id": 75,
+            "method": "tools/call",
+            "params": {
+                "name": "continuity.compare",
+                "arguments": {
+                    "subject_kind": "user",
+                    "subject_id": "stef",
+                    "candidate_capsule": candidate_capsule,
+                    "signals": [
+                        {
+                            "kind": "system_check",
+                            "source_ref": "checks/continuity.json",
+                            "observed_at": "2026-03-15T14:30:22Z",
+                            "summary": "verification passed",
+                        }
+                    ],
+                },
+            },
+        }
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes={"read:files"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            (continuity_dir / "user-stef.json").write_text(json.dumps(candidate_capsule), encoding="utf-8")
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
+                "app.main.require_auth", return_value=auth
+            ):
+                res = mcp_rpc(req, authorization="Bearer token")
+
+        self.assertIn("result", res)
+        structured = res["result"]["structuredContent"]
+        self.assertTrue(structured["ok"])
+        self.assertTrue(structured["identical"])
+        self.assertEqual(structured["recommended_outcome"], "confirm")
+
+    def test_tools_call_continuity_revalidate_with_auth(self) -> None:
+        """Continuity revalidate should be invokable through MCP tool dispatch."""
+        req = {
+            "jsonrpc": "2.0",
+            "id": 76,
+            "method": "tools/call",
+            "params": {
+                "name": "continuity.revalidate",
+                "arguments": {
+                    "subject_kind": "user",
+                    "subject_id": "stef",
+                    "outcome": "confirm",
+                    "signals": [
+                        {
+                            "kind": "peer_confirmation",
+                            "source_ref": "messages/thread/peer-confirmation.json",
+                            "observed_at": "2026-03-15T14:30:22Z",
+                            "summary": "peer confirmed context",
+                        }
+                    ],
+                },
+            },
+        }
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes={"write:projects", "read:files"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            (continuity_dir / "user-stef.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "subject_kind": "user",
+                        "subject_id": "stef",
+                        "updated_at": "2026-03-15T14:30:22Z",
+                        "verified_at": "2026-03-15T14:30:22Z",
+                        "verification_kind": "self_review",
+                        "source": {
+                            "producer": "handoff-hook",
+                            "update_reason": "pre_compaction",
+                            "inputs": ["memory/core/identity.md"],
+                        },
+                        "continuity": {
+                            "top_priorities": ["reply"],
+                            "active_concerns": ["none"],
+                            "active_constraints": ["stay deterministic"],
+                            "open_loops": ["follow up"],
+                            "stance_summary": "keep context stable",
+                            "drift_signals": [],
+                        },
+                        "confidence": {"continuity": 0.82, "relationship_model": 0.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
+                "app.main.require_auth", return_value=auth
+            ):
+                res = mcp_rpc(req, authorization="Bearer token")
+
+        self.assertIn("result", res)
+        structured = res["result"]["structuredContent"]
+        self.assertTrue(structured["ok"])
+        self.assertEqual(structured["outcome"], "confirm")
+        self.assertEqual(structured["verification_state"]["status"], "peer_confirmed")
 
     def test_tools_call_system_manifest_without_auth(self) -> None:
         """Public tools should be invokable without auth when designed that way."""
