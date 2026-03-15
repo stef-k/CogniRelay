@@ -35,6 +35,7 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `POST /v1/search`: query-driven search across indexed content
 - `POST /v1/recent`: latest indexed items without a search query
 - `POST /v1/context/retrieve`: compact continuity-oriented context bundle
+- `POST /v1/continuity/upsert`: create or replace one continuity capsule
 - `POST /v1/context/snapshot`: persist deterministic context snapshot
 - `GET /v1/context/snapshot/{snapshot_id}`: load a persisted snapshot
 - `POST /v1/compact/run`: compaction planning and summary/report generation
@@ -44,6 +45,8 @@ Notable behavior:
 - `POST /v1/search` matches terms, not strict phrases, for multi-word queries
 - `POST /v1/recent` is queryless and focused on recency
 - `POST /v1/context/retrieve` is continuity-shaped output rather than a raw ranked search dump
+- `POST /v1/context/retrieve` now supports optional continuity subject selection and returns additive `continuity_state` metadata when available
+- `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
 
 ## Peers and messaging
 
