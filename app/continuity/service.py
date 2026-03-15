@@ -252,11 +252,11 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | 
         "canonical_sources",
         "freshness",
         "attention_policy.presence_bias_overrides",
-        "relationship_model.sensitivity_notes",
-        "relationship_model.preferred_style",
-        "retrieval_hints.avoid",
-        "retrieval_hints.load_next",
-        "working_hypotheses",
+        "continuity.relationship_model.sensitivity_notes",
+        "continuity.relationship_model.preferred_style",
+        "continuity.retrieval_hints.avoid",
+        "continuity.retrieval_hints.load_next",
+        "continuity.working_hypotheses",
     ):
         if _estimated_tokens(_render_value(payload)) <= max_tokens:
             break

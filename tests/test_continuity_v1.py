@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.continuity.service import _trim_capsule
 from app.main import continuity_upsert, context_retrieve
 from app.models import ContinuityUpsertRequest, ContextRetrieveRequest
 
@@ -244,6 +245,19 @@ class TestContinuityV1(unittest.TestCase):
                     continuity_upsert(req=req, auth=_AuthStub())
             self.assertEqual(cm.exception.status_code, 400)
 
+    def test_continuity_upsert_invalid_load_next_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            payload = self._capsule_payload()
+            payload["continuity"]["retrieval_hints"] = {"load_next": ["../escape.json"]}
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 400)
+
     def test_continuity_upsert_oversized_capsule_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -257,6 +271,25 @@ class TestContinuityV1(unittest.TestCase):
                     continuity_upsert(req=req, auth=_AuthStub())
             self.assertEqual(cm.exception.status_code, 400)
 
+    def test_context_retrieve_expired_capsule_not_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            verified_at = (datetime.now(timezone.utc) - timedelta(days=90)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            capsule = self._capsule_payload(verified_at=verified_at)
+            (continuity_dir / "user-stef.json").write_text(json.dumps(capsule), encoding="utf-8")
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = context_retrieve(
+                    req=ContextRetrieveRequest(task="resume", subject_kind="user", subject_id="stef"),
+                    auth=_AuthStub(),
+                )
+            state = out["bundle"]["continuity_state"]
+            self.assertFalse(state["present"])
+            self.assertIn("continuity_expired", state["warnings"])
+
     def test_continuity_upsert_metadata_scalar_only(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -269,6 +302,35 @@ class TestContinuityV1(unittest.TestCase):
                 with self.assertRaises(HTTPException) as cm:
                     continuity_upsert(req=req, auth=_AuthStub())
             self.assertEqual(cm.exception.status_code, 400)
+
+    def test_trim_capsule_drops_lower_priority_optional_fields_before_constraints(self) -> None:
+        capsule = self._capsule_payload()
+        capsule["continuity"]["working_hypotheses"] = [
+            "x" * 160,
+            "y" * 160,
+        ]
+        capsule["continuity"]["relationship_model"] = {
+            "trust_level": "high",
+            "preferred_style": ["direct", "technical", "low-fluff"],
+            "sensitivity_notes": ["keep replies concise"],
+        }
+        capsule["continuity"]["retrieval_hints"] = {
+            "must_include": ["recent commitments", "current blockers"],
+            "avoid": ["raw logs", "broad recap"],
+            "load_next": ["memory/core/identity.md"],
+        }
+        capsule["metadata"] = {"trace": "z" * 400}
+        capsule["canonical_sources"] = ["memory/core/identity.md"]
+        capsule["attention_policy"] = {"presence_bias_overrides": ["long-horizon work first"]}
+        trimmed = _trim_capsule(capsule, 180)
+        self.assertIsNotNone(trimmed)
+        assert trimmed is not None
+        self.assertEqual(trimmed["continuity"]["active_constraints"], ["do not regress current workflows"])
+        self.assertNotIn("working_hypotheses", trimmed["continuity"])
+        self.assertNotIn("relationship_model", trimmed["continuity"])
+        self.assertNotIn("canonical_sources", trimmed)
+        self.assertNotIn("metadata", trimmed)
+        self.assertNotIn("freshness", trimmed)
 
 
 if __name__ == "__main__":
