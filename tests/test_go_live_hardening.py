@@ -1,3 +1,5 @@
+"""Tests for go-live hardening features added around the API surface."""
+
 import io
 import json
 import tarfile
@@ -34,28 +36,40 @@ from app.models import (
 
 
 class _AuthStub:
+    """Auth stub that permits the scopes used by hardening tests."""
+
     peer_id = "peer-admin"
 
     def require(self, _scope: str) -> None:
+        """Accept any requested scope for test purposes."""
         return None
 
     def require_write_path(self, _path: str) -> None:
+        """Accept any requested write path for test purposes."""
         return None
 
     def require_read_path(self, _path: str) -> None:
+        """Accept any requested read path for test purposes."""
         return None
 
 
 class _GitManagerStub:
+    """Git manager stub that pretends every file commit succeeds."""
+
     def commit_file(self, _path: Path, _message: str) -> bool:
+        """Report a successful commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
+        """Return a stable fake commit hash."""
         return "test-sha"
 
 
 class TestGoLiveHardening(unittest.TestCase):
+    """Validate hardening behaviors that should remain stable across releases."""
+
     def _settings(self, repo_root: Path, **overrides) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
         payload = {
             "repo_root": repo_root,
             "auto_init_git": False,
@@ -68,6 +82,7 @@ class TestGoLiveHardening(unittest.TestCase):
         return Settings(**payload)
 
     def test_contract_version_is_exposed_consistently(self) -> None:
+        """Contract version should stay aligned across the exposed metadata endpoints."""
         with tempfile.TemporaryDirectory() as td:
             settings = self._settings(Path(td), contract_version="2026-03-01")
             with patch("app.main.get_settings", return_value=settings):
@@ -81,6 +96,7 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertEqual(len(c["tool_catalog_hash"]), 64)
 
     def test_governance_policy_default_is_available(self) -> None:
+        """Governance policy endpoint should expose the default policy payload."""
         with tempfile.TemporaryDirectory() as td:
             settings = self._settings(Path(td))
             with patch("app.main._services", return_value=(settings, _GitManagerStub())):
@@ -91,6 +107,7 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertIn("scope_templates", out["policy"])
 
     def test_trust_transition_flow_enforces_policy(self) -> None:
+        """Trust transitions should follow the configured peer trust policy."""
         with tempfile.TemporaryDirectory() as td:
             settings = self._settings(Path(td))
             gm = _GitManagerStub()
@@ -122,6 +139,7 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertEqual(err.exception.status_code, 409)
 
     def test_backup_create_and_restore_validation(self) -> None:
+        """Backup creation and restore validation should succeed on a valid archive."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
@@ -143,6 +161,7 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertTrue(restore["index_validation"]["ok"])
 
     def test_backup_restore_rejects_unsafe_archive_paths(self) -> None:
+        """Restore tests should reject backup archives with unsafe extraction paths."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             (repo_root / "backups").mkdir(parents=True, exist_ok=True)
@@ -163,6 +182,7 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertIn("unsafe path", str(err.exception.detail).lower())
 
     def test_external_key_store_keeps_secret_out_of_repo_file(self) -> None:
+        """External key-store mode should keep raw secrets out of repo-tracked files."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             key_store_path = repo_root / "external" / "security_keys.json"
@@ -184,6 +204,7 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertEqual(external["keys"]["key-ext"]["secret"], "secret-ext")
 
     def test_verification_failure_throttle_is_enforced(self) -> None:
+        """Repeated signature failures should trigger the verification throttle."""
         with tempfile.TemporaryDirectory() as td:
             settings = self._settings(Path(td), verify_failure_limit=1, verify_failure_window_seconds=600)
             gm = _GitManagerStub()
@@ -217,6 +238,7 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertEqual(second["reason"], "verification_throttled")
 
     def test_rate_limit_and_payload_limit_are_enforced(self) -> None:
+        """Rate limiting and payload limits should reject abusive requests."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings_rate = self._settings(repo_root, token_rate_limit_per_minute=1, ip_rate_limit_per_minute=100)
