@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
-from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
@@ -1036,8 +1035,6 @@ def replication_push(req: ReplicationPushRequest, auth: AuthContext = Depends(re
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         load_peers_registry=load_peers_registry,
-        urlopen_fn=urlopen,
-        url_request_factory=UrlRequest,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 

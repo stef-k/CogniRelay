@@ -487,10 +487,15 @@ def replication_push_service(
     enforce_rate_limit: Callable[[Any, AuthContext, str], None],
     enforce_payload_limit: Callable[[Any, Any, str], None],
     load_peers_registry: Callable[[Path], dict[str, Any]],
-    urlopen_fn: Callable[..., Any] = urlopen,
-    url_request_factory: Callable[..., Any] = UrlRequest,
+    urlopen_fn: Callable[..., Any] | None = None,
+    url_request_factory: Callable[..., Any] | None = None,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict:
+    if urlopen_fn is None:
+        urlopen_fn = urlopen
+    if url_request_factory is None:
+        url_request_factory = UrlRequest
+
     enforce_rate_limit(settings, auth, "replication_push")
     auth.require("admin:peers")
 
