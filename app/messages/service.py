@@ -1,3 +1,5 @@
+"""Messaging, relay, replay, and delivery-state business logic."""
+
 from __future__ import annotations
 
 import json
@@ -16,10 +18,12 @@ DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
 
 def _delivery_state_path(repo_root: Path) -> Path:
+    """Return the repository path for delivery-state persistence."""
     return safe_path(repo_root, DELIVERY_STATE_REL)
 
 
 def load_delivery_state(repo_root: Path) -> dict[str, Any]:
+    """Load normalized delivery state from disk."""
     path = _delivery_state_path(repo_root)
     if not path.exists():
         return {"version": "1", "records": {}, "idempotency": {}}
@@ -39,12 +43,14 @@ def load_delivery_state(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_delivery_state(repo_root: Path, state: dict[str, Any]) -> Path:
+    """Persist the delivery-state file."""
     path = _delivery_state_path(repo_root)
     write_text_file(path, json.dumps(state, ensure_ascii=False, indent=2))
     return path
 
 
 def effective_delivery_status(record: dict[str, Any], now: datetime, *, parse_iso: Callable[[str | None], datetime | None]) -> str:
+    """Return the effective delivery status for a record at the given time."""
     status = str(record.get("status") or "pending_ack")
     if status != "pending_ack":
         return status
@@ -57,12 +63,14 @@ def effective_delivery_status(record: dict[str, Any], now: datetime, *, parse_is
 
 
 def delivery_record_view(record: dict[str, Any], now: datetime, *, parse_iso: Callable[[str | None], datetime | None]) -> dict[str, Any]:
+    """Return a delivery record with the computed effective status attached."""
     out = dict(record)
     out["effective_status"] = effective_delivery_status(record, now, parse_iso=parse_iso)
     return out
 
 
 def _idempotency_scope_key(sender: str, recipient: str, idempotency_key: str) -> str:
+    """Build the stable idempotency key used for send deduplication."""
     return f"{sender}|{recipient}|{idempotency_key}"
 
 

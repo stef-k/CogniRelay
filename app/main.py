@@ -1,3 +1,5 @@
+"""FastAPI route composition for the CogniRelay service."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -137,6 +139,7 @@ app = FastAPI(title="CogniRelay", version="0.3.0")
 
 
 def _services() -> tuple:
+    """Load settings and ensure the repository-backed git manager is ready."""
     settings = get_settings()
     gm = GitManager(
         repo_root=settings.repo_root,
@@ -148,19 +151,23 @@ def _services() -> tuple:
 
 
 def _schema_for_model(model_cls: Any) -> dict[str, Any]:
+    """Return the JSON schema for a Pydantic model class."""
     return model_cls.model_json_schema()
 
 
 def _tool_catalog() -> list[dict[str, Any]]:
+    """Build the current tool catalog from the registered models."""
     return tool_catalog(_schema_for_model)
 
 
 def _workflow_catalog() -> list[dict[str, Any]]:
+    """Build the current workflow catalog."""
     return workflow_catalog()
 
 
 @app.get("/v1/discovery")
 def discovery() -> dict:
+    """Return the top-level machine-readable discovery payload."""
     settings = get_settings()
     tools = _tool_catalog()
     workflows = _workflow_catalog()
@@ -169,6 +176,7 @@ def discovery() -> dict:
 
 @app.get("/v1/discovery/tools")
 def discovery_tools() -> dict:
+    """Return the machine-readable tool catalog payload."""
     settings = get_settings()
     tools = _tool_catalog()
     return discovery_tools_payload(settings.contract_version, tools=tools)
@@ -176,22 +184,26 @@ def discovery_tools() -> dict:
 
 @app.get("/v1/discovery/workflows")
 def discovery_workflows() -> dict:
+    """Return the machine-readable workflow catalog payload."""
     workflows = _workflow_catalog()
     return discovery_workflows_payload(workflows=workflows)
 
 
 @app.get("/.well-known/cognirelay.json")
 def well_known_cognirelay() -> dict:
+    """Serve the well-known CogniRelay discovery document."""
     return well_known_cognirelay_payload(discovery())
 
 
 @app.get("/.well-known/mcp.json")
 def well_known_mcp() -> dict:
+    """Serve the well-known MCP-compatible descriptor."""
     settings = get_settings()
     return well_known_mcp_payload(settings.contract_version)
 
 
 def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext | None) -> dict[str, Any]:
+    """Compose main-route callbacks into the discovery tool dispatcher."""
     return invoke_tool_by_name(
         name,
         arguments,
@@ -262,6 +274,7 @@ def mcp_rpc(
     x_real_ip: str | None = Header(default=None, alias="X-Real-IP"),
     http_request: FastAPIRequest = None,  # type: ignore[assignment]
 ) -> Any:
+    """Handle MCP-compatible JSON-RPC requests over HTTP."""
     # When called directly in unit tests, FastAPI's Header sentinel can appear here.
     if authorization is not None and not isinstance(authorization, str):
         authorization = None
@@ -314,6 +327,7 @@ def mcp_rpc(
 
 @app.get("/health")
 def health() -> dict:
+    """Return service liveness, repo state, and contract metadata."""
     settings, gm = _services()
     return health_payload(
         app_version=app.version,
@@ -327,6 +341,7 @@ def health() -> dict:
 
 @app.get("/capabilities")
 def capabilities() -> dict:
+    """Return the service feature flag payload."""
     return capabilities_payload()
 
 
@@ -339,24 +354,28 @@ def manifest() -> dict:
 
 @app.get("/v1/contracts")
 def contracts() -> dict:
+    """Return contract version metadata and compatibility policy."""
     settings = get_settings()
     return contracts_payload(contract_version=settings.contract_version, tools=_tool_catalog())
 
 
 @app.get("/v1/governance/policy")
 def governance_policy() -> dict:
+    """Return the machine-readable governance policy pack."""
     settings, _ = _services()
     return governance_policy_service(repo_root=settings.repo_root)
 
 
 @app.get("/v1/ops/catalog")
 def ops_catalog(auth: AuthContext = Depends(require_auth)) -> dict:
+    """Return the host-local operations catalog."""
     settings, _ = _services()
     return ops_catalog_service(settings=settings, auth=auth, audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail))
 
 
 @app.get("/v1/ops/status")
 def ops_status(limit: int = Query(default=50, ge=1, le=500), auth: AuthContext = Depends(require_auth)) -> dict:
+    """Return recent host-local operations status entries."""
     settings, _ = _services()
     return ops_status_service(
         repo_root=settings.repo_root,
@@ -368,6 +387,7 @@ def ops_status(limit: int = Query(default=50, ge=1, le=500), auth: AuthContext =
 
 @app.get("/v1/ops/schedule/export")
 def ops_schedule_export(format: str = Query(default="systemd"), auth: AuthContext = Depends(require_auth)) -> dict:
+    """Export scheduler snippets for host-local maintenance jobs."""
     settings, _ = _services()
     return ops_schedule_export_service(
         settings=settings,
@@ -379,6 +399,7 @@ def ops_schedule_export(format: str = Query(default="systemd"), auth: AuthContex
 
 @app.post("/v1/ops/run")
 def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Execute one host-local maintenance operation."""
     settings, _ = _services()
     return ops_run_service(
         settings=settings,
@@ -412,6 +433,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
 
 @app.post("/v1/write")
 def write_file(req: WriteRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Write a text file into the repository and commit it if changed."""
     settings, gm = _services()
     return write_file_service(
         repo_root=settings.repo_root,
@@ -428,6 +450,7 @@ def write_file(req: WriteRequest, auth: AuthContext = Depends(require_auth)) -> 
 
 @app.get("/v1/read")
 def read_file(path: str = Query(...), auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read a repository file by path after auth and path checks."""
     settings, _ = _services()
     return read_file_service(
         repo_root=settings.repo_root,
@@ -439,6 +462,7 @@ def read_file(path: str = Query(...), auth: AuthContext = Depends(require_auth))
 
 @app.post("/v1/append")
 def append_record(req: AppendRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Append one JSONL record to a repository file and commit it if changed."""
     settings, gm = _services()
     return append_record_service(
         repo_root=settings.repo_root,
@@ -455,6 +479,7 @@ def append_record(req: AppendRequest, auth: AuthContext = Depends(require_auth))
 
 @app.post("/v1/index/rebuild")
 def index_rebuild(auth: AuthContext = Depends(require_auth)) -> dict:
+    """Rebuild the full derived search index set."""
     settings, gm = _services()
     return index_rebuild_service(
         repo_root=settings.repo_root,
@@ -466,6 +491,7 @@ def index_rebuild(auth: AuthContext = Depends(require_auth)) -> dict:
 
 @app.post("/v1/index/rebuild-incremental")
 def index_rebuild_incremental(auth: AuthContext = Depends(require_auth)) -> dict:
+    """Incrementally rebuild derived indexes from repository changes."""
     settings, gm = _services()
     return index_rebuild_incremental_service(
         repo_root=settings.repo_root,
@@ -477,12 +503,14 @@ def index_rebuild_incremental(auth: AuthContext = Depends(require_auth)) -> dict
 
 @app.get("/v1/index/status")
 def index_status(auth: AuthContext = Depends(require_auth)) -> dict:
+    """Return the status of generated search index artifacts."""
     settings, _ = _services()
     return index_status_service(repo_root=settings.repo_root, auth=auth)
 
 
 @app.post("/v1/search")
 def search(req: SearchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Search indexed repository content."""
     settings, _ = _services()
     return search_service(
         repo_root=settings.repo_root,
@@ -494,6 +522,7 @@ def search(req: SearchRequest, auth: AuthContext = Depends(require_auth)) -> dic
 
 @app.post("/v1/recent")
 def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """List recent repository files without a search query."""
     settings, _ = _services()
     return recent_list_service(
         repo_root=settings.repo_root,
@@ -505,6 +534,7 @@ def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -
 
 @app.post("/v1/continuity/upsert")
 def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Store or replace a continuity capsule."""
     settings, gm = _services()
     return continuity_upsert_service(
         repo_root=settings.repo_root,
@@ -517,6 +547,7 @@ def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(
 
 @app.post("/v1/context/retrieve")
 def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Build a continuation bundle for a task or subject."""
     settings, _ = _services()
     return context_retrieve_service(
         repo_root=settings.repo_root,
@@ -528,6 +559,7 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
 
 @app.get("/v1/peers")
 def peers_list(auth: AuthContext = Depends(require_auth)) -> dict:
+    """List known peers from the repository registry."""
     settings, _ = _services()
     return peers_list_service(
         repo_root=settings.repo_root,
@@ -538,6 +570,7 @@ def peers_list(auth: AuthContext = Depends(require_auth)) -> dict:
 
 @app.post("/v1/peers/register")
 def peers_register(req: PeerRegisterRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Create or update a peer registry record."""
     settings, gm = _services()
     return peers_register_service(
         repo_root=settings.repo_root,
@@ -554,6 +587,7 @@ def peers_register(req: PeerRegisterRequest, auth: AuthContext = Depends(require
 
 @app.post("/v1/peers/{peer_id}/trust")
 def peers_trust_transition(peer_id: str, req: PeerTrustTransitionRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Apply a peer trust-level transition with policy enforcement."""
     settings, gm = _services()
     return peers_trust_transition_service(
         repo_root=settings.repo_root,
@@ -571,6 +605,7 @@ def peers_trust_transition(peer_id: str, req: PeerTrustTransitionRequest, auth: 
 
 @app.get("/v1/peers/{peer_id}/manifest")
 def peer_manifest(peer_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Fetch and return a peer's advertised manifest."""
     settings, _ = _services()
     return peer_manifest_service(
         repo_root=settings.repo_root,
@@ -582,6 +617,7 @@ def peer_manifest(peer_id: str, auth: AuthContext = Depends(require_auth)) -> di
 
 @app.post("/v1/context/snapshot")
 def context_snapshot_create(req: ContextSnapshotRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Create and persist a deterministic context snapshot."""
     settings, gm = _services()
     return context_snapshot_create_service(
         repo_root=settings.repo_root,
@@ -596,6 +632,7 @@ def context_snapshot_create(req: ContextSnapshotRequest, auth: AuthContext = Dep
 
 @app.get("/v1/context/snapshot/{snapshot_id}")
 def context_snapshot_get(snapshot_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Load a stored context snapshot by id."""
     settings, _ = _services()
     return context_snapshot_get_service(
         repo_root=settings.repo_root,
@@ -607,6 +644,7 @@ def context_snapshot_get(snapshot_id: str, auth: AuthContext = Depends(require_a
 
 @app.post("/v1/tasks")
 def tasks_create(req: TaskCreateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Create a shared task record."""
     settings, gm = _services()
     return tasks_create_service(
         repo_root=settings.repo_root,
@@ -619,6 +657,7 @@ def tasks_create(req: TaskCreateRequest, auth: AuthContext = Depends(require_aut
 
 @app.patch("/v1/tasks/{task_id}")
 def tasks_update(task_id: str, req: TaskUpdateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Update an existing shared task record."""
     settings, gm = _services()
     return tasks_update_service(
         repo_root=settings.repo_root,
@@ -639,6 +678,7 @@ def tasks_query(
     limit: int = Query(default=100, ge=1, le=500),
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
+    """Query shared task records with optional filters."""
     settings, _ = _services()
     return tasks_query_service(
         repo_root=settings.repo_root,
@@ -654,6 +694,7 @@ def tasks_query(
 
 @app.post("/v1/docs/patch/propose")
 def docs_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Propose a documentation patch against the repository."""
     settings, gm = _services()
     return docs_patch_propose_service(
         repo_root=settings.repo_root,
@@ -667,6 +708,7 @@ def docs_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(req
 
 @app.post("/v1/code/patch/propose")
 def code_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Propose a code patch against the repository."""
     settings, gm = _services()
     return code_patch_propose_service(
         repo_root=settings.repo_root,
@@ -680,6 +722,7 @@ def code_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(req
 
 @app.post("/v1/docs/patch/apply")
 def docs_patch_apply(req: PatchApplyRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Apply a previously proposed documentation patch."""
     settings, gm = _services()
     return docs_patch_apply_service(
         repo_root=settings.repo_root,
@@ -694,6 +737,7 @@ def docs_patch_apply(req: PatchApplyRequest, auth: AuthContext = Depends(require
 
 @app.post("/v1/code/checks/run")
 def code_checks_run(req: CodeCheckRunRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Run one configured code-check profile against a ref."""
     settings, gm = _services()
     return code_checks_run_service(
         repo_root=settings.repo_root,
@@ -707,6 +751,7 @@ def code_checks_run(req: CodeCheckRunRequest, auth: AuthContext = Depends(requir
 
 @app.post("/v1/code/merge")
 def code_merge(req: CodeMergeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Merge one source ref into a target ref after required checks."""
     settings, _ = _services()
     return code_merge_service(
         repo_root=settings.repo_root,
@@ -717,6 +762,7 @@ def code_merge(req: CodeMergeRequest, auth: AuthContext = Depends(require_auth))
     )
 @app.post("/v1/messages/send")
 def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Send a direct message with optional signed-ingress enforcement."""
     settings, gm = _services()
     return messages_send_service(
         settings=settings,
@@ -735,6 +781,7 @@ def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_a
 
 @app.post("/v1/messages/ack")
 def messages_ack(req: MessageAckRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Acknowledge a previously delivered message."""
     settings, gm = _services()
     return messages_ack_service(
         repo_root=settings.repo_root,
@@ -754,6 +801,7 @@ def messages_pending(
     limit: int = Query(default=50, ge=1, le=500),
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
+    """List pending or terminal messages for a recipient."""
     settings, _ = _services()
     return messages_pending_service(
         repo_root=settings.repo_root,
@@ -769,6 +817,7 @@ def messages_pending(
 
 @app.get("/v1/messages/inbox")
 def messages_inbox(recipient: str = Query(...), limit: int = Query(default=20, ge=1, le=200), auth: AuthContext = Depends(require_auth)) -> dict:
+    """Return inbox messages for a recipient."""
     settings, _ = _services()
     return messages_inbox_service(
         repo_root=settings.repo_root,
@@ -781,12 +830,14 @@ def messages_inbox(recipient: str = Query(...), limit: int = Query(default=20, g
 
 @app.get("/v1/messages/thread")
 def messages_thread(thread_id: str = Query(...), limit: int = Query(default=100, ge=1, le=1000), auth: AuthContext = Depends(require_auth)) -> dict:
+    """Return messages for one thread."""
     settings, _ = _services()
     return messages_thread_service(repo_root=settings.repo_root, auth=auth, thread_id=thread_id, limit=limit)
 
 
 @app.post("/v1/relay/forward")
 def relay_forward(req: RelayForwardRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Forward a message through the relay pipeline."""
     settings, gm = _services()
     return relay_forward_service(
         settings=settings,
@@ -809,6 +860,7 @@ def security_tokens_list(
     include_inactive: bool = Query(default=False),
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
+    """List issued tokens with optional status and peer filters."""
     settings, _ = _services()
     return security_tokens_list_service(
         repo_root=settings.repo_root,
@@ -823,6 +875,7 @@ def security_tokens_list(
 
 @app.post("/v1/security/tokens/issue")
 def security_tokens_issue(req: SecurityTokenIssueRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Issue a new peer token."""
     settings, gm = _services()
     return security_tokens_issue_service(
         repo_root=settings.repo_root,
@@ -839,6 +892,7 @@ def security_tokens_issue(req: SecurityTokenIssueRequest, auth: AuthContext = De
 
 @app.post("/v1/security/tokens/revoke")
 def security_tokens_revoke(req: SecurityTokenRevokeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Revoke one or more peer tokens."""
     settings, gm = _services()
     return security_tokens_revoke_service(
         repo_root=settings.repo_root,
@@ -856,6 +910,7 @@ def security_tokens_revoke(req: SecurityTokenRevokeRequest, auth: AuthContext = 
 
 @app.post("/v1/security/tokens/rotate")
 def security_tokens_rotate(req: SecurityTokenRotateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Rotate an existing peer token and optionally update its metadata."""
     settings, gm = _services()
     return security_tokens_rotate_service(
         repo_root=settings.repo_root,
@@ -870,6 +925,7 @@ def security_tokens_rotate(req: SecurityTokenRotateRequest, auth: AuthContext = 
     )
 @app.post("/v1/security/keys/rotate")
 def security_keys_rotate(req: SecurityKeysRotateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Rotate signing keys used for signed ingress and verification."""
     settings, gm = _services()
     return security_keys_rotate_service(
         repo_root=settings.repo_root,
@@ -885,6 +941,7 @@ def security_keys_rotate(req: SecurityKeysRotateRequest, auth: AuthContext = Dep
 
 @app.post("/v1/messages/verify")
 def messages_verify(req: MessageVerifyRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Verify a signed payload without sending or relaying it."""
     settings, gm = _services()
     return messages_verify_service(
         settings=settings,
@@ -901,6 +958,7 @@ def messages_verify(req: MessageVerifyRequest, auth: AuthContext = Depends(requi
 
 @app.get("/v1/metrics")
 def metrics(auth: AuthContext = Depends(require_auth)) -> dict:
+    """Return aggregated service metrics and alarm indicators."""
     settings, _ = _services()
     return metrics_service(
         settings=settings,
@@ -915,6 +973,7 @@ def metrics(auth: AuthContext = Depends(require_auth)) -> dict:
 
 @app.post("/v1/replay/messages")
 def replay_messages(req: MessageReplayRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Replay a previously failed or dead-lettered message."""
     settings, gm = _services()
     return replay_messages_service(
         settings=settings,
@@ -928,6 +987,7 @@ def replay_messages(req: MessageReplayRequest, auth: AuthContext = Depends(requi
 
 @app.post("/v1/replication/pull")
 def replication_pull(req: ReplicationPullRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Apply inbound replicated file state to the local repository."""
     settings, gm = _services()
     return replication_pull_service(
         settings=settings,
@@ -943,6 +1003,7 @@ def replication_pull(req: ReplicationPullRequest, auth: AuthContext = Depends(re
 
 @app.post("/v1/replication/push")
 def replication_push(req: ReplicationPushRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Push local replicated file state to another peer."""
     settings, gm = _services()
     return replication_push_service(
         settings=settings,
@@ -959,6 +1020,7 @@ def replication_push(req: ReplicationPushRequest, auth: AuthContext = Depends(re
 
 @app.post("/v1/backup/create")
 def backup_create(req: BackupCreateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Create a repository backup archive."""
     settings, gm = _services()
     return backup_create_service(
         settings=settings,
@@ -973,6 +1035,7 @@ def backup_create(req: BackupCreateRequest, auth: AuthContext = Depends(require_
 
 @app.post("/v1/backup/restore-test")
 def backup_restore_test(req: BackupRestoreTestRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Validate that a backup archive can be restored safely."""
     settings, _ = _services()
     return backup_restore_test_service(
         settings=settings,
@@ -985,6 +1048,7 @@ def backup_restore_test(req: BackupRestoreTestRequest, auth: AuthContext = Depen
     )
 @app.post("/v1/compact/run")
 def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Generate a compaction plan for memory and summary candidates."""
     settings, gm = _services()
     return compact_run_service(
         settings=settings,
@@ -998,4 +1062,5 @@ def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_, exc: Exception):
+    """Return a normalized JSON error payload for uncaught exceptions."""
     return JSONResponse(status_code=500, content={"ok": False, "error": type(exc).__name__, "detail": str(exc)})

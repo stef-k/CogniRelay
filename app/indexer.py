@@ -1,3 +1,5 @@
+"""Derived indexing and local search helpers for repository content."""
+
 from __future__ import annotations
 
 import json
@@ -15,19 +17,23 @@ FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 
 def _snippet(text: str, limit: int = 240) -> str:
+    """Collapse text into a single-line snippet with a character cap."""
     t = " ".join(text.split())
     return t[:limit] + ("..." if len(t) > limit else "")
 
 
 def _extract_tags(text: str) -> List[str]:
+    """Extract hashtag-style tags from text."""
     return sorted(set(TAG_REGEX.findall(text)))
 
 
 def _extract_words(text: str) -> List[str]:
+    """Extract lowercased indexable words from text."""
     return [w.lower() for w in WORD_REGEX.findall(text)]
 
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:
+    """Parse a minimal Markdown frontmatter block into a flat mapping."""
     m = FRONTMATTER_RE.match(text)
     if not m:
         return {}
@@ -41,6 +47,7 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
 
 
 def _iter_text_files(repo_root: Path):
+    """Yield repository files eligible for indexing."""
     for path in repo_root.rglob('*'):
         if not path.is_file():
             continue
@@ -59,6 +66,7 @@ def _iter_text_files(repo_root: Path):
 
 
 def _record_for_file(repo_root: Path, path: Path) -> dict[str, Any] | None:
+    """Build one index record for a file or return ``None`` on read failure."""
     rel = str(path.relative_to(repo_root))
     try:
         content = path.read_text(encoding='utf-8', errors='ignore')
@@ -88,16 +96,19 @@ def _record_for_file(repo_root: Path, path: Path) -> dict[str, Any] | None:
 
 
 def _index_dir(repo_root: Path) -> Path:
+    """Return the directory containing derived index artifacts."""
     d = repo_root / 'index'
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _sqlite_path(repo_root: Path) -> Path:
+    """Return the SQLite FTS database path."""
     return _index_dir(repo_root) / 'search.db'
 
 
 def _ensure_sqlite(conn: sqlite3.Connection) -> None:
+    """Create the SQLite tables needed for search if they do not exist."""
     conn.execute('PRAGMA journal_mode=DELETE;')
     conn.execute('CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, type TEXT, modified_at TEXT, mtime_ns INTEGER, size INTEGER, importance REAL, snippet TEXT)')
     conn.execute('CREATE TABLE IF NOT EXISTS tags (tag TEXT, path TEXT, PRIMARY KEY(tag, path))')
@@ -105,6 +116,7 @@ def _ensure_sqlite(conn: sqlite3.Connection) -> None:
 
 
 def _upsert_sqlite(repo_root: Path, records: list[dict[str, Any]], removed_paths: list[str] | None = None) -> None:
+    """Upsert file and tag records into the SQLite search database."""
     dbp = _sqlite_path(repo_root)
     conn = sqlite3.connect(dbp)
     try:
@@ -131,6 +143,7 @@ def _upsert_sqlite(repo_root: Path, records: list[dict[str, Any]], removed_paths
 
 
 def _write_json_indexes(repo_root: Path, files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Write the JSON index artifacts derived from indexed files."""
     tags_map: Dict[str, List[str]] = {}
     words_map: Dict[str, List[str]] = {}
     type_map: Dict[str, List[str]] = {}
@@ -160,6 +173,7 @@ def _write_json_indexes(repo_root: Path, files: list[dict[str, Any]]) -> dict[st
 
 
 def rebuild_index(repo_root: Path) -> Dict[str, Any]:
+    """Rebuild all JSON and SQLite index artifacts from repository files."""
     records = []
     for p in _iter_text_files(repo_root):
         r = _record_for_file(repo_root, p)
@@ -170,6 +184,7 @@ def rebuild_index(repo_root: Path) -> Dict[str, Any]:
 
 
 def load_files_index(repo_root: Path) -> Dict[str, Any]:
+    """Load the primary JSON files index, returning an empty payload if absent."""
     p = repo_root / 'index' / 'files_index.json'
     if not p.exists():
         return {'generated_at': None, 'file_count': 0, 'files': []}
@@ -177,6 +192,7 @@ def load_files_index(repo_root: Path) -> Dict[str, Any]:
 
 
 def _parse_modified_at(value: str | None) -> datetime | None:
+    """Parse an indexed modified-at timestamp into UTC."""
     if not value:
         return None
     try:
@@ -193,6 +209,7 @@ def filter_results_by_time_window(
     time_window_days: int | None = None,
     time_window_hours: int | None = None,
 ) -> List[Dict[str, Any]]:
+    """Filter indexed rows to those inside the requested time window."""
     cutoff: datetime | None = None
     now = datetime.now(timezone.utc)
     if time_window_hours is not None:
@@ -211,6 +228,7 @@ def filter_results_by_time_window(
 
 
 def sort_results_by_recent(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sort indexed rows by newest modified timestamp first."""
     return sorted(
         results,
         key=lambda x: (
@@ -227,6 +245,7 @@ def list_recent_files(
     time_window_days: int | None = None,
     time_window_hours: int | None = None,
 ) -> List[Dict[str, Any]]:
+    """Return recent indexed files with optional type and time filtering."""
     include_set = {t.lower() for t in (include_types or []) if t}
 
     out: List[Dict[str, Any]] = []
@@ -240,6 +259,7 @@ def list_recent_files(
 
 
 def _load_index_state(repo_root: Path) -> dict[str, Any]:
+    """Load incremental-index state, tolerating missing or invalid data."""
     p = repo_root / 'index' / 'index_state.json'
     if not p.exists():
         return {'mtime_ns_by_path': {}}
@@ -250,6 +270,7 @@ def _load_index_state(repo_root: Path) -> dict[str, Any]:
 
 
 def incremental_rebuild_index(repo_root: Path) -> dict[str, Any]:
+    """Rebuild index artifacts only for files changed since the last state file."""
     prev = _load_index_state(repo_root).get('mtime_ns_by_path', {}) or {}
     current_records: list[dict[str, Any]] = []
     changed_records: list[dict[str, Any]] = []
@@ -282,6 +303,7 @@ def search_index(
     time_window_days: int | None = None,
     time_window_hours: int | None = None,
 ) -> List[Dict[str, Any]]:
+    """Search repository content with SQLite FTS and JSON fallback support."""
     include_set = {t.lower() for t in (include_types or []) if t}
     # Try SQLite FTS first
     dbp = _sqlite_path(repo_root)

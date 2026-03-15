@@ -1,3 +1,5 @@
+"""Shared runtime helpers for auditing, rate limiting, and MCP dispatch."""
+
 from __future__ import annotations
 
 import json
@@ -17,12 +19,14 @@ RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
 
 
 def audit_event(settings: Any, auth: Any, event: str, detail: dict[str, Any]) -> None:
+    """Write an audit event when audit logging is enabled."""
     if not settings.audit_log_enabled:
         return
     append_audit(settings.repo_root, event, auth.peer_id if auth else "anonymous", detail)
 
 
 def scope_for_path(path: str) -> str:
+    """Map a repository path to the required write scope."""
     top = Path(path).parts[0] if Path(path).parts else ""
     if top == "journal":
         return "write:journal"
@@ -42,6 +46,7 @@ def resolve_auth_context(
     x_real_ip: str | None = None,
     request: Any = None,
 ) -> Any | None:
+    """Resolve an auth context only when authorization is required or provided."""
     if not authorization:
         if required:
             raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -66,6 +71,7 @@ def handle_mcp_request(
     resolve_auth_context_fn: Callable[..., Any | None],
     invoke_tool_by_name: Callable[[str, dict[str, Any], Any | None], dict[str, Any]],
 ) -> dict[str, Any] | None:
+    """Delegate MCP request handling to the discovery-layer implementation."""
     return discovery_handle_mcp_rpc_request(
         request_payload,
         authorization=authorization,
@@ -80,6 +86,7 @@ def handle_mcp_request(
 
 
 def _estimate_payload_bytes(payload: Any) -> int:
+    """Estimate payload size in bytes for request limit enforcement."""
     try:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     except Exception:
@@ -88,6 +95,7 @@ def _estimate_payload_bytes(payload: Any) -> int:
 
 
 def enforce_payload_limit(settings: Any, payload: Any, label: str) -> None:
+    """Reject a payload that exceeds the configured byte limit."""
     size = _estimate_payload_bytes(payload)
     if size > int(settings.max_payload_bytes):
         raise HTTPException(
@@ -97,10 +105,12 @@ def enforce_payload_limit(settings: Any, payload: Any, label: str) -> None:
 
 
 def _rate_limit_path(repo_root: Path) -> Path:
+    """Return the rate-limit state file path inside the repository."""
     return safe_path(repo_root, RATE_LIMIT_STATE_REL)
 
 
 def _load_rate_limit_state(repo_root: Path) -> dict[str, Any]:
+    """Load the raw rate-limit state file, tolerating missing or invalid data."""
     path = _rate_limit_path(repo_root)
     if not path.exists():
         return {"schema_version": "1.0", "events": [], "verification_failures": []}
@@ -120,16 +130,19 @@ def _load_rate_limit_state(repo_root: Path) -> dict[str, Any]:
 
 
 def load_rate_limit_state(repo_root: Path) -> dict[str, Any]:
+    """Public wrapper for loading the normalized rate-limit state."""
     return _load_rate_limit_state(repo_root)
 
 
 def _write_rate_limit_state(repo_root: Path, payload: dict[str, Any]) -> Path:
+    """Persist the normalized rate-limit state file."""
     path = _rate_limit_path(repo_root)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 
 def _auth_refs(auth: Any) -> tuple[str, str]:
+    """Return stable token and IP references for throttling state."""
     raw_token = getattr(auth, "token", None)
     if isinstance(raw_token, str) and raw_token:
         token_ref = sha256_token(raw_token)[:24]
@@ -142,6 +155,7 @@ def _auth_refs(auth: Any) -> tuple[str, str]:
 
 
 def parse_iso(value: str | None):
+    """Parse an ISO timestamp and return ``None`` on invalid input."""
     if not value:
         return None
     try:
@@ -151,6 +165,7 @@ def parse_iso(value: str | None):
 
 
 def _prune_rate_limit_state(payload: dict[str, Any], now: datetime, max_window_seconds: int) -> None:
+    """Drop rate-limit and verification events older than the active window."""
     cutoff = now - timedelta(seconds=max_window_seconds)
     kept_events = []
     for row in payload.get("events", []):
@@ -172,6 +187,7 @@ def _prune_rate_limit_state(payload: dict[str, Any], now: datetime, max_window_s
 
 
 def enforce_rate_limit(settings: Any, auth: Any, bucket: str) -> None:
+    """Apply per-token and per-IP rate limits for a request bucket."""
     now = datetime.now(timezone.utc)
     token_ref, ip_ref = _auth_refs(auth)
     payload = _load_rate_limit_state(settings.repo_root)
@@ -213,6 +229,7 @@ def enforce_rate_limit(settings: Any, auth: Any, bucket: str) -> None:
 
 
 def record_verification_failure(settings: Any, auth: Any, reason: str) -> None:
+    """Record one signed-ingress verification failure for throttling purposes."""
     now = datetime.now(timezone.utc)
     token_ref, ip_ref = _auth_refs(auth)
     payload = _load_rate_limit_state(settings.repo_root)
@@ -232,6 +249,7 @@ def record_verification_failure(settings: Any, auth: Any, reason: str) -> None:
 
 
 def verification_failure_count(settings: Any, auth: Any) -> int:
+    """Count recent verification failures for the current caller."""
     now = datetime.now(timezone.utc)
     token_ref, _ = _auth_refs(auth)
     payload = _load_rate_limit_state(settings.repo_root)
@@ -253,10 +271,12 @@ def verification_failure_count(settings: Any, auth: Any) -> int:
 
 
 def run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command inside the repository without raising on failure."""
     return subprocess.run(["git", *args], cwd=repo_root, text=True, capture_output=True, check=False)
 
 
 def read_commit_file(repo_root: Path, commit_ref: str, rel_path: str) -> str | None:
+    """Read a file from a commit reference, returning ``None`` if absent."""
     cp = run_git(repo_root, "show", f"{commit_ref}:{rel_path}")
     if cp.returncode != 0:
         return None
