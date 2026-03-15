@@ -169,6 +169,42 @@ class TestContinuityV1(unittest.TestCase):
                 )
             self.assertIn("continuity_stale_soft", out["bundle"]["continuity_state"]["warnings"])
 
+    def test_context_retrieve_uses_verified_at_not_updated_at_for_staleness(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            old_verified = (datetime.now(timezone.utc) - timedelta(days=40)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            capsule = self._capsule_payload(verified_at=old_verified)
+            capsule["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            (continuity_dir / "user-stef.json").write_text(json.dumps(capsule), encoding="utf-8")
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = context_retrieve(
+                    req=ContextRetrieveRequest(task="resume", subject_kind="user", subject_id="stef"),
+                    auth=_AuthStub(),
+                )
+            self.assertIn("continuity_stale_soft", out["bundle"]["continuity_state"]["warnings"])
+
+    def test_context_retrieve_infers_task_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            capsule = self._capsule_payload(subject_kind="task", subject_id="build-v1")
+            (continuity_dir / "task-build-v1.json").write_text(json.dumps(capsule), encoding="utf-8")
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = context_retrieve(
+                    req=ContextRetrieveRequest(task="task:build-v1"),
+                    auth=_AuthStub(),
+                )
+            state = out["bundle"]["continuity_state"]
+            self.assertTrue(state["present"])
+            self.assertEqual(state["selection_order"], ["inferred:task:build-v1"])
+
     def test_continuity_upsert_same_bytes_reports_update_false(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -194,6 +230,45 @@ class TestContinuityV1(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, gm)):
                 with self.assertRaises(ValidationError):
                     ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
+
+    def test_continuity_upsert_invalid_canonical_source_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            payload = self._capsule_payload()
+            payload["canonical_sources"] = ["../escape.json"]
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 400)
+
+    def test_continuity_upsert_oversized_capsule_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            payload = self._capsule_payload()
+            payload["metadata"] = {"x": "y" * (13 * 1024)}
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 400)
+
+    def test_continuity_upsert_metadata_scalar_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            settings = self._settings(repo_root)
+            payload = self._capsule_payload()
+            payload["metadata"] = {"nested": {"bad": True}}
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=req, auth=_AuthStub())
+            self.assertEqual(cm.exception.status_code, 400)
 
 
 if __name__ == "__main__":

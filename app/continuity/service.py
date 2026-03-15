@@ -89,6 +89,9 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
+    for source_input in list(capsule.source.inputs):
+        if len(source_input) > 200:
+            raise HTTPException(status_code=400, detail="Value too long in source.inputs")
     for field_name in (
         "top_priorities",
         "active_concerns",
@@ -120,6 +123,11 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
         _validate_repo_relative_paths(repo_root, list(capsule.canonical_sources), "canonical_sources")
     if capsule.metadata and len(capsule.metadata) > 12:
         raise HTTPException(status_code=400, detail="Too many metadata keys")
+    for key, value in capsule.metadata.items():
+        if not isinstance(key, str):
+            raise HTTPException(status_code=400, detail="Invalid metadata key")
+        if isinstance(value, (dict, list)):
+            raise HTTPException(status_code=400, detail="Metadata values must be scalar")
     payload = capsule.model_dump(mode="json", exclude_none=True)
     canonical = _canonical_json(payload)
     if len(canonical.encode("utf-8")) > 12 * 1024:
