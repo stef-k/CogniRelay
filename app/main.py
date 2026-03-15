@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import subprocess
@@ -93,6 +92,22 @@ from .peers import (
     peers_trust_transition_service,
 )
 from .storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
+from .security import (
+    GOVERNANCE_POLICY_REL,
+    NONCE_INDEX_REL,
+    SECURITY_KEYS_REL,
+    TOKEN_CONFIG_REL,
+    governance_policy_service,
+    load_token_config,
+    load_security_keys,
+    messages_verify_service,
+    security_keys_rotate_service,
+    security_tokens_issue_service,
+    security_tokens_list_service,
+    security_tokens_revoke_service,
+    security_tokens_rotate_service,
+    verify_signed_payload_service,
+)
 from .tasks import (
     RUN_CHECKS_DIR_REL,
     code_checks_run_service,
@@ -441,8 +456,7 @@ def contracts() -> dict:
 @app.get("/v1/governance/policy")
 def governance_policy() -> dict:
     settings, _ = _services()
-    policy = _load_governance_policy(settings.repo_root)
-    return {"ok": True, "policy": policy}
+    return governance_policy_service(repo_root=settings.repo_root)
 def _latest_backup_archive_rel(repo_root: Path) -> str | None:
     d = safe_path(repo_root, BACKUPS_DIR_REL)
     if not d.exists() or not d.is_dir():
@@ -503,9 +517,9 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
         replication_push_request_factory=ReplicationPushRequest,
         compact_run=compact_run,
         compact_request_factory=CompactRequest,
-        load_token_config=_load_token_config,
+        load_token_config=load_token_config,
         parse_iso=_parse_iso,
-        load_security_keys=_load_security_keys,
+        load_security_keys=load_security_keys,
         load_delivery_state=_load_delivery_state,
         effective_delivery_status=_effective_delivery_status,
         replay_messages=replay_messages,
@@ -842,9 +856,6 @@ def code_merge(req: CodeMergeRequest, auth: AuthContext = Depends(require_auth))
 
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
-TOKEN_CONFIG_REL = "config/peer_tokens.json"
-SECURITY_KEYS_REL = "config/security_keys.json"
-NONCE_INDEX_REL = "messages/security/nonce_index.json"
 REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
 
@@ -852,7 +863,6 @@ RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
 TRUST_POLICIES_REL = "peers/trust_policies.json"
 REPLICATION_TOMBSTONES_REL = "peers/replication_tombstones.json"
 BACKUPS_DIR_REL = "backups"
-GOVERNANCE_POLICY_REL = "config/governance_policy.json"
 def _estimate_payload_bytes(payload: Any) -> int:
     try:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -1014,107 +1024,6 @@ def _verification_failure_count(settings, auth: AuthContext) -> int:
     return count
 
 
-def _external_key_store_path(settings) -> Path:
-    return Path(settings.key_store_path).expanduser().resolve()
-
-
-def _load_external_key_store(settings) -> dict[str, Any]:
-    p = _external_key_store_path(settings)
-    if not p.exists():
-        return {"schema_version": "1.0", "keys": {}}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {"schema_version": "1.0", "keys": {}}
-    if not isinstance(data, dict):
-        return {"schema_version": "1.0", "keys": {}}
-    keys = data.get("keys")
-    if not isinstance(keys, dict):
-        keys = {}
-    return {"schema_version": "1.0", "keys": keys}
-
-
-def _write_external_key_store(settings, payload: dict[str, Any]) -> Path:
-    p = _external_key_store_path(settings)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        os.chmod(p, 0o600)
-    except Exception:
-        # Best-effort permission hardening for environments without chmod support.
-        pass
-    return p
-
-
-def _resolve_signing_secret(settings, key_id: str, row: dict[str, Any]) -> str | None:
-    # Legacy in-repo fallback
-    secret = row.get("secret")
-    if isinstance(secret, str) and secret:
-        return secret
-
-    if not settings.use_external_key_store:
-        return None
-    key_store = _load_external_key_store(settings)
-    entry = key_store.get("keys", {}).get(key_id)
-    if not isinstance(entry, dict):
-        return None
-    ext_secret = entry.get("secret")
-    if not isinstance(ext_secret, str) or not ext_secret:
-        return None
-    return ext_secret
-
-
-def _default_governance_policy() -> dict[str, Any]:
-    return {
-        "schema_version": "1.0",
-        "authority_model": {
-            "issuer": "hosting_agent",
-            "description": "Hosting agent is sole token/key issuer for this CogniRelay instance.",
-        },
-        "scope_templates": {
-            "collaboration_peer": {
-                "scopes": ["read:files", "search", "write:messages"],
-                "read_namespaces": ["memory", "messages"],
-                "write_namespaces": ["messages"],
-            },
-            "replication_peer": {
-                "scopes": ["admin:peers", "read:files", "write:messages"],
-                "read_namespaces": ["*"],
-                "write_namespaces": ["messages", "peers", "snapshots"],
-            },
-        },
-        "incident_response": {
-            "token_compromise": [
-                "revoke impacted token(s)",
-                "rotate key material",
-                "review audit window",
-                "issue replacement token(s)",
-            ],
-            "replication_conflict": [
-                "set conflict_policy=error",
-                "inspect drift + tombstones",
-                "resume with explicit transition plan",
-            ],
-        },
-        "audit_retention": {"api_audit_days": 90, "security_events_days": 180},
-    }
-
-
-def _load_governance_policy(repo_root: Path) -> dict[str, Any]:
-    p = safe_path(repo_root, GOVERNANCE_POLICY_REL)
-    default = _default_governance_policy()
-    if not p.exists():
-        return default
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-    if not isinstance(data, dict):
-        return default
-    merged = dict(default)
-    merged.update(data)
-    return merged
-
 def _load_replication_tombstones(repo_root: Path) -> dict[str, Any]:
     p = safe_path(repo_root, REPLICATION_TOMBSTONES_REL)
     if not p.exists():
@@ -1200,152 +1109,6 @@ def _canonical_json(data: Any) -> str:
 
 def _sha256_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _message_signing_blob(payload: dict[str, Any], key_id: str, nonce: str, expires_at: str | None) -> bytes:
-    canonical = _canonical_json({"payload": payload, "key_id": key_id, "nonce": nonce, "expires_at": expires_at})
-    return canonical.encode("utf-8")
-
-
-def _hmac_sha256(secret: str, blob: bytes) -> str:
-    return hmac.new(secret.encode("utf-8"), blob, hashlib.sha256).hexdigest()
-
-
-def _load_security_keys(repo_root: Path) -> dict[str, Any]:
-    p = safe_path(repo_root, SECURITY_KEYS_REL)
-    if not p.exists():
-        return {"schema_version": "1.0", "active_key_id": None, "keys": {}}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {"schema_version": "1.0", "active_key_id": None, "keys": {}}
-    if not isinstance(data, dict):
-        return {"schema_version": "1.0", "active_key_id": None, "keys": {}}
-    keys = data.get("keys")
-    if not isinstance(keys, dict):
-        keys = {}
-    return {"schema_version": "1.0", "active_key_id": data.get("active_key_id"), "keys": keys}
-
-
-def _write_security_keys(repo_root: Path, payload: dict[str, Any]) -> Path:
-    p = safe_path(repo_root, SECURITY_KEYS_REL)
-    write_text_file(p, json.dumps(payload, ensure_ascii=False, indent=2))
-    return p
-
-
-def _load_token_config(repo_root: Path) -> dict[str, Any]:
-    p = safe_path(repo_root, TOKEN_CONFIG_REL)
-    if not p.exists():
-        return {"schema_version": "1.0", "tokens": []}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {"schema_version": "1.0", "tokens": []}
-    if not isinstance(data, dict):
-        return {"schema_version": "1.0", "tokens": []}
-    tokens = data.get("tokens")
-    if not isinstance(tokens, list):
-        tokens = []
-    return {"schema_version": "1.0", "tokens": tokens}
-
-
-def _write_token_config(repo_root: Path, payload: dict[str, Any]) -> Path:
-    p = safe_path(repo_root, TOKEN_CONFIG_REL)
-    write_text_file(p, json.dumps(payload, ensure_ascii=False, indent=2))
-    return p
-
-
-def _resolve_token_expiry(expires_at: str | None, ttl_seconds: int | None) -> str | None:
-    if expires_at and ttl_seconds:
-        raise HTTPException(status_code=400, detail="Provide either expires_at or ttl_seconds, not both")
-    if ttl_seconds:
-        return (datetime.now(timezone.utc) + timedelta(seconds=int(ttl_seconds))).isoformat()
-    if expires_at:
-        dt = _parse_iso(expires_at)
-        if dt is None:
-            raise HTTPException(status_code=400, detail="Invalid expires_at format")
-        return dt.isoformat()
-    return None
-
-
-def _token_effective_status(entry: dict[str, Any], now: datetime) -> str:
-    status = str(entry.get("status") or "active")
-    if status != "active":
-        return status
-    exp = _parse_iso(entry.get("expires_at"))
-    if exp is not None and now > exp:
-        return "expired"
-    return "active"
-
-
-def _token_public_view(entry: dict[str, Any], now: datetime) -> dict[str, Any]:
-    return {
-        "token_id": entry.get("token_id"),
-        "peer_id": entry.get("peer_id"),
-        "scopes": entry.get("scopes", []),
-        "read_namespaces": entry.get("read_namespaces", []),
-        "write_namespaces": entry.get("write_namespaces", []),
-        "status": entry.get("status", "active"),
-        "effective_status": _token_effective_status(entry, now),
-        "issued_at": entry.get("issued_at"),
-        "expires_at": entry.get("expires_at"),
-        "revoked_at": entry.get("revoked_at"),
-        "revoked_reason": entry.get("revoked_reason"),
-        "rotated_at": entry.get("rotated_at"),
-        "rotated_to_token_id": entry.get("rotated_to_token_id"),
-        "rotated_from_token_id": entry.get("rotated_from_token_id"),
-        "description": entry.get("description"),
-        "token_sha256": entry.get("token_sha256"),
-    }
-
-
-def _normalize_token_sha(value: str | None) -> str | None:
-    if not value:
-        return None
-    v = str(value).strip()
-    if v.startswith("sha256:"):
-        v = v.split(":", 1)[1]
-    return v or None
-
-
-def _load_nonce_index(repo_root: Path) -> dict[str, Any]:
-    p = safe_path(repo_root, NONCE_INDEX_REL)
-    if not p.exists():
-        return {"schema_version": "1.0", "entries": {}}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {"schema_version": "1.0", "entries": {}}
-    if not isinstance(data, dict):
-        return {"schema_version": "1.0", "entries": {}}
-    entries = data.get("entries")
-    if not isinstance(entries, dict):
-        entries = {}
-    return {"schema_version": "1.0", "entries": entries}
-
-
-def _write_nonce_index(repo_root: Path, payload: dict[str, Any]) -> Path:
-    p = safe_path(repo_root, NONCE_INDEX_REL)
-    write_text_file(p, json.dumps(payload, ensure_ascii=False, indent=2))
-    return p
-
-
-def _prune_nonce_entries(payload: dict[str, Any], now: datetime) -> int:
-    entries = payload.setdefault("entries", {})
-    if not isinstance(entries, dict):
-        payload["entries"] = {}
-        return 0
-    remove_keys = []
-    for k, row in entries.items():
-        if not isinstance(row, dict):
-            remove_keys.append(k)
-            continue
-        exp = _parse_iso(row.get("expires_at"))
-        if exp is not None and now > exp:
-            remove_keys.append(k)
-    for k in remove_keys:
-        entries.pop(k, None)
-    return len(remove_keys)
 
 
 def _load_replication_state(repo_root: Path) -> dict[str, Any]:
@@ -1471,10 +1234,10 @@ def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_a
                         "idempotency_key": req.idempotency_key,
                         "delivery": req.delivery.model_dump(),
                     }
-                    verification = _verify_signed_payload(
-                        settings,
-                        gm,
-                        auth,
+                    verification = verify_signed_payload_service(
+                        settings=settings,
+                        gm=gm,
+                        auth=auth,
                         payload=signed_payload,
                         key_id=req.signed_envelope.key_id,
                         nonce=req.signed_envelope.nonce,
@@ -1483,6 +1246,9 @@ def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_a
                         algorithm=req.signed_envelope.algorithm,
                         consume_nonce=False,
                         audit_event="messages_send_signature",
+                        verification_failure_count=_verification_failure_count,
+                        record_verification_failure=_record_verification_failure,
+                        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
                     )
                     if not verification["valid"]:
                         raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {verification['reason']}")
@@ -1518,10 +1284,10 @@ def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_a
             "idempotency_key": req.idempotency_key,
             "delivery": req.delivery.model_dump(),
         }
-        signature_verification = _verify_signed_payload(
-            settings,
-            gm,
-            auth,
+        signature_verification = verify_signed_payload_service(
+            settings=settings,
+            gm=gm,
+            auth=auth,
             payload=signed_payload,
             key_id=req.signed_envelope.key_id,
             nonce=req.signed_envelope.nonce,
@@ -1530,6 +1296,9 @@ def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_a
             algorithm=req.signed_envelope.algorithm,
             consume_nonce=req.signed_envelope.consume_nonce,
             audit_event="messages_send_signature",
+            verification_failure_count=_verification_failure_count,
+            record_verification_failure=_record_verification_failure,
+            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
         )
         if not signature_verification["valid"]:
             raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {signature_verification['reason']}")
@@ -1768,10 +1537,10 @@ def relay_forward(req: RelayForwardRequest, auth: AuthContext = Depends(require_
             "attachments": req.attachments,
             "envelope": req.envelope,
         }
-        signature_verification = _verify_signed_payload(
-            settings,
-            gm,
-            auth,
+        signature_verification = verify_signed_payload_service(
+            settings=settings,
+            gm=gm,
+            auth=auth,
             payload=signed_payload,
             key_id=req.signed_envelope.key_id,
             nonce=req.signed_envelope.nonce,
@@ -1780,6 +1549,9 @@ def relay_forward(req: RelayForwardRequest, auth: AuthContext = Depends(require_
             algorithm=req.signed_envelope.algorithm,
             consume_nonce=req.signed_envelope.consume_nonce,
             audit_event="relay_forward_signature",
+            verification_failure_count=_verification_failure_count,
+            record_verification_failure=_record_verification_failure,
+            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
         )
         if not signature_verification["valid"]:
             raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {signature_verification['reason']}")
@@ -1825,493 +1597,93 @@ def security_tokens_list(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     settings, _ = _services()
-    _enforce_rate_limit(settings, auth, "security_tokens_list")
-    auth.require("admin:peers")
-    auth.require_read_path(TOKEN_CONFIG_REL)
-    if peer_id is not None and not isinstance(peer_id, str):
-        peer_id = None
-    if status is not None and not isinstance(status, str):
-        status = None
-    if not isinstance(include_inactive, bool):
-        include_inactive = False
-
-    payload = _load_token_config(settings.repo_root)
-    now = datetime.now(timezone.utc)
-    rows = []
-    for row in payload.get("tokens", []):
-        if not isinstance(row, dict):
-            continue
-        view = _token_public_view(row, now)
-        if peer_id and str(view.get("peer_id") or "") != peer_id:
-            continue
-        effective = str(view.get("effective_status") or "")
-        if status and effective != status:
-            continue
-        if not include_inactive and effective != "active":
-            continue
-        rows.append(view)
-
-    rows.sort(key=lambda x: (str(x.get("issued_at") or ""), str(x.get("token_id") or "")), reverse=True)
-    return {"ok": True, "count": len(rows), "tokens": rows}
+    return security_tokens_list_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        peer_id=peer_id if isinstance(peer_id, str) else None,
+        status=status if isinstance(status, str) else None,
+        include_inactive=include_inactive if isinstance(include_inactive, bool) else False,
+        enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+    )
 
 
 @app.post("/v1/security/tokens/issue")
 def security_tokens_issue(req: SecurityTokenIssueRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    _enforce_rate_limit(settings, auth, "security_tokens_issue")
-    _enforce_payload_limit(settings, req.model_dump(), "security_tokens_issue")
-    auth.require("admin:peers")
-    auth.require_write_path(TOKEN_CONFIG_REL)
-
-    payload = _load_token_config(settings.repo_root)
-    tokens = payload.setdefault("tokens", [])
-    if not isinstance(tokens, list):
-        tokens = []
-        payload["tokens"] = tokens
-
-    now_dt = datetime.now(timezone.utc)
-    now = now_dt.isoformat()
-    token_id = req.token_id or f"tok_{now_dt.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
-    if any(isinstance(x, dict) and str(x.get("token_id") or "") == token_id for x in tokens):
-        raise HTTPException(status_code=409, detail=f"Token id already exists: {token_id}")
-
-    token_plain = f"cgr_{uuid4().hex}{uuid4().hex[:8]}"
-    token_sha = hashlib.sha256(token_plain.encode("utf-8")).hexdigest()
-    expires_at = _resolve_token_expiry(req.expires_at, req.ttl_seconds)
-    scopes = sorted(set(str(s) for s in (req.scopes or []) if str(s))) or sorted(ALL_SCOPES)
-    read_ns = sorted(set(str(s) for s in (req.read_namespaces or []) if str(s))) or ["*"]
-    write_ns = sorted(set(str(s) for s in (req.write_namespaces or []) if str(s))) or ["*"]
-
-    entry = {
-        "token_id": token_id,
-        "peer_id": req.peer_id,
-        "token_sha256": token_sha,
-        "scopes": scopes,
-        "read_namespaces": read_ns,
-        "write_namespaces": write_ns,
-        "status": "active",
-        "issued_at": now,
-        "expires_at": expires_at,
-        "revoked_at": None,
-        "revoked_reason": None,
-        "description": req.description,
-    }
-    tokens.append(entry)
-
-    p = _write_token_config(settings.repo_root, payload)
-    committed = gm.commit_file(p, f"security: issue token {token_id}")
-    get_settings(force_reload=True)
-
-    _audit(settings, auth, "security_tokens_issue", {"token_id": token_id, "peer_id": req.peer_id, "expires_at": expires_at})
-    return {
-        "ok": True,
-        "token": token_plain,
-        "token_meta": _token_public_view(entry, now_dt),
-        "committed": committed,
-        "latest_commit": gm.latest_commit(),
-    }
+    return security_tokens_issue_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        refresh_settings=lambda: get_settings(force_reload=True),
+    )
 
 
 @app.post("/v1/security/tokens/revoke")
 def security_tokens_revoke(req: SecurityTokenRevokeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    _enforce_rate_limit(settings, auth, "security_tokens_revoke")
-    _enforce_payload_limit(settings, req.model_dump(), "security_tokens_revoke")
-    auth.require("admin:peers")
-    auth.require_write_path(TOKEN_CONFIG_REL)
-
-    payload = _load_token_config(settings.repo_root)
-    tokens = payload.setdefault("tokens", [])
-    if not isinstance(tokens, list):
-        tokens = []
-        payload["tokens"] = tokens
-
-    if req.revoke_all_for_peer:
-        if not req.peer_id:
-            raise HTTPException(status_code=400, detail="peer_id is required when revoke_all_for_peer=true")
-    else:
-        norm_sha = _normalize_token_sha(req.token_sha256)
-        if not req.token_id and not norm_sha:
-            raise HTTPException(status_code=400, detail="Provide token_id or token_sha256")
-
-    now_dt = datetime.now(timezone.utc)
-    now = now_dt.isoformat()
-    norm_sha = _normalize_token_sha(req.token_sha256)
-    matched = 0
-    revoked = 0
-    revoked_rows = []
-
-    for row in tokens:
-        if not isinstance(row, dict):
-            continue
-        is_match = False
-        if req.revoke_all_for_peer:
-            is_match = str(row.get("peer_id") or "") == str(req.peer_id or "")
-        else:
-            if req.token_id and str(row.get("token_id") or "") == req.token_id:
-                is_match = True
-            elif norm_sha and str(row.get("token_sha256") or "") == norm_sha:
-                is_match = True
-        if not is_match:
-            continue
-
-        matched += 1
-        if str(row.get("status") or "active") == "active":
-            row["status"] = "revoked"
-            row["revoked_at"] = now
-            row["revoked_reason"] = req.reason
-            revoked += 1
-        revoked_rows.append(_token_public_view(row, now_dt))
-
-    if matched == 0:
-        raise HTTPException(status_code=404, detail="Token entry not found")
-
-    committed = False
-    if revoked > 0:
-        p = _write_token_config(settings.repo_root, payload)
-        committed = gm.commit_file(p, "security: revoke token(s)")
-    get_settings(force_reload=True)
-
-    _audit(settings, auth, "security_tokens_revoke", {"matched": matched, "revoked": revoked, "reason": req.reason})
-    return {
-        "ok": True,
-        "matched": matched,
-        "revoked": revoked,
-        "tokens": revoked_rows,
-        "committed": committed,
-        "latest_commit": gm.latest_commit(),
-    }
+    return security_tokens_revoke_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        refresh_settings=lambda: get_settings(force_reload=True),
+    )
 
 
 
 @app.post("/v1/security/tokens/rotate")
 def security_tokens_rotate(req: SecurityTokenRotateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    _enforce_rate_limit(settings, auth, "security_tokens_rotate")
-    _enforce_payload_limit(settings, req.model_dump(), "security_tokens_rotate")
-    auth.require("admin:peers")
-    auth.require_write_path(TOKEN_CONFIG_REL)
-
-    norm_sha = _normalize_token_sha(req.token_sha256)
-    if not req.token_id and not norm_sha:
-        raise HTTPException(status_code=400, detail="Provide token_id or token_sha256")
-
-    payload = _load_token_config(settings.repo_root)
-    tokens = payload.setdefault("tokens", [])
-    if not isinstance(tokens, list):
-        tokens = []
-        payload["tokens"] = tokens
-
-    matched: list[dict[str, Any]] = []
-    for row in tokens:
-        if not isinstance(row, dict):
-            continue
-        if req.token_id and str(row.get("token_id") or "") == req.token_id:
-            matched.append(row)
-            continue
-        if norm_sha and str(row.get("token_sha256") or "") == norm_sha:
-            matched.append(row)
-
-    if not matched:
-        raise HTTPException(status_code=404, detail="Token entry not found")
-    if len(matched) > 1:
-        raise HTTPException(status_code=409, detail="Multiple tokens matched; use token_id for deterministic rotate")
-
-    src = matched[0]
-    now_dt = datetime.now(timezone.utc)
-    now = now_dt.isoformat()
-    src_effective = _token_effective_status(src, now_dt)
-    if src_effective == "revoked":
-        raise HTTPException(status_code=409, detail="Token is already revoked")
-
-    source_token_id = str(src.get("token_id") or "")
-    peer_id = str(src.get("peer_id") or "")
-    if not peer_id:
-        raise HTTPException(status_code=400, detail="Matched token is missing peer_id")
-
-    new_token_id = req.new_token_id or f"tok_{now_dt.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
-    if any(isinstance(x, dict) and str(x.get("token_id") or "") == new_token_id for x in tokens):
-        raise HTTPException(status_code=409, detail=f"Token id already exists: {new_token_id}")
-
-    def _normalize_scopes(values: Any, default_all: bool = True) -> list[str]:
-        vals = sorted(set(str(v) for v in (values or []) if str(v)))
-        if vals:
-            return vals
-        return sorted(ALL_SCOPES) if default_all else []
-
-    def _normalize_namespaces(values: Any) -> list[str]:
-        vals = sorted(set(str(v) for v in (values or []) if str(v)))
-        return vals or ["*"]
-
-    scopes = _normalize_scopes(req.scopes if req.scopes is not None else src.get("scopes"))
-    read_ns = _normalize_namespaces(req.read_namespaces if req.read_namespaces is not None else src.get("read_namespaces"))
-    write_ns = _normalize_namespaces(req.write_namespaces if req.write_namespaces is not None else src.get("write_namespaces"))
-
-    expires_at = _resolve_token_expiry(req.expires_at, req.ttl_seconds)
-    if expires_at is None:
-        expires_at = src.get("expires_at")
-    description = req.description if req.description is not None else src.get("description")
-
-    token_plain = f"cgr_{uuid4().hex}{uuid4().hex[:8]}"
-    token_sha = hashlib.sha256(token_plain.encode("utf-8")).hexdigest()
-
-    src["status"] = "revoked"
-    src["revoked_at"] = now
-    src["rotated_at"] = now
-    src["revoked_reason"] = req.reason or f"rotated_to:{new_token_id}"
-    src["rotated_to_token_id"] = new_token_id
-
-    entry = {
-        "token_id": new_token_id,
-        "peer_id": peer_id,
-        "token_sha256": token_sha,
-        "scopes": scopes,
-        "read_namespaces": read_ns,
-        "write_namespaces": write_ns,
-        "status": "active",
-        "issued_at": now,
-        "expires_at": expires_at,
-        "revoked_at": None,
-        "revoked_reason": None,
-        "rotated_at": None,
-        "rotated_to_token_id": None,
-        "rotated_from_token_id": source_token_id or None,
-        "description": description,
-    }
-    tokens.append(entry)
-
-    p = _write_token_config(settings.repo_root, payload)
-    source_ref = source_token_id or "sha-match"
-    committed = gm.commit_file(p, f"security: rotate token {source_ref} -> {new_token_id}")
-    get_settings(force_reload=True)
-
-    _audit(
-        settings,
-        auth,
-        "security_tokens_rotate",
-        {
-            "peer_id": peer_id,
-            "from_token_id": source_token_id or None,
-            "to_token_id": new_token_id,
-            "expires_at": expires_at,
-            "reason": req.reason,
-            "source_effective_status": src_effective,
-        },
+    return security_tokens_rotate_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        refresh_settings=lambda: get_settings(force_reload=True),
     )
-    return {
-        "ok": True,
-        "token": token_plain,
-        "from_token": _token_public_view(src, now_dt),
-        "token_meta": _token_public_view(entry, now_dt),
-        "committed": committed,
-        "latest_commit": gm.latest_commit(),
-    }
 @app.post("/v1/security/keys/rotate")
 def security_keys_rotate(req: SecurityKeysRotateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    _enforce_rate_limit(settings, auth, "security_keys_rotate")
-    _enforce_payload_limit(settings, req.model_dump(), "security_keys_rotate")
-    auth.require("admin:peers")
-    auth.require_write_path(SECURITY_KEYS_REL)
-    payload = _load_security_keys(settings.repo_root)
-    now = datetime.now(timezone.utc).isoformat()
-    key_id = req.key_id or f"key_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
-    secret = req.secret or f"{uuid4().hex}{uuid4().hex}"
-    keys = payload.setdefault("keys", {})
-    if not isinstance(keys, dict):
-        keys = {}
-        payload["keys"] = keys
-
-    previous_active = str(payload.get("active_key_id") or "") or None
-    if req.retire_previous and previous_active and previous_active in keys and previous_active != key_id:
-        prev = keys.get(previous_active)
-        if isinstance(prev, dict):
-            prev["status"] = "retired"
-            prev["retired_at"] = now
-
-    prev_row = keys.get(key_id) if isinstance(keys.get(key_id), dict) else {}
-    created_at = str(prev_row.get("created_at") or now)
-    row = {
-        "key_id": key_id,
-        "algorithm": "hmac-sha256",
-        "status": "active" if req.activate else "staged",
-        "created_at": created_at,
-        "rotated_at": now,
-        "retired_at": None,
-        "secret_sha256": _sha256_text(secret),
-    }
-
-    storage_mode = "external" if settings.use_external_key_store else "repo"
-    if settings.use_external_key_store:
-        key_store = _load_external_key_store(settings)
-        ext_keys = key_store.setdefault("keys", {})
-        if not isinstance(ext_keys, dict):
-            ext_keys = {}
-            key_store["keys"] = ext_keys
-        ext_keys[key_id] = {"secret": secret, "updated_at": now}
-        _write_external_key_store(settings, key_store)
-        row["secret_ref"] = f"external:{key_id}"
-    else:
-        row["secret"] = secret
-
-    keys[key_id] = row
-    if req.activate:
-        payload["active_key_id"] = key_id
-
-    p = _write_security_keys(settings.repo_root, payload)
-    committed = gm.commit_file(p, f"security: rotate key {key_id}")
-    _audit(settings, auth, "security_keys_rotate", {"key_id": key_id, "activate": req.activate, "retire_previous": req.retire_previous, "storage_mode": storage_mode})
-
-    key_view = {
-        "key_id": key_id,
-        "algorithm": "hmac-sha256",
-        "status": row["status"],
-        "created_at": created_at,
-        "rotated_at": now,
-        "storage_mode": storage_mode,
-    }
-    if req.return_secret:
-        key_view["secret"] = secret
-
-    return {
-        "ok": True,
-        "active_key_id": payload.get("active_key_id"),
-        "key": key_view,
-        "committed": committed,
-        "latest_commit": gm.latest_commit(),
-    }
-
-
-def _verify_signed_payload(
-    settings,
-    gm,
-    auth: AuthContext,
-    payload: dict[str, Any],
-    key_id: str,
-    nonce: str,
-    expires_at: str | None,
-    signature: str,
-    algorithm: str = "hmac-sha256",
-    consume_nonce: bool = True,
-    audit_event: str = "messages_verify",
-) -> dict[str, Any]:
-    if consume_nonce:
-        auth.require_write_path(NONCE_INDEX_REL)
-
-    prior_failures = _verification_failure_count(settings, auth)
-    if prior_failures >= int(settings.verify_failure_limit):
-        detail = {
-            "valid": False,
-            "reason": "verification_throttled",
-            "algorithm": algorithm,
-            "key_id": key_id,
-            "nonce": nonce,
-            "expires_at": expires_at,
-            "signature_valid": False,
-            "expired": False,
-            "replay_detected": False,
-            "nonce_consumed": False,
-            "failure_count": prior_failures,
-            "committed_files": [],
-        }
-        _audit(settings, auth, audit_event, detail)
-        return detail
-
-    keys_payload = _load_security_keys(settings.repo_root)
-    keys = keys_payload.get("keys", {})
-    key_row = keys.get(key_id) if isinstance(keys, dict) else None
-    if not isinstance(key_row, dict):
-        raise HTTPException(status_code=404, detail=f"Unknown key_id: {key_id}")
-    if str(key_row.get("algorithm") or "hmac-sha256") != algorithm:
-        raise HTTPException(status_code=400, detail=f"Algorithm mismatch for key {key_id}")
-
-    secret = _resolve_signing_secret(settings, key_id, key_row)
-    if not secret:
-        raise HTTPException(status_code=500, detail=f"Key secret missing for {key_id}")
-
-    now = datetime.now(timezone.utc)
-    expires_dt = _parse_iso(expires_at)
-    expired = expires_dt is not None and now > expires_dt
-
-    blob = _message_signing_blob(payload, key_id, nonce, expires_at)
-    expected_signature = _hmac_sha256(secret, blob)
-    signature_valid = hmac.compare_digest(expected_signature, signature.strip())
-    replay_detected = False
-    nonce_consumed = False
-    reason = "ok"
-
-    committed_files: list[str] = []
-    if expired:
-        reason = "expired"
-    elif not signature_valid:
-        reason = "invalid_signature"
-    elif consume_nonce:
-        nonce_payload = _load_nonce_index(settings.repo_root)
-        _prune_nonce_entries(nonce_payload, now)
-        entries = nonce_payload.setdefault("entries", {})
-        key = f"{key_id}|{nonce}"
-        if key in entries:
-            replay_detected = True
-            reason = "replay_detected"
-        else:
-            entries[key] = {
-                "key_id": key_id,
-                "nonce": nonce,
-                "first_seen_at": now.isoformat(),
-                "expires_at": expires_at,
-            }
-            nonce_path = _write_nonce_index(settings.repo_root, nonce_payload)
-            if gm.commit_file(nonce_path, f"messages: consume nonce {key_id}:{nonce}"):
-                committed_files.append(NONCE_INDEX_REL)
-            nonce_consumed = True
-
-    valid = reason == "ok"
-    if not valid:
-        _record_verification_failure(settings, auth, reason)
-
-    detail = {
-        "valid": valid,
-        "reason": reason,
-        "algorithm": algorithm,
-        "key_id": key_id,
-        "nonce": nonce,
-        "expires_at": expires_at,
-        "signature_valid": signature_valid,
-        "expired": expired,
-        "replay_detected": replay_detected,
-        "consume_nonce": consume_nonce,
-        "nonce_consumed": nonce_consumed,
-        "failure_count": _verification_failure_count(settings, auth),
-        "committed_files": committed_files,
-    }
-    _audit(settings, auth, audit_event, detail)
-    return detail
+    return security_keys_rotate_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/messages/verify")
 def messages_verify(req: MessageVerifyRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    _enforce_rate_limit(settings, auth, "messages_verify")
-    _enforce_payload_limit(settings, req.model_dump(), "messages_verify")
-    auth.require("write:messages")
-    verification = _verify_signed_payload(
-        settings,
-        gm,
-        auth,
-        payload=req.payload,
-        key_id=req.key_id,
-        nonce=req.nonce,
-        expires_at=req.expires_at,
-        signature=req.signature,
-        algorithm=req.algorithm,
-        consume_nonce=req.consume_nonce,
-        audit_event="messages_verify",
+    return messages_verify_service(
+        settings=settings,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        verification_failure_count=_verification_failure_count,
+        record_verification_failure=_record_verification_failure,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
-    return {
-        "ok": True,
-        **verification,
-        "latest_commit": gm.latest_commit(),
-    }
 
 
 @app.get("/v1/metrics")
