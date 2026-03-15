@@ -83,6 +83,7 @@ from .models import (
     TaskUpdateRequest,
     WriteRequest,
 )
+from .ops import ops_catalog_service, ops_run_service, ops_schedule_export_service, ops_status_service
 from .storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
 
 
@@ -422,95 +423,6 @@ def governance_policy() -> dict:
     settings, _ = _services()
     policy = _load_governance_policy(settings.repo_root)
     return {"ok": True, "policy": policy}
-
-
-def _is_local_client_ip(client_ip: str | None) -> bool:
-    if not client_ip:
-        return False
-    v = str(client_ip).strip().lower()
-    if not v:
-        return False
-    if v.startswith("::ffff:"):
-        v = v[7:]
-    if v in {"127.0.0.1", "::1", "localhost"}:
-        return True
-    return v.startswith("127.")
-
-
-def _require_local_ops_access(auth: AuthContext) -> str:
-    auth.require("admin:peers")
-    ip = getattr(auth, "client_ip", None)
-    if not _is_local_client_ip(ip):
-        raise HTTPException(status_code=403, detail="Host ops endpoints are local-only")
-    return str(ip)
-
-
-def _ops_runs_path(repo_root: Path) -> Path:
-    return safe_path(repo_root, OPS_RUNS_REL)
-
-
-def _ops_lock_path(repo_root: Path, job_id: str) -> Path:
-    safe_job = re.sub(r"[^A-Za-z0-9_.-]+", "_", job_id)
-    return safe_path(repo_root, f"{OPS_LOCKS_DIR_REL}/{safe_job}.lock")
-
-
-def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
-    p = _ops_runs_path(repo_root)
-    if not p.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in p.read_text(encoding="utf-8", errors="ignore").splitlines()[-max(1, int(limit)):]:
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(row, dict):
-            out.append(row)
-    return out
-
-
-def _append_ops_run(repo_root: Path, payload: dict[str, Any]) -> Path:
-    p = _ops_runs_path(repo_root)
-    append_jsonl(p, payload)
-    return p
-
-
-def _acquire_ops_lock(repo_root: Path, job_id: str, run_id: str, started_at: str) -> Path:
-    p = _ops_lock_path(repo_root, job_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as e:
-        raise HTTPException(status_code=409, detail=f"Ops job already running: {job_id}") from e
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"job_id": job_id, "run_id": run_id, "started_at": started_at}, ensure_ascii=False))
-    return p
-
-
-def _release_ops_lock(lock_path: Path) -> None:
-    try:
-        lock_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-def _list_ops_locks(repo_root: Path) -> list[dict[str, Any]]:
-    d = safe_path(repo_root, OPS_LOCKS_DIR_REL)
-    if not d.exists() or not d.is_dir():
-        return []
-    out: list[dict[str, Any]] = []
-    for p in sorted(d.glob("*.lock")):
-        try:
-            row = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            row = {"job_id": p.stem}
-        if not isinstance(row, dict):
-            row = {"job_id": p.stem}
-        row["path"] = f"{OPS_LOCKS_DIR_REL}/{p.name}"
-        out.append(row)
-    return out
-
-
 def _latest_backup_archive_rel(repo_root: Path) -> str | None:
     d = safe_path(repo_root, BACKUPS_DIR_REL)
     if not d.exists() or not d.is_dir():
@@ -521,346 +433,65 @@ def _latest_backup_archive_rel(repo_root: Path) -> str | None:
     return f"{BACKUPS_DIR_REL}/{candidates[0].name}"
 
 
-def _ops_rotation_check(settings, lookahead_hours: int) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    lookahead = now + timedelta(hours=max(1, int(lookahead_hours)))
-
-    token_cfg = _load_token_config(settings.repo_root)
-    expiring_tokens: list[dict[str, Any]] = []
-    for item in token_cfg.get("tokens", []):
-        if not isinstance(item, dict):
-            continue
-        expires_at = _parse_iso(item.get("expires_at"))
-        if expires_at is None:
-            continue
-        if now <= expires_at <= lookahead and str(item.get("status") or "active") == "active":
-            expiring_tokens.append(
-                {
-                    "peer_id": item.get("peer_id"),
-                    "token_id": item.get("token_id"),
-                    "expires_at": expires_at.isoformat(),
-                }
-            )
-
-    key_payload = _load_security_keys(settings.repo_root)
-    active_key_id = key_payload.get("active_key_id")
-    keys = key_payload.get("keys", {}) if isinstance(key_payload.get("keys"), dict) else {}
-    active_key_status = None
-    if isinstance(keys.get(active_key_id), dict):
-        active_key_status = keys.get(active_key_id, {}).get("status")
-
-    return {
-        "ok": True,
-        "checked_at": now.isoformat(),
-        "lookahead_hours": int(lookahead_hours),
-        "active_key_id": active_key_id,
-        "active_key_status": active_key_status,
-        "expiring_tokens": expiring_tokens,
-        "expiring_token_count": len(expiring_tokens),
-    }
-
-
-def _ops_replay_dead_letter_sweep(settings, auth: AuthContext, arguments: dict[str, Any]) -> dict[str, Any]:
-    limit = int(arguments.get("limit", 20))
-    force = bool(arguments.get("force", False))
-    reason = str(arguments.get("reason") or "ops_dead_letter_sweep")
-
-    state = _load_delivery_state(settings.repo_root)
-    now = datetime.now(timezone.utc)
-    dead_ids = []
-    for msg_id, row in state.get("records", {}).items():
-        if not isinstance(row, dict):
-            continue
-        if _effective_delivery_status(row, now) == "dead_letter":
-            dead_ids.append(str(msg_id))
-    dead_ids = sorted(dead_ids)[: max(1, limit)]
-
-    replayed: list[str] = []
-    errors: list[dict[str, Any]] = []
-    for message_id in dead_ids:
-        try:
-            replay_messages(
-                req=MessageReplayRequest(message_id=message_id, reason=reason, force=force),
-                auth=auth,
-            )
-            replayed.append(message_id)
-        except HTTPException as e:
-            errors.append({"message_id": message_id, "status_code": e.status_code, "detail": str(e.detail)})
-
-    return {
-        "ok": True,
-        "dead_letter_candidates": len(dead_ids),
-        "replayed_count": len(replayed),
-        "replayed": replayed,
-        "errors": errors,
-        "force": force,
-    }
-
-
-def _ops_job_catalog() -> list[dict[str, Any]]:
-    return [
-        {
-            "job_id": "index.rebuild_incremental",
-            "description": "Incremental index refresh for retrieval freshness.",
-            "local_only": True,
-            "external_factors": ["host_resources"],
-            "recommended_schedule": "every 1-5 minutes",
-            "idempotent": False,
-        },
-        {
-            "job_id": "metrics.poll_and_alarm_eval",
-            "description": "Collect delivery/check/security/replication metrics and alarms.",
-            "local_only": True,
-            "external_factors": ["workload"],
-            "recommended_schedule": "every 1-5 minutes",
-            "idempotent": True,
-        },
-        {
-            "job_id": "backup.create",
-            "description": "Create deterministic backup archive + manifest.",
-            "local_only": True,
-            "external_factors": ["disk_capacity"],
-            "recommended_schedule": "daily",
-            "idempotent": False,
-        },
-        {
-            "job_id": "backup.restore_test",
-            "description": "Run restore drill using latest or explicit backup path.",
-            "local_only": True,
-            "external_factors": ["disk_capacity", "cpu"],
-            "recommended_schedule": "daily/weekly",
-            "idempotent": True,
-        },
-        {
-            "job_id": "replication.pull",
-            "description": "Ingest replication bundle from peer source.",
-            "local_only": True,
-            "external_factors": ["network", "peer_availability"],
-            "recommended_schedule": "hourly or policy-driven",
-            "idempotent": True,
-        },
-        {
-            "job_id": "replication.push",
-            "description": "Push replication bundle to peer target.",
-            "local_only": True,
-            "external_factors": ["network", "peer_availability"],
-            "recommended_schedule": "hourly or policy-driven",
-            "idempotent": True,
-        },
-        {
-            "job_id": "messages.replay_dead_letter_sweep",
-            "description": "Replay dead-letter deliveries with bounded sweep.",
-            "local_only": True,
-            "external_factors": ["peer_availability"],
-            "recommended_schedule": "hourly",
-            "idempotent": False,
-        },
-        {
-            "job_id": "security.rotation_check",
-            "description": "Check upcoming token expiry and active key status.",
-            "local_only": True,
-            "external_factors": ["time"],
-            "recommended_schedule": "daily",
-            "idempotent": True,
-        },
-        {
-            "job_id": "compact.plan",
-            "description": "Generate compaction planning report (host-controlled).",
-            "local_only": True,
-            "external_factors": ["token_budget", "context_budget", "host_resources"],
-            "recommended_schedule": "daily/weekly",
-            "idempotent": False,
-        },
-    ]
-
-
-def _ops_execute_job(req: OpsRunRequest, auth: AuthContext) -> dict[str, Any]:
-    settings, _ = _services()
-    args = dict(req.arguments or {})
-
-    if req.dry_run:
-        return {
-            "ok": True,
-            "dry_run": True,
-            "job_id": req.job_id,
-            "planned_arguments": args,
-        }
-
-    if req.job_id == "index.rebuild_incremental":
-        return index_rebuild_incremental(auth=auth)
-    if req.job_id == "metrics.poll_and_alarm_eval":
-        return metrics(auth=auth)
-    if req.job_id == "backup.create":
-        return backup_create(req=BackupCreateRequest(**args), auth=auth)
-    if req.job_id == "backup.restore_test":
-        req_args = dict(args)
-        if not req_args.get("backup_path"):
-            latest_rel = _latest_backup_archive_rel(settings.repo_root)
-            if not latest_rel:
-                raise HTTPException(status_code=404, detail="No backup archive found for restore test")
-            req_args["backup_path"] = latest_rel
-        return backup_restore_test(req=BackupRestoreTestRequest(**req_args), auth=auth)
-    if req.job_id == "replication.pull":
-        return replication_pull(req=ReplicationPullRequest(**args), auth=auth)
-    if req.job_id == "replication.push":
-        return replication_push(req=ReplicationPushRequest(**args), auth=auth)
-    if req.job_id == "messages.replay_dead_letter_sweep":
-        return _ops_replay_dead_letter_sweep(settings, auth, args)
-    if req.job_id == "security.rotation_check":
-        return _ops_rotation_check(settings, lookahead_hours=int(args.get("lookahead_hours", 24)))
-    if req.job_id == "compact.plan":
-        return compact_run(req=CompactRequest(**args), auth=auth)
-
-    raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
-
-
 @app.get("/v1/ops/catalog")
 def ops_catalog(auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    ip = _require_local_ops_access(auth)
-    jobs = _ops_job_catalog()
-    _audit(settings, auth, "ops_catalog", {"count": len(jobs), "client_ip": ip})
-    return {
-        "ok": True,
-        "local_only": True,
-        "security": {
-            "execution": "host-local",
-            "required_scope": "admin:peers",
-            "network_boundary": "loopback_or_unix_socket",
-            "description": "Ops endpoints are for hosting-agent daemon/scheduler use only.",
-        },
-        "jobs": jobs,
-    }
+    return ops_catalog_service(settings=settings, auth=auth, audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail))
 
 
 @app.get("/v1/ops/status")
 def ops_status(limit: int = Query(default=50, ge=1, le=500), auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    ip = _require_local_ops_access(auth)
-    runs = _load_ops_runs(settings.repo_root, limit=limit)
-    locks = _list_ops_locks(settings.repo_root)
-
-    by_job: dict[str, dict[str, Any]] = {}
-    for row in runs:
-        job_id = str(row.get("job_id") or "")
-        if not job_id or job_id in by_job:
-            continue
-        by_job[job_id] = {
-            "status": row.get("status"),
-            "started_at": row.get("started_at"),
-            "finished_at": row.get("finished_at"),
-            "run_id": row.get("run_id"),
-        }
-
-    _audit(settings, auth, "ops_status", {"limit": limit, "client_ip": ip, "runs": len(runs), "locks": len(locks)})
-    return {
-        "ok": True,
-        "local_only": True,
-        "client_ip": ip,
-        "active_locks": locks,
-        "recent_runs": runs,
-        "last_by_job": by_job,
-    }
+    return ops_status_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        limit=limit,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.get("/v1/ops/schedule/export")
 def ops_schedule_export(format: str = Query(default="systemd"), auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    ip = _require_local_ops_access(auth)
-    fmt = str(format or "systemd").strip().lower()
-    if fmt not in {"systemd", "cron"}:
-        raise HTTPException(status_code=400, detail="format must be one of: systemd, cron")
-
-    jobs = _ops_job_catalog()
-    base_url = "http://127.0.0.1:8080"
-    command = f"curl -sS -X POST {base_url}/v1/ops/run -H 'Authorization: Bearer $COGNIRELAY_OPS_TOKEN' -H 'Content-Type: application/json'"
-
-    if fmt == "systemd":
-        examples = {
-            "service_unit": {
-                "Description": "CogniRelay host ops runner",
-                "ExecStart": f"/bin/sh -lc \"{command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'\"",
-            },
-            "timer_unit": {"OnCalendar": "*:0/5", "Persistent": True},
-        }
-    else:
-        examples = {
-            "cron_examples": [
-                f"*/5 * * * * {command} -d '{{\"job_id\":\"index.rebuild_incremental\"}}'",
-                f"0 * * * * {command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'",
-                f"0 2 * * * {command} -d '{{\"job_id\":\"backup.create\"}}'",
-                f"30 2 * * 0 {command} -d '{{\"job_id\":\"backup.restore_test\"}}'",
-            ]
-        }
-
-    _audit(settings, auth, "ops_schedule_export", {"format": fmt, "client_ip": ip})
-    return {
-        "ok": True,
-        "local_only": True,
-        "format": fmt,
-        "jobs": jobs,
-        "examples": examples,
-    }
+    return ops_schedule_export_service(
+        settings=settings,
+        auth=auth,
+        format=format,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/ops/run")
 def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    _enforce_rate_limit(settings, auth, "ops_run")
-    _enforce_payload_limit(settings, req.model_dump(), "ops_run")
-    ip = _require_local_ops_access(auth)
-    if req.job_id not in OPS_JOBS:
-        raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
-
-    started = datetime.now(timezone.utc)
-    run_id = f"ops_{started.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
-    lock_path = _acquire_ops_lock(settings.repo_root, req.job_id, run_id, started.isoformat())
-
-    status = "succeeded"
-    job_result: dict[str, Any] | None = None
-    error_detail: str | None = None
-    try:
-        job_result = _ops_execute_job(req, auth)
-    except HTTPException as e:
-        status = "failed"
-        error_detail = f"HTTP {e.status_code}: {e.detail}"
-        raise
-    except Exception as e:
-        status = "failed"
-        error_detail = str(e)
-        raise
-    finally:
-        finished = datetime.now(timezone.utc)
-        run_row = {
-            "schema_version": "1.0",
-            "run_id": run_id,
-            "job_id": req.job_id,
-            "status": status,
-            "started_at": started.isoformat(),
-            "finished_at": finished.isoformat(),
-            "duration_seconds": round((finished - started).total_seconds(), 4),
-            "dry_run": req.dry_run,
-            "force": req.force,
-            "client_ip": ip,
-            "initiator": auth.peer_id,
-            "error": error_detail,
-            "result_summary": {
-                "ok": bool(job_result.get("ok")) if isinstance(job_result, dict) else None,
-                "keys": sorted(list(job_result.keys()))[:20] if isinstance(job_result, dict) else [],
-            },
-        }
-        _append_ops_run(settings.repo_root, run_row)
-        _release_ops_lock(lock_path)
-        _audit(settings, auth, "ops_run", {"run_id": run_id, "job_id": req.job_id, "status": status, "client_ip": ip})
-
-    return {
-        "ok": True,
-        "run_id": run_id,
-        "job_id": req.job_id,
-        "status": status,
-        "local_only": True,
-        "job_result": job_result,
-    }
+    return ops_run_service(
+        settings=settings,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        index_rebuild_incremental=index_rebuild_incremental,
+        metrics=metrics,
+        backup_create=backup_create,
+        backup_create_request_factory=BackupCreateRequest,
+        backup_restore_test=backup_restore_test,
+        backup_restore_test_request_factory=BackupRestoreTestRequest,
+        replication_pull=replication_pull,
+        replication_pull_request_factory=ReplicationPullRequest,
+        replication_push=replication_push,
+        replication_push_request_factory=ReplicationPushRequest,
+        compact_run=compact_run,
+        compact_request_factory=CompactRequest,
+        load_token_config=_load_token_config,
+        parse_iso=_parse_iso,
+        load_security_keys=_load_security_keys,
+        load_delivery_state=_load_delivery_state,
+        effective_delivery_status=_effective_delivery_status,
+        replay_messages=replay_messages,
+        replay_request_factory=MessageReplayRequest,
+        backups_dir_rel=BACKUPS_DIR_REL,
+    )
 
 
 @app.post("/v1/write")
@@ -1678,21 +1309,6 @@ TRUST_POLICIES_REL = "peers/trust_policies.json"
 REPLICATION_TOMBSTONES_REL = "peers/replication_tombstones.json"
 BACKUPS_DIR_REL = "backups"
 GOVERNANCE_POLICY_REL = "config/governance_policy.json"
-OPS_RUNS_REL = "logs/ops_runs.jsonl"
-OPS_LOCKS_DIR_REL = "logs/ops_locks"
-OPS_JOBS = {
-    "index.rebuild_incremental",
-    "metrics.poll_and_alarm_eval",
-    "backup.create",
-    "backup.restore_test",
-    "replication.pull",
-    "replication.push",
-    "messages.replay_dead_letter_sweep",
-    "security.rotation_check",
-    "compact.plan",
-}
-
-
 def _estimate_payload_bytes(payload: Any) -> int:
     try:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
