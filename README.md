@@ -8,7 +8,7 @@ This is not a Git forge. It is an AI-native substrate for memory, retrieval, mes
 
 - Git-backed read, write, and append operations with commit-on-change behavior
 - Derived indexing and local search with JSON indexes and SQLite FTS5
-- Context retrieval and deterministic snapshots for continuation-safe agent loops
+- Context retrieval, continuity capsules, and deterministic snapshots for continuation-safe agent loops
 - Peer registry, federation metadata, direct messaging, and relay transport
 - Shared task records, patch proposal/apply flows, and code check/merge workflows
 - Token lifecycle management, signed message verification, replication, backup, and host-local ops automation

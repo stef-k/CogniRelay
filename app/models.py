@@ -27,6 +27,9 @@ class SearchRequest(BaseModel):
 
 class ContextRetrieveRequest(BaseModel):
     task: str
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    subject_id: Optional[str] = Field(default=None, max_length=200)
+    continuity_mode: Literal["auto", "required", "off"] = "auto"
     max_tokens_estimate: int = Field(default=4000, ge=256, le=100000)
     include_types: List[str] = Field(default_factory=list)
     time_window_days: int = Field(default=30, ge=1, le=3650)
@@ -290,3 +293,74 @@ class OpsRunRequest(BaseModel):
     dry_run: bool = False
     force: bool = False
     arguments: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ContinuitySource(BaseModel):
+    producer: str = Field(min_length=1, max_length=100)
+    update_reason: Literal["startup_refresh", "pre_compaction", "interaction_boundary", "manual", "migration"]
+    inputs: List[str] = Field(default_factory=list, max_length=12)
+
+
+class ContinuityRelationshipModel(BaseModel):
+    trust_level: Optional[Literal["low", "guarded", "normal", "high"]] = None
+    preferred_style: List[str] = Field(default_factory=list, max_length=5)
+    sensitivity_notes: List[str] = Field(default_factory=list, max_length=5)
+
+
+class ContinuityRetrievalHints(BaseModel):
+    must_include: List[str] = Field(default_factory=list, max_length=8)
+    avoid: List[str] = Field(default_factory=list, max_length=8)
+    load_next: List[str] = Field(default_factory=list, max_length=8)
+
+
+class ContinuityAttentionPolicy(BaseModel):
+    early_load: List[str] = Field(default_factory=list, max_length=8)
+    presence_bias_overrides: List[str] = Field(default_factory=list, max_length=5)
+
+
+class ContinuityConfidence(BaseModel):
+    continuity: float = Field(ge=0.0, le=1.0)
+    relationship_model: float = Field(ge=0.0, le=1.0)
+
+
+class ContinuityFreshness(BaseModel):
+    freshness_class: Optional[Literal["persistent", "durable", "situational", "ephemeral"]] = None
+    expires_at: Optional[str] = None
+    stale_after_seconds: Optional[int] = Field(default=None, ge=300, le=31536000)
+
+
+class ContinuityState(BaseModel):
+    top_priorities: List[str] = Field(max_length=5)
+    active_concerns: List[str] = Field(max_length=5)
+    active_constraints: List[str] = Field(max_length=5)
+    open_loops: List[str] = Field(max_length=5)
+    stance_summary: str = Field(max_length=240)
+    drift_signals: List[str] = Field(max_length=5)
+    working_hypotheses: List[str] = Field(default_factory=list, max_length=5)
+    relationship_model: Optional[ContinuityRelationshipModel] = None
+    retrieval_hints: Optional[ContinuityRetrievalHints] = None
+    long_horizon_commitments: List[str] = Field(default_factory=list, max_length=5)
+
+
+class ContinuityCapsule(BaseModel):
+    schema_version: Literal["1.0"] = "1.0"
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    updated_at: str
+    verified_at: str
+    source: ContinuitySource
+    continuity: ContinuityState
+    confidence: ContinuityConfidence
+    verification_kind: Optional[Literal["self_review", "external_observation", "user_confirmation", "peer_confirmation", "system_check"]] = None
+    attention_policy: Optional[ContinuityAttentionPolicy] = None
+    freshness: Optional[ContinuityFreshness] = None
+    canonical_sources: List[str] = Field(default_factory=list, max_length=8)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ContinuityUpsertRequest(BaseModel):
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    capsule: ContinuityCapsule
+    commit_message: Optional[str] = None
+    idempotency_key: Optional[str] = Field(default=None, max_length=200)

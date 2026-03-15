@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from .audit import append_audit
 from .auth import AuthContext, require_auth
+from .continuity import build_continuity_state, continuity_upsert_service
 from .config import ALL_SCOPES, get_settings, sha256_token
 from .git_manager import GitManager
 from .indexer import (
@@ -37,6 +38,7 @@ from .models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
+    ContinuityUpsertRequest,
     ContextSnapshotRequest,
     ContextRetrieveRequest,
     MessageReplayRequest,
@@ -321,6 +323,15 @@ def _tool_catalog() -> list[dict[str, Any]]:
             "scopes": ["search", "read_namespaces"],
             "idempotent": True,
             "input_schema": _schema_for_model(ContextRetrieveRequest),
+        },
+        {
+            "name": "continuity.upsert",
+            "description": "Create or replace one continuity capsule atomically.",
+            "method": "POST",
+            "path": "/v1/continuity/upsert",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": _schema_for_model(ContinuityUpsertRequest),
         },
         {
             "name": "context.snapshot_create",
@@ -972,6 +983,8 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         return recent_list(RecentRequest(**args), auth=auth)  # type: ignore[arg-type]
     if name == "context.retrieve":
         return context_retrieve(ContextRetrieveRequest(**args), auth=auth)  # type: ignore[arg-type]
+    if name == "continuity.upsert":
+        return continuity_upsert(ContinuityUpsertRequest(**args), auth=auth)  # type: ignore[arg-type]
     if name == "context.snapshot_create":
         return context_snapshot_create(ContextSnapshotRequest(**args), auth=auth)  # type: ignore[arg-type]
     if name == "context.snapshot_get":
@@ -1216,6 +1229,7 @@ def capabilities() -> dict:
             "index_rebuild",
             "search",
             "context_retrieve",
+            "continuity_state",
             "context_snapshot",
             "messages_send_inbox",
             "compact_summary",
@@ -1283,6 +1297,7 @@ def manifest() -> dict:
             "POST /v1/search": {"scope": "search"},
             "POST /v1/recent": {"scope": "search"},
             "POST /v1/context/retrieve": {"scope": "search"},
+            "POST /v1/continuity/upsert": {"scope": "write:projects"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},
             "GET /v1/context/snapshot/{snapshot_id}": {"scope": "read:files"},
             "POST /v1/tasks": {"scope": "write:projects"},
@@ -1925,6 +1940,18 @@ def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -
     return {"ok": True, "count": len(results), "results": results}
 
 
+@app.post("/v1/continuity/upsert")
+def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    settings, gm = _services()
+    return continuity_upsert_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
 @app.post("/v1/context/retrieve")
 def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
@@ -1968,19 +1995,27 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
         if "?" in item.get("snippet", ""):
             open_questions.append(item["snippet"])
 
+    continuity_state = build_continuity_state(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
+    )
+
     bundle = {
         "task": req.task,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "core_memory": core_memory,
         "recent_relevant": recent,
         "open_questions": open_questions[:5],
-        "token_budget_hint": min(req.max_tokens_estimate, 4000),
+        "token_budget_hint": continuity_state["budget"]["token_budget_hint"],
         "time_window_days": req.time_window_days,
         "notes": [
             "For best continuity, run /v1/index/rebuild before retrieve if many files changed.",
             "Use include_types to reduce noise (e.g. ['journal_entry','messages']).",
             "Use /v1/recent for startup continuity when you need latest entries regardless of keyword relevance.",
         ],
+        "continuity_state": continuity_state,
     }
     _audit(settings, auth, "context_retrieve", {"task": req.task[:120], "count": len(recent)})
     return {"ok": True, "bundle": bundle}
