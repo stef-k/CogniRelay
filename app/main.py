@@ -27,6 +27,7 @@ from .continuity import (
     continuity_compare_service,
     continuity_list_service,
     continuity_read_service,
+    continuity_revalidate_service,
     continuity_upsert_service,
 )
 from .config import get_settings
@@ -56,6 +57,7 @@ from .models import (
     ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     ContextSnapshotRequest,
     ContextRetrieveRequest,
@@ -576,6 +578,19 @@ def continuity_compare(req: ContinuityCompareRequest, auth: AuthContext = Depend
     settings, _ = _services()
     return continuity_compare_service(
         repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/revalidate")
+def continuity_revalidate(req: ContinuityRevalidateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Confirm, correct, degrade, or conflict-mark one active continuity capsule."""
+    settings, gm = _services()
+    return continuity_revalidate_service(
+        repo_root=settings.repo_root,
+        gm=gm,
         auth=auth,
         req=req,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),

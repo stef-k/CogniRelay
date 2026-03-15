@@ -38,6 +38,7 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `POST /v1/continuity/upsert`: create or replace one continuity capsule
 - `POST /v1/continuity/read`: load one active continuity capsule by exact selector
 - `POST /v1/continuity/compare`: compare one active continuity capsule to a candidate capsule without mutating storage
+- `POST /v1/continuity/revalidate`: confirm, correct, degrade, or conflict-mark one active continuity capsule
 - `POST /v1/continuity/list`: list active continuity capsule summaries
 - `POST /v1/continuity/archive`: archive one active continuity capsule and remove the active file
 - `POST /v1/context/snapshot`: persist deterministic context snapshot
@@ -54,6 +55,7 @@ Notable behavior:
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
 - `POST /v1/continuity/read` returns the raw active capsule payload for one exact selector
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule
+- `POST /v1/continuity/revalidate` writes verification status and capsule health through one audited git-backed continuity update
 - `POST /v1/continuity/list` returns active-only summaries, skipping archive entries and invalid active files
 - `POST /v1/continuity/archive` writes an archive envelope under `memory/continuity/archive/` and removes the active capsule in one git-backed commit
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes

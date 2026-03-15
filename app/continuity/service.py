@@ -17,11 +17,14 @@ from app.auth import AuthContext
 from app.git_manager import GitManager
 from app.models import (
     ContinuityArchiveRequest,
+    ContinuityCapsuleHealth,
     ContinuityCapsule,
     ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
+    ContinuityVerificationState,
     ContinuityVerificationSignal,
     ContextRetrieveRequest,
 )
@@ -90,6 +93,13 @@ CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
     "retrieval_hints": ["must_include", "avoid", "load_next"],
 }
 CONTINUITY_COMPARE_IGNORED_FIELDS = {"verified_at", "verification_kind", "verification_state", "capsule_health"}
+CONTINUITY_SIGNAL_STATUS = {
+    "self_review": "self_attested",
+    "external_observation": "externally_supported",
+    "peer_confirmation": "peer_confirmed",
+    "user_confirmation": "user_confirmed",
+    "system_check": "system_confirmed",
+}
 
 
 def _canonical_json(data: Any) -> str:
@@ -325,6 +335,42 @@ def _compare_capsules(active: dict[str, Any], candidate: dict[str, Any]) -> list
         order_name = key if key in CONTINUITY_COMPARE_NESTED_ORDERS else ("metadata" if key == "metadata" else None)
         changes.extend(_compare_values(active_value, candidate_value, path=key, order_name=order_name))
     return changes
+
+
+def _signals_to_evidence_refs(signals: list[ContinuityVerificationSignal]) -> list[str]:
+    """Derive bounded evidence refs from ordered verification signals."""
+    return [signal.source_ref for signal in signals[:4]]
+
+
+def _final_capsule_payload(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
+    """Validate a final assembled capsule including V3 fields and return canonical JSON."""
+    payload, canonical = _validate_capsule(repo_root, capsule)
+    _validate_v3_capsule_fields(capsule)
+    if len(canonical.encode("utf-8")) > 12 * 1024:
+        raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+    return payload, canonical
+
+
+def _persist_active_capsule(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    path: Path,
+    canonical: str,
+    commit_message: str,
+) -> None:
+    """Persist an active capsule safely, restoring the prior durable file on commit failure."""
+    old_bytes = path.read_bytes() if path.exists() else None
+    write_text_file(path, canonical)
+    try:
+        gm.commit_file(path, commit_message)
+    except Exception as exc:
+        if old_bytes is None:
+            if path.exists():
+                path.unlink()
+        else:
+            write_text_file(path, old_bytes.decode("utf-8"))
+        raise HTTPException(status_code=500, detail="Failed to persist revalidated continuity capsule") from exc
 
 
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
@@ -798,6 +844,131 @@ def continuity_compare_service(
         "changed_fields": changed_fields,
         "strongest_signal": strongest_signal,
         "recommended_outcome": recommended_outcome,
+    }
+
+
+def continuity_revalidate_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityRevalidateRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Confirm, correct, degrade, or conflict-mark one active continuity capsule."""
+    auth.require("write:projects")
+    _validate_verification_signals(req.signals)
+    if req.outcome == "correct":
+        if req.candidate_capsule is None:
+            raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
+        _validate_candidate_selector_match(req.subject_kind, req.subject_id, req.candidate_capsule)
+        _normalize_compare_payload(repo_root, req.candidate_capsule)
+    elif req.candidate_capsule is not None:
+        raise HTTPException(status_code=400, detail=f"candidate_capsule is not allowed for outcome={req.outcome}")
+    if req.outcome in {"degrade", "conflict"} and not req.reason:
+        raise HTTPException(status_code=400, detail=f"reason is required for outcome={req.outcome}")
+
+    rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    auth.require_read_path(rel)
+    auth.require_write_path(rel)
+    active_path = safe_path(repo_root, rel)
+    active = ContinuityCapsule.model_validate(
+        _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now_iso = now.isoformat().replace("+00:00", "Z")
+    strongest_signal = _strongest_signal_kind(req.signals)
+    derived_status = CONTINUITY_SIGNAL_STATUS[strongest_signal]
+    evidence_refs = _signals_to_evidence_refs(req.signals)
+    compare_changed_fields: list[str] = []
+    result_outcome = req.outcome
+    updated = False
+
+    if req.outcome == "correct":
+        candidate = req.candidate_capsule
+        assert candidate is not None
+        compare_changed_fields = _compare_capsules(
+            _normalize_compare_payload(repo_root, active),
+            _normalize_compare_payload(repo_root, candidate),
+        )
+        if not compare_changed_fields:
+            result_outcome = "confirm"
+            final_capsule = active.model_copy(deep=True)
+        else:
+            updated = True
+            final_capsule = candidate.model_copy(deep=True)
+    else:
+        final_capsule = active.model_copy(deep=True)
+
+    final_capsule.verified_at = now_iso
+    final_capsule.verification_kind = strongest_signal  # type: ignore[assignment]
+
+    if result_outcome == "conflict":
+        final_capsule.verification_state = ContinuityVerificationState.model_validate({
+            "status": "conflicted",
+            "last_revalidated_at": now_iso,
+            "strongest_signal": strongest_signal,
+            "evidence_refs": evidence_refs,
+            "conflict_summary": req.reason,
+        })
+        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+            "status": "conflicted",
+            "reasons": [req.reason],
+            "last_checked_at": now_iso,
+        })
+    elif result_outcome == "degrade":
+        final_capsule.verification_state = ContinuityVerificationState.model_validate({
+            "status": derived_status,
+            "last_revalidated_at": now_iso,
+            "strongest_signal": strongest_signal,
+            "evidence_refs": evidence_refs,
+        })
+        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+            "status": "degraded",
+            "reasons": [req.reason],
+            "last_checked_at": now_iso,
+        })
+    else:
+        final_capsule.verification_state = ContinuityVerificationState.model_validate({
+            "status": derived_status,
+            "last_revalidated_at": now_iso,
+            "strongest_signal": strongest_signal,
+            "evidence_refs": evidence_refs,
+        })
+        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+            "status": "healthy",
+            "reasons": [],
+            "last_checked_at": now_iso,
+        })
+
+    _, canonical = _final_capsule_payload(repo_root, final_capsule)
+    _persist_active_capsule(
+        repo_root=repo_root,
+        gm=gm,
+        path=active_path,
+        canonical=canonical,
+        commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
+    )
+    audit(
+        auth,
+        "continuity_revalidate",
+        {
+            "subject_kind": req.subject_kind,
+            "subject_id": req.subject_id,
+            "path": rel,
+            "outcome": result_outcome,
+            "strongest_signal": strongest_signal,
+            "updated": updated,
+        },
+    )
+    return {
+        "ok": True,
+        "path": rel,
+        "outcome": result_outcome,
+        "updated": updated,
+        "verification_state": final_capsule.verification_state.model_dump(mode="json", exclude_none=True),
+        "capsule_health": final_capsule.capsule_health.model_dump(mode="json", exclude_none=True),
+        "latest_commit": gm.latest_commit(),
     }
 
 
