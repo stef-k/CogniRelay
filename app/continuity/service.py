@@ -38,6 +38,7 @@ CONTINUITY_WARNING_STALE_SOFT = "continuity_stale_soft"
 CONTINUITY_WARNING_STALE_HARD = "continuity_stale_hard"
 CONTINUITY_WARNING_EXPIRED = "continuity_expired"
 CONTINUITY_WARNING_TRUNCATED = "continuity_truncated_to_zero"
+CONTINUITY_WARNING_TRUNCATED_MULTI = "continuity_capsule_truncated_to_zero"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -207,9 +208,9 @@ def _format_selector(subject_kind: str, subject_id: str) -> str:
 
 def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_mode: bool) -> str:
     """Return a warning string in either V1 or V2 retrieval format."""
+    if warning == CONTINUITY_WARNING_TRUNCATED_MULTI and not multi_mode:
+        return CONTINUITY_WARNING_TRUNCATED
     if not multi_mode:
-        if warning == "continuity_capsule_truncated_to_zero":
-            return CONTINUITY_WARNING_TRUNCATED
         return warning
     return f"{warning}:{subject_kind}:{subject_id}"
 
@@ -561,7 +562,7 @@ def continuity_list_service(
             try:
                 capsule = _load_capsule(repo_root, rel)
             except HTTPException as exc:
-                if exc.status_code == 400:
+                if exc.status_code in {400, 404}:
                     continue
                 raise
             phase, _ = _continuity_phase(capsule, now)
@@ -623,9 +624,21 @@ def continuity_archive_service(
     archive_path = safe_path(repo_root, archive_rel)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     active_path = safe_path(repo_root, rel)
+    active_bytes = active_path.read_bytes()
     write_text_file(archive_path, _canonical_json(archive_payload))
     active_path.unlink()
-    gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
+    try:
+        committed = gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
+    except Exception:
+        write_text_file(active_path, active_bytes.decode("utf-8"))
+        if archive_path.exists():
+            archive_path.unlink()
+        raise
+    if not committed:
+        write_text_file(active_path, active_bytes.decode("utf-8"))
+        if archive_path.exists():
+            archive_path.unlink()
+        raise RuntimeError("Continuity archive commit produced no changes")
 
     audit(
         auth,
@@ -717,7 +730,7 @@ def build_continuity_state(
         trimmed = _trim_capsule(row["capsule"], allocation)
         if trimmed is None:
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
-            warnings.append(_qualify_warning("continuity_capsule_truncated_to_zero", kind, subject_id, multi_mode=multi_warning_mode))
+            warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUNCATED_MULTI, kind, subject_id, multi_mode=multi_warning_mode))
             continue
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")

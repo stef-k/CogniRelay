@@ -49,3 +49,11 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 - Keep changes scoped to the active issue.
 - Add targeted regression tests when moving risky logic.
 - Favor clarity and explicit wiring over clever indirection.
+
+## Continuity Resilience
+
+- Treat continuity features as mission-critical agent-orientation infrastructure.
+- Multi-step continuity mutations must preserve existing data on failure; never leave an agent without its last durable capsule because a later archive or commit step failed.
+- When a continuity operation can degrade safely under the current contract, prefer returning the best available result over failing the whole aggregate operation.
+- Skip unreadable or concurrently removed entries in list-style continuity views when doing so preserves a deterministic response.
+- Do not silently change established continuity API semantics in implementation code. If stronger resilience requires a contract change, record it in the appropriate roadmap/spec issue first.

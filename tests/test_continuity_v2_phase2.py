@@ -301,3 +301,21 @@ class TestContinuityV2Phase2(unittest.TestCase):
                     context_retrieve(req=req, auth=_AuthStub())
 
             self.assertEqual(cm.exception.status_code, 400)
+
+    def test_multi_selector_subject_mismatch_halts_with_400(self) -> None:
+        """A selected capsule whose embedded subject mismatches should fail the whole request."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            mismatched = self._capsule_payload(subject_kind="user", subject_id="other-user")
+            self._write_capsule(repo_root, subject_kind="user", subject_id="expected-user", payload=mismatched)
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "expected-user"}],
+            )
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as cm:
+                    context_retrieve(req=req, auth=_AuthStub())
+
+            self.assertEqual(cm.exception.status_code, 400)

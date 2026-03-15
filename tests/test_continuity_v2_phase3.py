@@ -186,6 +186,32 @@ class TestContinuityV2Phase3(unittest.TestCase):
             self.assertEqual(out["capsules"][0]["subject_id"], "allowed")
             self.assertEqual(events[0][0], "continuity_list")
 
+    def test_continuity_list_skips_capsules_deleted_during_iteration(self) -> None:
+        """List should treat a mid-iteration missing file as a skipped entry, not a server error."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._write_capsule(repo_root, subject_kind="user", subject_id="allowed")
+            self._write_capsule(repo_root, subject_kind="user", subject_id="gone")
+
+            real_loader = __import__("app.continuity.service", fromlist=["_load_capsule"])._load_capsule
+
+            def _flaky_load(repo_root_arg: Path, rel: str, **kwargs):
+                if rel.endswith("user-gone.json"):
+                    raise HTTPException(status_code=404, detail="Continuity capsule not found")
+                return real_loader(repo_root_arg, rel, **kwargs)
+
+            with patch("app.continuity.service._load_capsule", side_effect=_flaky_load):
+                out = continuity_list_service(
+                    repo_root=repo_root,
+                    auth=_AuthStub(),
+                    req=ContinuityListRequest(limit=10),
+                    now=datetime.now(timezone.utc),
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(out["count"], 1)
+            self.assertEqual(out["capsules"][0]["subject_id"], "allowed")
+
     def test_continuity_list_reports_phase_and_null_freshness_class(self) -> None:
         """List summaries should compute phase and allow null freshness_class."""
         with tempfile.TemporaryDirectory() as td:
