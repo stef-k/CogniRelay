@@ -215,7 +215,7 @@ def _render_value(value: Any) -> str:
     if isinstance(value, list):
         return "\n".join(f"- {item}" for item in value)
     if isinstance(value, dict):
-        return "\n".join(f"{key}: {_render_value(value[key])}" for key in sorted(value))
+        return "\n".join(f"{key}: {_render_value(value[key])}" for key in value)
     return str(value)
 
 
@@ -257,7 +257,7 @@ def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
 
 
 def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | None:
-    payload = json.loads(_canonical_json(capsule))
+    payload = json.loads(json.dumps(capsule, ensure_ascii=False))
     for dotted in (
         "metadata",
         "canonical_sources",

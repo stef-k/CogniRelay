@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.continuity.service import _trim_capsule
+from app.continuity.service import _render_value, _trim_capsule
 from app.main import continuity_upsert, context_retrieve
 from app.models import ContinuityUpsertRequest, ContextRetrieveRequest
 
@@ -415,6 +415,10 @@ class TestContinuityV1(unittest.TestCase):
         self.assertNotIn("canonical_sources", trimmed)
         self.assertNotIn("metadata", trimmed)
         self.assertNotIn("freshness", trimmed)
+
+    def test_render_value_preserves_insertion_order_for_objects(self) -> None:
+        rendered = _render_value({"b": "second", "a": "first"})
+        self.assertEqual(rendered, "b: second\na: first")
 
 
 if __name__ == "__main__":
