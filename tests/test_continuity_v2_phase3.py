@@ -114,6 +114,31 @@ class TestContinuityV2Phase3(unittest.TestCase):
             self.assertFalse(out["archived"])
             self.assertEqual(out["capsule"]["subject_id"], "stef")
 
+    def test_continuity_read_returns_v3_fields_when_present(self) -> None:
+        """Read should return V3 verification and health fields when they are stored."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            payload = self._capsule_payload(subject_kind="user", subject_id="stef")
+            payload["verification_state"] = {
+                "status": "system_confirmed",
+                "last_revalidated_at": payload["verified_at"],
+                "strongest_signal": "system_check",
+                "evidence_refs": ["checks/continuity.json"],
+            }
+            payload["capsule_health"] = {
+                "status": "degraded",
+                "reasons": ["source drift"],
+                "last_checked_at": payload["verified_at"],
+            }
+            self._write_capsule(repo_root, subject_kind="user", subject_id="stef", payload=payload)
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_read(req=ContinuityReadRequest(subject_kind="user", subject_id="stef"), auth=_AuthStub())
+
+            self.assertEqual(out["capsule"]["verification_state"]["status"], "system_confirmed")
+            self.assertEqual(out["capsule"]["capsule_health"]["status"], "degraded")
+
     def test_continuity_read_missing_capsule_raises_404(self) -> None:
         """Read should return 404 when the active capsule does not exist."""
         with tempfile.TemporaryDirectory() as td:

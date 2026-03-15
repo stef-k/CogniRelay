@@ -292,3 +292,141 @@ class TestContinuityV3Phase3(unittest.TestCase):
             self.assertEqual(events[0][0], "continuity_revalidate")
             self.assertEqual(events[0][1]["strongest_signal"], "system_check")
             self.assertFalse(events[0][1]["updated"])
+
+    def test_revalidate_derives_evidence_refs_in_request_order_capped_at_four(self) -> None:
+        """Revalidate should persist the first four signal source refs in request order."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            active = self._capsule_payload()
+            self._write_capsule(repo_root, active)
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            signals = [
+                {"kind": "self_review", "source_ref": f"ref-{idx}", "observed_at": now, "summary": f"signal {idx}"}
+                for idx in range(5)
+            ]
+
+            out = continuity_revalidate_service(
+                repo_root=repo_root,
+                gm=_GitManagerStub(),
+                auth=_AuthStub(),
+                req=ContinuityRevalidateRequest(
+                    subject_kind="user",
+                    subject_id="stef",
+                    outcome="confirm",
+                    signals=signals,
+                ),
+                audit=lambda *_args: None,
+            )
+
+            self.assertEqual(out["verification_state"]["evidence_refs"], ["ref-0", "ref-1", "ref-2", "ref-3"])
+
+    def test_revalidate_missing_active_capsule_returns_404(self) -> None:
+        """Revalidate should return 404 when the selected active capsule does not exist."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            with self.assertRaises(HTTPException) as cm:
+                continuity_revalidate_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(),
+                    auth=_AuthStub(),
+                    req=ContinuityRevalidateRequest(
+                        subject_kind="user",
+                        subject_id="missing",
+                        outcome="confirm",
+                        signals=self._signals(),
+                    ),
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(cm.exception.status_code, 404)
+
+    def test_revalidate_enforces_outcome_specific_validation(self) -> None:
+        """Revalidate should reject forbidden candidate and reason combinations."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            active = self._capsule_payload()
+            self._write_capsule(repo_root, active)
+
+            with self.assertRaises(HTTPException) as confirm_reason:
+                continuity_revalidate_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(),
+                    auth=_AuthStub(),
+                    req=ContinuityRevalidateRequest(
+                        subject_kind="user",
+                        subject_id="stef",
+                        outcome="confirm",
+                        reason="not allowed",
+                        signals=self._signals(),
+                    ),
+                    audit=lambda *_args: None,
+                )
+            self.assertEqual(confirm_reason.exception.status_code, 400)
+
+            with self.assertRaises(HTTPException) as degrade_candidate:
+                continuity_revalidate_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(),
+                    auth=_AuthStub(),
+                    req=ContinuityRevalidateRequest(
+                        subject_kind="user",
+                        subject_id="stef",
+                        outcome="degrade",
+                        candidate_capsule=self._capsule_payload(),
+                        reason="stale",
+                        signals=self._signals(),
+                    ),
+                    audit=lambda *_args: None,
+                )
+            self.assertEqual(degrade_candidate.exception.status_code, 400)
+
+            with self.assertRaises(HTTPException) as missing_reason:
+                continuity_revalidate_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(),
+                    auth=_AuthStub(),
+                    req=ContinuityRevalidateRequest(
+                        subject_kind="user",
+                        subject_id="stef",
+                        outcome="conflict",
+                        signals=self._signals(),
+                    ),
+                    audit=lambda *_args: None,
+                )
+            self.assertEqual(missing_reason.exception.status_code, 400)
+
+    def test_revalidate_rejects_oversized_post_injection_capsule(self) -> None:
+        """Revalidate should enforce the final assembled 12KB size limit."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            active = self._capsule_payload()
+            self._write_capsule(repo_root, active)
+            candidate = self._capsule_payload()
+            candidate["continuity"]["stance_summary"] = "x" * 240
+            candidate["continuity"]["top_priorities"] = ["x" * 160] * 5
+            candidate["continuity"]["active_concerns"] = ["x" * 160] * 5
+            candidate["continuity"]["active_constraints"] = ["x" * 160] * 5
+            candidate["continuity"]["open_loops"] = ["x" * 160] * 5
+            candidate["continuity"]["working_hypotheses"] = ["x" * 160] * 5
+            candidate["continuity"]["long_horizon_commitments"] = ["x" * 160] * 5
+            candidate["metadata"] = {f"m{idx}": "x" * 320 for idx in range(12)}
+            candidate["canonical_sources"] = [f"memory/core/source-{idx}.md" for idx in range(8)]
+            candidate["source"]["inputs"] = [f"memory/core/source-input-{idx}-{'x' * 150}.md"[:200] for idx in range(12)]
+
+            with self.assertRaises(HTTPException) as cm:
+                continuity_revalidate_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(),
+                    auth=_AuthStub(),
+                    req=ContinuityRevalidateRequest(
+                        subject_kind="user",
+                        subject_id="stef",
+                        outcome="correct",
+                        candidate_capsule=candidate,
+                        signals=self._signals(),
+                    ),
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertIn("12 KB", str(cm.exception.detail))

@@ -3,7 +3,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +40,15 @@ class _GitManagerStub(SimpleGitManagerStub):
         """Record a committed file path and report success."""
         self.commits.append((str(path), message))
         return True
+
+
+class _FailingGitManagerStub(_GitManagerStub):
+    """Git manager stub that fails commits after the file write step."""
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        """Record the attempted commit and then fail."""
+        super().commit_file(path, message)
+        raise RuntimeError("git commit failed")
 
 
 class TestContinuityV3Phase1(unittest.TestCase):
@@ -204,3 +213,71 @@ class TestContinuityV3Phase1(unittest.TestCase):
             signals=self._signals_payload(),
         )
         self.assertEqual(_strongest_signal_kind(req.signals), "system_check")
+
+    def test_request_models_enforce_v3_validation_bounds(self) -> None:
+        """V3 request models should enforce bounded signals and reason lengths."""
+        with self.assertRaises(ValidationError):
+            ContinuityCompareRequest(
+                subject_kind="user",
+                subject_id="stef",
+                candidate_capsule=self._capsule_payload(),
+                signals=self._signals_payload() * 5,
+            )
+        with self.assertRaises(ValidationError):
+            ContinuityRevalidateRequest(
+                subject_kind="user",
+                subject_id="stef",
+                outcome="conflict",
+                signals=self._signals_payload(),
+                reason="x" * 121,
+            )
+
+    def test_candidate_models_enforce_evidence_refs_and_conflict_summary_bounds(self) -> None:
+        """Candidate capsule models should reject oversized V3 verification fields."""
+        capsule = self._capsule_payload()
+        capsule["verification_state"] = {
+            "status": "conflicted",
+            "last_revalidated_at": capsule["verified_at"],
+            "strongest_signal": "system_check",
+            "evidence_refs": ["x" * 201],
+            "conflict_summary": "x" * 241,
+        }
+        with self.assertRaises(ValidationError):
+            ContinuityCompareRequest(
+                subject_kind="user",
+                subject_id="stef",
+                candidate_capsule=capsule,
+                signals=self._signals_payload(),
+            )
+
+        capsule["verification_state"]["evidence_refs"] = [f"ref-{idx}" for idx in range(5)]
+        capsule["verification_state"]["conflict_summary"] = "ok"
+        with self.assertRaises(ValidationError):
+            ContinuityCompareRequest(
+                subject_kind="user",
+                subject_id="stef",
+                candidate_capsule=capsule,
+                signals=self._signals_payload(),
+            )
+
+    def test_upsert_rollback_restores_prior_capsule_on_commit_failure(self) -> None:
+        """Upsert should preserve the previously durable capsule on commit failure."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            initial = self._capsule_payload()
+            updated = self._capsule_payload()
+            updated["updated_at"] = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            updated["continuity"]["stance_summary"] = "updated but should roll back"
+            path = repo_root / "memory" / "continuity" / "user-stef.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(initial), encoding="utf-8")
+            req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=updated)  # type: ignore[arg-type]
+
+            with patch("app.main._services", return_value=(settings, _FailingGitManagerStub())):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_upsert(req=req, auth=_AuthStub())
+
+            self.assertEqual(cm.exception.status_code, 500)
+            restored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(restored["continuity"]["stance_summary"], initial["continuity"]["stance_summary"])

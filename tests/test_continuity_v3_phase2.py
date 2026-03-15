@@ -228,3 +228,75 @@ class TestContinuityV3Phase2(unittest.TestCase):
             self.assertEqual(events[0][0], "continuity_compare")
             self.assertEqual(events[0][1]["recommended_outcome"], "correct")
             self.assertFalse(events[0][1]["identical"])
+
+    def test_compare_treats_explicit_none_and_missing_optional_fields_as_identical(self) -> None:
+        """Compare should normalize explicit null and missing optional fields equivalently."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            active = self._capsule_payload()
+            self._write_capsule(repo_root, active)
+            candidate = dict(active)
+            candidate["attention_policy"] = None
+
+            out = continuity_compare_service(
+                repo_root=repo_root,
+                auth=_AuthStub(),
+                req=ContinuityCompareRequest(
+                    subject_kind="user",
+                    subject_id="stef",
+                    candidate_capsule=candidate,
+                    signals=self._signals(),
+                ),
+                audit=lambda *_args: None,
+            )
+
+            self.assertTrue(out["identical"])
+            self.assertEqual(out["changed_fields"], [])
+
+    def test_compare_reports_array_order_changes_at_the_shallowest_path(self) -> None:
+        """Compare should treat arrays as ordered and report the container path."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            active = self._capsule_payload()
+            active["continuity"]["top_priorities"] = ["a", "b"]
+            self._write_capsule(repo_root, active)
+            candidate = self._capsule_payload()
+            candidate["continuity"]["top_priorities"] = ["b", "a"]
+
+            out = continuity_compare_service(
+                repo_root=repo_root,
+                auth=_AuthStub(),
+                req=ContinuityCompareRequest(
+                    subject_kind="user",
+                    subject_id="stef",
+                    candidate_capsule=candidate,
+                    signals=self._signals(),
+                ),
+                audit=lambda *_args: None,
+            )
+
+            self.assertEqual(out["changed_fields"], ["continuity.top_priorities"])
+
+    def test_compare_rejects_candidate_schema_validation_failures(self) -> None:
+        """Compare should reject candidate capsules that fail schema validation."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            active = self._capsule_payload()
+            self._write_capsule(repo_root, active)
+            candidate = self._capsule_payload()
+            candidate["canonical_sources"] = ["/etc/passwd"]
+
+            with self.assertRaises(HTTPException) as cm:
+                continuity_compare_service(
+                    repo_root=repo_root,
+                    auth=_AuthStub(),
+                    req=ContinuityCompareRequest(
+                        subject_kind="user",
+                        subject_id="stef",
+                        candidate_capsule=candidate,
+                        signals=self._signals(),
+                    ),
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(cm.exception.status_code, 400)

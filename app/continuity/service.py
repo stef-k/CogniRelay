@@ -254,7 +254,10 @@ def _validate_v3_capsule_fields(capsule: ContinuityCapsule) -> None:
 def _strip_v3_verification_fields(capsule: ContinuityCapsule) -> ContinuityCapsule:
     """Return a capsule copy with V3 verification-only fields removed for upsert."""
     payload = capsule.model_dump(mode="json", exclude_none=True, exclude={"verification_state", "capsule_health"})
-    return ContinuityCapsule.model_validate(payload)
+    try:
+        return ContinuityCapsule.model_validate(payload)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Capsule invalid after V3 field stripping: {e}") from e
 
 
 def _validate_verification_signals(signals: list[ContinuityVerificationSignal]) -> None:
@@ -366,14 +369,23 @@ def _persist_active_capsule(
     old_bytes = path.read_bytes() if path.exists() else None
     write_text_file(path, canonical)
     try:
-        gm.commit_file(path, commit_message)
+        committed = gm.commit_file(path, commit_message)
+        if not committed:
+            raise RuntimeError("git commit produced no changes")
     except Exception as exc:
-        if old_bytes is None:
-            if path.exists():
-                path.unlink()
-        else:
-            write_text_file(path, old_bytes.decode("utf-8"))
-        raise HTTPException(status_code=500, detail="Failed to persist revalidated continuity capsule") from exc
+        restore_error: Exception | None = None
+        try:
+            if old_bytes is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.write_bytes(old_bytes)
+        except Exception as restore_exc:
+            restore_error = restore_exc
+        detail = f"Failed to persist revalidated continuity capsule: {exc}"
+        if restore_error is not None:
+            detail = f"{detail}; rollback failed: {restore_error}"
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
@@ -516,6 +528,7 @@ def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
         reasons = capsule_health.get("reasons")
         if isinstance(status, str) and status:
             return status, list(reasons or [])
+        return "degraded", ["invalid capsule_health payload"]
     return "healthy", []
 
 
@@ -733,7 +746,24 @@ def continuity_upsert_service(
         write_text_file(path, canonical)
     committed = False
     if changed:
-        committed = gm.commit_file(path, req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}")
+        try:
+            committed = gm.commit_file(path, req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}")
+            if not committed:
+                raise RuntimeError("git commit produced no changes")
+        except Exception as exc:
+            restore_error: Exception | None = None
+            try:
+                if old_bytes is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    path.write_bytes(old_bytes)
+            except Exception as restore_exc:
+                restore_error = restore_exc
+            detail = f"Failed to persist continuity capsule: {exc}"
+            if restore_error is not None:
+                detail = f"{detail}; rollback failed: {restore_error}"
+            raise HTTPException(status_code=500, detail=detail) from exc
     audit(
         auth,
         "continuity_upsert",
@@ -894,6 +924,8 @@ def continuity_revalidate_service(
         _normalize_compare_payload(repo_root, req.candidate_capsule)
     elif req.candidate_capsule is not None:
         raise HTTPException(status_code=400, detail=f"candidate_capsule is not allowed for outcome={req.outcome}")
+    if req.outcome == "confirm" and req.reason is not None:
+        raise HTTPException(status_code=400, detail="reason is not allowed for outcome=confirm")
     if req.outcome in {"degrade", "conflict"} and not req.reason:
         raise HTTPException(status_code=400, detail=f"reason is required for outcome={req.outcome}")
 
@@ -915,7 +947,8 @@ def continuity_revalidate_service(
 
     if req.outcome == "correct":
         candidate = req.candidate_capsule
-        assert candidate is not None
+        if candidate is None:
+            raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
         compare_changed_fields = _compare_capsules(
             _normalize_compare_payload(repo_root, active),
             _normalize_compare_payload(repo_root, candidate),
