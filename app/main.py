@@ -93,6 +93,18 @@ from .peers import (
     peers_trust_transition_service,
 )
 from .storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
+from .tasks import (
+    RUN_CHECKS_DIR_REL,
+    code_checks_run_service,
+    code_merge_service,
+    code_patch_propose_service,
+    docs_patch_apply_service,
+    docs_patch_propose_service,
+    load_check_artifacts,
+    tasks_create_service,
+    tasks_query_service,
+    tasks_update_service,
+)
 
 
 app = FastAPI(title="CogniRelay", version="0.3.0")
@@ -717,170 +729,29 @@ def context_snapshot_get(snapshot_id: str, auth: AuthContext = Depends(require_a
     )
 
 
-TASKS_OPEN_DIR_REL = "tasks/open"
-TASKS_DONE_DIR_REL = "tasks/done"
-PATCH_PROPOSALS_DIR_REL = "patches/proposals"
-PATCH_APPLIED_DIR_REL = "patches/applied"
-RUN_CHECKS_DIR_REL = "runs/checks"
-TASK_STATUS_TRANSITIONS = {
-    "open": {"open", "in_progress", "blocked", "done"},
-    "in_progress": {"in_progress", "open", "blocked", "done"},
-    "blocked": {"blocked", "open", "in_progress", "done"},
-    "done": {"done"},
-}
-CHECK_PROFILE_COMMANDS = {
-    "lint": ["python3", "-m", "compileall", "-q", "."],
-    "test": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
-    "build": ["python3", "-m", "compileall", "."],
-}
-
-
-def _resolve_commit_ref(repo_root: Path, ref: str) -> str:
-    cp = _run_git(repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}")
-    if cp.returncode != 0:
-        raise HTTPException(status_code=400, detail=f"Invalid git ref: {ref}")
-    return cp.stdout.strip()
-
-
-def _task_rel(task_id: str, status: str) -> str:
-    base = TASKS_DONE_DIR_REL if status == "done" else TASKS_OPEN_DIR_REL
-    return f"{base}/{task_id}.json"
-
-
-def _find_task(repo_root: Path, task_id: str) -> tuple[str, Path, dict[str, Any]] | tuple[None, None, None]:
-    for rel in (f"{TASKS_OPEN_DIR_REL}/{task_id}.json", f"{TASKS_DONE_DIR_REL}/{task_id}.json"):
-        p = safe_path(repo_root, rel)
-        if not p.exists():
-            continue
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        return rel, p, payload
-    return None, None, None
-
-
-def _iter_task_files(repo_root: Path) -> list[tuple[str, Path]]:
-    out = []
-    for base in (TASKS_OPEN_DIR_REL, TASKS_DONE_DIR_REL):
-        d = safe_path(repo_root, base)
-        if not d.exists() or not d.is_dir():
-            continue
-        for p in sorted(d.glob("*.json")):
-            out.append((f"{base}/{p.name}", p))
-    return out
-
-
-def _extract_patch_paths(diff: str) -> set[str]:
-    paths: set[str] = set()
-    for line in diff.splitlines():
-        if line.startswith("diff --git "):
-            parts = line.split()
-            if len(parts) >= 4:
-                for raw in (parts[2], parts[3]):
-                    if raw == "/dev/null":
-                        continue
-                    norm = raw[2:] if raw.startswith("a/") or raw.startswith("b/") else raw
-                    if norm:
-                        paths.add(norm)
-        elif line.startswith("--- ") or line.startswith("+++ "):
-            raw = line.split(" ", 1)[1].strip()
-            if raw == "/dev/null":
-                continue
-            norm = raw[2:] if raw.startswith("a/") or raw.startswith("b/") else raw
-            if norm:
-                paths.add(norm)
-    return paths
-
-
-def _run_check_command(repo_root: Path, ref_resolved: str, profile: str) -> tuple[int, str, str]:
-    cmd = CHECK_PROFILE_COMMANDS[profile]
-    tmp_dir = tempfile.mkdtemp(prefix="amr-check-")
-    try:
-        add_cp = _run_git(repo_root, "worktree", "add", "--detach", tmp_dir, ref_resolved)
-        if add_cp.returncode != 0:
-            return (1, "", f"failed to create worktree: {add_cp.stderr.strip()}")
-        cp = subprocess.run(cmd, cwd=tmp_dir, text=True, capture_output=True, check=False)
-        return (cp.returncode, cp.stdout, cp.stderr)
-    finally:
-        _run_git(repo_root, "worktree", "remove", "--force", tmp_dir)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-def _load_check_artifacts(repo_root: Path) -> list[dict[str, Any]]:
-    d = safe_path(repo_root, RUN_CHECKS_DIR_REL)
-    if not d.exists() or not d.is_dir():
-        return []
-    out = []
-    for p in sorted(d.glob("*.json")):
-        try:
-            row = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(row, dict):
-            out.append(row)
-    return out
-
-
 @app.post("/v1/tasks")
 def tasks_create(req: TaskCreateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    auth.require("write:projects")
-    existing_rel, _, _ = _find_task(settings.repo_root, req.task_id)
-    if existing_rel:
-        raise HTTPException(status_code=409, detail=f"Task already exists: {req.task_id}")
-
-    now = datetime.now(timezone.utc).isoformat()
-    payload = req.model_dump()
-    payload["created_at"] = now
-    payload["updated_at"] = now
-    payload["task_id"] = req.task_id
-    rel = _task_rel(req.task_id, req.status)
-    auth.require_write_path(rel)
-    p = safe_path(settings.repo_root, rel)
-    write_text_file(p, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(p, f"tasks: create {req.task_id}")
-    _audit(settings, auth, "tasks_create", {"task_id": req.task_id, "status": req.status})
-    return {"ok": True, "task": payload, "path": rel, "committed": committed, "latest_commit": gm.latest_commit()}
+    return tasks_create_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.patch("/v1/tasks/{task_id}")
 def tasks_update(task_id: str, req: TaskUpdateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    auth.require("write:projects")
-    rel, path, task = _find_task(settings.repo_root, task_id)
-    if not rel or not path or not isinstance(task, dict):
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-
-    current_status = str(task.get("status") or "open")
-    new_status = req.status or current_status
-    allowed = TASK_STATUS_TRANSITIONS.get(current_status, {current_status})
-    if new_status not in allowed:
-        raise HTTPException(status_code=409, detail=f"Invalid task status transition: {current_status} -> {new_status}")
-
-    updates = req.model_dump(exclude_unset=True)
-    task.update({k: v for k, v in updates.items() if v is not None})
-    task["status"] = new_status
-    task["updated_at"] = datetime.now(timezone.utc).isoformat()
-    task["task_id"] = task_id
-
-    next_rel = _task_rel(task_id, new_status)
-    auth.require_write_path(next_rel)
-    next_path = safe_path(settings.repo_root, next_rel)
-    write_text_file(next_path, json.dumps(task, ensure_ascii=False, indent=2))
-    committed_files = []
-    if gm.commit_file(next_path, f"tasks: update {task_id}"):
-        committed_files.append(next_rel)
-
-    if path != next_path and path.exists():
-        path.unlink()
-        if gm.commit_file(path, f"tasks: move {task_id}"):
-            committed_files.append(rel)
-
-    _audit(settings, auth, "tasks_update", {"task_id": task_id, "status": new_status})
-    return {"ok": True, "task": task, "path": next_rel, "committed_files": committed_files, "latest_commit": gm.latest_commit()}
+    return tasks_update_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        task_id=task_id,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.get("/v1/tasks/query")
@@ -892,273 +763,82 @@ def tasks_query(
     limit: int = Query(default=100, ge=1, le=500),
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
-    if status is not None and not isinstance(status, str):
-        status = None
-    if owner_peer is not None and not isinstance(owner_peer, str):
-        owner_peer = None
-    if collaborator is not None and not isinstance(collaborator, str):
-        collaborator = None
-    if thread_id is not None and not isinstance(thread_id, str):
-        thread_id = None
-    if not isinstance(limit, int):
-        limit = 100
-
     settings, _ = _services()
-    auth.require("read:files")
-    auth.require_read_path(f"{TASKS_OPEN_DIR_REL}/x.json")
-    auth.require_read_path(f"{TASKS_DONE_DIR_REL}/x.json")
-
-    tasks = []
-    for rel, p in _iter_task_files(settings.repo_root):
-        try:
-            row = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(row, dict):
-            continue
-        row.setdefault("task_id", p.stem)
-        row.setdefault("status", "done" if rel.startswith(TASKS_DONE_DIR_REL + "/") else "open")
-        if status and str(row.get("status")) != status:
-            continue
-        if owner_peer and str(row.get("owner_peer")) != owner_peer:
-            continue
-        if collaborator and collaborator not in set(str(x) for x in row.get("collaborators", []) if x):
-            continue
-        if thread_id and str(row.get("thread_id") or "") != thread_id:
-            continue
-        tasks.append(row)
-
-    tasks.sort(key=lambda x: (str(x.get("updated_at", "")), str(x.get("task_id", ""))), reverse=True)
-    out = tasks[:limit]
-    _audit(settings, auth, "tasks_query", {"count": len(out)})
-    return {"ok": True, "count": len(out), "tasks": out}
-
-
-def _patch_propose(kind: str, req: PatchProposeRequest, auth: AuthContext) -> dict:
-    settings, gm = _services()
-    auth.require("write:projects")
-    auth.require_write_path(req.target_path)
-    safe_path(settings.repo_root, req.target_path)
-    if req.format != "unified_diff":
-        raise HTTPException(status_code=400, detail=f"Unsupported patch format: {req.format}")
-
-    if not req.diff.strip():
-        raise HTTPException(status_code=400, detail="Patch diff must not be empty")
-    diff_paths = _extract_patch_paths(req.diff)
-    if diff_paths and diff_paths != {req.target_path}:
-        raise HTTPException(status_code=400, detail=f"Patch must only target {req.target_path}; got {sorted(diff_paths)}")
-
-    base_ref_resolved = _resolve_commit_ref(settings.repo_root, req.base_ref)
-    patch_id = req.patch_id or f"patch_{uuid4().hex[:12]}"
-    rel = f"{PATCH_PROPOSALS_DIR_REL}/{patch_id}.json"
-    auth.require_write_path(rel)
-    p = safe_path(settings.repo_root, rel)
-    if p.exists():
-        raise HTTPException(status_code=409, detail=f"Patch already exists: {patch_id}")
-
-    now = datetime.now(timezone.utc).isoformat()
-    payload = {
-        "schema_version": "1.0",
-        "patch_id": patch_id,
-        "patch_type": kind,
-        "status": "proposed",
-        "target_path": req.target_path,
-        "base_ref": req.base_ref,
-        "base_ref_resolved": base_ref_resolved,
-        "format": req.format,
-        "diff": req.diff,
-        "reason": req.reason,
-        "thread_id": req.thread_id,
-        "created_at": now,
-        "created_by": auth.peer_id,
-        "updated_at": now,
-    }
-    write_text_file(p, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(p, f"patches: propose {patch_id}")
-    _audit(settings, auth, "patch_propose", {"patch_id": patch_id, "patch_type": kind, "target_path": req.target_path})
-    return {"ok": True, "patch": payload, "path": rel, "committed": committed, "latest_commit": gm.latest_commit()}
+    return tasks_query_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        status=status if isinstance(status, str) else None,
+        owner_peer=owner_peer if isinstance(owner_peer, str) else None,
+        collaborator=collaborator if isinstance(collaborator, str) else None,
+        thread_id=thread_id if isinstance(thread_id, str) else None,
+        limit=limit if isinstance(limit, int) else 100,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/docs/patch/propose")
 def docs_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
-    return _patch_propose("doc_patch", req, auth)
+    settings, gm = _services()
+    return docs_patch_propose_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        run_git=_run_git,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/code/patch/propose")
 def code_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
-    return _patch_propose("code_patch", req, auth)
+    settings, gm = _services()
+    return code_patch_propose_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        run_git=_run_git,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/docs/patch/apply")
 def docs_patch_apply(req: PatchApplyRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    auth.require("write:projects")
-
-    proposal_rel = f"{PATCH_PROPOSALS_DIR_REL}/{req.patch_id}.json"
-    auth.require_write_path(proposal_rel)
-    proposal_path = safe_path(settings.repo_root, proposal_rel)
-    if not proposal_path.exists():
-        raise HTTPException(status_code=404, detail=f"Patch not found: {req.patch_id}")
-    try:
-        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Invalid patch proposal file: {e}") from e
-    if not isinstance(proposal, dict):
-        raise HTTPException(status_code=500, detail="Invalid patch proposal payload")
-    if proposal.get("status") != "proposed":
-        raise HTTPException(status_code=409, detail=f"Patch is not in proposed state: {proposal.get('status')}")
-
-    target_path = str(proposal.get("target_path") or "")
-    if not target_path:
-        raise HTTPException(status_code=500, detail="Patch proposal missing target_path")
-    auth.require_write_path(target_path)
-    target_abs = safe_path(settings.repo_root, target_path)
-
-    expected_ref = str(proposal.get("base_ref_resolved") or "")
-    if expected_ref:
-        # Compare target file state, not raw HEAD hash: proposal/check artifacts are allowed to
-        # create commits as long as the target file content stayed aligned with expected base ref.
-        expected_target = _read_commit_file(settings.repo_root, expected_ref, target_path)
-        current_target = _read_commit_file(settings.repo_root, "HEAD", target_path)
-        if expected_target != current_target:
-            head = _resolve_commit_ref(settings.repo_root, "HEAD")
-            raise HTTPException(
-                status_code=409,
-                detail=f"Patch base_ref mismatch: expected {expected_ref}, current {head}",
-            )
-
-    status_cp = _run_git(settings.repo_root, "status", "--porcelain")
-    if status_cp.stdout.strip():
-        raise HTTPException(status_code=409, detail="Working tree must be clean before applying patch")
-
-    diff_text = str(proposal.get("diff") or "")
-    if not diff_text.strip():
-        raise HTTPException(status_code=400, detail="Patch diff is empty")
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix="amr-patch-", suffix=".diff")
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            f.write(diff_text)
-        check_cp = _run_git(settings.repo_root, "apply", "--check", tmp_path)
-        if check_cp.returncode != 0:
-            raise HTTPException(status_code=409, detail=f"Patch apply check failed: {check_cp.stderr.strip()}")
-        apply_cp = _run_git(settings.repo_root, "apply", tmp_path)
-        if apply_cp.returncode != 0:
-            raise HTTPException(status_code=409, detail=f"Patch apply failed: {apply_cp.stderr.strip()}")
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-    committed_files = []
-    commit_msg = req.commit_message or f"patches: apply {req.patch_id}"
-    if gm.commit_file(target_abs, commit_msg):
-        committed_files.append(target_path)
-
-    now = datetime.now(timezone.utc).isoformat()
-    proposal["status"] = "applied"
-    proposal["applied_at"] = now
-    proposal["applied_by"] = auth.peer_id
-    proposal["updated_at"] = now
-    proposal["applied_commit"] = gm.latest_commit()
-    write_text_file(proposal_path, json.dumps(proposal, ensure_ascii=False, indent=2))
-    if gm.commit_file(proposal_path, f"patches: mark applied {req.patch_id}"):
-        committed_files.append(proposal_rel)
-
-    applied_rel = f"{PATCH_APPLIED_DIR_REL}/{req.patch_id}.json"
-    auth.require_write_path(applied_rel)
-    applied_path = safe_path(settings.repo_root, applied_rel)
-    write_text_file(applied_path, json.dumps(proposal, ensure_ascii=False, indent=2))
-    if gm.commit_file(applied_path, f"patches: archive applied {req.patch_id}"):
-        committed_files.append(applied_rel)
-
-    _audit(settings, auth, "patch_apply", {"patch_id": req.patch_id, "target_path": target_path})
-    return {
-        "ok": True,
-        "patch_id": req.patch_id,
-        "target_path": target_path,
-        "committed_files": committed_files,
-        "latest_commit": gm.latest_commit(),
-    }
+    return docs_patch_apply_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        run_git=_run_git,
+        read_commit_file=_read_commit_file,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/code/checks/run")
 def code_checks_run(req: CodeCheckRunRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    auth.require("write:projects")
-    ref_resolved = _resolve_commit_ref(settings.repo_root, req.ref)
-
-    rc, stdout_text, stderr_text = _run_check_command(settings.repo_root, ref_resolved, req.profile)
-    now = datetime.now(timezone.utc)
-    run_id = f"run_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
-    status = "passed" if rc == 0 else "failed"
-    payload = {
-        "schema_version": "1.0",
-        "run_id": run_id,
-        "profile": req.profile,
-        "ref": req.ref,
-        "ref_resolved": ref_resolved,
-        "status": status,
-        "return_code": rc,
-        "started_at": now.isoformat(),
-        "finished_at": datetime.now(timezone.utc).isoformat(),
-        "command": CHECK_PROFILE_COMMANDS[req.profile],
-        "stdout": stdout_text[-12000:],
-        "stderr": stderr_text[-12000:],
-    }
-    rel = f"{RUN_CHECKS_DIR_REL}/{run_id}.json"
-    auth.require_write_path(rel)
-    p = safe_path(settings.repo_root, rel)
-    write_text_file(p, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(p, f"runs: check {run_id}")
-    _audit(settings, auth, "code_checks_run", {"run_id": run_id, "profile": req.profile, "status": status, "ref": ref_resolved})
-    return {"ok": True, "run": payload, "path": rel, "committed": committed, "latest_commit": gm.latest_commit()}
+    return code_checks_run_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        run_git=_run_git,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/code/merge")
 def code_merge(req: CodeMergeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    auth.require("write:projects")
-    if req.target_ref != "HEAD":
-        raise HTTPException(status_code=400, detail="Only target_ref=HEAD is currently supported")
-
-    source_resolved = _resolve_commit_ref(settings.repo_root, req.source_ref)
-    required = [str(p) for p in req.required_checks]
-    artifacts = _load_check_artifacts(settings.repo_root)
-    missing = []
-    for profile in required:
-        ok = any(
-            isinstance(a, dict)
-            and str(a.get("profile")) == profile
-            and str(a.get("ref_resolved")) == source_resolved
-            and str(a.get("status")) == "passed"
-            for a in artifacts
-        )
-        if not ok:
-            missing.append(profile)
-    if missing:
-        raise HTTPException(status_code=409, detail=f"Required checks not passed for {source_resolved}: {missing}")
-
-    status_cp = _run_git(settings.repo_root, "status", "--porcelain")
-    if status_cp.stdout.strip():
-        raise HTTPException(status_code=409, detail="Working tree must be clean before merge")
-
-    head_before = _resolve_commit_ref(settings.repo_root, "HEAD")
-    merge_cp = _run_git(settings.repo_root, "merge", "--ff-only", source_resolved)
-    if merge_cp.returncode != 0:
-        raise HTTPException(status_code=409, detail=f"Merge failed: {merge_cp.stderr.strip()}")
-    head_after = _resolve_commit_ref(settings.repo_root, "HEAD")
-    merged = head_before != head_after
-    _audit(settings, auth, "code_merge", {"source_ref": source_resolved, "merged": merged, "required_checks": required})
-    return {
-        "ok": True,
-        "merged": merged,
-        "source_ref": source_resolved,
-        "target_ref": "HEAD",
-        "head_before": head_before,
-        "head_after": head_after,
-        "required_checks": required,
-    }
+    return code_merge_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        run_git=_run_git,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
@@ -2680,7 +2360,7 @@ def metrics(auth: AuthContext = Depends(require_auth)) -> dict:
             peer = str(item.get("peer_id") or "unknown")
             peer_counts[peer] = peer_counts.get(peer, 0) + 1
 
-    check_artifacts = _load_check_artifacts(settings.repo_root)
+    check_artifacts = load_check_artifacts(settings.repo_root)
     check_summary: dict[str, int] = {}
     for row in check_artifacts:
         profile = str(row.get("profile") or "unknown")
