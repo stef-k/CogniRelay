@@ -54,3 +54,10 @@ For agent integration details, including the MCP bootstrap flow and tool mapping
 ## Development
 
 Tests are in `tests/`. Discovery and manifest behavior are covered in `tests/test_discovery.py`.
+
+Local quality commands:
+
+```bash
+./.venv/bin/python -m unittest discover -s tests -v
+ruff check app tests tools_hash_token.py
+```
