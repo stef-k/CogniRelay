@@ -36,6 +36,7 @@ class ContextRetrieveRequest(BaseModel):
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     subject_id: Optional[str] = Field(default=None, max_length=200)
     continuity_mode: Literal["auto", "required", "off"] = "auto"
+    continuity_verification_policy: Literal["allow_degraded", "prefer_healthy", "require_healthy"] = "allow_degraded"
     continuity_selectors: List["ContinuitySelector"] = Field(default_factory=list, max_length=4)
     continuity_max_capsules: int = Field(default=1, ge=1, le=4)
     max_tokens_estimate: int = Field(default=4000, ge=256, le=100000)

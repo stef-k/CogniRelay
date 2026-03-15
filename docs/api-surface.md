@@ -52,11 +52,12 @@ Notable behavior:
 - `POST /v1/context/retrieve` is continuity-shaped output rather than a raw ranked search dump
 - `POST /v1/context/retrieve` now supports optional continuity subject selection and returns additive `continuity_state` metadata when available
 - `POST /v1/context/retrieve` now also accepts bounded `continuity_selectors` plus `continuity_max_capsules` for deterministic multi-capsule continuity loading
+- `POST /v1/context/retrieve` now also accepts `continuity_verification_policy` to allow degraded capsules, prefer healthy capsules first, or require healthy capsules only
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
 - `POST /v1/continuity/read` returns the raw active capsule payload for one exact selector
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule
 - `POST /v1/continuity/revalidate` writes verification status and capsule health through one audited git-backed continuity update
-- `POST /v1/continuity/list` returns active-only summaries, skipping archive entries and invalid active files
+- `POST /v1/continuity/list` returns active-only summaries, skipping archive entries and invalid active files, and now includes additive verification and health summary fields
 - `POST /v1/continuity/archive` writes an archive envelope under `memory/continuity/archive/` and removes the active capsule in one git-backed commit
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
 - `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`

@@ -44,6 +44,8 @@ CONTINUITY_WARNING_STALE_HARD = "continuity_stale_hard"
 CONTINUITY_WARNING_EXPIRED = "continuity_expired"
 CONTINUITY_WARNING_TRUNCATED = "continuity_truncated_to_zero"
 CONTINUITY_WARNING_TRUNCATED_MULTI = "continuity_capsule_truncated_to_zero"
+CONTINUITY_WARNING_DEGRADED = "continuity_degraded"
+CONTINUITY_WARNING_CONFLICTED = "continuity_conflicted"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -100,6 +102,7 @@ CONTINUITY_SIGNAL_STATUS = {
     "user_confirmation": "user_confirmed",
     "system_check": "system_confirmed",
 }
+CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
 
 
 def _canonical_json(data: Any) -> str:
@@ -495,6 +498,27 @@ def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
     return CONTINUITY_DEFAULT_STALE.get(freshness_class)
 
 
+def _verification_status(capsule: dict[str, Any]) -> str:
+    """Return the persisted or implicit V3 verification status for one capsule."""
+    verification_state = capsule.get("verification_state")
+    if isinstance(verification_state, dict):
+        status = verification_state.get("status")
+        if isinstance(status, str) and status:
+            return status
+    return "unverified"
+
+
+def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
+    """Return the persisted or implicit V3 capsule health summary."""
+    capsule_health = capsule.get("capsule_health")
+    if isinstance(capsule_health, dict):
+        status = capsule_health.get("status")
+        reasons = capsule_health.get("reasons")
+        if isinstance(status, str) and status:
+            return status, list(reasons or [])
+    return "healthy", []
+
+
 def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list[str]]:
     """Determine freshness phase and warnings for the given capsule."""
     warnings: list[str] = []
@@ -781,6 +805,8 @@ def continuity_list_service(
                 raise
             phase, _ = _continuity_phase(capsule, now)
             freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
+            verification_status = _verification_status(capsule)
+            health_status, health_reasons = _capsule_health_summary(capsule)
             summaries.append(
                 {
                     "subject_kind": capsule["subject_kind"],
@@ -791,6 +817,9 @@ def continuity_list_service(
                     "verification_kind": capsule.get("verification_kind"),
                     "freshness_class": freshness.get("freshness_class"),
                     "phase": phase,
+                    "verification_status": verification_status,
+                    "health_status": health_status,
+                    "health_reasons": health_reasons,
                 }
             )
     summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"])))
@@ -1085,7 +1114,37 @@ def build_continuity_state(
         if phase in {"expired", "expired_by_age"}:
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             continue
-        loaded.append({"selector": item, "capsule": capsule})
+        health_status, health_reasons = _capsule_health_summary(capsule)
+        loaded.append(
+            {
+                "selector": item,
+                "capsule": capsule,
+                "verification_status": _verification_status(capsule),
+                "health_status": health_status,
+                "health_reasons": health_reasons,
+            }
+        )
+
+    if not loaded:
+        if req.continuity_mode == "required":
+            raise HTTPException(status_code=404, detail="Continuity capsule not found")
+        state["warnings"] = warnings
+        return state
+
+    if req.continuity_verification_policy == "prefer_healthy":
+        loaded = sorted(
+            loaded,
+            key=lambda row: CONTINUITY_HEALTH_ORDER.get(str(row["health_status"]), CONTINUITY_HEALTH_ORDER["conflicted"]),
+        )
+    elif req.continuity_verification_policy == "require_healthy":
+        filtered: list[dict[str, Any]] = []
+        for row in loaded:
+            if row["health_status"] == "healthy":
+                filtered.append(row)
+                continue
+            selector = row["selector"]
+            state["omitted_selectors"].append(_format_selector(selector["subject_kind"], selector["subject_id"]))
+        loaded = filtered
 
     if not loaded:
         if req.continuity_mode == "required":
@@ -1113,6 +1172,10 @@ def build_continuity_state(
             continue
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
+        if row["health_status"] == "degraded":
+            warnings.append(_qualify_warning(CONTINUITY_WARNING_DEGRADED, kind, subject_id, multi_mode=multi_warning_mode))
+        elif row["health_status"] == "conflicted":
+            warnings.append(_qualify_warning(CONTINUITY_WARNING_CONFLICTED, kind, subject_id, multi_mode=multi_warning_mode))
 
     if not trimmed_capsules:
         if req.continuity_mode == "required":
