@@ -22,7 +22,13 @@ from .context import (
     search_service,
     write_file_service,
 )
-from .continuity import continuity_archive_service, continuity_list_service, continuity_read_service, continuity_upsert_service
+from .continuity import (
+    continuity_archive_service,
+    continuity_compare_service,
+    continuity_list_service,
+    continuity_read_service,
+    continuity_upsert_service,
+)
 from .config import get_settings
 from .discovery import (
     capabilities_payload,
@@ -47,6 +53,7 @@ from .models import (
     CodeMergeRequest,
     CompactRequest,
     ContinuityArchiveRequest,
+    ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
     ContinuityUpsertRequest,
@@ -556,6 +563,18 @@ def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(requ
     """Read one active continuity capsule by exact selector."""
     settings, _ = _services()
     return continuity_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/compare")
+def continuity_compare(req: ContinuityCompareRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Compare one active continuity capsule to a candidate capsule."""
+    settings, _ = _services()
+    return continuity_compare_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
