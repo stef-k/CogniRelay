@@ -23,7 +23,17 @@ from pydantic import ValidationError
 
 from .audit import append_audit
 from .auth import AuthContext, require_auth
-from .continuity import build_continuity_state, continuity_upsert_service
+from .context import (
+    context_retrieve_service,
+    context_snapshot_create_service,
+    context_snapshot_get_service,
+    index_rebuild_incremental_service,
+    index_rebuild_service,
+    index_status_service,
+    recent_list_service,
+    search_service,
+)
+from .continuity import continuity_upsert_service
 from .config import ALL_SCOPES, get_settings, sha256_token
 from .discovery import (
     capabilities_payload,
@@ -40,13 +50,7 @@ from .discovery import (
     workflow_catalog,
 )
 from .git_manager import GitManager
-from .indexer import (
-    incremental_rebuild_index,
-    list_recent_files,
-    load_files_index,
-    rebuild_index,
-    search_index,
-)
+from .indexer import incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from .models import (
     AppendRequest,
     CodeCheckRunRequest,
@@ -100,20 +104,6 @@ def _audit(settings, auth: AuthContext | None, event: str, detail: dict) -> None
     if not settings.audit_log_enabled:
         return
     append_audit(settings.repo_root, event, auth.peer_id if auth else "anonymous", detail)
-
-
-def _filter_search_results_for_auth(results: list[dict], auth: AuthContext) -> list[dict]:
-    out = []
-    for r in results:
-        rel = str(r.get("path", ""))
-        try:
-            auth.require_read_path(rel)
-        except HTTPException:
-            continue
-        out.append(r)
-    return out
-
-
 def _scope_for_path(path: str) -> str:
     top = Path(path).parts[0] if Path(path).parts else ""
     if top == "journal":
@@ -931,90 +921,51 @@ def append_record(req: AppendRequest, auth: AuthContext = Depends(require_auth))
 @app.post("/v1/index/rebuild")
 def index_rebuild(auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    auth.require("read:index")
-    payload = rebuild_index(settings.repo_root)
-    commits = []
-    for rel in [
-        "index/files_index.json",
-        "index/tags_index.json",
-        "index/words_index.json",
-        "index/types_index.json",
-        "index/index_state.json",
-        "index/search.db",
-    ]:
-        p = settings.repo_root / rel
-        if p.exists() and gm.commit_file(p, f"index: update {Path(rel).name}"):
-            commits.append(rel)
-    _audit(settings, auth, "index_rebuild", {"file_count": payload.get("file_count", 0), "commits": commits})
-    return {
-        "ok": True,
-        "file_count": payload.get("file_count", 0),
-        "committed_files": commits,
-        "latest_commit": gm.latest_commit(),
-    }
+    return index_rebuild_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.post("/v1/index/rebuild-incremental")
 def index_rebuild_incremental(auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    auth.require("read:index")
-    payload = incremental_rebuild_index(settings.repo_root)
-    commits = []
-    for rel in ["index/files_index.json", "index/tags_index.json", "index/words_index.json", "index/types_index.json", "index/index_state.json", "index/search.db"]:
-        p = settings.repo_root / rel
-        if p.exists() and gm.commit_file(p, f"index: incremental update {Path(rel).name}"):
-            commits.append(rel)
-    _audit(settings, auth, "index_rebuild_incremental", {"file_count": payload.get("file_count", 0), "incremental": payload.get("incremental", {}), "commits": commits})
-    return {
-        "ok": True,
-        "file_count": payload.get("file_count", 0),
-        "incremental": payload.get("incremental", {}),
-        "committed_files": commits,
-        "latest_commit": gm.latest_commit(),
-    }
+    return index_rebuild_incremental_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.get("/v1/index/status")
 def index_status(auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    auth.require("read:index")
-    idx = load_files_index(settings.repo_root)
-    sqlite_path = settings.repo_root / "index" / "search.db"
-    state_path = settings.repo_root / "index" / "index_state.json"
-    return {"ok": True, "generated_at": idx.get("generated_at"), "file_count": idx.get("file_count", 0), "sqlite_fts": sqlite_path.exists(), "state_file": state_path.exists()}
+    return index_status_service(repo_root=settings.repo_root, auth=auth)
 
 
 @app.post("/v1/search")
 def search(req: SearchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    auth.require("search")
-    results = search_index(
-        settings.repo_root,
-        req.query,
-        req.limit,
-        include_types=req.include_types or None,
-        sort_by=req.sort_by,
-        time_window_hours=req.time_window_hours,
+    return search_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
-    results = _filter_search_results_for_auth(results, auth)
-    _audit(settings, auth, "search", {"query": req.query, "count": len(results), "sort_by": req.sort_by})
-    return {"ok": True, "query": req.query, "sort_by": req.sort_by, "count": len(results), "results": results}
 
 
 @app.post("/v1/recent")
 def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    auth.require("search")
-    results = list_recent_files(
-        settings.repo_root,
-        req.limit,
-        include_types=req.include_types or None,
-        time_window_days=req.time_window_days,
-        time_window_hours=req.time_window_hours,
+    return recent_list_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
-    results = _filter_search_results_for_auth(results, auth)
-    _audit(settings, auth, "search", {"query": "", "count": len(results), "sort_by": "recent"})
-    return {"ok": True, "count": len(results), "results": results}
 
 
 @app.post("/v1/continuity/upsert")
@@ -1032,81 +983,27 @@ def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(
 @app.post("/v1/context/retrieve")
 def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    auth.require("search")
-
-    core_candidates = [
-        "memory/core/identity.md",
-        "memory/core/long_term_facts.json",
-        "memory/core/values.md",
-    ]
-    core_memory = []
-    for rel in core_candidates:
-        p = settings.repo_root / rel
-        if p.exists() and p.is_file():
-            try:
-                auth.require_read_path(rel)
-            except HTTPException:
-                continue
-            core_memory.append({"path": rel, "snippet": read_text_file(p)[:300]})
-
-    recent = search_index(
-        settings.repo_root,
-        req.task,
-        req.limit,
-        include_types=req.include_types or None,
-        time_window_days=req.time_window_days,
-    )
-    recent = _filter_search_results_for_auth(recent, auth)
-    # Simple AI-first shaping: prioritize summaries and messages for collaboration continuity.
-    recent = sorted(
-        recent,
-        key=lambda x: (
-            0 if str(x.get("path", "")).startswith("memory/summaries/") else 1,
-            0 if str(x.get("path", "")).startswith("messages/") else 1,
-            -float(x.get("score", 0) or 0),
-        ),
-    )[: req.limit]
-
-    open_questions = []
-    for item in recent[:10]:
-        if "?" in item.get("snippet", ""):
-            open_questions.append(item["snippet"])
-
-    continuity_state = build_continuity_state(
+    return context_retrieve_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
-
-    bundle = {
-        "task": req.task,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "core_memory": core_memory,
-        "recent_relevant": recent,
-        "open_questions": open_questions[:5],
-        "token_budget_hint": continuity_state["budget"]["token_budget_hint"],
-        "time_window_days": req.time_window_days,
-        "notes": [
-            "For best continuity, run /v1/index/rebuild before retrieve if many files changed.",
-            "Use include_types to reduce noise (e.g. ['journal_entry','messages']).",
-            "Use /v1/recent for startup continuity when you need latest entries regardless of keyword relevance.",
-        ],
-        "continuity_state": continuity_state,
-    }
-    _audit(settings, auth, "context_retrieve", {"task": req.task[:120], "count": len(recent)})
-    return {"ok": True, "bundle": bundle}
 
 
 PEERS_REGISTRY_REL = "peers/registry.json"
-SNAPSHOT_DIR_REL = "snapshots/context"
-SNAPSHOT_TEXT_SUFFIXES = {".md", ".json", ".jsonl", ".txt"}
-SNAPSHOT_WORD_RE = re.compile(r"[A-Za-z0-9_\-]{2,}")
-SNAPSHOT_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 
 def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=repo_root, text=True, capture_output=True, check=False)
+
+
+def _read_commit_file(repo_root: Path, commit_ref: str, rel_path: str) -> str | None:
+    cp = _run_git(repo_root, "show", f"{commit_ref}:{rel_path}")
+    if cp.returncode != 0:
+        return None
+    return cp.stdout
 
 
 def _load_peers_registry(repo_root: Path) -> dict[str, Any]:
@@ -1129,170 +1026,6 @@ def _write_peers_registry(repo_root: Path, registry: dict[str, Any]) -> Path:
     path = safe_path(repo_root, PEERS_REGISTRY_REL)
     write_text_file(path, json.dumps(registry, ensure_ascii=False, indent=2))
     return path
-
-
-def _snippet_text(text: str, limit: int = 280) -> str:
-    t = " ".join(text.split())
-    return t[:limit] + ("..." if len(t) > limit else "")
-
-
-def _parse_frontmatter_map(text: str) -> dict[str, str]:
-    m = SNAPSHOT_FRONTMATTER_RE.match(text)
-    if not m:
-        return {}
-    out: dict[str, str] = {}
-    for line in m.group(1).splitlines():
-        if ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        out[k.strip()] = v.strip()
-    return out
-
-
-def _record_type_importance(rel: str, content: str) -> tuple[str, float | None]:
-    fm = _parse_frontmatter_map(content) if rel.endswith(".md") else {}
-    record_type = str(fm.get("type") or (Path(rel).parts[0] if Path(rel).parts else "unknown"))
-    importance = None
-    if "importance" in fm:
-        try:
-            importance = float(str(fm["importance"]).strip())
-        except Exception:
-            importance = None
-    return record_type, importance
-
-
-def _task_score(task_terms: list[str], rel: str, content: str, importance: float | None) -> float:
-    if not task_terms:
-        base = 0.0
-    else:
-        base = 0.0
-        low_path = rel.lower()
-        low_text = content.lower()
-        for term in task_terms:
-            if term in low_path:
-                base += 2.0
-            if term in low_text:
-                base += 1.0
-    if importance is not None:
-        base += float(importance)
-    return round(base, 4)
-
-
-def _read_commit_file(repo_root: Path, commit_ref: str, rel_path: str) -> str | None:
-    cp = _run_git(repo_root, "show", f"{commit_ref}:{rel_path}")
-    if cp.returncode != 0:
-        return None
-    return cp.stdout
-
-
-def _resolve_as_of_ref(repo_root: Path, mode: str, value: str | None) -> dict[str, Any]:
-    if mode == "working_tree":
-        return {"mode": "working_tree", "value": None}
-    if mode == "commit":
-        if not value:
-            raise HTTPException(status_code=400, detail="as_of.value is required for mode=commit")
-        cp = _run_git(repo_root, "rev-parse", "--verify", f"{value}^{{commit}}")
-        if cp.returncode != 0:
-            raise HTTPException(status_code=400, detail=f"Invalid commit ref: {value}")
-        return {"mode": "commit", "value": cp.stdout.strip()}
-    if mode == "timestamp":
-        if not value:
-            raise HTTPException(status_code=400, detail="as_of.value is required for mode=timestamp")
-        cp = _run_git(repo_root, "rev-list", "-1", f"--before={value}", "HEAD")
-        commit_ref = cp.stdout.strip() if cp.returncode == 0 else ""
-        if not commit_ref:
-            raise HTTPException(status_code=404, detail=f"No commit found before timestamp: {value}")
-        return {"mode": "timestamp", "value": commit_ref}
-    raise HTTPException(status_code=400, detail=f"Unsupported as_of.mode: {mode}")
-
-
-def _build_snapshot_from_working_tree(
-    repo_root: Path,
-    auth: AuthContext,
-    task: str,
-    include_types: list[str],
-    limit: int,
-    include_core: bool,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    core_memory: list[dict[str, Any]] = []
-    if include_core:
-        for rel in ("memory/core/identity.md", "memory/core/long_term_facts.json", "memory/core/values.md"):
-            p = repo_root / rel
-            if not p.exists() or not p.is_file():
-                continue
-            try:
-                auth.require_read_path(rel)
-            except HTTPException:
-                continue
-            core_memory.append({"path": rel, "snippet": _snippet_text(read_text_file(p), limit=300)})
-
-    recent = search_index(repo_root, task, limit, include_types=include_types or None)
-    recent = _filter_search_results_for_auth(recent, auth)
-    recent = sorted(recent, key=lambda x: (-float(x.get("score", 0) or 0), str(x.get("path", ""))))[:limit]
-    open_questions = [r.get("snippet", "") for r in recent[:10] if "?" in str(r.get("snippet", ""))][:5]
-    return core_memory, recent, open_questions
-
-
-def _build_snapshot_from_commit(
-    repo_root: Path,
-    auth: AuthContext,
-    task: str,
-    include_types: list[str],
-    limit: int,
-    include_core: bool,
-    commit_ref: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    include_set = {t.lower() for t in include_types if t}
-    task_terms = [t.lower() for t in SNAPSHOT_WORD_RE.findall(task)]
-    cp = _run_git(repo_root, "ls-tree", "-r", "--name-only", commit_ref)
-    if cp.returncode != 0:
-        raise HTTPException(status_code=400, detail=f"Unable to list files at commit: {commit_ref}")
-    rel_paths = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
-
-    core_memory: list[dict[str, Any]] = []
-    if include_core:
-        for rel in ("memory/core/identity.md", "memory/core/long_term_facts.json", "memory/core/values.md"):
-            try:
-                auth.require_read_path(rel)
-            except HTTPException:
-                continue
-            content = _read_commit_file(repo_root, commit_ref, rel)
-            if content is None:
-                continue
-            core_memory.append({"path": rel, "snippet": _snippet_text(content, limit=300)})
-
-    items: list[dict[str, Any]] = []
-    for rel in rel_paths:
-        if rel.startswith("index/"):
-            continue
-        if Path(rel).suffix.lower() not in SNAPSHOT_TEXT_SUFFIXES:
-            continue
-        try:
-            auth.require_read_path(rel)
-        except HTTPException:
-            continue
-        content = _read_commit_file(repo_root, commit_ref, rel)
-        if content is None:
-            continue
-        item_type, importance = _record_type_importance(rel, content)
-        if include_set and item_type.lower() not in include_set:
-            continue
-        score = _task_score(task_terms, rel, content, importance)
-        items.append(
-            {
-                "path": rel,
-                "type": item_type,
-                "snippet": _snippet_text(content),
-                "importance": importance,
-                "score": score,
-                "source_ref": commit_ref,
-            }
-        )
-
-    items.sort(key=lambda x: (-float(x.get("score", 0)), str(x.get("path", ""))))
-    selected = items[:limit]
-    open_questions = [it.get("snippet", "") for it in selected[:10] if "?" in str(it.get("snippet", ""))][:5]
-    return core_memory, selected, open_questions
 
 
 @app.get("/v1/peers")
@@ -1467,65 +1200,26 @@ def peer_manifest(peer_id: str, auth: AuthContext = Depends(require_auth)) -> di
 @app.post("/v1/context/snapshot")
 def context_snapshot_create(req: ContextSnapshotRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, gm = _services()
-    auth.require("search")
-    auth.require("write:projects")
-
-    as_of = _resolve_as_of_ref(settings.repo_root, req.as_of.mode, req.as_of.value)
-    if as_of["mode"] == "working_tree":
-        core_memory, items, open_questions = _build_snapshot_from_working_tree(
-            settings.repo_root, auth, req.task, req.include_types, req.limit, req.include_core
-        )
-    else:
-        core_memory, items, open_questions = _build_snapshot_from_commit(
-            settings.repo_root, auth, req.task, req.include_types, req.limit, req.include_core, str(as_of["value"])
-        )
-
-    now = datetime.now(timezone.utc)
-    snapshot_id = f"snap_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
-    snapshot_rel = f"{SNAPSHOT_DIR_REL}/{snapshot_id}.json"
-    auth.require_write_path(snapshot_rel)
-    payload = {
-        "schema_version": "1.0",
-        "snapshot_id": snapshot_id,
-        "task": req.task,
-        "created_at": now.isoformat(),
-        "as_of": as_of,
-        "filters": {"include_types": req.include_types, "limit": req.limit, "include_core": req.include_core},
-        "core_memory": core_memory,
-        "items": items,
-        "open_questions": open_questions,
-        "provenance": {"source": "context_snapshot_create", "service_version": app.version},
-    }
-    path = safe_path(settings.repo_root, snapshot_rel)
-    write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(path, f"snapshot: create {snapshot_id}")
-    _audit(settings, auth, "context_snapshot_create", {"snapshot_id": snapshot_id, "as_of_mode": as_of["mode"], "items": len(items)})
-    return {
-        "ok": True,
-        "snapshot_id": snapshot_id,
-        "path": snapshot_rel,
-        "as_of": as_of,
-        "item_count": len(items),
-        "committed": committed,
-        "latest_commit": gm.latest_commit(),
-    }
+    return context_snapshot_create_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
+        service_version=app.version,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 @app.get("/v1/context/snapshot/{snapshot_id}")
 def context_snapshot_get(snapshot_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
     settings, _ = _services()
-    auth.require("read:files")
-    rel = f"{SNAPSHOT_DIR_REL}/{snapshot_id}.json"
-    auth.require_read_path(rel)
-    path = safe_path(settings.repo_root, rel)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"Snapshot not found: {snapshot_id}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse snapshot: {e}") from e
-    _audit(settings, auth, "context_snapshot_get", {"snapshot_id": snapshot_id})
-    return {"ok": True, "snapshot": payload}
+    return context_snapshot_get_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        snapshot_id=snapshot_id,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
 
 
 TASKS_OPEN_DIR_REL = "tasks/open"
