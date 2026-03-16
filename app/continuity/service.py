@@ -102,6 +102,9 @@ CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
         "working_hypotheses",
         "long_horizon_commitments",
         "session_trajectory",
+        "negative_decisions",
+        "trailing_notes",
+        "curiosity_queue",
         "relationship_model",
         "retrieval_hints",
     ],
@@ -183,8 +186,33 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
             raise HTTPException(status_code=400, detail=f"Invalid repo-relative path in {field_name}: {e}") from e
 
 
+def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
+    """Validate low-commitment continuity fields using service-layer HTTP 400 semantics."""
+    # trailing_notes, curiosity_queue, and negative_decisions intentionally add per-item
+    # minimum-length checks; older continuity list fields remain max-only.
+    for value in list(capsule.continuity.trailing_notes):
+        if len(value) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.trailing_notes")
+        if len(value) > 160:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.trailing_notes")
+    for value in list(capsule.continuity.curiosity_queue):
+        if len(value) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.curiosity_queue")
+        if len(value) > 120:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.curiosity_queue")
+    for decision in list(capsule.continuity.negative_decisions):
+        if len(decision.decision) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.decision")
+        if len(decision.decision) > 160:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.decision")
+        if len(decision.rationale) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.rationale")
+        if len(decision.rationale) > 240:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.rationale")
+
+
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
-    """Validate a capsule and return normalized payload plus canonical JSON."""
+    """Validate write-path continuity bounds and return normalized payload plus canonical JSON."""
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
     if capsule.freshness and capsule.freshness.expires_at:
@@ -207,6 +235,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     for value in list(capsule.continuity.session_trajectory):
         if len(value) > 80:
             raise HTTPException(status_code=400, detail="Value too long in continuity.session_trajectory")
+    _validate_low_commitment_fields(capsule)
     if len(capsule.continuity.stance_summary) > 240:
         raise HTTPException(status_code=400, detail="Value too long in continuity.stance_summary")
     if capsule.continuity.relationship_model:
@@ -249,9 +278,8 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
         raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
 
-
-def _validate_v3_capsule_fields(capsule: ContinuityCapsule) -> None:
-    """Validate V3 verification and health fields when present on a capsule."""
+def _validate_verification_state_and_health(capsule: ContinuityCapsule) -> None:
+    """Validate verification_state and capsule_health when present on a capsule."""
     if capsule.verification_state is not None:
         _require_utc_timestamp(capsule.verification_state.last_revalidated_at, "verification_state.last_revalidated_at")
         for ref in capsule.verification_state.evidence_refs:
@@ -268,17 +296,17 @@ def _validate_v3_capsule_fields(capsule: ContinuityCapsule) -> None:
             raise HTTPException(status_code=400, detail="capsule_health.reasons is required when status is degraded or conflicted")
 
 
-def _strip_v3_verification_fields(capsule: ContinuityCapsule) -> ContinuityCapsule:
-    """Return a capsule copy with V3 verification-only fields removed for upsert."""
+def _strip_verification_fields_for_upsert(capsule: ContinuityCapsule) -> ContinuityCapsule:
+    """Return a capsule copy with verification-derived fields removed for upsert."""
     payload = capsule.model_dump(mode="json", exclude_none=True, exclude={"verification_state", "capsule_health"})
     try:
         return ContinuityCapsule.model_validate(payload)
     except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"Capsule invalid after V3 field stripping: {e}") from e
+        raise HTTPException(status_code=400, detail=f"Capsule invalid after verification-field stripping: {e}") from e
 
 
 def _validate_verification_signals(signals: list[ContinuityVerificationSignal]) -> None:
-    """Validate V3 verification signals using the continuity timestamp rules."""
+    """Validate verification signals using the continuity timestamp rules."""
     for signal in signals:
         _require_utc_timestamp(signal.observed_at, "signals.observed_at")
 
@@ -293,9 +321,9 @@ def _strongest_signal_kind(signals: list[ContinuityVerificationSignal]) -> str:
 
 
 def _normalize_compare_payload(repo_root: Path, capsule: ContinuityCapsule) -> dict[str, Any]:
-    """Validate and normalize a capsule payload for V3 compare semantics."""
+    """Validate and normalize a capsule payload for compare and revalidate semantics."""
     _validate_capsule(repo_root, capsule)
-    _validate_v3_capsule_fields(capsule)
+    _validate_verification_state_and_health(capsule)
     return capsule.model_dump(mode="json", exclude_none=True)
 
 
@@ -344,7 +372,7 @@ def _compare_values(left: Any, right: Any, *, path: str = "", order_name: str | 
 
 
 def _compare_capsules(active: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
-    """Compare two normalized capsules using the V3 canonical traversal order."""
+    """Compare two normalized capsules using the canonical traversal order."""
     changes: list[str] = []
     for key in CONTINUITY_COMPARE_TOP_LEVEL_ORDER:
         if key in CONTINUITY_COMPARE_IGNORED_FIELDS:
@@ -366,9 +394,9 @@ def _signals_to_evidence_refs(signals: list[ContinuityVerificationSignal]) -> li
 
 
 def _final_capsule_payload(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
-    """Validate a final assembled capsule including V3 fields and return canonical JSON."""
+    """Validate a final assembled capsule including verification-derived fields and return canonical JSON."""
     payload, canonical = _validate_capsule(repo_root, capsule)
-    _validate_v3_capsule_fields(capsule)
+    _validate_verification_state_and_health(capsule)
     return payload, canonical
 
 
@@ -570,7 +598,7 @@ def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | Non
 
 
 def _warning_mode_is_multi(req: ContextRetrieveRequest) -> bool:
-    """Return whether retrieval should use V2 multi-capsule warning strings."""
+    """Return whether retrieval should use selector-qualified multi-capsule warning strings."""
     return "continuity_selectors" in req.model_fields_set and bool(req.continuity_selectors)
 
 
@@ -585,7 +613,7 @@ def _format_selector(subject_kind: str, subject_id: str) -> str:
 
 
 def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_mode: bool) -> str:
-    """Return a warning string in either V1 or V2 retrieval format."""
+    """Return a warning string in either single-capsule or selector-qualified retrieval format."""
     if warning == CONTINUITY_WARNING_TRUNCATED_MULTI and not multi_mode:
         return CONTINUITY_WARNING_TRUNCATED
     if not multi_mode:
@@ -671,10 +699,10 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
             if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
                 raise HTTPException(status_code=400, detail="Continuity capsule subject does not match requested subject")
         return capsule
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity capsule: {e}") from e
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity capsule JSON: {e}") from e
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity capsule: {e}") from e
 
 
 def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
@@ -688,7 +716,7 @@ def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
 
 
 def _verification_status(capsule: dict[str, Any]) -> str:
-    """Return the persisted or implicit V3 verification status for one capsule."""
+    """Return the persisted or implicit verification status for one capsule."""
     verification_state = capsule.get("verification_state")
     if isinstance(verification_state, dict):
         status = verification_state.get("status")
@@ -698,7 +726,7 @@ def _verification_status(capsule: dict[str, Any]) -> str:
 
 
 def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
-    """Return the persisted or implicit V3 capsule health summary."""
+    """Return the persisted or implicit capsule health summary."""
     capsule_health = capsule.get("capsule_health")
     if isinstance(capsule_health, dict):
         status = capsule_health.get("status")
@@ -837,7 +865,7 @@ def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list
 
 
 def _estimated_tokens(text: str) -> int:
-    """Estimate token usage with the V1 four-characters-per-token heuristic."""
+    """Estimate token usage with the repository four-characters-per-token heuristic."""
     return int(math.ceil(len(text) / 4.0))
 
 
@@ -893,6 +921,9 @@ def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
 def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | None:
     """Trim a capsule deterministically to fit the reserved continuity budget."""
     payload = json.loads(json.dumps(capsule, ensure_ascii=False))
+    # Lower-commitment fields (trailing_notes, curiosity_queue, negative_decisions) trim before
+    # working_hypotheses so deliberate non-action survives longer than residual notes/curiosity,
+    # while hypotheses still outlive all three.
     for dotted in (
         "metadata",
         "canonical_sources",
@@ -902,6 +933,9 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | 
         "continuity.relationship_model.preferred_style",
         "continuity.retrieval_hints.avoid",
         "continuity.retrieval_hints.load_next",
+        "continuity.trailing_notes",
+        "continuity.curiosity_queue",
+        "continuity.negative_decisions",
         "continuity.working_hypotheses",
     ):
         if _estimated_tokens(_render_value(payload)) <= max_tokens:
@@ -998,7 +1032,7 @@ def continuity_upsert_service(
 ) -> dict[str, Any]:
     """Validate and persist one continuity capsule with commit-on-change behavior."""
     auth.require("write:projects")
-    capsule = _strip_v3_verification_fields(req.capsule)
+    capsule = _strip_verification_fields_for_upsert(req.capsule)
     if capsule.subject_kind != req.subject_kind or capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)

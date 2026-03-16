@@ -400,9 +400,15 @@ class ContinuityCapsuleHealth(BaseModel):
 
 
 class ContinuitySelector(BaseModel):
-    """Explicit continuity subject selector used by V2 retrieval."""
+    """Explicit continuity subject selector used by multi-capsule retrieval."""
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
+
+
+class NegativeDecision(BaseModel):
+    """A deliberate non-action plus rationale; bounds are enforced in the continuity service."""
+    decision: str = Field(description="1-160 chars, validated at the continuity service layer.")
+    rationale: str = Field(description="1-240 chars, validated at the continuity service layer.")
 
 
 class ContinuityState(BaseModel):
@@ -414,10 +420,13 @@ class ContinuityState(BaseModel):
     stance_summary: str = Field(max_length=240)
     drift_signals: List[str] = Field(max_length=5)
     working_hypotheses: List[str] = Field(default_factory=list, max_length=5)
-    relationship_model: Optional[ContinuityRelationshipModel] = None
-    retrieval_hints: Optional[ContinuityRetrievalHints] = None
     long_horizon_commitments: List[str] = Field(default_factory=list, max_length=5)
     session_trajectory: List[str] = Field(default_factory=list, max_length=5)
+    negative_decisions: List[NegativeDecision] = Field(default_factory=list, max_length=4)
+    trailing_notes: List[str] = Field(default_factory=list, max_length=3)
+    curiosity_queue: List[str] = Field(default_factory=list, max_length=5)
+    relationship_model: Optional[ContinuityRelationshipModel] = None
+    retrieval_hints: Optional[ContinuityRetrievalHints] = None
 
 
 class ContinuityCapsule(BaseModel):
@@ -495,7 +504,7 @@ class ContinuityDeleteRequest(BaseModel):
 
 
 class ContinuityVerificationSignal(BaseModel):
-    """Structured verification signal used by V3 compare and revalidate workflows."""
+    """Structured verification signal used by continuity compare and revalidate workflows."""
     kind: Literal["self_review", "external_observation", "user_confirmation", "peer_confirmation", "system_check"]
     source_ref: str = Field(min_length=1, max_length=200)
     observed_at: str

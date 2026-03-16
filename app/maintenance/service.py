@@ -27,8 +27,7 @@ from app.continuity.service import (
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ReplicationPullRequest, ReplicationPushRequest
-from app.models import ContinuityCapsule
+from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
 from app.storage import canonical_json, read_text_file, safe_path, write_text_file
 
 REPLICATION_STATE_REL = "peers/replication_state.json"
