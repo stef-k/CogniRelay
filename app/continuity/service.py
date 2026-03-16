@@ -1336,6 +1336,9 @@ def continuity_delete_service(
         for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
             if path.is_dir() or path.suffix.lower() != ".json" or not path.name.startswith(archive_prefix):
                 continue
+            timestamp_start = path.name[len(archive_prefix): len(archive_prefix) + 1]
+            if not timestamp_start.isdigit():
+                continue
             rel = str(path.relative_to(repo_root))
             auth.require_write_path(rel)
             archive_paths.append((rel, path))

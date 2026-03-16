@@ -211,6 +211,14 @@ class TestContinuityPhase4Phase3(unittest.TestCase):
                 capsule=capsule,
                 archived_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
             )
+            other_capsule = self._capsule_payload(subject_kind="user", subject_id="stef-v2")
+            archive_other = self._write_archive(
+                repo_root,
+                subject_kind="user",
+                subject_id="stef-v2",
+                capsule=other_capsule,
+                archived_at=datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc),
+            )
 
             with patch("app.main._services", return_value=(settings, gm)):
                 out = continuity_delete(
@@ -237,6 +245,7 @@ class TestContinuityPhase4Phase3(unittest.TestCase):
             self.assertFalse(fallback.exists())
             self.assertFalse(archive_one.exists())
             self.assertFalse(archive_two.exists())
+            self.assertTrue(archive_other.exists())
             self.assertEqual(len(gm.commit_paths_calls), 1)
             staged_paths, commit_message = gm.commit_paths_calls[0]
             self.assertEqual(sorted(staged_paths), sorted([str(active), str(fallback), str(archive_one), str(archive_two)]))
