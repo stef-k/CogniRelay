@@ -210,3 +210,38 @@ class TestContinuity33Phase2(unittest.TestCase):
         self.assertNotIn("negative_decisions", continuity)
         self.assertIn("working_hypotheses", continuity)
         self.assertEqual(continuity["active_constraints"], ["constraint for stef"])
+
+    def test_trim_drops_trailing_notes_before_curiosity_queue(self) -> None:
+        """Targeted budget pressure should drop trailing notes before curiosity queue."""
+        payload = self._capsule_payload()
+        payload.pop("freshness", None)
+        boundary = json.loads(json.dumps(payload))
+        boundary["continuity"].pop("trailing_notes", None)
+        max_tokens = _estimated_tokens(_render_value(boundary))
+
+        trimmed = _trim_capsule(payload, max_tokens)
+
+        self.assertIsNotNone(trimmed)
+        assert trimmed is not None
+        continuity = trimmed["continuity"]
+        self.assertNotIn("trailing_notes", continuity)
+        self.assertIn("curiosity_queue", continuity)
+        self.assertIn("negative_decisions", continuity)
+
+    def test_trim_drops_curiosity_queue_before_negative_decisions(self) -> None:
+        """Targeted budget pressure should drop curiosity queue before negative decisions."""
+        payload = self._capsule_payload()
+        payload.pop("freshness", None)
+        boundary = json.loads(json.dumps(payload))
+        boundary["continuity"].pop("trailing_notes", None)
+        boundary["continuity"].pop("curiosity_queue", None)
+        max_tokens = _estimated_tokens(_render_value(boundary))
+
+        trimmed = _trim_capsule(payload, max_tokens)
+
+        self.assertIsNotNone(trimmed)
+        assert trimmed is not None
+        continuity = trimmed["continuity"]
+        self.assertNotIn("trailing_notes", continuity)
+        self.assertNotIn("curiosity_queue", continuity)
+        self.assertIn("negative_decisions", continuity)

@@ -187,7 +187,7 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
 
 
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
-    """Validate timestamps, paths, and continuity string bounds, then return canonicalized capsule bytes."""
+    """Validate timestamps, paths, and continuity string bounds, then return canonical JSON."""
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
     if capsule.freshness and capsule.freshness.expires_at:
@@ -271,6 +271,16 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     if len(canonical.encode("utf-8")) > 12 * 1024:
         raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
+
+
+def _validated_capsule_payload(repo_root: Path, payload: Any, *, detail_prefix: str) -> dict[str, Any]:
+    """Model-validate and apply continuity-service bounds to one stored capsule payload."""
+    try:
+        capsule = ContinuityCapsule.model_validate(payload)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"{detail_prefix}: {e}") from e
+    normalized, _canonical = _validate_capsule(repo_root, capsule)
+    return normalized
 
 
 def _validate_v3_capsule_fields(capsule: ContinuityCapsule) -> None:
@@ -492,10 +502,11 @@ def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]
     nested = payload.get("capsule")
     if not isinstance(nested, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
-    try:
-        payload["capsule"] = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
+    payload["capsule"] = _validated_capsule_payload(
+        repo_root,
+        nested,
+        detail_prefix="Invalid continuity fallback snapshot capsule",
+    )
     return payload
 
 
@@ -570,10 +581,11 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     capsule = payload.get("capsule")
     if not isinstance(capsule, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope capsule")
-    try:
-        payload["capsule"] = ContinuityCapsule.model_validate(capsule).model_dump(mode="json", exclude_none=True)
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope capsule: {e}") from e
+    payload["capsule"] = _validated_capsule_payload(
+        repo_root,
+        capsule,
+        detail_prefix="Invalid continuity archive envelope capsule",
+    )
     return payload
 
 
@@ -686,7 +698,7 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
         raise HTTPException(status_code=404, detail="Continuity capsule not found")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
+        capsule = _validated_capsule_payload(repo_root, payload, detail_prefix="Invalid continuity capsule")
         if expected_subject is not None:
             expected_kind, expected_id = expected_subject
             capsule_kind = str(capsule.get("subject_kind") or "")
@@ -694,8 +706,6 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
             if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
                 raise HTTPException(status_code=400, detail="Continuity capsule subject does not match requested subject")
         return capsule
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity capsule: {e}") from e
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity capsule JSON: {e}") from e
 
