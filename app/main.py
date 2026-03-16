@@ -25,6 +25,7 @@ from .context import (
 from .continuity import (
     continuity_archive_service,
     continuity_compare_service,
+    continuity_delete_service,
     continuity_list_service,
     continuity_read_service,
     continuity_refresh_plan_service,
@@ -56,6 +57,7 @@ from .models import (
     CompactRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
+    ContinuityDeleteRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
     ContinuityRefreshPlanRequest,
@@ -638,6 +640,19 @@ def continuity_archive(req: ContinuityArchiveRequest, auth: AuthContext = Depend
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/delete")
+def continuity_delete(req: ContinuityDeleteRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Delete selected continuity artifacts for one exact selector."""
+    settings, gm = _services()
+    return continuity_delete_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 

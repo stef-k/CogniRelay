@@ -60,7 +60,8 @@ Notable behavior:
 - `POST /v1/continuity/refresh/plan` now returns deterministic refresh candidates and persists the latest plan under `memory/continuity/refresh_state.json`
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule
 - `POST /v1/continuity/revalidate` writes verification status and capsule health through one audited git-backed continuity update
-- `POST /v1/continuity/list` returns active-only summaries, skipping archive entries and invalid active files, and now includes additive verification and health summary fields
+- `POST /v1/continuity/list` now supports `include_fallback` and `include_archived`, and returns additive `artifact_state` plus `retention_class`
+- `POST /v1/continuity/delete` deletes exact-selector active, fallback, and archive artifacts through one audited git-backed delete path
 - `POST /v1/continuity/archive` writes an archive envelope under `memory/continuity/archive/` and removes the active capsule in one git-backed commit
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
 - `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`

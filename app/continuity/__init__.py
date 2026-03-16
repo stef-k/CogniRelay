@@ -3,6 +3,7 @@
 from .service import (
     continuity_archive_service,
     continuity_compare_service,
+    continuity_delete_service,
     continuity_refresh_plan_service,
     build_continuity_state,
     continuity_list_service,
@@ -14,6 +15,7 @@ from .service import (
 __all__ = [
     "continuity_archive_service",
     "continuity_compare_service",
+    "continuity_delete_service",
     "continuity_refresh_plan_service",
     "build_continuity_state",
     "continuity_list_service",

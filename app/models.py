@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class WriteRequest(BaseModel):
@@ -458,6 +458,8 @@ class ContinuityListRequest(BaseModel):
     """Filter parameters for listing active continuity capsules."""
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     limit: int = Field(default=50, ge=1, le=200)
+    include_fallback: bool = False
+    include_archived: bool = False
 
 
 class ContinuityRefreshPlanRequest(BaseModel):
@@ -472,6 +474,23 @@ class ContinuityArchiveRequest(BaseModel):
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=3, max_length=240)
+
+
+class ContinuityDeleteRequest(BaseModel):
+    """Exact-selector request for deleting continuity artifacts."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    delete_active: bool = False
+    delete_archive: bool = False
+    delete_fallback: bool = False
+    reason: str = Field(min_length=3, max_length=240)
+
+    @model_validator(mode="after")
+    def _require_any_delete_flag(self) -> "ContinuityDeleteRequest":
+        """Require at least one explicit delete target."""
+        if not (self.delete_active or self.delete_archive or self.delete_fallback):
+            raise ValueError("at least one delete flag must be true")
+        return self
 
 
 class ContinuityVerificationSignal(BaseModel):
