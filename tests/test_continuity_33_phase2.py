@@ -140,6 +140,27 @@ class TestContinuity33Phase2(unittest.TestCase):
                 "Keep issue-33 focused on the bounded continuity slice.",
             )
 
+    def test_continuity_read_tolerates_stored_issue_33_write_bound_violations(self) -> None:
+        """Read should keep older stored capsules accessible even if #33 write-only bounds were exceeded."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            payload = self._capsule_payload()
+            payload["continuity"]["negative_decisions"][0]["decision"] = "d" * 161
+            self._write_capsule(repo_root, payload)
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="stef"),
+                    auth=AllowAllAuthStub(),
+                )
+
+            self.assertEqual(
+                out["capsule"]["continuity"]["negative_decisions"][0]["decision"],
+                "d" * 161,
+            )
+
     def test_compare_reports_shallow_changed_paths_for_issue_33_fields(self) -> None:
         """Compare should treat the new fields as shallow ordered list paths."""
         with tempfile.TemporaryDirectory() as td:

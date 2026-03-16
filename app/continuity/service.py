@@ -186,8 +186,33 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
             raise HTTPException(status_code=400, detail=f"Invalid repo-relative path in {field_name}: {e}") from e
 
 
+def _validate_issue_33_fields(capsule: ContinuityCapsule) -> None:
+    """Validate the additive #33 continuity fields using service-layer HTTP 400 semantics."""
+    # trailing_notes, curiosity_queue, and negative_decisions intentionally add per-item
+    # minimum-length checks; older continuity list fields remain max-only.
+    for value in list(capsule.continuity.trailing_notes):
+        if len(value) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.trailing_notes")
+        if len(value) > 160:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.trailing_notes")
+    for value in list(capsule.continuity.curiosity_queue):
+        if len(value) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.curiosity_queue")
+        if len(value) > 120:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.curiosity_queue")
+    for decision in list(capsule.continuity.negative_decisions):
+        if len(decision.decision) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.decision")
+        if len(decision.decision) > 160:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.decision")
+        if len(decision.rationale) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.rationale")
+        if len(decision.rationale) > 240:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.rationale")
+
+
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
-    """Validate timestamps, paths, and continuity string bounds, then return canonical JSON."""
+    """Validate write-path continuity bounds and return normalized payload plus canonical JSON."""
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
     if capsule.freshness and capsule.freshness.expires_at:
@@ -210,26 +235,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     for value in list(capsule.continuity.session_trajectory):
         if len(value) > 80:
             raise HTTPException(status_code=400, detail="Value too long in continuity.session_trajectory")
-    # These three fields intentionally add per-item minimum-length checks; older continuity list fields remain max-only.
-    for value in list(capsule.continuity.trailing_notes):
-        if len(value) < 1:
-            raise HTTPException(status_code=400, detail="Value too short in continuity.trailing_notes")
-        if len(value) > 160:
-            raise HTTPException(status_code=400, detail="Value too long in continuity.trailing_notes")
-    for value in list(capsule.continuity.curiosity_queue):
-        if len(value) < 1:
-            raise HTTPException(status_code=400, detail="Value too short in continuity.curiosity_queue")
-        if len(value) > 120:
-            raise HTTPException(status_code=400, detail="Value too long in continuity.curiosity_queue")
-    for decision in list(capsule.continuity.negative_decisions):
-        if len(decision.decision) < 1:
-            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.decision")
-        if len(decision.decision) > 160:
-            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.decision")
-        if len(decision.rationale) < 1:
-            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.rationale")
-        if len(decision.rationale) > 240:
-            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.rationale")
+    _validate_issue_33_fields(capsule)
     if len(capsule.continuity.stance_summary) > 240:
         raise HTTPException(status_code=400, detail="Value too long in continuity.stance_summary")
     if capsule.continuity.relationship_model:
@@ -274,7 +280,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
 
 
 def _validated_capsule_payload(repo_root: Path, payload: Any, *, detail_prefix: str) -> dict[str, Any]:
-    """Model-validate and apply continuity-service bounds to one stored capsule payload."""
+    """Model-validate one stored capsule payload and apply write-path continuity bounds."""
     try:
         capsule = ContinuityCapsule.model_validate(payload)
     except ValidationError as e:
@@ -502,11 +508,10 @@ def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]
     nested = payload.get("capsule")
     if not isinstance(nested, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
-    payload["capsule"] = _validated_capsule_payload(
-        repo_root,
-        nested,
-        detail_prefix="Invalid continuity fallback snapshot capsule",
-    )
+    try:
+        payload["capsule"] = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
     return payload
 
 
@@ -581,11 +586,10 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     capsule = payload.get("capsule")
     if not isinstance(capsule, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope capsule")
-    payload["capsule"] = _validated_capsule_payload(
-        repo_root,
-        capsule,
-        detail_prefix="Invalid continuity archive envelope capsule",
-    )
+    try:
+        payload["capsule"] = ContinuityCapsule.model_validate(capsule).model_dump(mode="json", exclude_none=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope capsule: {e}") from e
     return payload
 
 
@@ -698,7 +702,7 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
         raise HTTPException(status_code=404, detail="Continuity capsule not found")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        capsule = _validated_capsule_payload(repo_root, payload, detail_prefix="Invalid continuity capsule")
+        capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
         if expected_subject is not None:
             expected_kind, expected_id = expected_subject
             capsule_kind = str(capsule.get("subject_kind") or "")
@@ -708,6 +712,8 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
         return capsule
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity capsule JSON: {e}") from e
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity capsule: {e}") from e
 
 
 def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
@@ -926,6 +932,8 @@ def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
 def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | None:
     """Trim a capsule deterministically to fit the reserved continuity budget."""
     payload = json.loads(json.dumps(capsule, ensure_ascii=False))
+    # Lower-commitment #33 fields trim before working_hypotheses so deliberate non-action survives
+    # longer than residual notes/curiosity, while hypotheses still outlive all three.
     for dotted in (
         "metadata",
         "canonical_sources",
