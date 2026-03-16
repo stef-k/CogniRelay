@@ -56,6 +56,8 @@ CONTINUITY_WARNING_FALLBACK_USED = "continuity_fallback_used"
 CONTINUITY_WARNING_FALLBACK_MISSING = "continuity_fallback_missing"
 CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
 CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
+CONTINUITY_ARCHIVE_SCHEMA_TYPE = "continuity_archive_envelope"
+CONTINUITY_ARCHIVE_SCHEMA_VERSION = "1.0"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -420,39 +422,26 @@ def _fallback_snapshot_payload(*, capsule: dict[str, Any], active_rel: str, capt
     }
 
 
-def _persist_fallback_snapshot(
-    *,
-    repo_root: Path,
-    gm: GitManager,
-    subject_kind: str,
-    subject_id: str,
-    capsule: dict[str, Any],
-) -> tuple[str, bool]:
-    """Persist the recovery-only fallback snapshot without rolling back the active write."""
-    fallback_rel = continuity_fallback_rel_path(subject_kind, subject_id)
-    path = safe_path(repo_root, fallback_rel)
-    payload = _fallback_snapshot_payload(
-        capsule=capsule,
-        active_rel=continuity_rel_path(subject_kind, subject_id),
-        captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
-    )
-    canonical = _canonical_json(payload)
-    old_bytes = path.read_bytes() if path.exists() else None
-    new_bytes = canonical.encode("utf-8")
-    if old_bytes == new_bytes:
-        return fallback_rel, False
-    write_text_file(path, canonical)
+def _restore_failed_fallback_snapshot(path: Path, old_bytes: bytes | None, exc: Exception) -> str:
+    """Restore the prior fallback snapshot bytes after a failed commit and return audit detail."""
+    restore_error: Exception | None = None
     try:
-        committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
-        if not committed:
-            raise RuntimeError("git commit produced no changes")
-    except Exception:
-        return fallback_rel, False
-    return fallback_rel, True
+        if old_bytes is None:
+            if path.exists():
+                path.unlink()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(old_bytes)
+    except Exception as restore_exc:
+        restore_error = restore_exc
+    detail = f"Failed to persist continuity fallback snapshot: {exc}"
+    if restore_error is not None:
+        detail = f"{detail}; rollback failed: {restore_error}"
+    return detail
 
 
-def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tuple[str, str]) -> dict[str, Any]:
-    """Load and validate one fallback snapshot envelope, returning the nested capsule."""
+def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]:
+    """Load and validate a fallback snapshot envelope payload."""
     path = safe_path(repo_root, rel)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Continuity fallback snapshot not found")
@@ -468,9 +457,48 @@ def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tupl
     if not isinstance(nested, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
     try:
-        capsule = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
+        payload["capsule"] = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
+    return payload
+
+
+def _persist_fallback_snapshot(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    subject_kind: str,
+    subject_id: str,
+    capsule: dict[str, Any],
+) -> tuple[str, str]:
+    """Persist the recovery-only fallback snapshot without rolling back the active write."""
+    fallback_rel = continuity_fallback_rel_path(subject_kind, subject_id)
+    path = safe_path(repo_root, fallback_rel)
+    payload = _fallback_snapshot_payload(
+        capsule=capsule,
+        active_rel=continuity_rel_path(subject_kind, subject_id),
+        captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
+    )
+    canonical = _canonical_json(payload)
+    old_bytes = path.read_bytes() if path.exists() else None
+    new_bytes = canonical.encode("utf-8")
+    if old_bytes == new_bytes:
+        return fallback_rel, "unchanged"
+    write_text_file(path, canonical)
+    try:
+        committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
+        if not committed:
+            raise RuntimeError("git commit produced no changes")
+    except Exception as exc:
+        _restore_failed_fallback_snapshot(path, old_bytes, exc)
+        return fallback_rel, "failed"
+    return fallback_rel, "committed"
+
+
+def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tuple[str, str]) -> dict[str, Any]:
+    """Load and validate one fallback snapshot envelope, returning the nested capsule."""
+    payload = _load_fallback_envelope_payload(repo_root, rel)
+    capsule = payload["capsule"]
     expected_kind, expected_id = expected_subject
     capsule_kind = str(capsule.get("subject_kind") or "")
     capsule_subject_id = str(capsule.get("subject_id") or "")
@@ -481,25 +509,7 @@ def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tupl
 
 def _load_fallback_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     """Load and validate a fallback snapshot envelope."""
-    path = safe_path(repo_root, rel)
-    if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=404, detail="Continuity fallback snapshot not found")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot JSON: {e}") from e
-    if payload.get("schema_type") != CONTINUITY_FALLBACK_SCHEMA_TYPE:
-        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_type")
-    if payload.get("schema_version") != CONTINUITY_FALLBACK_SCHEMA_VERSION:
-        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_version")
-    capsule = payload.get("capsule")
-    if not isinstance(capsule, dict):
-        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
-    try:
-        payload["capsule"] = ContinuityCapsule.model_validate(capsule).model_dump(mode="json", exclude_none=True)
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
-    return payload
+    return _load_fallback_envelope_payload(repo_root, rel)
 
 
 def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
@@ -511,9 +521,9 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope JSON: {e}") from e
-    if payload.get("schema_type") != "continuity_archive_envelope":
+    if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope schema_type")
-    if payload.get("schema_version") != "1.0":
+    if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope schema_version")
     capsule = payload.get("capsule")
     if not isinstance(capsule, dict):
@@ -992,14 +1002,14 @@ def continuity_upsert_service(
             commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
         )
         committed = True
-        fallback_rel, fallback_committed = _persist_fallback_snapshot(
+        fallback_rel, fallback_status = _persist_fallback_snapshot(
             repo_root=repo_root,
             gm=gm,
             subject_kind=req.subject_kind,
             subject_id=req.subject_id,
             capsule=capsule.model_dump(mode="json", exclude_none=True),
         )
-        if not fallback_committed:
+        if fallback_status == "failed":
             fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
     else:
         fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
@@ -1217,7 +1227,7 @@ def continuity_list_service(
                 health_status, health_reasons = _capsule_health_summary(capsule)
                 archived_at = _parse_iso(str(envelope.get("archived_at") or ""))
                 retention_class = "archive_recent"
-                if archived_at is not None and (now - archived_at).days > CONTINUITY_RETENTION_ARCHIVE_DAYS:
+                if archived_at is not None and (now - archived_at).total_seconds() > (CONTINUITY_RETENTION_ARCHIVE_DAYS * 86400):
                     retention_class = "archive_stale"
                 summaries.append(
                     {
@@ -1329,16 +1339,17 @@ def continuity_delete_service(
         if not committed:
             raise RuntimeError("Continuity delete commit produced no changes")
     except Exception as exc:
-        restore_error: Exception | None = None
+        restore_errors: list[str] = []
         for path, data in original_bytes.items():
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
             except Exception as restore_exc:
-                if restore_error is None:
-                    restore_error = restore_exc
-        if restore_error is not None:
-            raise RuntimeError(f"Continuity delete commit failed: {exc}; rollback failed: {restore_error}") from exc
+                restore_errors.append(f"{path}: {restore_exc}")
+        if restore_errors:
+            raise RuntimeError(
+                f"Continuity delete commit failed: {exc}; rollback failed for {', '.join(restore_errors)}"
+            ) from exc
         raise
     audit(
         auth,
@@ -1438,16 +1449,10 @@ def continuity_refresh_plan_service(
             except HTTPException:
                 continue
             try:
-                capsule = _load_fallback_snapshot(
-                    repo_root,
-                    rel,
-                    expected_subject=(
-                        str(json.loads(path.read_text(encoding="utf-8")).get("capsule", {}).get("subject_kind") or ""),
-                        str(json.loads(path.read_text(encoding="utf-8")).get("capsule", {}).get("subject_id") or ""),
-                    ),
-                )
+                envelope = _load_fallback_envelope(repo_root, rel)
             except Exception:
                 continue
+            capsule = envelope["capsule"]
             selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
             if req.subject_kind and selector[0] != req.subject_kind:
                 continue
@@ -1672,7 +1677,7 @@ def continuity_revalidate_service(
         canonical=canonical,
         commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
     )
-    fallback_rel, fallback_committed = _persist_fallback_snapshot(
+    fallback_rel, fallback_status = _persist_fallback_snapshot(
         repo_root=repo_root,
         gm=gm,
         subject_kind=req.subject_kind,
@@ -1690,7 +1695,7 @@ def continuity_revalidate_service(
             "strongest_signal": strongest_signal,
             "updated": updated,
             "fallback_path": fallback_rel,
-            "fallback_warning": None if fallback_committed else CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
+            "fallback_warning": CONTINUITY_WARNING_FALLBACK_WRITE_FAILED if fallback_status == "failed" else None,
         },
     )
     return {

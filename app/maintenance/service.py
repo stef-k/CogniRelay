@@ -18,7 +18,15 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
-from app.continuity.service import continuity_fallback_rel_path, continuity_rel_path
+from app.continuity.service import (
+    CONTINUITY_ARCHIVE_SCHEMA_TYPE,
+    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+    CONTINUITY_DIR_REL,
+    CONTINUITY_FALLBACK_SCHEMA_TYPE,
+    CONTINUITY_FALLBACK_SCHEMA_VERSION,
+    continuity_fallback_rel_path,
+    continuity_rel_path,
+)
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ReplicationPullRequest, ReplicationPushRequest
 from app.models import ContinuityCapsule
 from app.storage import read_text_file, safe_path, write_text_file
@@ -27,11 +35,6 @@ REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
 REPLICATION_TOMBSTONES_REL = "peers/replication_tombstones.json"
 BACKUPS_DIR_REL = "backups"
-CONTINUITY_DIR_REL = "memory/continuity"
-CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
-CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
-CONTINUITY_ARCHIVE_SCHEMA_TYPE = "continuity_archive_envelope"
-CONTINUITY_ARCHIVE_SCHEMA_VERSION = "1.0"
 
 
 def _continuity_included(include_prefixes: list[str]) -> bool:

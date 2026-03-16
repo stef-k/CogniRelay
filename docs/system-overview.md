@@ -122,7 +122,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `continuity_verification_policy` on `POST /v1/context/retrieve` when you need to allow degraded continuity, prefer healthy continuity first, or require healthy capsules only
 - Use `continuity_resilience_policy` on `POST /v1/context/retrieve` when you need to permit fallback snapshots or insist on active continuity only
 - Expect `POST /v1/context/retrieve` to degrade deterministically when search indexes are stale or missing: stale keeps indexed retrieval with warnings, missing falls back to a bounded raw scan
-- Use `POST /v1/continuity/read` when you need the full capsule for one exact selector and want structured fallback or missing-state degradation
+- Use `POST /v1/continuity/read` when you need the full capsule for one exact selector; set `allow_fallback=true` when you want structured fallback or missing-state degradation
 - Use `POST /v1/continuity/refresh/plan` when you need a deterministic list of the next continuity capsules that should be refreshed
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
 - Use `POST /v1/continuity/revalidate` when you need to confirm, correct, degrade, or conflict-mark one active capsule through the audited write path

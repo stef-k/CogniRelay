@@ -40,6 +40,15 @@ class _GitManagerStub(SimpleGitManagerStub):
         return True
 
 
+class _FailingFallbackGitManagerStub(_GitManagerStub):
+    """Git stub that fails only the fallback snapshot commit."""
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        """Fail the fallback commit while allowing the active write to succeed."""
+        self.commit_file_calls.append((str(path), message))
+        return "memory/continuity/fallback/" not in str(path)
+
+
 class _RejectingReadAuthStub(_AuthStub):
     """Auth stub that denies reads for fallback paths only."""
 
@@ -208,6 +217,63 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
             self.assertEqual(snapshot["capsule"]["subject_id"], "stef")
             self.assertEqual(snapshot["verification_status"], "system_confirmed")
             self.assertEqual(snapshot["health_status"], "healthy")
+
+    def test_upsert_idempotent_write_does_not_fail_or_rewrite_fallback_snapshot(self) -> None:
+        """Identical upserts should not report fallback failure or rewrite the fallback snapshot."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            capsule = self._capsule_payload(subject_kind="user", subject_id="stef")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                first = continuity_upsert(
+                    req=ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=capsule),
+                    auth=_AuthStub(),
+                )
+                second = continuity_upsert(
+                    req=ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=capsule),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(first["ok"])
+            self.assertTrue(second["ok"])
+            self.assertFalse(second["updated"])
+            fallback_path = repo_root / "memory" / "continuity" / "fallback" / "user-stef.json"
+            self.assertTrue(fallback_path.exists())
+            self.assertEqual(
+                gm.commit_file_calls,
+                [
+                    (str(repo_root / "memory" / "continuity" / "user-stef.json"), "continuity: upsert user stef"),
+                    (str(fallback_path), "continuity: update fallback user stef"),
+                ],
+            )
+
+    def test_upsert_preserves_previous_fallback_snapshot_on_fallback_commit_failure(self) -> None:
+        """Fallback commit failure should restore the prior fallback bytes and keep the active write successful."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _FailingFallbackGitManagerStub()
+            old_capsule = self._capsule_payload(subject_kind="user", subject_id="stef")
+            self._write_fallback_snapshot(repo_root, subject_kind="user", subject_id="stef", capsule=old_capsule)
+            old_snapshot = (repo_root / "memory" / "continuity" / "fallback" / "user-stef.json").read_text(encoding="utf-8")
+
+            new_capsule = self._capsule_payload(subject_kind="user", subject_id="stef")
+            new_capsule["continuity"]["stance_summary"] = "new stance"
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_upsert(
+                    req=ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=new_capsule),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(out["ok"])
+            active_path = repo_root / "memory" / "continuity" / "user-stef.json"
+            active = json.loads(active_path.read_text(encoding="utf-8"))
+            self.assertEqual(active["continuity"]["stance_summary"], "new stance")
+            fallback_path = repo_root / "memory" / "continuity" / "fallback" / "user-stef.json"
+            self.assertEqual(fallback_path.read_text(encoding="utf-8"), old_snapshot)
 
     def test_read_uses_fallback_when_active_is_missing(self) -> None:
         """Read should return a fallback snapshot when the active file is missing."""

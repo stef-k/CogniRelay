@@ -70,6 +70,8 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         write_schema = by_name["memory.write"]["input_schema"]
         self.assertIn("path", write_schema.get("properties", {}))
         self.assertIn("content", write_schema.get("properties", {}))
+        self.assertEqual(by_name["continuity.refresh_plan"]["scopes"], ["read:files", "read_namespaces", "write_namespaces"])
+        self.assertFalse(by_name["continuity.refresh_plan"]["idempotent"])
 
     def test_workflow_catalog_has_bootstrap(self) -> None:
         """Workflow catalog should expose the bootstrap workflow."""

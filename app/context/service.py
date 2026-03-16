@@ -359,16 +359,23 @@ def _raw_scan_recent_relevant(
 
 
 def _pack_recent_relevant(results: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Stable-partition evidence into the deterministic packing order."""
-    summaries = [row for row in results if str(row.get("path", "")).startswith("memory/summaries/")]
-    messages = [row for row in results if str(row.get("path", "")).startswith("messages/threads/")]
-    remaining = [
-        row
-        for row in results
-        if not str(row.get("path", "")).startswith("memory/summaries/")
-        and not str(row.get("path", "")).startswith("messages/threads/")
-    ]
-    return (summaries + messages + remaining)[:limit]
+    """Sort evidence using the established packing order and score tie-breaks."""
+    def _group(path: str) -> int:
+        if path.startswith("memory/summaries/"):
+            return 0
+        if path.startswith("messages/"):
+            return 1
+        return 2
+
+    packed = sorted(
+        results,
+        key=lambda row: (
+            _group(str(row.get("path", ""))),
+            -float(row.get("score", 0) or 0),
+            str(row.get("path", "")),
+        ),
+    )
+    return packed[:limit]
 
 
 def context_retrieve_service(

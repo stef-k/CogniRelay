@@ -449,14 +449,14 @@ class ContinuityUpsertRequest(BaseModel):
 
 
 class ContinuityReadRequest(BaseModel):
-    """Exact-selector request for reading one active continuity capsule."""
+    """Exact-selector request for reading one continuity capsule with optional fallback."""
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
-    allow_fallback: bool = True
+    allow_fallback: bool = False
 
 
 class ContinuityListRequest(BaseModel):
-    """Filter parameters for listing active continuity capsules."""
+    """Filter parameters for listing active, fallback, and archived continuity capsules."""
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     limit: int = Field(default=50, ge=1, le=200)
     include_fallback: bool = False

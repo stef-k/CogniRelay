@@ -139,14 +139,29 @@ class TestContinuityV2Phase3(unittest.TestCase):
             self.assertEqual(out["capsule"]["verification_state"]["status"], "system_confirmed")
             self.assertEqual(out["capsule"]["capsule_health"]["status"], "degraded")
 
-    def test_continuity_read_missing_capsule_returns_degraded_response_by_default(self) -> None:
-        """Read should now return a structured missing response by default."""
+    def test_continuity_read_missing_capsule_preserves_strict_default_behavior(self) -> None:
+        """Read should preserve the exact-active 404 behavior unless fallback is enabled."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
             gm = _GitManagerStub()
             with patch("app.main._services", return_value=(settings, gm)):
-                out = continuity_read(req=ContinuityReadRequest(subject_kind="user", subject_id="missing"), auth=_AuthStub())
+                with self.assertRaises(HTTPException) as err:
+                    continuity_read(req=ContinuityReadRequest(subject_kind="user", subject_id="missing"), auth=_AuthStub())
+
+            self.assertEqual(err.exception.status_code, 404)
+
+    def test_continuity_read_missing_capsule_can_return_degraded_response_when_enabled(self) -> None:
+        """Read should degrade to a structured missing response when fallback is explicitly enabled."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="missing", allow_fallback=True),
+                    auth=_AuthStub(),
+                )
 
             self.assertTrue(out["ok"])
             self.assertIsNone(out["capsule"])
