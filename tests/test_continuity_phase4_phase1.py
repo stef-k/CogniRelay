@@ -339,6 +339,26 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
 
             self.assertEqual(cm.exception.status_code, 404)
 
+    def test_read_rejects_subject_mismatch_in_active_capsule_even_when_fallback_exists(self) -> None:
+        """Read should fail hard on active selector mismatch instead of masking it with fallback data."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            mismatched = self._capsule_payload(subject_kind="user", subject_id="other")
+            self._write_capsule(repo_root, subject_kind="user", subject_id="stef", payload=mismatched)
+            fallback = self._capsule_payload(subject_kind="user", subject_id="stef")
+            self._write_fallback_snapshot(repo_root, subject_kind="user", subject_id="stef", capsule=fallback)
+
+            with self.assertRaises(HTTPException) as cm:
+                continuity_read_service(
+                    repo_root=repo_root,
+                    auth=_AuthStub(),
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="stef", allow_fallback=True),
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertEqual(cm.exception.detail, "Continuity capsule subject does not match requested subject")
+
     def test_read_requires_auth_for_the_matching_fallback_path(self) -> None:
         """Fallback reads should enforce auth on the fallback path before loading it."""
         with tempfile.TemporaryDirectory() as td:

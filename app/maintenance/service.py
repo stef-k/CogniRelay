@@ -29,7 +29,7 @@ from app.continuity.service import (
 )
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ReplicationPullRequest, ReplicationPushRequest
 from app.models import ContinuityCapsule
-from app.storage import read_text_file, safe_path, write_text_file
+from app.storage import canonical_json, read_text_file, safe_path, write_text_file
 
 REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
@@ -57,12 +57,11 @@ def _continuity_counts(repo_root: Path) -> dict[str, int]:
         """Count JSON artifacts in one directory, optionally without descending."""
         if not directory.exists() or not directory.is_dir():
             return 0
-        iterator = directory.iterdir() if top_level_only else directory.rglob("*.json")
+        iterator = directory.glob("*.json") if top_level_only else directory.rglob("*.json")
         return sum(
             1
             for path in iterator
             if path.is_file()
-            and path.suffix.lower() == ".json"
             and path.name != "refresh_state.json"
         )
 
@@ -249,11 +248,6 @@ def _write_replication_state(repo_root: Path, payload: dict[str, Any]) -> Path:
 def _sha256_text(content: str) -> str:
     """Return the SHA-256 digest for text content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _canonical_json(data: Any) -> str:
-    """Serialize data using the canonical JSON form used in replication hashes."""
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def iter_replication_files(repo_root: Path, include_prefixes: list[str], max_files: int, include_deleted: bool = True) -> list[dict[str, Any]]:
@@ -690,7 +684,7 @@ def replication_push_service(
         if isinstance(peer, dict):
             target_base = str(peer.get("base_url") or "").strip() or None
 
-    push_id_source = req.idempotency_key or _canonical_json(
+    push_id_source = req.idempotency_key or canonical_json(
         {
             "peer": auth.peer_id,
             "target": target_base,
@@ -725,7 +719,7 @@ def replication_push_service(
     }
     enforce_payload_limit(settings, request_payload, "replication_push")
 
-    body = _canonical_json(request_payload).encode("utf-8")
+    body = canonical_json(request_payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if req.target_token:
         headers["Authorization"] = f"Bearer {req.target_token}"

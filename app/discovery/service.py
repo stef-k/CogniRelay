@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -50,11 +49,7 @@ from app.models import (
     TaskUpdateRequest,
     WriteRequest,
 )
-
-
-def _canonical_json(data: Any) -> str:
-    """Serialize JSON deterministically for hashing and catalog stability."""
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+from app.storage import canonical_json
 
 
 def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1386,5 +1381,5 @@ def contracts_payload(*, contract_version: str, tools: list[dict[str, Any]]) -> 
             "policy": "backward-compatible additive changes within same contract_version",
             "breaking_change_rule": "increment contract_version before breaking fields/methods",
         },
-        "tool_catalog_hash": hashlib.sha256(_canonical_json(tools).encode("utf-8")).hexdigest(),
+        "tool_catalog_hash": hashlib.sha256(canonical_json(tools).encode("utf-8")).hexdigest(),
     }

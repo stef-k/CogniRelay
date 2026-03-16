@@ -31,7 +31,7 @@ from app.models import (
     ContinuityVerificationSignal,
     ContextRetrieveRequest,
 )
-from app.storage import StorageError, safe_path, write_text_file
+from app.storage import StorageError, canonical_json, safe_path, write_text_file
 
 CONTINUITY_DIR_REL = "memory/continuity"
 CONTINUITY_SUBJECT_RE = re.compile(r"^(task|thread):(.+)$")
@@ -119,11 +119,6 @@ CONTINUITY_SIGNAL_STATUS = {
 CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
-
-
-def _canonical_json(data: Any) -> str:
-    """Serialize JSON deterministically for hashing and idempotency checks."""
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -249,7 +244,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     elif capsule.source.update_reason == "interaction_boundary":
         raise HTTPException(status_code=400, detail="metadata.interaction_boundary_kind is required when source.update_reason=interaction_boundary")
     payload = capsule.model_dump(mode="json", exclude_none=True)
-    canonical = _canonical_json(payload)
+    canonical = canonical_json(payload)
     if len(canonical.encode("utf-8")) > 12 * 1024:
         raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
@@ -374,8 +369,6 @@ def _final_capsule_payload(repo_root: Path, capsule: ContinuityCapsule) -> tuple
     """Validate a final assembled capsule including V3 fields and return canonical JSON."""
     payload, canonical = _validate_capsule(repo_root, capsule)
     _validate_v3_capsule_fields(capsule)
-    if len(canonical.encode("utf-8")) > 12 * 1024:
-        raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
 
 
@@ -503,7 +496,7 @@ def _persist_fallback_snapshot(
             active_rel=continuity_rel_path(subject_kind, subject_id),
             captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
         )
-        canonical = _canonical_json(payload)
+        canonical = canonical_json(payload)
         new_bytes = canonical.encode("utf-8")
         if old_bytes == new_bytes:
             return fallback_rel, "unchanged", None
@@ -1012,7 +1005,7 @@ def continuity_upsert_service(
     auth.require_write_path(rel)
     _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
-    canonical = _canonical_json(capsule.model_dump(mode="json", exclude_none=True))
+    canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
     new_bytes = canonical.encode("utf-8")
     old_bytes = path.read_bytes() if path.exists() else None
     if old_bytes != new_bytes:
@@ -1106,6 +1099,8 @@ def continuity_read_service(
         if exc.status_code == 404:
             recovery_warnings.append(CONTINUITY_WARNING_ACTIVE_MISSING)
         elif exc.status_code == 400:
+            if "subject does not match" in str(exc.detail):
+                raise
             recovery_warnings.append(CONTINUITY_WARNING_ACTIVE_INVALID)
         else:
             raise
@@ -1556,7 +1551,7 @@ def continuity_refresh_plan_service(
 
     refresh_path = safe_path(repo_root, refresh_rel)
     payload = _refresh_state_payload(now, candidates)
-    canonical = _canonical_json(payload)
+    canonical = canonical_json(payload)
     old_bytes = refresh_path.read_bytes() if refresh_path.exists() else None
     latest_commit = gm.latest_commit()
     new_bytes = canonical.encode("utf-8")
@@ -1802,7 +1797,7 @@ def continuity_archive_service(
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     active_path = safe_path(repo_root, rel)
     active_bytes = active_path.read_bytes()
-    write_text_file(archive_path, _canonical_json(archive_payload))
+    write_text_file(archive_path, canonical_json(archive_payload))
     # The active-path deletion must be staged before the git commit can atomically
     # record the archive write plus active-file removal. If the commit step fails,
     # restore the active capsule and discard the archive envelope immediately.

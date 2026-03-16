@@ -1160,6 +1160,8 @@ def backup_restore_test(req: BackupRestoreTestRequest, auth: AuthContext = Depen
         rebuild_index=rebuild_index,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
+
+
 @app.post("/v1/compact/run")
 def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Generate a compaction plan for memory and summary candidates."""

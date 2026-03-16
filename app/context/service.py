@@ -276,9 +276,9 @@ def _task_terms(task: str) -> list[str]:
     return out
 
 
-def _raw_scan_candidate_paths(repo_root: Path) -> list[Path]:
+def _raw_scan_candidate_paths(repo_root: Path) -> list[tuple[Path, float]]:
     """Enumerate deterministic raw-scan candidates using indexer eligibility rules."""
-    candidates: list[tuple[float, str, Path]] = []
+    candidates: list[tuple[float, str, Path, float]] = []
     for path in repo_root.rglob("*"):
         if not path.is_file():
             continue
@@ -301,9 +301,9 @@ def _raw_scan_candidate_paths(repo_root: Path) -> list[Path]:
             stat = path.stat()
         except Exception:
             continue
-        candidates.append((-stat.st_mtime, str(rel_path), path))
+        candidates.append((-stat.st_mtime, str(rel_path), path, stat.st_mtime))
     candidates.sort()
-    return [item[2] for item in candidates[:200]]
+    return [(item[2], item[3]) for item in candidates[:200]]
 
 
 def _raw_scan_recent_relevant(
@@ -315,7 +315,15 @@ def _raw_scan_recent_relevant(
     include_set = {item.lower() for item in req.include_types if item}
     task_terms = _task_terms(req.task)
     rows: list[dict[str, Any]] = []
-    for path in _raw_scan_candidate_paths(repo_root):
+    for candidate in _raw_scan_candidate_paths(repo_root):
+        if isinstance(candidate, tuple):
+            path, mtime = candidate
+        else:
+            path = candidate
+            try:
+                mtime = path.stat().st_mtime
+            except Exception:
+                continue
         rel = str(path.relative_to(repo_root))
         try:
             auth.require_read_path(rel)
@@ -333,21 +341,17 @@ def _raw_scan_recent_relevant(
         low_text = text.lower()
         path_matches = sum(1 for term in task_terms if term in low_rel)
         snippet_matches = sum(1 for term in task_terms if term in low_text)
-        try:
-            stat = path.stat()
-        except Exception:
-            continue
         rows.append(
             {
                 "path": rel,
                 "type": record_type,
                 "snippet": _snippet_text(text),
                 "importance": importance,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "modified_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
                 "score": (path_matches * 1000) + snippet_matches,
                 "_path_matches": path_matches,
                 "_snippet_matches": snippet_matches,
-                "_mtime": stat.st_mtime,
+                "_mtime": mtime,
             }
         )
     rows.sort(
