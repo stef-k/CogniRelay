@@ -168,6 +168,10 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             continuity_dir = repo_root / "memory" / "continuity"
             continuity_dir.mkdir(parents=True, exist_ok=True)
             (continuity_dir / "user-bad.json").write_text("{bad json", encoding="utf-8")
+            (continuity_dir / "refresh_state.json").write_text(
+                json.dumps({"schema_version": "1.0", "last_planned_at": now, "candidates": []}),
+                encoding="utf-8",
+            )
 
             fallback_dir = continuity_dir / "fallback"
             fallback_dir.mkdir(parents=True, exist_ok=True)
@@ -199,6 +203,7 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             self.assertIn("memory/continuity/fallback/user-bad.json", validation["invalid_fallbacks"])
             self.assertIn("memory/continuity/archive/user-bad-20260316T120000Z.json", validation["invalid_archives"])
             self.assertIn("memory/continuity/user-alpha.json", validation["missing_fallbacks"])
+            self.assertNotIn("memory/continuity/refresh_state.json", validation["invalid_capsules"])
 
     def test_context_retrieve_uses_indexed_path_when_index_is_stale(self) -> None:
         """Stale indexes should keep indexed retrieval and add a stale warning."""

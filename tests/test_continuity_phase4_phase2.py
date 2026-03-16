@@ -306,6 +306,52 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
             self.assertEqual(len(with_healthy["candidates"]), 1)
             self.assertEqual(with_healthy["candidates"][0]["reason_codes"], ["recently_used"])
 
+    def test_refresh_plan_matches_recently_used_with_normalized_subject_ids(self) -> None:
+        """Recently-used detection should normalize subject IDs the same way capsule paths do."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            recent_iso = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            self._write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="my-task",
+                payload=self._capsule_payload(
+                    subject_kind="user",
+                    subject_id="my-task",
+                    updated_at=recent_iso,
+                    verified_at=recent_iso,
+                    verification_status="system_confirmed",
+                    health_status="healthy",
+                ),
+            )
+            self._write_audit_log(
+                repo_root,
+                [
+                    {
+                        "ts": recent_iso,
+                        "event": "continuity_read",
+                        "detail": {
+                            "subject_kind": "user",
+                            "subject_id": "My Task",
+                            "path": "memory/continuity/user-my-task.json",
+                            "source_state": "active",
+                        },
+                    }
+                ],
+            )
+
+            with_healthy = continuity_refresh_plan_service(
+                repo_root=repo_root,
+                gm=gm,
+                auth=_AuthStub(),
+                req=ContinuityRefreshPlanRequest(limit=10, include_healthy=True),
+                now=now,
+                audit=lambda *_args: None,
+            )
+            self.assertEqual(with_healthy["candidates"][0]["reason_codes"], ["recently_used"])
+
     def test_refresh_plan_skips_fully_healthy_candidates_by_default(self) -> None:
         """Healthy candidates with no reason codes should be omitted unless include_healthy is enabled."""
         with tempfile.TemporaryDirectory() as td:

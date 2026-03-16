@@ -54,6 +54,7 @@ def _continuity_counts(repo_root: Path) -> dict[str, int]:
     archive_dir = safe_path(repo_root, f"{CONTINUITY_DIR_REL}/archive")
 
     def _count_json(directory: Path, *, top_level_only: bool = False) -> int:
+        """Count JSON artifacts in one directory, optionally without descending."""
         if not directory.exists() or not directory.is_dir():
             return 0
         iterator = directory.iterdir() if top_level_only else directory.rglob("*.json")
@@ -106,7 +107,7 @@ def _validate_fallback_snapshot_payload(path: Path, restore_root: Path) -> tuple
 
 
 def _validate_archive_envelope_payload(path: Path, restore_root: Path) -> tuple[bool, dict[str, Any] | None]:
-    """Validate one restored continuity archive envelope."""
+    """Validate one restored continuity archive envelope, including its active-path match."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
@@ -130,7 +131,7 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
     archive_dir = restore_root / CONTINUITY_DIR_REL / "archive"
 
     active_paths = sorted(
-        path for path in active_dir.glob("*.json") if path.is_file()
+        path for path in active_dir.glob("*.json") if path.is_file() and path.name != "refresh_state.json"
     ) if active_dir.exists() and active_dir.is_dir() else []
     fallback_paths = sorted(
         path for path in fallback_dir.glob("*.json") if path.is_file()

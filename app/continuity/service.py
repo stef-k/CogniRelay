@@ -490,7 +490,7 @@ def _persist_fallback_snapshot(
     subject_id: str,
     capsule: dict[str, Any],
 ) -> tuple[str, str]:
-    """Persist the recovery-only fallback snapshot without rolling back the active write."""
+    """Persist the fallback snapshot and restore prior fallback bytes if this write fails."""
     fallback_rel = continuity_fallback_rel_path(subject_kind, subject_id)
     path: Path | None = None
     old_bytes: bytes | None = None
@@ -734,7 +734,7 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
             kind = detail.get("subject_kind")
             subject_id = detail.get("subject_id")
             if isinstance(kind, str) and isinstance(subject_id, str):
-                recent.add((kind, subject_id))
+                recent.add((kind, _normalize_subject_id(subject_id)))
             continue
         if row.get("event") != "context_retrieve":
             continue
@@ -747,7 +747,7 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
             kind = item.get("subject_kind")
             subject_id = item.get("subject_id")
             if isinstance(kind, str) and isinstance(subject_id, str):
-                recent.add((kind, subject_id))
+                recent.add((kind, _normalize_subject_id(subject_id)))
     return recent
 
 
@@ -1148,6 +1148,8 @@ def continuity_list_service(
         for path in sorted(base.iterdir(), key=lambda item: item.name):
             if path.is_dir() or path.suffix.lower() != ".json":
                 continue
+            if path.name == "refresh_state.json":
+                continue
             if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
                 continue
             rel = str(path.relative_to(repo_root))
@@ -1429,11 +1431,12 @@ def continuity_refresh_plan_service(
                     continue
                 raise
             selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
+            selector_key = _selector_key(selector[0], selector[1])
             seen.add(selector)
             codes = _refresh_reason_codes(
                 capsule=capsule,
                 fallback_only=False,
-                recently_used=selector in recent_selectors,
+                recently_used=selector_key in recent_selectors,
                 now=now,
             )
             if not req.include_healthy and (not codes or codes == ["recently_used"]):
@@ -1483,6 +1486,7 @@ def continuity_refresh_plan_service(
                 continue
             if selector in seen:
                 continue
+            selector_key = _selector_key(selector[0], selector[1])
             active_rel = continuity_rel_path(selector[0], selector[1])
             try:
                 auth.require_read_path(active_rel)
@@ -1491,7 +1495,7 @@ def continuity_refresh_plan_service(
             codes = _refresh_reason_codes(
                 capsule=capsule,
                 fallback_only=True,
-                recently_used=selector in recent_selectors,
+                recently_used=selector_key in recent_selectors,
                 now=now,
             )
             if not req.include_healthy and (not codes or codes == ["recently_used"]):
@@ -1758,8 +1762,8 @@ def continuity_archive_service(
 
     capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
     archive_payload = {
-        "schema_type": "continuity_archive_envelope",
-        "schema_version": "1.0",
+        "schema_type": CONTINUITY_ARCHIVE_SCHEMA_TYPE,
+        "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
         "archived_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "archived_by": auth.peer_id,
         "reason": req.reason,
