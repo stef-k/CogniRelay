@@ -24,11 +24,10 @@ from app.continuity.service import (
     CONTINUITY_DIR_REL,
     CONTINUITY_FALLBACK_SCHEMA_TYPE,
     CONTINUITY_FALLBACK_SCHEMA_VERSION,
-    _validated_capsule_payload,
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ReplicationPullRequest, ReplicationPushRequest
+from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
 from app.storage import canonical_json, read_text_file, safe_path, write_text_file
 
 REPLICATION_STATE_REL = "peers/replication_state.json"
@@ -77,7 +76,7 @@ def _validate_active_continuity_payload(path: Path, restore_root: Path) -> tuple
     rel = str(path.relative_to(restore_root))
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        capsule = _validated_capsule_payload(restore_root, payload, detail_prefix="Invalid continuity capsule")
+        capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
         expected_rel = continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
         if rel != expected_rel:
             return False, None
@@ -95,11 +94,7 @@ def _validate_fallback_snapshot_payload(path: Path, restore_root: Path) -> tuple
             return False, None
         if payload.get("schema_version") != CONTINUITY_FALLBACK_SCHEMA_VERSION:
             return False, None
-        capsule = _validated_capsule_payload(
-            restore_root,
-            payload.get("capsule"),
-            detail_prefix="Invalid continuity fallback snapshot capsule",
-        )
+        capsule = ContinuityCapsule.model_validate(payload.get("capsule")).model_dump(mode="json", exclude_none=True)
         expected_rel = continuity_fallback_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
         if rel != expected_rel:
             return False, None
@@ -117,11 +112,7 @@ def _validate_archive_envelope_payload(path: Path, restore_root: Path) -> tuple[
             return False, None
         if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
             return False, None
-        capsule = _validated_capsule_payload(
-            restore_root,
-            payload.get("capsule"),
-            detail_prefix="Invalid continuity archive envelope capsule",
-        )
+        capsule = ContinuityCapsule.model_validate(payload.get("capsule")).model_dump(mode="json", exclude_none=True)
         expected_active_rel = continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
         if str(payload.get("active_path") or "") != expected_active_rel:
             return False, None

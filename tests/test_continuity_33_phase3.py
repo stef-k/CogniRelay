@@ -180,6 +180,71 @@ class TestContinuity33Phase3(unittest.TestCase):
             self.assertEqual(validation["invalid_fallbacks"], [])
             self.assertEqual(validation["invalid_archives"], [])
 
+    def test_backup_restore_validation_tolerates_legacy_issue_33_write_bound_violations(self) -> None:
+        """Restore validation should not flag stored capsules invalid for #33 write-only bound violations."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            capsule = self._capsule_payload(subject_id="alpha")
+            capsule["continuity"]["negative_decisions"][0]["decision"] = "d" * 161
+
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            (continuity_dir / "user-alpha.json").write_text(json.dumps(capsule), encoding="utf-8")
+
+            fallback_dir = continuity_dir / "fallback"
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            (fallback_dir / "user-alpha.json").write_text(
+                json.dumps(
+                    {
+                        "schema_type": "continuity_fallback_snapshot",
+                        "schema_version": "1.0",
+                        "captured_at": capsule["updated_at"],
+                        "source_path": "memory/continuity/user-alpha.json",
+                        "verification_status": "self_review",
+                        "health_status": "healthy",
+                        "capsule": capsule,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            archive_dir = continuity_dir / "archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            (archive_dir / "user-alpha-20260316T120000Z.json").write_text(
+                json.dumps(
+                    {
+                        "schema_type": "continuity_archive_envelope",
+                        "schema_version": "1.0",
+                        "archived_at": capsule["updated_at"],
+                        "active_path": "memory/continuity/user-alpha.json",
+                        "archived_by": "phase33-test",
+                        "reason": "legacy tolerance",
+                        "capsule": capsule,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                created = backup_create(req=BackupCreateRequest(include_prefixes=["memory"], note="phase33 legacy"), auth=AllowAllAuthStub())
+                restored = backup_restore_test(
+                    req=BackupRestoreTestRequest(
+                        backup_path=created["backup_path"],
+                        verify_index_rebuild=False,
+                        verify_continuity=True,
+                    ),
+                    auth=AllowAllAuthStub(),
+                )
+
+            self.assertTrue(restored["ok"])
+            validation = restored["continuity_validation"]
+            self.assertTrue(validation["ok"])
+            self.assertEqual(validation["invalid_capsules"], [])
+            self.assertEqual(validation["invalid_fallbacks"], [])
+            self.assertEqual(validation["invalid_archives"], [])
+
     def test_continuity_list_summaries_do_not_expand_with_issue_33_fields(self) -> None:
         """List summaries should stay narrow and omit the new continuity-body fields."""
         with tempfile.TemporaryDirectory() as td:

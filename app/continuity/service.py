@@ -186,8 +186,8 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
             raise HTTPException(status_code=400, detail=f"Invalid repo-relative path in {field_name}: {e}") from e
 
 
-def _validate_issue_33_fields(capsule: ContinuityCapsule) -> None:
-    """Validate the additive #33 continuity fields using service-layer HTTP 400 semantics."""
+def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
+    """Validate low-commitment continuity fields using service-layer HTTP 400 semantics."""
     # trailing_notes, curiosity_queue, and negative_decisions intentionally add per-item
     # minimum-length checks; older continuity list fields remain max-only.
     for value in list(capsule.continuity.trailing_notes):
@@ -235,7 +235,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     for value in list(capsule.continuity.session_trajectory):
         if len(value) > 80:
             raise HTTPException(status_code=400, detail="Value too long in continuity.session_trajectory")
-    _validate_issue_33_fields(capsule)
+    _validate_low_commitment_fields(capsule)
     if len(capsule.continuity.stance_summary) > 240:
         raise HTTPException(status_code=400, detail="Value too long in continuity.stance_summary")
     if capsule.continuity.relationship_model:
@@ -932,8 +932,9 @@ def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
 def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | None:
     """Trim a capsule deterministically to fit the reserved continuity budget."""
     payload = json.loads(json.dumps(capsule, ensure_ascii=False))
-    # Lower-commitment #33 fields trim before working_hypotheses so deliberate non-action survives
-    # longer than residual notes/curiosity, while hypotheses still outlive all three.
+    # Lower-commitment fields (trailing_notes, curiosity_queue, negative_decisions) trim before
+    # working_hypotheses so deliberate non-action survives longer than residual notes/curiosity,
+    # while hypotheses still outlive all three.
     for dotted in (
         "metadata",
         "canonical_sources",
