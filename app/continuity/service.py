@@ -207,6 +207,25 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     for value in list(capsule.continuity.session_trajectory):
         if len(value) > 80:
             raise HTTPException(status_code=400, detail="Value too long in continuity.session_trajectory")
+    for value in list(capsule.continuity.trailing_notes):
+        if len(value) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.trailing_notes")
+        if len(value) > 160:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.trailing_notes")
+    for value in list(capsule.continuity.curiosity_queue):
+        if len(value) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.curiosity_queue")
+        if len(value) > 120:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.curiosity_queue")
+    for decision in list(capsule.continuity.negative_decisions):
+        if len(decision.decision) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in negative_decisions.decision")
+        if len(decision.decision) > 160:
+            raise HTTPException(status_code=400, detail="Value too long in negative_decisions.decision")
+        if len(decision.rationale) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in negative_decisions.rationale")
+        if len(decision.rationale) > 240:
+            raise HTTPException(status_code=400, detail="Value too long in negative_decisions.rationale")
     if len(capsule.continuity.stance_summary) > 240:
         raise HTTPException(status_code=400, detail="Value too long in continuity.stance_summary")
     if capsule.continuity.relationship_model:

@@ -68,6 +68,7 @@ Notable behavior:
 - `POST /v1/backup/create` now includes `continuity_counts` in the manifest when continuity artifacts are part of the backup scope
 - `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, and archive artifacts
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
+- continuity capsules may also carry optional `continuity.trailing_notes`, `continuity.curiosity_queue`, and `continuity.negative_decisions` fields as additive agent-owned orientation payload
 - `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`
 
 ## Peers and messaging

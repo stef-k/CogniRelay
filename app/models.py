@@ -405,6 +405,12 @@ class ContinuitySelector(BaseModel):
     subject_id: str = Field(min_length=1, max_length=200)
 
 
+class NegativeDecision(BaseModel):
+    """A deliberate non-action plus the rationale for preserving it."""
+    decision: str
+    rationale: str
+
+
 class ContinuityState(BaseModel):
     """Operational orientation state preserved across resets and compaction."""
     top_priorities: List[str] = Field(max_length=5)
@@ -414,6 +420,9 @@ class ContinuityState(BaseModel):
     stance_summary: str = Field(max_length=240)
     drift_signals: List[str] = Field(max_length=5)
     working_hypotheses: List[str] = Field(default_factory=list, max_length=5)
+    trailing_notes: List[str] = Field(default_factory=list, max_length=3)
+    curiosity_queue: List[str] = Field(default_factory=list, max_length=5)
+    negative_decisions: List[NegativeDecision] = Field(default_factory=list, max_length=4)
     relationship_model: Optional[ContinuityRelationshipModel] = None
     retrieval_hints: Optional[ContinuityRetrievalHints] = None
     long_horizon_commitments: List[str] = Field(default_factory=list, max_length=5)

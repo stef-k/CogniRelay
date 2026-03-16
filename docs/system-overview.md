@@ -141,6 +141,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - `POST /v1/backup/create` includes continuity artifact counts in its manifest when continuity data is in scope
 - `POST /v1/backup/restore-test` can validate restored continuity artifacts and report invalid active, fallback, and archive entries without crashing the drill
 - continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
+- continuity capsules may also include optional `trailing_notes`, `curiosity_queue`, and structured `negative_decisions` entries to preserve lower-commitment orientation context
 - interaction-boundary upserts require `source.update_reason=interaction_boundary` plus a valid scalar `metadata.interaction_boundary_kind`
 
 ### Indexing and compaction guidance
