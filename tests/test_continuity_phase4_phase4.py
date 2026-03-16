@@ -237,14 +237,17 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             (repo_root / "messages" / "threads").mkdir(parents=True, exist_ok=True)
             (repo_root / "journal" / "2026").mkdir(parents=True, exist_ok=True)
             (repo_root / "memory" / "core" / "identity.md").write_text("# identity\n", encoding="utf-8")
+            (repo_root / "memory" / "continuity").mkdir(parents=True, exist_ok=True)
             summary = repo_root / "memory" / "summaries" / "phase4.md"
             message = repo_root / "messages" / "threads" / "thread-1.md"
             journal = repo_root / "journal" / "2026" / "2026-03-16.md"
+            continuity_capsule = repo_root / "memory" / "continuity" / "user-infra.json"
             summary.write_text("---\ntype: summary\n---\nphase4 summary body\n", encoding="utf-8")
             message.write_text("---\ntype: message_thread\n---\nphase4 message body\n", encoding="utf-8")
             journal.write_text("---\ntype: journal_entry\n---\nphase4 journal body\n", encoding="utf-8")
+            continuity_capsule.write_text('{"schema_version":"1.0","subject_kind":"user","subject_id":"infra"}', encoding="utf-8")
             now = datetime.now(timezone.utc)
-            for idx, path in enumerate([summary, message, journal]):
+            for idx, path in enumerate([summary, message, journal, continuity_capsule]):
                 ts = now - timedelta(minutes=idx)
                 content = path.read_text(encoding="utf-8")
                 path.write_text(content, encoding="utf-8")

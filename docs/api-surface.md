@@ -57,6 +57,7 @@ Notable behavior:
 - when derived search indexes are stale, `POST /v1/context/retrieve` keeps indexed retrieval and adds `continuity_index_stale`; when they are missing, it falls back to a bounded raw file scan and adds `continuity_index_missing`
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
 - successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` now refresh a recovery-only fallback snapshot under `memory/continuity/fallback/`
+- `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` surface fallback snapshot failures through additive `recovery_warnings` instead of failing the already durable active write
 - `POST /v1/continuity/read` now returns `source_state` plus `recovery_warnings`; exact-active behavior remains the default and structured fallback or missing-state degradation is enabled with `allow_fallback=true`
 - `POST /v1/continuity/refresh/plan` now returns deterministic refresh candidates and persists the latest plan under `memory/continuity/refresh_state.json`
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule

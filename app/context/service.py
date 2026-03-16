@@ -234,7 +234,7 @@ def _load_core_memory(repo_root: Path, auth: AuthContext) -> list[dict[str, Any]
 
 
 def _parse_utc_iso(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp into UTC or return ``None`` when invalid."""
+    """Parse index metadata timestamps into UTC, treating legacy naive values as UTC."""
     if not value:
         return None
     try:
@@ -290,6 +290,8 @@ def _raw_scan_candidate_paths(repo_root: Path) -> list[Path]:
         if rel in _CORE_MEMORY_PATHS:
             continue
         if ".git" in path.parts:
+            continue
+        if len(rel_path.parts) >= 2 and rel_path.parts[0] == "memory" and rel_path.parts[1] == "continuity":
             continue
         if rel_path.parts and rel_path.parts[0] == "index":
             continue

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -711,7 +712,11 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists() or not path.is_file():
         return set()
-    rows = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-10000:]
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            rows = list(deque(handle, maxlen=10000))
+    except Exception:
+        return set()
     cutoff = now.timestamp() - (7 * 86400)
     recent: set[tuple[str, str]] = set()
     for line in rows:
@@ -1052,6 +1057,7 @@ def continuity_upsert_service(
         "updated": bool(changed and not created),
         "latest_commit": gm.latest_commit(),
         "capsule_sha256": capsule_sha256,
+        "recovery_warnings": [fallback_warning] if fallback_warning else [],
     }
 
 
@@ -1348,9 +1354,9 @@ def continuity_delete_service(
             "latest_commit": gm.latest_commit(),
         }
 
-    for path in paths_to_stage:
-        path.unlink()
     try:
+        for path in paths_to_stage:
+            path.unlink()
         committed = gm.commit_paths(paths_to_stage, f"continuity: delete {req.subject_kind} {req.subject_id} - {req.reason}")
         if not committed:
             raise RuntimeError("Continuity delete commit produced no changes")
@@ -1363,10 +1369,11 @@ def continuity_delete_service(
             except Exception as restore_exc:
                 restore_errors.append(f"{path}: {restore_exc}")
         if restore_errors:
-            raise RuntimeError(
-                f"Continuity delete commit failed: {exc}; rollback failed for {', '.join(restore_errors)}"
+            raise HTTPException(
+                status_code=500,
+                detail=f"Continuity delete failed: {exc}; rollback failed for {', '.join(restore_errors)}",
             ) from exc
-        raise
+        raise HTTPException(status_code=500, detail=f"Continuity delete failed: {exc}") from exc
     audit(
         auth,
         "continuity_delete",
@@ -1397,6 +1404,8 @@ def continuity_refresh_plan_service(
 ) -> dict[str, Any]:
     """Build and persist a deterministic continuity refresh plan."""
     auth.require("read:files")
+    refresh_rel = CONTINUITY_REFRESH_STATE_REL
+    auth.require_write_path(refresh_rel)
     recent_selectors = _audit_recent_selectors(repo_root, now)
     base = repo_root / CONTINUITY_DIR_REL
     candidates: list[dict[str, Any]] = []
@@ -1513,11 +1522,9 @@ def continuity_refresh_plan_service(
             )
 
     priority_order = {"high": 0, "medium": 1, "low": 2}
-    candidates.sort(key=lambda row: (priority_order[str(row["recommended_priority"])], str(row["subject_kind"]), str(row["subject_id"])))
+    candidates.sort(key=lambda row: (priority_order.get(str(row["recommended_priority"]), 3), str(row["subject_kind"]), str(row["subject_id"])))
     candidates = candidates[: req.limit]
 
-    refresh_rel = CONTINUITY_REFRESH_STATE_REL
-    auth.require_write_path(refresh_rel)
     refresh_path = safe_path(repo_root, refresh_rel)
     payload = _refresh_state_payload(now, candidates)
     canonical = _canonical_json(payload)
@@ -1727,6 +1734,7 @@ def continuity_revalidate_service(
         "verification_state": final_capsule.verification_state.model_dump(mode="json", exclude_none=True),
         "capsule_health": final_capsule.capsule_health.model_dump(mode="json", exclude_none=True),
         "latest_commit": gm.latest_commit(),
+        "recovery_warnings": [CONTINUITY_WARNING_FALLBACK_WRITE_FAILED] if fallback_status == "failed" else [],
     }
 
 
@@ -1864,9 +1872,6 @@ def build_continuity_state(
             if resilience_policy == "require_active":
                 state["omitted_selectors"].append(selector_label)
                 continue
-            # Phase 4 keeps the observable fallback behavior the same for
-            # allow_fallback and prefer_active while reserving the latter for
-            # future stricter active-first semantics without request-model churn.
             if resilience_policy not in {"allow_fallback", "prefer_active"}:
                 raise HTTPException(status_code=400, detail="Unsupported continuity_resilience_policy")
             fallback_rel = continuity_fallback_rel_path(kind, subject_id)

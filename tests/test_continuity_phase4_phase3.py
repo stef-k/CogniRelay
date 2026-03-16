@@ -13,7 +13,11 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.continuity.service import continuity_delete_service
+from app.continuity.service import (
+    CONTINUITY_ARCHIVE_SCHEMA_TYPE,
+    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+    continuity_delete_service,
+)
 from app.main import continuity_delete, continuity_list
 from app.models import ContinuityDeleteRequest, ContinuityListRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -49,6 +53,10 @@ class _GitManagerStub(SimpleGitManagerStub):
         """Record the delete commit request and report success."""
         self.commit_paths_calls.append(([str(path) for path in paths], message))
         return True
+
+
+class _UnlinkFailurePath(type(Path())):
+    """Concrete path subclass used to inject delete unlink failures."""
 
 
 class TestContinuityPhase4Phase3(unittest.TestCase):
@@ -127,8 +135,8 @@ class TestContinuityPhase4Phase3(unittest.TestCase):
         path.write_text(
             json.dumps(
                 {
-                    "schema_type": "continuity_archive_envelope",
-                    "schema_version": "1.0",
+                    "schema_type": CONTINUITY_ARCHIVE_SCHEMA_TYPE,
+                    "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
                     "archived_at": archived_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                     "archived_by": "peer-test",
                     "reason": "cleanup",
@@ -291,4 +299,48 @@ class TestContinuityPhase4Phase3(unittest.TestCase):
                 )
 
             self.assertEqual(cm.exception.status_code, 403)
+            self.assertEqual(gm.commit_paths_calls, [])
+
+    def test_delete_unlink_failure_restores_prior_paths_and_returns_structured_500(self) -> None:
+        """Delete should restore already removed files when a later unlink fails."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            capsule = self._capsule_payload(subject_kind="user", subject_id="stef")
+            active = self._write_active(repo_root, subject_kind="user", subject_id="stef", payload=capsule)
+            fallback = self._write_fallback(repo_root, subject_kind="user", subject_id="stef", capsule=capsule)
+
+            from app.continuity import service as continuity_service
+
+            original_safe_path = continuity_service.safe_path
+
+            def failing_safe_path(root: Path, rel: str) -> Path:
+                path = original_safe_path(root, rel)
+                if rel == "memory/continuity/fallback/user-stef.json":
+                    class _FailingFallbackPath(_UnlinkFailurePath):
+                        def unlink(self, missing_ok: bool = False) -> None:
+                            raise PermissionError("cannot unlink fallback")
+
+                    return _FailingFallbackPath(path)
+                return path
+
+            with patch("app.continuity.service.safe_path", side_effect=failing_safe_path):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_delete_service(
+                        repo_root=repo_root,
+                        gm=gm,
+                        auth=_AuthStub(),
+                        req=ContinuityDeleteRequest(
+                            subject_kind="user",
+                            subject_id="stef",
+                            delete_active=True,
+                            delete_fallback=True,
+                            reason="cleanup",
+                        ),
+                        audit=lambda *_args: None,
+                    )
+
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertTrue(active.exists())
+            self.assertTrue(fallback.exists())
             self.assertEqual(gm.commit_paths_calls, [])

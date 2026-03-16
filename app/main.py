@@ -570,7 +570,7 @@ def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(
 
 @app.post("/v1/continuity/read")
 def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(require_auth)) -> dict:
-    """Read one active continuity capsule by exact selector."""
+    """Read one continuity capsule by exact selector with optional fallback handling."""
     settings, _ = _services()
     return continuity_read_service(
         repo_root=settings.repo_root,

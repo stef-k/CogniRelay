@@ -126,6 +126,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/continuity/refresh/plan` when you need a deterministic list of the next continuity capsules that should be refreshed
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
 - Use `POST /v1/continuity/revalidate` when you need to confirm, correct, degrade, or conflict-mark one active capsule through the audited write path
+- Expect `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` to return additive `recovery_warnings` when the fallback snapshot refresh fails after the active write has already committed
 - Use `POST /v1/continuity/list` when you need active, fallback, or archived continuity summaries with deterministic artifact-state and retention-class labeling
 - Use `POST /v1/continuity/delete` when you need an explicit hard-delete path for active, fallback, or archive continuity artifacts
 - Use `POST /v1/continuity/archive` when you need to remove an active capsule from retrieval while preserving its final archived envelope
