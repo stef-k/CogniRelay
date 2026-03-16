@@ -276,8 +276,8 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
                 ],
             )
 
-    def test_context_retrieve_raw_scan_skips_files_deleted_before_stat(self) -> None:
-        """Raw-scan fallback should skip files that disappear before stat succeeds."""
+    def test_context_retrieve_raw_scan_skips_files_deleted_before_read(self) -> None:
+        """Raw-scan fallback should skip files that disappear after candidate enumeration."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -285,17 +285,18 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             (repo_root / "memory" / "summaries").mkdir(parents=True, exist_ok=True)
             summary = repo_root / "memory" / "summaries" / "phase4.md"
             summary.write_text("---\ntype: summary\n---\nphase4 summary body\n", encoding="utf-8")
-            original_stat = Path.stat
+            candidate = (summary, summary.stat().st_mtime)
+            original_read_bytes = Path.read_bytes
 
-            def flaky_stat(path_obj: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+            def flaky_read_bytes(path_obj: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
                 if path_obj == summary:
-                    raise FileNotFoundError("vanished during raw scan")
-                return original_stat(path_obj, *args, **kwargs)
+                    raise FileNotFoundError("vanished before read")
+                return original_read_bytes(path_obj, *args, **kwargs)
 
             with patch("app.main._services", return_value=(settings, gm)), patch(
                 "app.context.service._raw_scan_candidate_paths",
-                return_value=[summary],
-            ), patch("pathlib.Path.stat", new=flaky_stat):
+                return_value=[candidate],
+            ), patch("pathlib.Path.read_bytes", new=flaky_read_bytes):
                 out = context_retrieve(ContextRetrieveRequest(task="phase4", limit=5), auth=_AuthStub())
 
             self.assertEqual(out["bundle"]["recent_relevant"], [])

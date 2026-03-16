@@ -315,15 +315,7 @@ def _raw_scan_recent_relevant(
     include_set = {item.lower() for item in req.include_types if item}
     task_terms = _task_terms(req.task)
     rows: list[dict[str, Any]] = []
-    for candidate in _raw_scan_candidate_paths(repo_root):
-        if isinstance(candidate, tuple):
-            path, mtime = candidate
-        else:
-            path = candidate
-            try:
-                mtime = path.stat().st_mtime
-            except Exception:
-                continue
+    for path, mtime in _raw_scan_candidate_paths(repo_root):
         rel = str(path.relative_to(repo_root))
         try:
             auth.require_read_path(rel)
