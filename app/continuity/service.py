@@ -278,17 +278,6 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
         raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
 
-
-def _validated_capsule_payload(repo_root: Path, payload: Any, *, detail_prefix: str) -> dict[str, Any]:
-    """Model-validate one stored capsule payload and apply write-path continuity bounds."""
-    try:
-        capsule = ContinuityCapsule.model_validate(payload)
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"{detail_prefix}: {e}") from e
-    normalized, _canonical = _validate_capsule(repo_root, capsule)
-    return normalized
-
-
 def _validate_v3_capsule_fields(capsule: ContinuityCapsule) -> None:
     """Validate V3 verification and health fields when present on a capsule."""
     if capsule.verification_state is not None:
