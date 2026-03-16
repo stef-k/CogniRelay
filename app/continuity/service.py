@@ -187,7 +187,7 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
 
 
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
-    """Validate a capsule and return normalized payload plus canonical JSON."""
+    """Validate timestamps, paths, and continuity string bounds, then return canonicalized capsule bytes."""
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
     if capsule.freshness and capsule.freshness.expires_at:
@@ -210,6 +210,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     for value in list(capsule.continuity.session_trajectory):
         if len(value) > 80:
             raise HTTPException(status_code=400, detail="Value too long in continuity.session_trajectory")
+    # These three fields intentionally add per-item minimum-length checks; older continuity list fields remain max-only.
     for value in list(capsule.continuity.trailing_notes):
         if len(value) < 1:
             raise HTTPException(status_code=400, detail="Value too short in continuity.trailing_notes")
@@ -222,13 +223,13 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
             raise HTTPException(status_code=400, detail="Value too long in continuity.curiosity_queue")
     for decision in list(capsule.continuity.negative_decisions):
         if len(decision.decision) < 1:
-            raise HTTPException(status_code=400, detail="Value too short in negative_decisions.decision")
+            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.decision")
         if len(decision.decision) > 160:
-            raise HTTPException(status_code=400, detail="Value too long in negative_decisions.decision")
+            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.decision")
         if len(decision.rationale) < 1:
-            raise HTTPException(status_code=400, detail="Value too short in negative_decisions.rationale")
+            raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.rationale")
         if len(decision.rationale) > 240:
-            raise HTTPException(status_code=400, detail="Value too long in negative_decisions.rationale")
+            raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.rationale")
     if len(capsule.continuity.stance_summary) > 240:
         raise HTTPException(status_code=400, detail="Value too long in continuity.stance_summary")
     if capsule.continuity.relationship_model:

@@ -228,3 +228,11 @@ class TestContinuity33Phase3(unittest.TestCase):
         item_ref = negative_decisions["items"]["$ref"]
         item_props = schema["$defs"][item_ref.split("/")[-1]]["properties"]
         self.assertEqual(sorted(item_props), ["decision", "rationale"])
+        self.assertEqual(
+            item_props["decision"]["description"],
+            "1-160 chars, validated at the continuity service layer.",
+        )
+        self.assertEqual(
+            item_props["rationale"]["description"],
+            "1-240 chars, validated at the continuity service layer.",
+        )

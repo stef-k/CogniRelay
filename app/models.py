@@ -406,9 +406,9 @@ class ContinuitySelector(BaseModel):
 
 
 class NegativeDecision(BaseModel):
-    """A deliberate non-action plus the rationale for preserving it."""
-    decision: str
-    rationale: str
+    """A deliberate non-action plus rationale; bounds are enforced in the continuity service."""
+    decision: str = Field(description="1-160 chars, validated at the continuity service layer.")
+    rationale: str = Field(description="1-240 chars, validated at the continuity service layer.")
 
 
 class ContinuityState(BaseModel):
@@ -420,13 +420,13 @@ class ContinuityState(BaseModel):
     stance_summary: str = Field(max_length=240)
     drift_signals: List[str] = Field(max_length=5)
     working_hypotheses: List[str] = Field(default_factory=list, max_length=5)
-    trailing_notes: List[str] = Field(default_factory=list, max_length=3)
-    curiosity_queue: List[str] = Field(default_factory=list, max_length=5)
-    negative_decisions: List[NegativeDecision] = Field(default_factory=list, max_length=4)
-    relationship_model: Optional[ContinuityRelationshipModel] = None
-    retrieval_hints: Optional[ContinuityRetrievalHints] = None
     long_horizon_commitments: List[str] = Field(default_factory=list, max_length=5)
     session_trajectory: List[str] = Field(default_factory=list, max_length=5)
+    negative_decisions: List[NegativeDecision] = Field(default_factory=list, max_length=4)
+    trailing_notes: List[str] = Field(default_factory=list, max_length=3)
+    curiosity_queue: List[str] = Field(default_factory=list, max_length=5)
+    relationship_model: Optional[ContinuityRelationshipModel] = None
+    retrieval_hints: Optional[ContinuityRetrievalHints] = None
 
 
 class ContinuityCapsule(BaseModel):

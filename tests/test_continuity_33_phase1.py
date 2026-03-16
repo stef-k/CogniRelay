@@ -156,7 +156,7 @@ class TestContinuity33Phase1(unittest.TestCase):
                     continuity_upsert(req=req, auth=AllowAllAuthStub())
 
             self.assertEqual(cm.exception.status_code, 400)
-            self.assertEqual(cm.exception.detail, "Value too short in negative_decisions.decision")
+            self.assertEqual(cm.exception.detail, "Value too short in continuity.negative_decisions.decision")
 
     def test_upsert_rejects_empty_negative_decision_rationale(self) -> None:
         """Empty negative-decision rationales should surface as HTTP 400, not ValidationError."""
@@ -170,7 +170,7 @@ class TestContinuity33Phase1(unittest.TestCase):
                     continuity_upsert(req=req, auth=AllowAllAuthStub())
 
             self.assertEqual(cm.exception.status_code, 400)
-            self.assertEqual(cm.exception.detail, "Value too short in negative_decisions.rationale")
+            self.assertEqual(cm.exception.detail, "Value too short in continuity.negative_decisions.rationale")
 
     def test_upsert_rejects_overlong_trailing_notes_items(self) -> None:
         """Trailing notes longer than 160 chars should fail with the exact detail string."""
@@ -212,7 +212,7 @@ class TestContinuity33Phase1(unittest.TestCase):
                     continuity_upsert(req=req, auth=AllowAllAuthStub())
 
             self.assertEqual(cm.exception.status_code, 400)
-            self.assertEqual(cm.exception.detail, "Value too long in negative_decisions.decision")
+            self.assertEqual(cm.exception.detail, "Value too long in continuity.negative_decisions.decision")
 
     def test_upsert_rejects_overlong_negative_decision_rationale(self) -> None:
         """Overlong negative-decision rationales should fail with the exact detail string."""
@@ -226,7 +226,7 @@ class TestContinuity33Phase1(unittest.TestCase):
                     continuity_upsert(req=req, auth=AllowAllAuthStub())
 
             self.assertEqual(cm.exception.status_code, 400)
-            self.assertEqual(cm.exception.detail, "Value too long in negative_decisions.rationale")
+            self.assertEqual(cm.exception.detail, "Value too long in continuity.negative_decisions.rationale")
 
     def test_more_than_max_issue_33_items_fail_model_validation(self) -> None:
         """List-count bounds should still fail at model validation time."""
