@@ -320,7 +320,7 @@ def _strongest_signal_kind(signals: list[ContinuityVerificationSignal]) -> str:
     return strongest
 
 
-def _normalize_compare_candidate_payload(repo_root: Path, capsule: ContinuityCapsule) -> dict[str, Any]:
+def _normalize_compare_payload(repo_root: Path, capsule: ContinuityCapsule) -> dict[str, Any]:
     """Validate and normalize a capsule payload for compare and revalidate semantics."""
     _validate_capsule(repo_root, capsule)
     _validate_verification_state_and_health(capsule)
@@ -1628,7 +1628,7 @@ def continuity_compare_service(
     auth.require("read:files")
     _validate_verification_signals(req.signals)
     _validate_candidate_selector_match(req.subject_kind, req.subject_id, req.candidate_capsule)
-    candidate = _normalize_compare_candidate_payload(repo_root, req.candidate_capsule)
+    candidate = _normalize_compare_payload(repo_root, req.candidate_capsule)
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_read_path(rel)
     active = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
@@ -1673,7 +1673,7 @@ def continuity_revalidate_service(
         if req.candidate_capsule is None:
             raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
         _validate_candidate_selector_match(req.subject_kind, req.subject_id, req.candidate_capsule)
-        _normalize_compare_candidate_payload(repo_root, req.candidate_capsule)
+        _normalize_compare_payload(repo_root, req.candidate_capsule)
     elif req.candidate_capsule is not None:
         raise HTTPException(status_code=400, detail=f"candidate_capsule is not allowed for outcome={req.outcome}")
     if req.outcome == "confirm" and req.reason is not None:
@@ -1702,8 +1702,8 @@ def continuity_revalidate_service(
         if candidate is None:
             raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
         compare_changed_fields = _compare_capsules(
-            _normalize_compare_candidate_payload(repo_root, active),
-            _normalize_compare_candidate_payload(repo_root, candidate),
+            _normalize_compare_payload(repo_root, active),
+            _normalize_compare_payload(repo_root, candidate),
         )
         if not compare_changed_fields:
             result_outcome = "confirm"
