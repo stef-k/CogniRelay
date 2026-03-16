@@ -400,7 +400,7 @@ class ContinuityCapsuleHealth(BaseModel):
 
 
 class ContinuitySelector(BaseModel):
-    """Explicit continuity subject selector used by V2 retrieval."""
+    """Explicit continuity subject selector used by multi-capsule retrieval."""
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
 
@@ -504,7 +504,7 @@ class ContinuityDeleteRequest(BaseModel):
 
 
 class ContinuityVerificationSignal(BaseModel):
-    """Structured verification signal used by V3 compare and revalidate workflows."""
+    """Structured verification signal used by continuity compare and revalidate workflows."""
     kind: Literal["self_review", "external_observation", "user_confirmation", "peer_confirmation", "system_check"]
     source_ref: str = Field(min_length=1, max_length=200)
     observed_at: str
