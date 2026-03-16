@@ -34,7 +34,7 @@ The MCP tool catalog is broad. It covers the project's substantive feature set, 
 
 - service discovery and contracts
 - memory read/write and JSONL append
-- indexing, search, recent items, and context retrieval
+- indexing, search, recent items, context retrieval, and continuity refresh planning
 - peer registry and peer trust transitions
 - direct messaging, relay forwarding, verification, and replay
 - shared tasks and patch/code workflows
@@ -76,6 +76,8 @@ MCP tools are adapters over the HTTP API. Examples:
 - `search.query` -> `POST /v1/search`
 - `tasks.create` -> `POST /v1/tasks`
 - `messages.send` -> `POST /v1/messages/send`
+- `continuity.refresh_plan` -> `POST /v1/continuity/refresh/plan`
+- `continuity.delete` -> `POST /v1/continuity/delete`
 - `code.checks_run` -> `POST /v1/code/checks/run`
 - `security.tokens_issue` -> `POST /v1/security/tokens/issue`
 - `ops.run` -> `POST /v1/ops/run`

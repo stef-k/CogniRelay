@@ -100,8 +100,10 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("continuity.read", by_name)
         self.assertIn("continuity.compare", by_name)
         self.assertIn("continuity.revalidate", by_name)
+        self.assertIn("continuity.refresh_plan", by_name)
         self.assertIn("continuity.list", by_name)
         self.assertIn("continuity.archive", by_name)
+        self.assertIn("continuity.delete", by_name)
         self.assertIn("peers.list", by_name)
         self.assertIn("context.snapshot_create", by_name)
         self.assertIn("tasks.create", by_name)
@@ -261,6 +263,39 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertTrue(structured["ok"])
         self.assertTrue(structured["identical"])
         self.assertEqual(structured["recommended_outcome"], "confirm")
+
+    def test_tools_call_continuity_refresh_plan_with_auth(self) -> None:
+        """Continuity refresh planning should be invokable through MCP tool dispatch."""
+        req = {
+            "jsonrpc": "2.0",
+            "id": 77,
+            "method": "tools/call",
+            "params": {
+                "name": "continuity.refresh_plan",
+                "arguments": {"limit": 5},
+            },
+        }
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes={"read:files"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
+                "app.main.require_auth", return_value=auth
+            ):
+                res = mcp_rpc(req, authorization="Bearer token")
+
+        self.assertIn("result", res)
+        structured = res["result"]["structuredContent"]
+        self.assertTrue(structured["ok"])
+        self.assertEqual(structured["count"], 0)
 
     def test_tools_call_continuity_revalidate_with_auth(self) -> None:
         """Continuity revalidate should be invokable through MCP tool dispatch."""

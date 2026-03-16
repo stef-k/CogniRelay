@@ -20,7 +20,9 @@ from app.models import (
     CompactRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
+    ContinuityDeleteRequest,
     ContinuityListRequest,
+    ContinuityRefreshPlanRequest,
     ContinuityReadRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
@@ -258,7 +260,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "context.retrieve",
-            "description": "Build a compact context bundle for task continuation.",
+            "description": "Build a compact context bundle for task continuation with continuity resilience and degraded index fallback.",
             "method": "POST",
             "path": "/v1/context/retrieve",
             "scopes": ["search", "read_namespaces"],
@@ -276,7 +278,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "continuity.read",
-            "description": "Read one active continuity capsule by exact selector.",
+            "description": "Read one continuity capsule by exact selector with active, fallback, or structured missing-state output.",
             "method": "POST",
             "path": "/v1/continuity/read",
             "scopes": ["read:files", "read_namespaces"],
@@ -302,8 +304,17 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "input_schema": schema_for_model(ContinuityRevalidateRequest),
         },
         {
+            "name": "continuity.refresh_plan",
+            "description": "Build and persist the latest deterministic continuity refresh plan.",
+            "method": "POST",
+            "path": "/v1/continuity/refresh/plan",
+            "scopes": ["read:files", "read_namespaces"],
+            "idempotent": True,
+            "input_schema": schema_for_model(ContinuityRefreshPlanRequest),
+        },
+        {
             "name": "continuity.list",
-            "description": "List active continuity capsule summaries.",
+            "description": "List active, fallback, and archived continuity summaries with retention and recovery metadata.",
             "method": "POST",
             "path": "/v1/continuity/list",
             "scopes": ["read:files", "read_namespaces"],
@@ -318,6 +329,15 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
             "idempotent": False,
             "input_schema": schema_for_model(ContinuityArchiveRequest),
+        },
+        {
+            "name": "continuity.delete",
+            "description": "Hard-delete exact-selector active, fallback, and archive continuity artifacts.",
+            "method": "POST",
+            "path": "/v1/continuity/delete",
+            "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(ContinuityDeleteRequest),
         },
         {
             "name": "context.snapshot_create",
@@ -626,7 +646,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "backup.restore_test",
-            "description": "Run backup restore validation in temporary directory.",
+            "description": "Run backup restore validation in temporary directory with index and continuity checks.",
             "method": "POST",
             "path": "/v1/backup/restore-test",
             "scopes": ["admin:peers", "read_namespaces"],
@@ -743,13 +763,14 @@ def workflow_catalog() -> list[dict[str, Any]]:
         },
         {
             "name": "maintenance_compaction",
-            "description": "Periodic maintenance for index freshness and compaction planning.",
+            "description": "Periodic maintenance for continuity refresh visibility, backups, and compaction planning.",
             "steps": [
                 {"order": 1, "tool": "index.rebuild_incremental"},
-                {"order": 2, "tool": "backup.create"},
-                {"order": 3, "tool": "backup.restore_test"},
-                {"order": 4, "tool": "memory.compaction_plan"},
-                {"order": 5, "tool": "memory.write"},
+                {"order": 2, "tool": "continuity.refresh_plan"},
+                {"order": 3, "tool": "backup.create"},
+                {"order": 4, "tool": "backup.restore_test"},
+                {"order": 5, "tool": "memory.compaction_plan"},
+                {"order": 6, "tool": "memory.write"},
             ],
         },
         {
@@ -893,8 +914,10 @@ def invoke_tool_by_name(
     continuity_read: Callable[[ContinuityReadRequest, AuthContext | None], dict[str, Any]],
     continuity_compare: Callable[[ContinuityCompareRequest, AuthContext | None], dict[str, Any]],
     continuity_revalidate: Callable[[ContinuityRevalidateRequest, AuthContext | None], dict[str, Any]],
+    continuity_refresh_plan: Callable[[ContinuityRefreshPlanRequest, AuthContext | None], dict[str, Any]],
     continuity_list: Callable[[ContinuityListRequest, AuthContext | None], dict[str, Any]],
     continuity_archive: Callable[[ContinuityArchiveRequest, AuthContext | None], dict[str, Any]],
+    continuity_delete: Callable[[ContinuityDeleteRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_create: Callable[[ContextSnapshotRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_get: Callable[[str, AuthContext | None], dict[str, Any]],
     tasks_create: Callable[[TaskCreateRequest, AuthContext | None], dict[str, Any]],
@@ -986,10 +1009,14 @@ def invoke_tool_by_name(
         return continuity_compare(ContinuityCompareRequest(**args), auth)
     if name == "continuity.revalidate":
         return continuity_revalidate(ContinuityRevalidateRequest(**args), auth)
+    if name == "continuity.refresh_plan":
+        return continuity_refresh_plan(ContinuityRefreshPlanRequest(**args), auth)
     if name == "continuity.list":
         return continuity_list(ContinuityListRequest(**args), auth)
     if name == "continuity.archive":
         return continuity_archive(ContinuityArchiveRequest(**args), auth)
+    if name == "continuity.delete":
+        return continuity_delete(ContinuityDeleteRequest(**args), auth)
     if name == "context.snapshot_create":
         return context_snapshot_create(ContextSnapshotRequest(**args), auth)
     if name == "context.snapshot_get":
@@ -1309,8 +1336,10 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "POST /v1/continuity/read": {"scope": "read:files"},
             "POST /v1/continuity/compare": {"scope": "read:files"},
             "POST /v1/continuity/revalidate": {"scope": "write:projects"},
+            "POST /v1/continuity/refresh/plan": {"scope": "read:files"},
             "POST /v1/continuity/list": {"scope": "read:files"},
             "POST /v1/continuity/archive": {"scope": "write:projects"},
+            "POST /v1/continuity/delete": {"scope": "write:projects"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},
             "GET /v1/context/snapshot/{snapshot_id}": {"scope": "read:files"},
             "POST /v1/tasks": {"scope": "write:projects"},
