@@ -330,7 +330,10 @@ def _raw_scan_recent_relevant(
         low_text = text.lower()
         path_matches = sum(1 for term in task_terms if term in low_rel)
         snippet_matches = sum(1 for term in task_terms if term in low_text)
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
         rows.append(
             {
                 "path": rel,
@@ -400,14 +403,18 @@ def context_retrieve_service(
             "continuity_index_missing"
         ]
     else:
-        recent = search_index(
-            repo_root,
-            req.task,
-            req.limit,
-            include_types=req.include_types or None,
-            time_window_days=req.time_window_days,
-        )
-        recent = _filter_search_results_for_auth(recent, auth)
+        try:
+            recent = search_index(
+                repo_root,
+                req.task,
+                req.limit,
+                include_types=req.include_types or None,
+                time_window_days=req.time_window_days,
+            )
+            recent = _filter_search_results_for_auth(recent, auth)
+        except Exception:
+            recent = _raw_scan_recent_relevant(repo_root, auth, req)
+            index_health = "stale"
         if index_health == "stale":
             continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + [
                 "continuity_index_stale"

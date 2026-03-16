@@ -424,6 +424,16 @@ class TestContinuityV1(unittest.TestCase):
                     continuity_upsert(req=req, auth=_AuthStub())
             self.assertEqual(cm.exception.status_code, 400)
 
+    def test_continuity_upsert_commit_message_too_long_rejected(self) -> None:
+        """Overlong upsert commit messages should be rejected by the request model."""
+        with self.assertRaises(ValidationError):
+            ContinuityUpsertRequest(
+                subject_kind="user",
+                subject_id="stef",
+                capsule=self._capsule_payload(),
+                commit_message="x" * 241,
+            )  # type: ignore[arg-type]
+
     def test_trim_capsule_drops_lower_priority_optional_fields_before_constraints(self) -> None:
         """Trimming should drop lower-priority optional fields before active constraints."""
         capsule = self._capsule_payload()

@@ -276,6 +276,64 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
                 ],
             )
 
+    def test_context_retrieve_raw_scan_skips_files_deleted_before_stat(self) -> None:
+        """Raw-scan fallback should skip files that disappear before stat succeeds."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            (repo_root / "memory" / "summaries").mkdir(parents=True, exist_ok=True)
+            summary = repo_root / "memory" / "summaries" / "phase4.md"
+            summary.write_text("---\ntype: summary\n---\nphase4 summary body\n", encoding="utf-8")
+            original_stat = Path.stat
+
+            def flaky_stat(path_obj: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+                if path_obj == summary:
+                    raise FileNotFoundError("vanished during raw scan")
+                return original_stat(path_obj, *args, **kwargs)
+
+            with patch("app.main._services", return_value=(settings, gm)), patch(
+                "app.context.service._raw_scan_candidate_paths",
+                return_value=[summary],
+            ), patch("pathlib.Path.stat", new=flaky_stat):
+                out = context_retrieve(ContextRetrieveRequest(task="phase4", limit=5), auth=_AuthStub())
+
+            self.assertEqual(out["bundle"]["recent_relevant"], [])
+            self.assertEqual(out["bundle"]["continuity_state"]["recovery_warnings"], ["continuity_index_missing"])
+
+    def test_context_retrieve_falls_back_to_raw_scan_when_files_index_is_corrupt(self) -> None:
+        """Corrupt files_index.json should degrade stale retrieval to raw-scan fallback."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory" / "summaries").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory" / "core" / "identity.md").write_text("# identity\n", encoding="utf-8")
+            (repo_root / "memory" / "summaries" / "phase4.md").write_text("---\ntype: summary\n---\nphase4 summary\n", encoding="utf-8")
+            rebuild_index(repo_root)
+            (repo_root / "index" / "files_index.json").write_text("{bad json", encoding="utf-8")
+            fallback_rows = [
+                {
+                    "path": "memory/summaries/phase4.md",
+                    "type": "summary",
+                    "snippet": "phase4 summary",
+                    "importance": 1.0,
+                    "modified_at": datetime.now(timezone.utc).isoformat(),
+                    "score": 1,
+                }
+            ]
+
+            with patch("app.main._services", return_value=(settings, gm)), patch(
+                "app.context.service._raw_scan_recent_relevant",
+                return_value=fallback_rows,
+            ) as raw_scan:
+                out = context_retrieve(ContextRetrieveRequest(task="phase4", limit=5), auth=_AuthStub())
+
+            self.assertTrue(raw_scan.called)
+            self.assertEqual(out["bundle"]["recent_relevant"], fallback_rows)
+            self.assertEqual(out["bundle"]["continuity_state"]["recovery_warnings"], ["continuity_index_stale"])
+
 
 if __name__ == "__main__":
     unittest.main()

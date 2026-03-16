@@ -251,6 +251,43 @@ class TestContinuityPhase4Phase3(unittest.TestCase):
             self.assertEqual(sorted(staged_paths), sorted([str(active), str(fallback), str(archive_one), str(archive_two)]))
             self.assertEqual(commit_message, "continuity: delete user stef - cleanup")
 
+    def test_delete_archive_match_requires_full_timestamp_suffix(self) -> None:
+        """Archive deletion should not capture similarly prefixed subjects that start with digits."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            archive_target = self._write_archive(
+                repo_root,
+                subject_kind="user",
+                subject_id="a",
+                capsule=self._capsule_payload(subject_kind="user", subject_id="a"),
+                archived_at=datetime(2026, 3, 15, 12, 0, tzinfo=timezone.utc),
+            )
+            archive_other = self._write_archive(
+                repo_root,
+                subject_kind="user",
+                subject_id="a-1abc",
+                capsule=self._capsule_payload(subject_kind="user", subject_id="a-1abc"),
+                archived_at=datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc),
+            )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_delete(
+                    req=ContinuityDeleteRequest(
+                        subject_kind="user",
+                        subject_id="a",
+                        delete_archive=True,
+                        reason="cleanup",
+                    ),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["deleted_paths"], ["memory/continuity/archive/user-a-20260315T120000Z.json"])
+            self.assertFalse(archive_target.exists())
+            self.assertTrue(archive_other.exists())
+
     def test_delete_returns_noop_success_when_only_missing_paths_remain(self) -> None:
         """Delete should succeed without a git commit when nothing exists to remove."""
         with tempfile.TemporaryDirectory() as td:

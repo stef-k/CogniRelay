@@ -444,7 +444,7 @@ class ContinuityUpsertRequest(BaseModel):
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     capsule: ContinuityCapsule
-    commit_message: Optional[str] = None
+    commit_message: Optional[str] = Field(default=None, max_length=240)
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
 
 

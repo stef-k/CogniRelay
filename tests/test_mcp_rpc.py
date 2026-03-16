@@ -145,7 +145,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         auth = AuthContext(
             token="token",
             peer_id="peer-host",
-            scopes={"read:files", "write:projects"},
+            scopes={"read:files"},
             read_namespaces={"*"},
             write_namespaces={"*"},
             client_ip="127.0.0.1",
@@ -241,7 +241,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         auth = AuthContext(
             token="token",
             peer_id="peer-host",
-            scopes={"read:files", "write:projects"},
+            scopes={"read:files"},
             read_namespaces={"*"},
             write_namespaces={"*"},
             client_ip="127.0.0.1",

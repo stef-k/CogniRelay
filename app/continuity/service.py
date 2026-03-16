@@ -1334,10 +1334,11 @@ def continuity_delete_service(
     if req.delete_archive and archive_base.exists() and archive_base.is_dir():
         archive_paths: list[tuple[str, Path]] = []
         for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
-            if path.is_dir() or path.suffix.lower() != ".json" or not path.name.startswith(archive_prefix):
+            stem = path.stem
+            if path.is_dir() or path.suffix.lower() != ".json" or not stem.startswith(archive_prefix):
                 continue
-            timestamp_start = path.name[len(archive_prefix): len(archive_prefix) + 1]
-            if not timestamp_start.isdigit():
+            archive_suffix = stem[len(archive_prefix):]
+            if re.fullmatch(r"\d{8}T\d{6}Z", archive_suffix) is None:
                 continue
             rel = str(path.relative_to(repo_root))
             auth.require_write_path(rel)
