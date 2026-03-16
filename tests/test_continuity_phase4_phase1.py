@@ -450,3 +450,4 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
             self.assertTrue(out["ok"])
             self.assertEqual(out["path"], "memory/continuity/user-stef.json")
             self.assertEqual(out["recovery_warnings"], ["continuity_fallback_write_failed"])
+            self.assertIn("Failed to persist continuity fallback snapshot", out["fallback_warning_detail"])

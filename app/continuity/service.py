@@ -490,7 +490,7 @@ def _persist_fallback_snapshot(
     subject_kind: str,
     subject_id: str,
     capsule: dict[str, Any],
-) -> tuple[str, str]:
+ ) -> tuple[str, str, str | None]:
     """Persist the fallback snapshot and restore prior fallback bytes if this write fails."""
     fallback_rel = continuity_fallback_rel_path(subject_kind, subject_id)
     path: Path | None = None
@@ -506,16 +506,24 @@ def _persist_fallback_snapshot(
         canonical = _canonical_json(payload)
         new_bytes = canonical.encode("utf-8")
         if old_bytes == new_bytes:
-            return fallback_rel, "unchanged"
+            return fallback_rel, "unchanged", None
         write_text_file(path, canonical)
         committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
         if not committed:
             raise RuntimeError("git commit produced no changes")
     except Exception as exc:
         if path is not None:
-            _restore_failed_fallback_snapshot(path, old_bytes, exc)
-        return fallback_rel, "failed"
-    return fallback_rel, "committed"
+            return fallback_rel, "failed", _restore_failed_fallback_snapshot(path, old_bytes, exc)
+        return fallback_rel, "failed", f"Failed to persist continuity fallback snapshot: {exc}"
+    return fallback_rel, "committed", None
+
+
+def _delete_commit_message(subject_kind: str, subject_id: str, reason: str) -> str:
+    """Build a bounded delete commit subject while keeping the full reason in audit detail."""
+    message = f"continuity: delete {subject_kind} {subject_id} - {reason}"
+    if len(message) <= 120:
+        return message
+    return message[:117] + "..."
 
 
 def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tuple[str, str]) -> dict[str, Any]:
@@ -1021,6 +1029,7 @@ def continuity_upsert_service(
     changed = old_bytes != new_bytes
     committed = False
     fallback_warning: str | None = None
+    fallback_warning_detail: str | None = None
     if changed:
         _persist_active_capsule(
             repo_root=repo_root,
@@ -1030,7 +1039,7 @@ def continuity_upsert_service(
             commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
         )
         committed = True
-        fallback_rel, fallback_status = _persist_fallback_snapshot(
+        fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
             repo_root=repo_root,
             gm=gm,
             subject_kind=req.subject_kind,
@@ -1055,6 +1064,7 @@ def continuity_upsert_service(
             "committed": committed,
             "fallback_path": fallback_rel,
             "fallback_warning": fallback_warning,
+            "fallback_warning_detail": fallback_warning_detail,
         },
     )
     return {
@@ -1065,6 +1075,7 @@ def continuity_upsert_service(
         "latest_commit": gm.latest_commit(),
         "capsule_sha256": capsule_sha256,
         "recovery_warnings": [fallback_warning] if fallback_warning else [],
+        "fallback_warning_detail": fallback_warning_detail,
     }
 
 
@@ -1370,7 +1381,7 @@ def continuity_delete_service(
     try:
         for path in paths_to_stage:
             path.unlink()
-        committed = gm.commit_paths(paths_to_stage, f"continuity: delete {req.subject_kind} {req.subject_id} - {req.reason}")
+        committed = gm.commit_paths(paths_to_stage, _delete_commit_message(req.subject_kind, req.subject_id, req.reason))
         if not committed:
             raise RuntimeError("Continuity delete commit produced no changes")
     except Exception as exc:
@@ -1723,7 +1734,7 @@ def continuity_revalidate_service(
         canonical=canonical,
         commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
     )
-    fallback_rel, fallback_status = _persist_fallback_snapshot(
+    fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
         repo_root=repo_root,
         gm=gm,
         subject_kind=req.subject_kind,
@@ -1742,6 +1753,7 @@ def continuity_revalidate_service(
             "updated": updated,
             "fallback_path": fallback_rel,
             "fallback_warning": CONTINUITY_WARNING_FALLBACK_WRITE_FAILED if fallback_status == "failed" else None,
+            "fallback_warning_detail": fallback_warning_detail,
         },
     )
     return {
@@ -1753,6 +1765,7 @@ def continuity_revalidate_service(
         "capsule_health": final_capsule.capsule_health.model_dump(mode="json", exclude_none=True),
         "latest_commit": gm.latest_commit(),
         "recovery_warnings": [CONTINUITY_WARNING_FALLBACK_WRITE_FAILED] if fallback_status == "failed" else [],
+        "fallback_warning_detail": fallback_warning_detail,
     }
 
 

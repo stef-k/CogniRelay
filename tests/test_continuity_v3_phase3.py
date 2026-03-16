@@ -371,6 +371,7 @@ class TestContinuityV3Phase3(unittest.TestCase):
 
             self.assertTrue(out["ok"])
             self.assertEqual(out["recovery_warnings"], ["continuity_fallback_write_failed"])
+            self.assertIn("Failed to persist continuity fallback snapshot", out["fallback_warning_detail"])
 
     def test_revalidate_enforces_outcome_specific_validation(self) -> None:
         """Revalidate should reject forbidden candidate and reason combinations."""

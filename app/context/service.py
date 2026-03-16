@@ -297,7 +297,10 @@ def _raw_scan_candidate_paths(repo_root: Path) -> list[Path]:
             continue
         if path.suffix.lower() not in TEXT_SUFFIXES:
             continue
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
         candidates.append((-stat.st_mtime, str(rel_path), path))
     candidates.sort()
     return [item[2] for item in candidates[:200]]

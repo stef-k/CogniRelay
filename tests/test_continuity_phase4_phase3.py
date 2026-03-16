@@ -288,6 +288,36 @@ class TestContinuityPhase4Phase3(unittest.TestCase):
             self.assertFalse(archive_target.exists())
             self.assertTrue(archive_other.exists())
 
+    def test_delete_commit_message_is_bounded(self) -> None:
+        """Delete should cap the git subject length while keeping the full audit reason separate."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            self._write_active(
+                repo_root,
+                subject_kind="user",
+                subject_id="stef",
+                payload=self._capsule_payload(subject_kind="user", subject_id="stef"),
+            )
+            reason = "r" * 240
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_delete(
+                    req=ContinuityDeleteRequest(
+                        subject_kind="user",
+                        subject_id="stef",
+                        delete_active=True,
+                        reason=reason,
+                    ),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(out["ok"])
+            _staged, commit_message = gm.commit_paths_calls[0]
+            self.assertLessEqual(len(commit_message), 120)
+            self.assertTrue(commit_message.startswith("continuity: delete user "))
+
     def test_delete_returns_noop_success_when_only_missing_paths_remain(self) -> None:
         """Delete should succeed without a git commit when nothing exists to remove."""
         with tempfile.TemporaryDirectory() as td:
