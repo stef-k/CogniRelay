@@ -47,6 +47,13 @@ CONTINUITY_WARNING_TRUNCATED_MULTI = "continuity_capsule_truncated_to_zero"
 CONTINUITY_WARNING_DEGRADED = "continuity_degraded"
 CONTINUITY_WARNING_CONFLICTED = "continuity_conflicted"
 CONTINUITY_WARNING_INVALID = "continuity_invalid_capsule"
+CONTINUITY_WARNING_ACTIVE_MISSING = "continuity_active_missing"
+CONTINUITY_WARNING_ACTIVE_INVALID = "continuity_active_invalid"
+CONTINUITY_WARNING_FALLBACK_WRITE_FAILED = "continuity_fallback_write_failed"
+CONTINUITY_WARNING_FALLBACK_USED = "continuity_fallback_used"
+CONTINUITY_WARNING_FALLBACK_MISSING = "continuity_fallback_missing"
+CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
+CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -154,6 +161,12 @@ def continuity_rel_path(subject_kind: str, subject_id: str) -> str:
     """Return the repository-relative path for a continuity capsule."""
     normalized = _normalize_subject_id(subject_id)
     return f"{CONTINUITY_DIR_REL}/{subject_kind}-{normalized}.json"
+
+
+def continuity_fallback_rel_path(subject_kind: str, subject_id: str) -> str:
+    """Return the repository-relative path for a continuity fallback snapshot."""
+    normalized = _normalize_subject_id(subject_id)
+    return f"{CONTINUITY_DIR_REL}/fallback/{subject_kind}-{normalized}.json"
 
 
 def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name: str) -> None:
@@ -387,6 +400,79 @@ def _persist_active_capsule(
         if restore_error is not None:
             detail = f"{detail}; rollback failed: {restore_error}"
         raise HTTPException(status_code=500, detail=detail) from exc
+
+
+def _fallback_snapshot_payload(*, capsule: dict[str, Any], active_rel: str, captured_at: str) -> dict[str, Any]:
+    """Build one fallback snapshot envelope from a validated active capsule."""
+    health_status, _health_reasons = _capsule_health_summary(capsule)
+    return {
+        "schema_type": CONTINUITY_FALLBACK_SCHEMA_TYPE,
+        "schema_version": CONTINUITY_FALLBACK_SCHEMA_VERSION,
+        "captured_at": captured_at,
+        "source_path": active_rel,
+        "verification_status": _verification_status(capsule),
+        "health_status": health_status,
+        "capsule": capsule,
+    }
+
+
+def _persist_fallback_snapshot(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    subject_kind: str,
+    subject_id: str,
+    capsule: dict[str, Any],
+) -> tuple[str, bool]:
+    """Persist the recovery-only fallback snapshot without rolling back the active write."""
+    fallback_rel = continuity_fallback_rel_path(subject_kind, subject_id)
+    path = safe_path(repo_root, fallback_rel)
+    payload = _fallback_snapshot_payload(
+        capsule=capsule,
+        active_rel=continuity_rel_path(subject_kind, subject_id),
+        captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
+    )
+    canonical = _canonical_json(payload)
+    old_bytes = path.read_bytes() if path.exists() else None
+    new_bytes = canonical.encode("utf-8")
+    if old_bytes == new_bytes:
+        return fallback_rel, False
+    write_text_file(path, canonical)
+    try:
+        committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
+        if not committed:
+            raise RuntimeError("git commit produced no changes")
+    except Exception:
+        return fallback_rel, False
+    return fallback_rel, True
+
+
+def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tuple[str, str]) -> dict[str, Any]:
+    """Load and validate one fallback snapshot envelope, returning the nested capsule."""
+    path = safe_path(repo_root, rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Continuity fallback snapshot not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot JSON: {e}") from e
+    if payload.get("schema_type") != CONTINUITY_FALLBACK_SCHEMA_TYPE:
+        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_type")
+    if payload.get("schema_version") != CONTINUITY_FALLBACK_SCHEMA_VERSION:
+        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_version")
+    nested = payload.get("capsule")
+    if not isinstance(nested, dict):
+        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
+    try:
+        capsule = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
+    expected_kind, expected_id = expected_subject
+    capsule_kind = str(capsule.get("subject_kind") or "")
+    capsule_subject_id = str(capsule.get("subject_id") or "")
+    if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
+        raise HTTPException(status_code=400, detail="Continuity fallback snapshot subject does not match requested subject")
+    return capsule
 
 
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
@@ -755,6 +841,7 @@ def continuity_upsert_service(
     created = not path.exists()
     changed = old_bytes != new_bytes
     committed = False
+    fallback_warning: str | None = None
     if changed:
         _persist_active_capsule(
             repo_root=repo_root,
@@ -764,6 +851,17 @@ def continuity_upsert_service(
             commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
         )
         committed = True
+        fallback_rel, fallback_committed = _persist_fallback_snapshot(
+            repo_root=repo_root,
+            gm=gm,
+            subject_kind=req.subject_kind,
+            subject_id=req.subject_id,
+            capsule=capsule.model_dump(mode="json", exclude_none=True),
+        )
+        if not fallback_committed:
+            fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
+    else:
+        fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
     audit(
         auth,
         "continuity_upsert",
@@ -776,6 +874,8 @@ def continuity_upsert_service(
             "capsule_sha256": capsule_sha256,
             "idempotency_key": req.idempotency_key,
             "committed": committed,
+            "fallback_path": fallback_rel,
+            "fallback_warning": fallback_warning,
         },
     )
     return {
@@ -795,13 +895,68 @@ def continuity_read_service(
     req: ContinuityReadRequest,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """Read one active continuity capsule by exact selector."""
+    """Read one active continuity capsule by exact selector with fallback degradation."""
     auth.require("read:files")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_read_path(rel)
-    capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
-    audit(auth, "continuity_read", {"subject_kind": req.subject_kind, "subject_id": req.subject_id, "path": rel})
-    return {"ok": True, "path": rel, "capsule": capsule, "archived": False}
+    fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
+    recovery_warnings: list[str] = []
+    try:
+        capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+        out = {
+            "ok": True,
+            "path": rel,
+            "capsule": capsule,
+            "archived": False,
+            "source_state": "active",
+            "recovery_warnings": recovery_warnings,
+        }
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            recovery_warnings.append(CONTINUITY_WARNING_ACTIVE_MISSING)
+        elif exc.status_code == 400:
+            recovery_warnings.append(CONTINUITY_WARNING_ACTIVE_INVALID)
+        else:
+            raise
+        if not req.allow_fallback:
+            raise
+        auth.require_read_path(fallback_rel)
+        try:
+            capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(req.subject_kind, req.subject_id))
+            recovery_warnings.append(CONTINUITY_WARNING_FALLBACK_USED)
+            out = {
+                "ok": True,
+                "path": rel,
+                "capsule": capsule,
+                "archived": False,
+                "source_state": "fallback",
+                "recovery_warnings": recovery_warnings,
+            }
+        except HTTPException as fallback_exc:
+            if fallback_exc.status_code in {400, 404}:
+                recovery_warnings.append(CONTINUITY_WARNING_FALLBACK_MISSING)
+                out = {
+                    "ok": True,
+                    "path": rel,
+                    "capsule": None,
+                    "archived": False,
+                    "source_state": "missing",
+                    "recovery_warnings": recovery_warnings,
+                }
+            else:
+                raise
+    audit(
+        auth,
+        "continuity_read",
+        {
+            "subject_kind": req.subject_kind,
+            "subject_id": req.subject_id,
+            "path": rel,
+            "source_state": out["source_state"],
+            "recovery_warnings": out["recovery_warnings"],
+        },
+    )
+    return out
 
 
 def continuity_list_service(
@@ -1011,6 +1166,13 @@ def continuity_revalidate_service(
         canonical=canonical,
         commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
     )
+    fallback_rel, fallback_committed = _persist_fallback_snapshot(
+        repo_root=repo_root,
+        gm=gm,
+        subject_kind=req.subject_kind,
+        subject_id=req.subject_id,
+        capsule=final_capsule.model_dump(mode="json", exclude_none=True),
+    )
     audit(
         auth,
         "continuity_revalidate",
@@ -1021,6 +1183,8 @@ def continuity_revalidate_service(
             "outcome": result_outcome,
             "strongest_signal": strongest_signal,
             "updated": updated,
+            "fallback_path": fallback_rel,
+            "fallback_warning": None if fallback_committed else CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
         },
     )
     return {
@@ -1127,6 +1291,8 @@ def build_continuity_state(
         "selection_order": [],
         "budget": budget,
         "warnings": [],
+        "fallback_used": False,
+        "recovery_warnings": [],
     }
     if req.continuity_mode == "off":
         return state
@@ -1141,24 +1307,49 @@ def build_continuity_state(
 
     loaded: list[dict[str, Any]] = []
     warnings: list[str] = []
+    recovery_warnings: list[str] = []
+    fallback_used = False
     for item in selectors:
         kind = item["subject_kind"]
         subject_id = item["subject_id"]
         resolution = item["resolution"]
         rel = continuity_rel_path(kind, subject_id)
         auth.require_read_path(rel)
-        path = repo_root / rel
-        if not path.exists():
-            state["omitted_selectors"].append(_format_selector(kind, subject_id))
-            continue
+        source_state = "active"
         try:
             capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
         except HTTPException as exc:
-            if exc.status_code == 400 and len(selectors) > 1:
-                state["omitted_selectors"].append(_format_selector(kind, subject_id))
-                warnings.append(_qualify_warning(CONTINUITY_WARNING_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+            selector_label = _format_selector(kind, subject_id)
+            if exc.status_code == 404:
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode))
+            elif exc.status_code == 400:
+                if "subject does not match" in str(exc.detail):
+                    raise
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+            else:
+                raise
+            if req.continuity_resilience_policy == "require_active":
+                state["omitted_selectors"].append(selector_label)
                 continue
-            raise
+            fallback_rel = continuity_fallback_rel_path(kind, subject_id)
+            auth.require_read_path(fallback_rel)
+            try:
+                capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(kind, subject_id))
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_USED, kind, subject_id, multi_mode=multi_warning_mode))
+                fallback_used = True
+                source_state = "fallback"
+            except HTTPException as fallback_exc:
+                if fallback_exc.status_code in {400, 404}:
+                    if exc.status_code == 404:
+                        recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode))
+                        state["omitted_selectors"].append(selector_label)
+                        continue
+                    if len(selectors) > 1:
+                        warnings.append(_qualify_warning(CONTINUITY_WARNING_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+                        state["omitted_selectors"].append(selector_label)
+                        continue
+                    raise exc
+                raise
         phase, phase_warnings = _continuity_phase(capsule, now)
         warnings.extend(_qualify_warning(warning, kind, subject_id, multi_mode=multi_warning_mode) for warning in phase_warnings)
         if phase in {"expired", "expired_by_age"}:
@@ -1172,6 +1363,7 @@ def build_continuity_state(
                 "verification_status": _verification_status(capsule),
                 "health_status": health_status,
                 "health_reasons": health_reasons,
+                "source_state": source_state,
             }
         )
 
@@ -1179,6 +1371,8 @@ def build_continuity_state(
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         state["warnings"] = warnings
+        state["recovery_warnings"] = recovery_warnings
+        state["fallback_used"] = fallback_used
         return state
 
     if req.continuity_verification_policy == "prefer_healthy":
@@ -1200,6 +1394,8 @@ def build_continuity_state(
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         state["warnings"] = warnings
+        state["recovery_warnings"] = recovery_warnings
+        state["fallback_used"] = fallback_used
         return state
 
     reserve = budget["continuity_tokens_reserved"]
@@ -1220,6 +1416,7 @@ def build_continuity_state(
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUNCATED_MULTI, kind, subject_id, multi_mode=multi_warning_mode))
             continue
+        trimmed["source_state"] = row["source_state"]
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
         if row["health_status"] == "degraded":
@@ -1231,11 +1428,15 @@ def build_continuity_state(
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         state["warnings"] = warnings
+        state["recovery_warnings"] = recovery_warnings
+        state["fallback_used"] = fallback_used
         return state
 
     state["present"] = True
     state["capsules"] = trimmed_capsules
     state["selection_order"] = trimmed_selection_order
     state["warnings"] = warnings
+    state["recovery_warnings"] = recovery_warnings
+    state["fallback_used"] = fallback_used
     state["budget"]["continuity_tokens_used"] = sum(_estimated_tokens(_render_value(item)) for item in trimmed_capsules)
     return state

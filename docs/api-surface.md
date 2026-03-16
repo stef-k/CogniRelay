@@ -53,8 +53,10 @@ Notable behavior:
 - `POST /v1/context/retrieve` now supports optional continuity subject selection and returns additive `continuity_state` metadata when available
 - `POST /v1/context/retrieve` now also accepts bounded `continuity_selectors` plus `continuity_max_capsules` for deterministic multi-capsule continuity loading
 - `POST /v1/context/retrieve` now also accepts `continuity_verification_policy` to allow degraded capsules, prefer healthy capsules first, or require healthy capsules only
+- `POST /v1/context/retrieve` now also accepts `continuity_resilience_policy` so callers can allow fallback snapshots, prefer active capsules, or require active continuity only
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
-- `POST /v1/continuity/read` returns the raw active capsule payload for one exact selector
+- successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` now refresh a recovery-only fallback snapshot under `memory/continuity/fallback/`
+- `POST /v1/continuity/read` now returns `source_state` plus `recovery_warnings`, and can degrade to a fallback snapshot or a structured missing response
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule
 - `POST /v1/continuity/revalidate` writes verification status and capsule health through one audited git-backed continuity update
 - `POST /v1/continuity/list` returns active-only summaries, skipping archive entries and invalid active files, and now includes additive verification and health summary fields

@@ -231,7 +231,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(state["selection_order"], ["inferred:task:build-v1"])
 
     def test_continuity_upsert_same_bytes_reports_update_false(self) -> None:
-        """Writing identical capsule bytes should report a no-op update."""
+        """Writing identical capsule bytes should avoid extra active or fallback commits."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -244,7 +244,8 @@ class TestContinuityV1(unittest.TestCase):
             self.assertTrue(first["created"])
             self.assertFalse(second["created"])
             self.assertFalse(second["updated"])
-            self.assertEqual(len(gm.commits), 1)
+            self.assertEqual(len(gm.commits), 2)
+            self.assertTrue((repo_root / "memory" / "continuity" / "fallback" / "user-stef.json").exists())
 
     def test_continuity_upsert_older_capsule_rejected_when_newer_exists(self) -> None:
         """Older capsules should not overwrite newer continuity state."""

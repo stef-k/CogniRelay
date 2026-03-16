@@ -37,6 +37,7 @@ class ContextRetrieveRequest(BaseModel):
     subject_id: Optional[str] = Field(default=None, max_length=200)
     continuity_mode: Literal["auto", "required", "off"] = "auto"
     continuity_verification_policy: Literal["allow_degraded", "prefer_healthy", "require_healthy"] = "allow_degraded"
+    continuity_resilience_policy: Literal["allow_fallback", "prefer_active", "require_active"] = "allow_fallback"
     continuity_selectors: List["ContinuitySelector"] = Field(default_factory=list, max_length=4)
     continuity_max_capsules: int = Field(default=1, ge=1, le=4)
     max_tokens_estimate: int = Field(default=4000, ge=256, le=100000)
@@ -450,6 +451,7 @@ class ContinuityReadRequest(BaseModel):
     """Exact-selector request for reading one active continuity capsule."""
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
+    allow_fallback: bool = True
 
 
 class ContinuityListRequest(BaseModel):

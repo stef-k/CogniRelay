@@ -139,17 +139,19 @@ class TestContinuityV2Phase3(unittest.TestCase):
             self.assertEqual(out["capsule"]["verification_state"]["status"], "system_confirmed")
             self.assertEqual(out["capsule"]["capsule_health"]["status"], "degraded")
 
-    def test_continuity_read_missing_capsule_raises_404(self) -> None:
-        """Read should return 404 when the active capsule does not exist."""
+    def test_continuity_read_missing_capsule_returns_degraded_response_by_default(self) -> None:
+        """Read should now return a structured missing response by default."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
             gm = _GitManagerStub()
             with patch("app.main._services", return_value=(settings, gm)):
-                with self.assertRaises(HTTPException) as cm:
-                    continuity_read(req=ContinuityReadRequest(subject_kind="user", subject_id="missing"), auth=_AuthStub())
+                out = continuity_read(req=ContinuityReadRequest(subject_kind="user", subject_id="missing"), auth=_AuthStub())
 
-            self.assertEqual(cm.exception.status_code, 404)
+            self.assertTrue(out["ok"])
+            self.assertIsNone(out["capsule"])
+            self.assertEqual(out["source_state"], "missing")
+            self.assertEqual(out["recovery_warnings"], ["continuity_active_missing", "continuity_fallback_missing"])
 
     def test_continuity_list_sorts_and_counts_post_limit(self) -> None:
         """List should sort by raw subject tuple and report the post-limit count."""
