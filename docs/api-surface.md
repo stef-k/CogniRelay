@@ -70,6 +70,7 @@ Notable behavior:
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
 - continuity capsules may also carry optional `continuity.trailing_notes`, `continuity.curiosity_queue`, and `continuity.negative_decisions` fields as additive agent-owned orientation payload
 - `POST /v1/continuity/read` and `POST /v1/context/retrieve` return those additive fields unchanged when present on the stored capsule and when retrieval trimming does not need to drop them
+- fallback snapshots, archive envelopes, and backup/restore validation preserve those additive fields as ordinary continuity-body content; `POST /v1/continuity/list` summaries intentionally do not expand to include them
 - `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`
 
 ## Peers and messaging

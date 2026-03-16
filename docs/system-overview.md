@@ -143,6 +143,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
 - continuity capsules may also include optional `trailing_notes`, `curiosity_queue`, and structured `negative_decisions` entries to preserve lower-commitment orientation context
 - `POST /v1/continuity/read` and `POST /v1/context/retrieve` pass those additive fields through unchanged unless deterministic trimming removes them to stay within the continuity budget
+- fallback snapshots, archive envelopes, and restore validation preserve those fields as ordinary continuity payload; list summaries stay intentionally narrower and do not surface them directly
 - interaction-boundary upserts require `source.update_reason=interaction_boundary` plus a valid scalar `metadata.interaction_boundary_kind`
 
 ### Indexing and compaction guidance
