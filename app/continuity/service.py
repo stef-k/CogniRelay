@@ -102,6 +102,9 @@ CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
         "working_hypotheses",
         "long_horizon_commitments",
         "session_trajectory",
+        "negative_decisions",
+        "trailing_notes",
+        "curiosity_queue",
         "relationship_model",
         "retrieval_hints",
     ],
@@ -921,6 +924,9 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | 
         "continuity.relationship_model.preferred_style",
         "continuity.retrieval_hints.avoid",
         "continuity.retrieval_hints.load_next",
+        "continuity.trailing_notes",
+        "continuity.curiosity_queue",
+        "continuity.negative_decisions",
         "continuity.working_hypotheses",
     ):
         if _estimated_tokens(_render_value(payload)) <= max_tokens:
