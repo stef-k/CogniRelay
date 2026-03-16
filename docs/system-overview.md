@@ -121,6 +121,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `continuity_selectors` plus `continuity_max_capsules` on `POST /v1/context/retrieve` when you need deterministic multi-capsule continuity loading in one request
 - Use `continuity_verification_policy` on `POST /v1/context/retrieve` when you need to allow degraded continuity, prefer healthy continuity first, or require healthy capsules only
 - Use `continuity_resilience_policy` on `POST /v1/context/retrieve` when you need to permit fallback snapshots or insist on active continuity only
+- Expect `POST /v1/context/retrieve` to degrade deterministically when search indexes are stale or missing: stale keeps indexed retrieval with warnings, missing falls back to a bounded raw scan
 - Use `POST /v1/continuity/read` when you need the full capsule for one exact selector and want structured fallback or missing-state degradation
 - Use `POST /v1/continuity/refresh/plan` when you need a deterministic list of the next continuity capsules that should be refreshed
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
@@ -136,6 +137,8 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` also refresh the last-known-good fallback snapshot under `memory/continuity/fallback/`
 - `POST /v1/continuity/refresh/plan` persists the latest operator-visible plan under `memory/continuity/refresh_state.json`
 - Use `POST /v1/continuity/archive` to move an active capsule into `memory/continuity/archive/` through one git-backed archive commit
+- `POST /v1/backup/create` includes continuity artifact counts in its manifest when continuity data is in scope
+- `POST /v1/backup/restore-test` can validate restored continuity artifacts and report invalid active, fallback, and archive entries without crashing the drill
 - continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
 - interaction-boundary upserts require `source.update_reason=interaction_boundary` plus a valid scalar `metadata.interaction_boundary_kind`
 

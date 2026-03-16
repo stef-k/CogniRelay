@@ -300,7 +300,10 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
             state = out["bundle"]["continuity_state"]
             self.assertTrue(state["present"])
             self.assertTrue(state["fallback_used"])
-            self.assertEqual(state["recovery_warnings"], ["continuity_active_missing", "continuity_fallback_used"])
+            self.assertEqual(
+                state["recovery_warnings"],
+                ["continuity_active_missing", "continuity_fallback_used", "continuity_index_missing"],
+            )
             self.assertEqual(state["capsules"][0]["subject_id"], "stef")
             self.assertEqual(state["capsules"][0]["source_state"], "fallback")
 
@@ -328,4 +331,3 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
             self.assertFalse(state["fallback_used"])
             self.assertEqual(state["capsules"], [])
             self.assertEqual(state["omitted_selectors"], ["user:stef"])
-

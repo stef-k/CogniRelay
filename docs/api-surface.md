@@ -54,6 +54,7 @@ Notable behavior:
 - `POST /v1/context/retrieve` now also accepts bounded `continuity_selectors` plus `continuity_max_capsules` for deterministic multi-capsule continuity loading
 - `POST /v1/context/retrieve` now also accepts `continuity_verification_policy` to allow degraded capsules, prefer healthy capsules first, or require healthy capsules only
 - `POST /v1/context/retrieve` now also accepts `continuity_resilience_policy` so callers can allow fallback snapshots, prefer active capsules, or require active continuity only
+- when derived search indexes are stale, `POST /v1/context/retrieve` keeps indexed retrieval and adds `continuity_index_stale`; when they are missing, it falls back to a bounded raw file scan and adds `continuity_index_missing`
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
 - successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` now refresh a recovery-only fallback snapshot under `memory/continuity/fallback/`
 - `POST /v1/continuity/read` now returns `source_state` plus `recovery_warnings`, and can degrade to a fallback snapshot or a structured missing response
@@ -63,6 +64,8 @@ Notable behavior:
 - `POST /v1/continuity/list` now supports `include_fallback` and `include_archived`, and returns additive `artifact_state` plus `retention_class`
 - `POST /v1/continuity/delete` deletes exact-selector active, fallback, and archive artifacts through one audited git-backed delete path
 - `POST /v1/continuity/archive` writes an archive envelope under `memory/continuity/archive/` and removes the active capsule in one git-backed commit
+- `POST /v1/backup/create` now includes `continuity_counts` in the manifest when continuity artifacts are part of the backup scope
+- `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, and archive artifacts
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
 - `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`
 

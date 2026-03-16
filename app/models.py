@@ -314,6 +314,7 @@ class BackupRestoreTestRequest(BaseModel):
     """Restore-test request for an existing backup archive."""
     backup_path: str
     verify_index_rebuild: bool = True
+    verify_continuity: bool = True
 
 
 class OpsRunRequest(BaseModel):
