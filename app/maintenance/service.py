@@ -57,7 +57,13 @@ def _continuity_counts(repo_root: Path) -> dict[str, int]:
         if not directory.exists() or not directory.is_dir():
             return 0
         iterator = directory.iterdir() if top_level_only else directory.rglob("*.json")
-        return sum(1 for path in iterator if path.is_file() and path.suffix.lower() == ".json")
+        return sum(
+            1
+            for path in iterator
+            if path.is_file()
+            and path.suffix.lower() == ".json"
+            and path.name != "refresh_state.json"
+        )
 
     return {
         "active_capsules": _count_json(active_dir, top_level_only=True),

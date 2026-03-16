@@ -46,7 +46,18 @@ class _FailingFallbackGitManagerStub(_GitManagerStub):
     def commit_file(self, path: Path, message: str) -> bool:
         """Fail the fallback commit while allowing the active write to succeed."""
         self.commit_file_calls.append((str(path), message))
-        return "memory/continuity/fallback/" not in str(path)
+        return "fallback" not in path.parts
+
+
+class _ExplodingFallbackGitManagerStub(_GitManagerStub):
+    """Git stub that raises only for fallback snapshot commits."""
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        """Raise on fallback commits while allowing active writes through."""
+        self.commit_file_calls.append((str(path), message))
+        if "fallback" in path.parts:
+            raise RuntimeError("fallback git failure")
+        return True
 
 
 class _RejectingReadAuthStub(_AuthStub):
@@ -397,3 +408,44 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
             self.assertFalse(state["fallback_used"])
             self.assertEqual(state["capsules"], [])
             self.assertEqual(state["omitted_selectors"], ["user:stef"])
+
+    def test_context_retrieve_prefer_active_uses_same_active_first_fallback_path(self) -> None:
+        """Prefer-active should still load fallback continuity when active continuity is unavailable."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            capsule = self._capsule_payload(subject_kind="user", subject_id="stef")
+            self._write_fallback_snapshot(repo_root, subject_kind="user", subject_id="stef", capsule=capsule)
+            req = ContextRetrieveRequest(
+                task="resume",
+                subject_kind="user",
+                subject_id="stef",
+                continuity_resilience_policy="prefer_active",
+            )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = context_retrieve(req=req, auth=_AuthStub())
+
+            state = out["bundle"]["continuity_state"]
+            self.assertTrue(state["present"])
+            self.assertTrue(state["fallback_used"])
+            self.assertEqual(state["capsules"][0]["source_state"], "fallback")
+
+    def test_upsert_degrades_success_when_fallback_snapshot_write_raises(self) -> None:
+        """Fallback write exceptions should not fail the already-committed active upsert."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _ExplodingFallbackGitManagerStub()
+            req = ContinuityUpsertRequest(
+                subject_kind="user",
+                subject_id="stef",
+                capsule=self._capsule_payload(subject_kind="user", subject_id="stef"),
+            )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_upsert(req=req, auth=_AuthStub())
+
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["path"], "memory/continuity/user-stef.json")

@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from app.config import Settings
 from app.continuity.service import continuity_refresh_plan_service
 from app.context.service import context_retrieve_service
@@ -32,6 +34,15 @@ class _GitManagerStub(SimpleGitManagerStub):
         """Record a single-file commit request and report success."""
         self.commit_file_calls.append((str(path), message))
         return True
+
+
+class _FailingRefreshGitManagerStub(_GitManagerStub):
+    """Git stub that fails refresh-state commits after the file is written."""
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        """Raise when refresh planning tries to commit refresh_state.json."""
+        self.commit_file_calls.append((str(path), message))
+        raise RuntimeError("refresh git failure")
 
 
 class TestContinuityPhase4Phase2(unittest.TestCase):
@@ -295,6 +306,48 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
             self.assertEqual(len(with_healthy["candidates"]), 1)
             self.assertEqual(with_healthy["candidates"][0]["reason_codes"], ["recently_used"])
 
+    def test_refresh_plan_skips_fully_healthy_candidates_by_default(self) -> None:
+        """Healthy candidates with no reason codes should be omitted unless include_healthy is enabled."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            recent_iso = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            self._write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="quiet",
+                payload=self._capsule_payload(
+                    subject_kind="user",
+                    subject_id="quiet",
+                    updated_at=recent_iso,
+                    verified_at=recent_iso,
+                    verification_status="system_confirmed",
+                    health_status="healthy",
+                ),
+            )
+
+            out = continuity_refresh_plan_service(
+                repo_root=repo_root,
+                gm=gm,
+                auth=_AuthStub(),
+                req=ContinuityRefreshPlanRequest(limit=10),
+                now=now,
+                audit=lambda *_args: None,
+            )
+            self.assertEqual(out["candidates"], [])
+
+            with_healthy = continuity_refresh_plan_service(
+                repo_root=repo_root,
+                gm=gm,
+                auth=_AuthStub(),
+                req=ContinuityRefreshPlanRequest(limit=10, include_healthy=True),
+                now=now,
+                audit=lambda *_args: None,
+            )
+            self.assertEqual(len(with_healthy["candidates"]), 1)
+            self.assertEqual(with_healthy["candidates"][0]["reason_codes"], [])
+
     def test_refresh_state_is_persisted_and_only_committed_when_bytes_change(self) -> None:
         """Refresh planning should rewrite refresh_state.json and skip no-op commits."""
         with tempfile.TemporaryDirectory() as td:
@@ -343,6 +396,45 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
             self.assertEqual(first["latest_commit"], "test-sha")
             self.assertEqual(second["latest_commit"], "test-sha")
 
+    def test_refresh_state_commit_failure_restores_prior_bytes(self) -> None:
+        """Refresh planning should restore the prior durable refresh state on commit failure."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _FailingRefreshGitManagerStub()
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            recent_iso = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            self._write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="degraded",
+                payload=self._capsule_payload(
+                    subject_kind="user",
+                    subject_id="degraded",
+                    updated_at=recent_iso,
+                    verified_at=recent_iso,
+                    verification_status="system_confirmed",
+                    health_status="degraded",
+                    health_reasons=["stale source"],
+                ),
+            )
+            refresh_path = repo_root / "memory" / "continuity" / "refresh_state.json"
+            refresh_path.parent.mkdir(parents=True, exist_ok=True)
+            refresh_path.write_text('{"schema_version":"1.0","sentinel":"old"}', encoding="utf-8")
+            old_bytes = refresh_path.read_bytes()
+
+            with self.assertRaises(HTTPException) as cm:
+                continuity_refresh_plan_service(
+                    repo_root=repo_root,
+                    gm=gm,
+                    auth=_AuthStub(),
+                    req=ContinuityRefreshPlanRequest(limit=10),
+                    now=now,
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertEqual(refresh_path.read_bytes(), old_bytes)
+
     def test_context_retrieve_audit_includes_loaded_continuity_selectors(self) -> None:
         """Context retrieval audit detail should include the loaded continuity selector list."""
         with tempfile.TemporaryDirectory() as td:
@@ -378,4 +470,3 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
                 audit_rows[-1][1]["continuity_selectors"],
                 [{"subject_kind": "user", "subject_id": "stef", "source_state": "active"}],
             )
-

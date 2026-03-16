@@ -440,6 +440,24 @@ def _restore_failed_fallback_snapshot(path: Path, old_bytes: bytes | None, exc: 
     return detail
 
 
+def _restore_failed_refresh_state(path: Path, old_bytes: bytes | None, exc: Exception) -> HTTPException:
+    """Return a refresh-state persistence error after restoring the prior durable bytes."""
+    restore_error: Exception | None = None
+    try:
+        if old_bytes is None:
+            if path.exists():
+                path.unlink()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(old_bytes)
+    except Exception as restore_exc:
+        restore_error = restore_exc
+    detail = f"Failed to persist continuity refresh state: {exc}"
+    if restore_error is not None:
+        detail = f"{detail}; rollback failed: {restore_error}"
+    return HTTPException(status_code=500, detail=detail)
+
+
 def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]:
     """Load and validate a fallback snapshot envelope payload."""
     path = safe_path(repo_root, rel)
@@ -473,24 +491,27 @@ def _persist_fallback_snapshot(
 ) -> tuple[str, str]:
     """Persist the recovery-only fallback snapshot without rolling back the active write."""
     fallback_rel = continuity_fallback_rel_path(subject_kind, subject_id)
-    path = safe_path(repo_root, fallback_rel)
-    payload = _fallback_snapshot_payload(
-        capsule=capsule,
-        active_rel=continuity_rel_path(subject_kind, subject_id),
-        captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
-    )
-    canonical = _canonical_json(payload)
-    old_bytes = path.read_bytes() if path.exists() else None
-    new_bytes = canonical.encode("utf-8")
-    if old_bytes == new_bytes:
-        return fallback_rel, "unchanged"
-    write_text_file(path, canonical)
+    path: Path | None = None
+    old_bytes: bytes | None = None
     try:
+        path = safe_path(repo_root, fallback_rel)
+        old_bytes = path.read_bytes() if path.exists() else None
+        payload = _fallback_snapshot_payload(
+            capsule=capsule,
+            active_rel=continuity_rel_path(subject_kind, subject_id),
+            captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
+        )
+        canonical = _canonical_json(payload)
+        new_bytes = canonical.encode("utf-8")
+        if old_bytes == new_bytes:
+            return fallback_rel, "unchanged"
+        write_text_file(path, canonical)
         committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
         if not committed:
             raise RuntimeError("git commit produced no changes")
     except Exception as exc:
-        _restore_failed_fallback_snapshot(path, old_bytes, exc)
+        if path is not None:
+            _restore_failed_fallback_snapshot(path, old_bytes, exc)
         return fallback_rel, "failed"
     return fallback_rel, "committed"
 
@@ -505,11 +526,6 @@ def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tupl
     if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
         raise HTTPException(status_code=400, detail="Continuity fallback snapshot subject does not match requested subject")
     return capsule
-
-
-def _load_fallback_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
-    """Load and validate a fallback snapshot envelope."""
-    return _load_fallback_envelope_payload(repo_root, rel)
 
 
 def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
@@ -1172,7 +1188,7 @@ def continuity_list_service(
                 except HTTPException:
                     continue
                 try:
-                    envelope = _load_fallback_envelope(repo_root, rel)
+                    envelope = _load_fallback_envelope_payload(repo_root, rel)
                 except HTTPException as exc:
                     if exc.status_code in {400, 404}:
                         continue
@@ -1411,7 +1427,7 @@ def continuity_refresh_plan_service(
                 recently_used=selector in recent_selectors,
                 now=now,
             )
-            if not req.include_healthy and codes == ["recently_used"]:
+            if not req.include_healthy and (not codes or codes == ["recently_used"]):
                 continue
             verification_status = _verification_status(capsule)
             health_status, _health_reasons = _capsule_health_summary(capsule)
@@ -1449,7 +1465,7 @@ def continuity_refresh_plan_service(
             except HTTPException:
                 continue
             try:
-                envelope = _load_fallback_envelope(repo_root, rel)
+                envelope = _load_fallback_envelope_payload(repo_root, rel)
             except Exception:
                 continue
             capsule = envelope["capsule"]
@@ -1469,7 +1485,7 @@ def continuity_refresh_plan_service(
                 recently_used=selector in recent_selectors,
                 now=now,
             )
-            if not req.include_healthy and codes == ["recently_used"]:
+            if not req.include_healthy and (not codes or codes == ["recently_used"]):
                 continue
             verification_status = _verification_status(capsule)
             health_status, _health_reasons = _capsule_health_summary(capsule)
@@ -1506,12 +1522,17 @@ def continuity_refresh_plan_service(
     payload = _refresh_state_payload(now, candidates)
     canonical = _canonical_json(payload)
     old_bytes = refresh_path.read_bytes() if refresh_path.exists() else None
-    write_text_file(refresh_path, canonical)
     latest_commit = gm.latest_commit()
-    if old_bytes != canonical.encode("utf-8"):
-        committed = gm.commit_file(refresh_path, "continuity: refresh plan")
-        if committed:
+    new_bytes = canonical.encode("utf-8")
+    if old_bytes != new_bytes:
+        try:
+            write_text_file(refresh_path, canonical)
+            committed = gm.commit_file(refresh_path, "continuity: refresh plan")
+            if not committed:
+                raise RuntimeError("git commit produced no changes")
             latest_commit = gm.latest_commit()
+        except Exception as exc:
+            raise _restore_failed_refresh_state(refresh_path, old_bytes, exc) from exc
 
     audit(
         auth,
@@ -1839,9 +1860,15 @@ def build_continuity_state(
                 recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
             else:
                 raise
-            if req.continuity_resilience_policy == "require_active":
+            resilience_policy = req.continuity_resilience_policy
+            if resilience_policy == "require_active":
                 state["omitted_selectors"].append(selector_label)
                 continue
+            # Phase 4 keeps the observable fallback behavior the same for
+            # allow_fallback and prefer_active while reserving the latter for
+            # future stricter active-first semantics without request-model churn.
+            if resilience_policy not in {"allow_fallback", "prefer_active"}:
+                raise HTTPException(status_code=400, detail="Unsupported continuity_resilience_policy")
             fallback_rel = continuity_fallback_rel_path(kind, subject_id)
             auth.require_read_path(fallback_rel)
             try:

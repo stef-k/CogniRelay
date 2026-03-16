@@ -621,7 +621,7 @@ def continuity_revalidate(req: ContinuityRevalidateRequest, auth: AuthContext = 
 
 @app.post("/v1/continuity/list")
 def continuity_list(req: ContinuityListRequest, auth: AuthContext = Depends(require_auth)) -> dict:
-    """List active continuity capsule summaries."""
+    """List active, fallback, and archived continuity capsule summaries."""
     settings, _ = _services()
     return continuity_list_service(
         repo_root=settings.repo_root,

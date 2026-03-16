@@ -53,7 +53,7 @@ Notable behavior:
 - `POST /v1/context/retrieve` now supports optional continuity subject selection and returns additive `continuity_state` metadata when available
 - `POST /v1/context/retrieve` now also accepts bounded `continuity_selectors` plus `continuity_max_capsules` for deterministic multi-capsule continuity loading
 - `POST /v1/context/retrieve` now also accepts `continuity_verification_policy` to allow degraded capsules, prefer healthy capsules first, or require healthy capsules only
-- `POST /v1/context/retrieve` now also accepts `continuity_resilience_policy` so callers can allow fallback snapshots, prefer active capsules, or require active continuity only
+- `POST /v1/context/retrieve` now also accepts `continuity_resilience_policy` so callers can allow fallback snapshots, use the explicit active-first `prefer_active` mode, or require active continuity only
 - when derived search indexes are stale, `POST /v1/context/retrieve` keeps indexed retrieval and adds `continuity_index_stale`; when they are missing, it falls back to a bounded raw file scan and adds `continuity_index_missing`
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
 - successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` now refresh a recovery-only fallback snapshot under `memory/continuity/fallback/`

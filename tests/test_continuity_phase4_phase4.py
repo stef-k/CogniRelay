@@ -121,6 +121,10 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             payload = self._capsule_payload(subject_kind="user", subject_id="alpha", updated_at=now, verified_at=now)
             self._write_valid_active(repo_root, subject_kind="user", subject_id="alpha", payload=payload)
             self._write_fallback(repo_root, subject_kind="user", subject_id="alpha", payload=payload)
+            (repo_root / "memory" / "continuity" / "refresh_state.json").write_text(
+                json.dumps({"schema_version": "1.0", "last_planned_at": now, "candidates": []}),
+                encoding="utf-8",
+            )
             archive_dir = repo_root / "memory" / "continuity" / "archive"
             archive_dir.mkdir(parents=True, exist_ok=True)
             (archive_dir / "user-alpha-20260316T120000Z.json").write_text(
