@@ -30,8 +30,10 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("continuity.read", by_name)
         self.assertIn("continuity.compare", by_name)
         self.assertIn("continuity.revalidate", by_name)
+        self.assertIn("continuity.refresh_plan", by_name)
         self.assertIn("continuity.list", by_name)
         self.assertIn("continuity.archive", by_name)
+        self.assertIn("continuity.delete", by_name)
         self.assertIn("messages.send", by_name)
         self.assertIn("messages.ack", by_name)
         self.assertIn("messages.pending", by_name)
@@ -68,6 +70,11 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         write_schema = by_name["memory.write"]["input_schema"]
         self.assertIn("path", write_schema.get("properties", {}))
         self.assertIn("content", write_schema.get("properties", {}))
+        self.assertEqual(
+            by_name["continuity.refresh_plan"]["scopes"],
+            ["read:files", "write:projects", "read_namespaces", "write_namespaces"],
+        )
+        self.assertFalse(by_name["continuity.refresh_plan"]["idempotent"])
 
     def test_workflow_catalog_has_bootstrap(self) -> None:
         """Workflow catalog should expose the bootstrap workflow."""
@@ -85,6 +92,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         federation_tools = [step["tool"] for step in by_name["federation_hardening"]["steps"]]
         self.assertIn("peers.trust_transition", federation_tools)
         maintenance_tools = [step["tool"] for step in by_name["maintenance_compaction"]["steps"]]
+        self.assertIn("continuity.refresh_plan", maintenance_tools)
         self.assertIn("backup.create", maintenance_tools)
         self.assertIn("backup.restore_test", maintenance_tools)
 
@@ -100,8 +108,10 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("POST /v1/continuity/read", endpoints)
         self.assertIn("POST /v1/continuity/compare", endpoints)
         self.assertIn("POST /v1/continuity/revalidate", endpoints)
+        self.assertIn("POST /v1/continuity/refresh/plan", endpoints)
         self.assertIn("POST /v1/continuity/list", endpoints)
         self.assertIn("POST /v1/continuity/archive", endpoints)
+        self.assertIn("POST /v1/continuity/delete", endpoints)
         self.assertIn("GET /v1/peers", endpoints)
         self.assertIn("POST /v1/peers/register", endpoints)
         self.assertIn("POST /v1/recent", endpoints)

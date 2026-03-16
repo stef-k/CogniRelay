@@ -100,8 +100,10 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertIn("continuity.read", by_name)
         self.assertIn("continuity.compare", by_name)
         self.assertIn("continuity.revalidate", by_name)
+        self.assertIn("continuity.refresh_plan", by_name)
         self.assertIn("continuity.list", by_name)
         self.assertIn("continuity.archive", by_name)
+        self.assertIn("continuity.delete", by_name)
         self.assertIn("peers.list", by_name)
         self.assertIn("context.snapshot_create", by_name)
         self.assertIn("tasks.create", by_name)
@@ -261,6 +263,106 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertTrue(structured["ok"])
         self.assertTrue(structured["identical"])
         self.assertEqual(structured["recommended_outcome"], "confirm")
+
+    def test_tools_call_continuity_refresh_plan_with_auth(self) -> None:
+        """Continuity refresh planning should be invokable through MCP tool dispatch."""
+        req = {
+            "jsonrpc": "2.0",
+            "id": 77,
+            "method": "tools/call",
+            "params": {
+                "name": "continuity.refresh_plan",
+                "arguments": {"limit": 5},
+            },
+        }
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes={"read:files", "write:projects"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
+                "app.main.require_auth", return_value=auth
+            ):
+                res = mcp_rpc(req, authorization="Bearer token")
+
+        self.assertIn("result", res)
+        structured = res["result"]["structuredContent"]
+        self.assertTrue(structured["ok"])
+        self.assertEqual(structured["count"], 0)
+
+    def test_tools_call_continuity_delete_with_auth(self) -> None:
+        """Continuity delete should be invokable through MCP tool dispatch."""
+        req = {
+            "jsonrpc": "2.0",
+            "id": 78,
+            "method": "tools/call",
+            "params": {
+                "name": "continuity.delete",
+                "arguments": {
+                    "subject_kind": "user",
+                    "subject_id": "stef",
+                    "delete_active": True,
+                    "reason": "cleanup",
+                },
+            },
+        }
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes={"write:projects", "read:files"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            continuity_dir = repo_root / "memory" / "continuity"
+            continuity_dir.mkdir(parents=True, exist_ok=True)
+            (continuity_dir / "user-stef.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "subject_kind": "user",
+                        "subject_id": "stef",
+                        "updated_at": "2026-03-15T14:30:22Z",
+                        "verified_at": "2026-03-15T14:30:22Z",
+                        "verification_kind": "self_review",
+                        "source": {
+                            "producer": "handoff-hook",
+                            "update_reason": "pre_compaction",
+                            "inputs": ["memory/core/identity.md"],
+                        },
+                        "continuity": {
+                            "top_priorities": ["reply"],
+                            "active_concerns": ["none"],
+                            "active_constraints": ["stay deterministic"],
+                            "open_loops": ["follow up"],
+                            "stance_summary": "keep context stable",
+                            "drift_signals": [],
+                        },
+                        "confidence": {"continuity": 0.82, "relationship_model": 0.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
+                "app.main.require_auth", return_value=auth
+            ):
+                res = mcp_rpc(req, authorization="Bearer token")
+
+        self.assertIn("result", res)
+        structured = res["result"]["structuredContent"]
+        self.assertTrue(structured["ok"])
+        self.assertEqual(structured["deleted_paths"], ["memory/continuity/user-stef.json"])
 
     def test_tools_call_continuity_revalidate_with_auth(self) -> None:
         """Continuity revalidate should be invokable through MCP tool dispatch."""

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class WriteRequest(BaseModel):
@@ -37,6 +37,7 @@ class ContextRetrieveRequest(BaseModel):
     subject_id: Optional[str] = Field(default=None, max_length=200)
     continuity_mode: Literal["auto", "required", "off"] = "auto"
     continuity_verification_policy: Literal["allow_degraded", "prefer_healthy", "require_healthy"] = "allow_degraded"
+    continuity_resilience_policy: Literal["allow_fallback", "prefer_active", "require_active"] = "allow_fallback"
     continuity_selectors: List["ContinuitySelector"] = Field(default_factory=list, max_length=4)
     continuity_max_capsules: int = Field(default=1, ge=1, le=4)
     max_tokens_estimate: int = Field(default=4000, ge=256, le=100000)
@@ -313,6 +314,7 @@ class BackupRestoreTestRequest(BaseModel):
     """Restore-test request for an existing backup archive."""
     backup_path: str
     verify_index_rebuild: bool = True
+    verify_continuity: bool = True
 
 
 class OpsRunRequest(BaseModel):
@@ -442,20 +444,30 @@ class ContinuityUpsertRequest(BaseModel):
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     capsule: ContinuityCapsule
-    commit_message: Optional[str] = None
+    commit_message: Optional[str] = Field(default=None, max_length=240)
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
 
 
 class ContinuityReadRequest(BaseModel):
-    """Exact-selector request for reading one active continuity capsule."""
+    """Exact-selector request for reading one continuity capsule with optional fallback."""
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
+    allow_fallback: bool = False
 
 
 class ContinuityListRequest(BaseModel):
-    """Filter parameters for listing active continuity capsules."""
+    """Filter parameters for listing active, fallback, and archived continuity capsules."""
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     limit: int = Field(default=50, ge=1, le=200)
+    include_fallback: bool = False
+    include_archived: bool = False
+
+
+class ContinuityRefreshPlanRequest(BaseModel):
+    """Parameters for deterministic continuity refresh planning."""
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    limit: int = Field(default=25, ge=1, le=100)
+    include_healthy: bool = False
 
 
 class ContinuityArchiveRequest(BaseModel):
@@ -463,6 +475,23 @@ class ContinuityArchiveRequest(BaseModel):
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=3, max_length=240)
+
+
+class ContinuityDeleteRequest(BaseModel):
+    """Exact-selector request for deleting continuity artifacts."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    delete_active: bool = False
+    delete_archive: bool = False
+    delete_fallback: bool = False
+    reason: str = Field(min_length=3, max_length=240)
+
+    @model_validator(mode="after")
+    def _require_any_delete_flag(self) -> "ContinuityDeleteRequest":
+        """Require at least one explicit delete target."""
+        if not (self.delete_active or self.delete_archive or self.delete_fallback):
+            raise ValueError("at least one delete flag must be true")
+        return self
 
 
 class ContinuityVerificationSignal(BaseModel):

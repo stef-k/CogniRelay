@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -20,15 +21,17 @@ from app.models import (
     ContinuityCapsuleHealth,
     ContinuityCapsule,
     ContinuityCompareRequest,
+    ContinuityDeleteRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     ContinuityVerificationState,
     ContinuityVerificationSignal,
     ContextRetrieveRequest,
 )
-from app.storage import StorageError, safe_path, write_text_file
+from app.storage import StorageError, canonical_json, safe_path, write_text_file
 
 CONTINUITY_DIR_REL = "memory/continuity"
 CONTINUITY_SUBJECT_RE = re.compile(r"^(task|thread):(.+)$")
@@ -47,6 +50,16 @@ CONTINUITY_WARNING_TRUNCATED_MULTI = "continuity_capsule_truncated_to_zero"
 CONTINUITY_WARNING_DEGRADED = "continuity_degraded"
 CONTINUITY_WARNING_CONFLICTED = "continuity_conflicted"
 CONTINUITY_WARNING_INVALID = "continuity_invalid_capsule"
+CONTINUITY_WARNING_ACTIVE_MISSING = "continuity_active_missing"
+CONTINUITY_WARNING_ACTIVE_INVALID = "continuity_active_invalid"
+CONTINUITY_WARNING_FALLBACK_WRITE_FAILED = "continuity_fallback_write_failed"
+CONTINUITY_WARNING_FALLBACK_USED = "continuity_fallback_used"
+CONTINUITY_WARNING_FALLBACK_MISSING = "continuity_fallback_missing"
+CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
+CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
+CONTINUITY_ARCHIVE_SCHEMA_TYPE = "continuity_archive_envelope"
+CONTINUITY_ARCHIVE_SCHEMA_VERSION = "1.0"
+CONTINUITY_REFRESH_STATE_SCHEMA_VERSION = "1.0"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -104,11 +117,8 @@ CONTINUITY_SIGNAL_STATUS = {
     "system_check": "system_confirmed",
 }
 CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
-
-
-def _canonical_json(data: Any) -> str:
-    """Serialize JSON deterministically for hashing and idempotency checks."""
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
+CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -154,6 +164,12 @@ def continuity_rel_path(subject_kind: str, subject_id: str) -> str:
     """Return the repository-relative path for a continuity capsule."""
     normalized = _normalize_subject_id(subject_id)
     return f"{CONTINUITY_DIR_REL}/{subject_kind}-{normalized}.json"
+
+
+def continuity_fallback_rel_path(subject_kind: str, subject_id: str) -> str:
+    """Return the repository-relative path for a continuity fallback snapshot."""
+    normalized = _normalize_subject_id(subject_id)
+    return f"{CONTINUITY_DIR_REL}/fallback/{subject_kind}-{normalized}.json"
 
 
 def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name: str) -> None:
@@ -228,7 +244,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     elif capsule.source.update_reason == "interaction_boundary":
         raise HTTPException(status_code=400, detail="metadata.interaction_boundary_kind is required when source.update_reason=interaction_boundary")
     payload = capsule.model_dump(mode="json", exclude_none=True)
-    canonical = _canonical_json(payload)
+    canonical = canonical_json(payload)
     if len(canonical.encode("utf-8")) > 12 * 1024:
         raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
@@ -353,8 +369,6 @@ def _final_capsule_payload(repo_root: Path, capsule: ContinuityCapsule) -> tuple
     """Validate a final assembled capsule including V3 fields and return canonical JSON."""
     payload, canonical = _validate_capsule(repo_root, capsule)
     _validate_v3_capsule_fields(capsule)
-    if len(canonical.encode("utf-8")) > 12 * 1024:
-        raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
     return payload, canonical
 
 
@@ -387,6 +401,157 @@ def _persist_active_capsule(
         if restore_error is not None:
             detail = f"{detail}; rollback failed: {restore_error}"
         raise HTTPException(status_code=500, detail=detail) from exc
+
+
+def _fallback_snapshot_payload(*, capsule: dict[str, Any], active_rel: str, captured_at: str) -> dict[str, Any]:
+    """Build one fallback snapshot envelope from a validated active capsule."""
+    health_status, _health_reasons = _capsule_health_summary(capsule)
+    return {
+        "schema_type": CONTINUITY_FALLBACK_SCHEMA_TYPE,
+        "schema_version": CONTINUITY_FALLBACK_SCHEMA_VERSION,
+        "captured_at": captured_at,
+        "source_path": active_rel,
+        "verification_status": _verification_status(capsule),
+        "health_status": health_status,
+        "capsule": capsule,
+    }
+
+
+def _restore_failed_fallback_snapshot(path: Path, old_bytes: bytes | None, exc: Exception) -> str:
+    """Restore the prior fallback snapshot bytes after a failed commit and return audit detail."""
+    restore_error: Exception | None = None
+    try:
+        if old_bytes is None:
+            if path.exists():
+                path.unlink()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(old_bytes)
+    except Exception as restore_exc:
+        restore_error = restore_exc
+    detail = f"Failed to persist continuity fallback snapshot: {exc}"
+    if restore_error is not None:
+        detail = f"{detail}; rollback failed: {restore_error}"
+    return detail
+
+
+def _restore_failed_refresh_state(path: Path, old_bytes: bytes | None, exc: Exception) -> HTTPException:
+    """Return a refresh-state persistence error after restoring the prior durable bytes."""
+    restore_error: Exception | None = None
+    try:
+        if old_bytes is None:
+            if path.exists():
+                path.unlink()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(old_bytes)
+    except Exception as restore_exc:
+        restore_error = restore_exc
+    detail = f"Failed to persist continuity refresh state: {exc}"
+    if restore_error is not None:
+        detail = f"{detail}; rollback failed: {restore_error}"
+    return HTTPException(status_code=500, detail=detail)
+
+
+def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]:
+    """Load and validate a fallback snapshot envelope payload."""
+    path = safe_path(repo_root, rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Continuity fallback snapshot not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot JSON: {e}") from e
+    if payload.get("schema_type") != CONTINUITY_FALLBACK_SCHEMA_TYPE:
+        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_type")
+    if payload.get("schema_version") != CONTINUITY_FALLBACK_SCHEMA_VERSION:
+        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_version")
+    nested = payload.get("capsule")
+    if not isinstance(nested, dict):
+        raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
+    try:
+        payload["capsule"] = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
+    return payload
+
+
+def _persist_fallback_snapshot(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    subject_kind: str,
+    subject_id: str,
+    capsule: dict[str, Any],
+ ) -> tuple[str, str, str | None]:
+    """Persist the fallback snapshot and restore prior fallback bytes if this write fails."""
+    fallback_rel = continuity_fallback_rel_path(subject_kind, subject_id)
+    path: Path | None = None
+    old_bytes: bytes | None = None
+    try:
+        path = safe_path(repo_root, fallback_rel)
+        old_bytes = path.read_bytes() if path.exists() else None
+        payload = _fallback_snapshot_payload(
+            capsule=capsule,
+            active_rel=continuity_rel_path(subject_kind, subject_id),
+            captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
+        )
+        canonical = canonical_json(payload)
+        new_bytes = canonical.encode("utf-8")
+        if old_bytes == new_bytes:
+            return fallback_rel, "unchanged", None
+        write_text_file(path, canonical)
+        committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
+        if not committed:
+            raise RuntimeError("git commit produced no changes")
+    except Exception as exc:
+        if path is not None:
+            return fallback_rel, "failed", _restore_failed_fallback_snapshot(path, old_bytes, exc)
+        return fallback_rel, "failed", f"Failed to persist continuity fallback snapshot: {exc}"
+    return fallback_rel, "committed", None
+
+
+def _delete_commit_message(subject_kind: str, subject_id: str, reason: str) -> str:
+    """Build a bounded delete commit subject while keeping the full reason in audit detail."""
+    message = f"continuity: delete {subject_kind} {subject_id} - {reason}"
+    if len(message) <= 120:
+        return message
+    return message[:117] + "..."
+
+
+def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tuple[str, str]) -> dict[str, Any]:
+    """Load and validate one fallback snapshot envelope, returning the nested capsule."""
+    payload = _load_fallback_envelope_payload(repo_root, rel)
+    capsule = payload["capsule"]
+    expected_kind, expected_id = expected_subject
+    capsule_kind = str(capsule.get("subject_kind") or "")
+    capsule_subject_id = str(capsule.get("subject_id") or "")
+    if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
+        raise HTTPException(status_code=400, detail="Continuity fallback snapshot subject does not match requested subject")
+    return capsule
+
+
+def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
+    """Load and validate an archive envelope."""
+    path = safe_path(repo_root, rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope JSON: {e}") from e
+    if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
+        raise HTTPException(status_code=400, detail="Invalid continuity archive envelope schema_type")
+    if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+        raise HTTPException(status_code=400, detail="Invalid continuity archive envelope schema_version")
+    capsule = payload.get("capsule")
+    if not isinstance(capsule, dict):
+        raise HTTPException(status_code=400, detail="Invalid continuity archive envelope capsule")
+    try:
+        payload["capsule"] = ContinuityCapsule.model_validate(capsule).model_dump(mode="json", exclude_none=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope capsule: {e}") from e
+    return payload
 
 
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
@@ -542,6 +707,107 @@ def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
             return status, list(reasons or [])
         return "degraded", ["invalid capsule_health payload"]
     return "healthy", []
+
+
+def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, str]]:
+    """Return selectors recently used by continuity reads or retrievals."""
+    path = repo_root / "logs" / "api_audit.jsonl"
+    if not path.exists() or not path.is_file():
+        return set()
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            rows = list(deque(handle, maxlen=10000))
+    except Exception:
+        return set()
+    cutoff = now.timestamp() - (7 * 86400)
+    recent: set[tuple[str, str]] = set()
+    for line in rows:
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        ts = _parse_iso(str(row.get("ts") or ""))
+        if ts is None or ts.timestamp() < cutoff:
+            continue
+        detail = row.get("detail")
+        if not isinstance(detail, dict):
+            continue
+        if row.get("event") == "continuity_read":
+            kind = detail.get("subject_kind")
+            subject_id = detail.get("subject_id")
+            if isinstance(kind, str) and isinstance(subject_id, str):
+                try:
+                    recent.add((kind, _normalize_subject_id(subject_id)))
+                except HTTPException:
+                    continue
+            continue
+        if row.get("event") != "context_retrieve":
+            continue
+        selectors = detail.get("continuity_selectors")
+        if not isinstance(selectors, list):
+            continue
+        for item in selectors:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("subject_kind")
+            subject_id = item.get("subject_id")
+            if isinstance(kind, str) and isinstance(subject_id, str):
+                try:
+                    recent.add((kind, _normalize_subject_id(subject_id)))
+                except HTTPException:
+                    continue
+    return recent
+
+
+def _refresh_reason_codes(
+    *,
+    capsule: dict[str, Any],
+    fallback_only: bool,
+    recently_used: bool,
+    now: datetime,
+) -> list[str]:
+    """Derive deterministic refresh reason codes for one capsule payload."""
+    codes: list[str] = []
+    health_status, _health_reasons = _capsule_health_summary(capsule)
+    if health_status == "degraded":
+        codes.append("health_degraded")
+    elif health_status == "conflicted":
+        codes.append("health_conflicted")
+
+    verification_status = _verification_status(capsule)
+    if verification_status == "unverified":
+        codes.append("verification_unverified")
+    elif verification_status == "self_attested":
+        codes.append("verification_self_attested")
+
+    verified_at = _parse_iso(str(capsule.get("verified_at") or ""))
+    if verified_at is not None and (now - verified_at).total_seconds() > 30 * 86400:
+        codes.append("stale_verified_at")
+    if recently_used:
+        codes.append("recently_used")
+    if fallback_only:
+        codes.append("fallback_only")
+    return codes
+
+
+def _refresh_priority(reason_codes: list[str], *, health_status: str, verification_status: str) -> str:
+    """Map deterministic refresh reason codes to high, medium, or low priority."""
+    if health_status in {"degraded", "conflicted"} or "fallback_only" in reason_codes:
+        return "high"
+    if verification_status in {"unverified", "self_attested"} or "stale_verified_at" in reason_codes:
+        return "medium"
+    return "low"
+
+
+def _refresh_state_payload(now: datetime, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the persisted refresh-state payload from one refresh-plan result."""
+    return {
+        "schema_version": CONTINUITY_REFRESH_STATE_SCHEMA_VERSION,
+        "last_planned_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "last_run_at": None,
+        "last_run_count": 0,
+        "entries": candidates,
+    }
 
 
 def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list[str]]:
@@ -739,7 +1005,7 @@ def continuity_upsert_service(
     auth.require_write_path(rel)
     _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
-    canonical = _canonical_json(capsule.model_dump(mode="json", exclude_none=True))
+    canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
     new_bytes = canonical.encode("utf-8")
     old_bytes = path.read_bytes() if path.exists() else None
     if old_bytes != new_bytes:
@@ -755,6 +1021,8 @@ def continuity_upsert_service(
     created = not path.exists()
     changed = old_bytes != new_bytes
     committed = False
+    fallback_warning: str | None = None
+    fallback_warning_detail: str | None = None
     if changed:
         _persist_active_capsule(
             repo_root=repo_root,
@@ -764,6 +1032,17 @@ def continuity_upsert_service(
             commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
         )
         committed = True
+        fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
+            repo_root=repo_root,
+            gm=gm,
+            subject_kind=req.subject_kind,
+            subject_id=req.subject_id,
+            capsule=capsule.model_dump(mode="json", exclude_none=True),
+        )
+        if fallback_status == "failed":
+            fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
+    else:
+        fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
     audit(
         auth,
         "continuity_upsert",
@@ -776,6 +1055,9 @@ def continuity_upsert_service(
             "capsule_sha256": capsule_sha256,
             "idempotency_key": req.idempotency_key,
             "committed": committed,
+            "fallback_path": fallback_rel,
+            "fallback_warning": fallback_warning,
+            "fallback_warning_detail": fallback_warning_detail,
         },
     )
     return {
@@ -785,6 +1067,8 @@ def continuity_upsert_service(
         "updated": bool(changed and not created),
         "latest_commit": gm.latest_commit(),
         "capsule_sha256": capsule_sha256,
+        "recovery_warnings": [fallback_warning] if fallback_warning else [],
+        "fallback_warning_detail": fallback_warning_detail,
     }
 
 
@@ -795,13 +1079,70 @@ def continuity_read_service(
     req: ContinuityReadRequest,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """Read one active continuity capsule by exact selector."""
+    """Read one active continuity capsule by exact selector with fallback degradation."""
     auth.require("read:files")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_read_path(rel)
-    capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
-    audit(auth, "continuity_read", {"subject_kind": req.subject_kind, "subject_id": req.subject_id, "path": rel})
-    return {"ok": True, "path": rel, "capsule": capsule, "archived": False}
+    fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
+    recovery_warnings: list[str] = []
+    try:
+        capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+        out = {
+            "ok": True,
+            "path": rel,
+            "capsule": capsule,
+            "archived": False,
+            "source_state": "active",
+            "recovery_warnings": recovery_warnings,
+        }
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            recovery_warnings.append(CONTINUITY_WARNING_ACTIVE_MISSING)
+        elif exc.status_code == 400:
+            if "subject does not match" in str(exc.detail):
+                raise
+            recovery_warnings.append(CONTINUITY_WARNING_ACTIVE_INVALID)
+        else:
+            raise
+        if not req.allow_fallback:
+            raise
+        auth.require_read_path(fallback_rel)
+        try:
+            capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(req.subject_kind, req.subject_id))
+            recovery_warnings.append(CONTINUITY_WARNING_FALLBACK_USED)
+            out = {
+                "ok": True,
+                "path": rel,
+                "capsule": capsule,
+                "archived": False,
+                "source_state": "fallback",
+                "recovery_warnings": recovery_warnings,
+            }
+        except HTTPException as fallback_exc:
+            if fallback_exc.status_code in {400, 404}:
+                recovery_warnings.append(CONTINUITY_WARNING_FALLBACK_MISSING)
+                out = {
+                    "ok": True,
+                    "path": rel,
+                    "capsule": None,
+                    "archived": False,
+                    "source_state": "missing",
+                    "recovery_warnings": recovery_warnings,
+                }
+            else:
+                raise
+    audit(
+        auth,
+        "continuity_read",
+        {
+            "subject_kind": req.subject_kind,
+            "subject_id": req.subject_id,
+            "path": rel,
+            "source_state": out["source_state"],
+            "recovery_warnings": out["recovery_warnings"],
+        },
+    )
+    return out
 
 
 def continuity_list_service(
@@ -812,13 +1153,15 @@ def continuity_list_service(
     now: datetime,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """List active continuity capsule summaries under the repository namespace."""
+    """List active, fallback, and archive continuity summaries under the repository namespace."""
     auth.require("read:files")
     base = repo_root / CONTINUITY_DIR_REL
     summaries: list[dict[str, Any]] = []
     if base.exists() and base.is_dir():
         for path in sorted(base.iterdir(), key=lambda item: item.name):
             if path.is_dir() or path.suffix.lower() != ".json":
+                continue
+            if path.name == "refresh_state.json":
                 continue
             if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
                 continue
@@ -850,9 +1193,98 @@ def continuity_list_service(
                     "verification_status": verification_status,
                     "health_status": health_status,
                     "health_reasons": health_reasons,
+                    "artifact_state": "active",
+                    "retention_class": "active",
                 }
             )
-    summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"])))
+    if req.include_fallback:
+        fallback_base = repo_root / CONTINUITY_DIR_REL / "fallback"
+        if fallback_base.exists() and fallback_base.is_dir():
+            for path in sorted(fallback_base.iterdir(), key=lambda item: item.name):
+                if path.is_dir() or path.suffix.lower() != ".json":
+                    continue
+                rel = str(path.relative_to(repo_root))
+                try:
+                    auth.require_read_path(rel)
+                except HTTPException:
+                    continue
+                try:
+                    envelope = _load_fallback_envelope_payload(repo_root, rel)
+                except HTTPException as exc:
+                    if exc.status_code in {400, 404}:
+                        continue
+                    raise
+                capsule = envelope["capsule"]
+                if req.subject_kind and capsule["subject_kind"] != req.subject_kind:
+                    continue
+                phase, _ = _continuity_phase(capsule, now)
+                freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
+                verification_status = _verification_status(capsule)
+                health_status, health_reasons = _capsule_health_summary(capsule)
+                summaries.append(
+                    {
+                        "subject_kind": capsule["subject_kind"],
+                        "subject_id": capsule["subject_id"],
+                        "path": rel,
+                        "updated_at": capsule["updated_at"],
+                        "verified_at": capsule["verified_at"],
+                        "verification_kind": capsule.get("verification_kind"),
+                        "freshness_class": freshness.get("freshness_class"),
+                        "phase": phase,
+                        "verification_status": verification_status,
+                        "health_status": health_status,
+                        "health_reasons": health_reasons,
+                        "artifact_state": "fallback",
+                        "retention_class": "fallback",
+                    }
+                )
+    if req.include_archived:
+        archive_base = repo_root / CONTINUITY_DIR_REL / "archive"
+        if archive_base.exists() and archive_base.is_dir():
+            for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
+                if path.is_dir() or path.suffix.lower() != ".json":
+                    continue
+                rel = str(path.relative_to(repo_root))
+                try:
+                    auth.require_read_path(rel)
+                except HTTPException:
+                    continue
+                try:
+                    envelope = _load_archive_envelope(repo_root, rel)
+                except HTTPException as exc:
+                    if exc.status_code in {400, 404}:
+                        continue
+                    raise
+                capsule = envelope["capsule"]
+                if req.subject_kind and capsule["subject_kind"] != req.subject_kind:
+                    continue
+                phase, _ = _continuity_phase(capsule, now)
+                freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
+                verification_status = _verification_status(capsule)
+                health_status, health_reasons = _capsule_health_summary(capsule)
+                archived_at = _parse_iso(str(envelope.get("archived_at") or ""))
+                retention_class = "archive_recent"
+                if archived_at is not None and (now - archived_at).total_seconds() > (CONTINUITY_RETENTION_ARCHIVE_DAYS * 86400):
+                    retention_class = "archive_stale"
+                summaries.append(
+                    {
+                        "subject_kind": capsule["subject_kind"],
+                        "subject_id": capsule["subject_id"],
+                        "path": str(envelope.get("active_path") or rel),
+                        "updated_at": capsule["updated_at"],
+                        "verified_at": capsule["verified_at"],
+                        "verification_kind": capsule.get("verification_kind"),
+                        "freshness_class": freshness.get("freshness_class"),
+                        "phase": phase,
+                        "verification_status": verification_status,
+                        "health_status": health_status,
+                        "health_reasons": health_reasons,
+                        "artifact_state": "archived",
+                        "retention_class": retention_class,
+                    }
+                )
+    artifact_order = {"active": 0, "fallback": 1, "archived": 2}
+    summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
     summaries = summaries[: req.limit]
     audit(
         auth,
@@ -863,6 +1295,292 @@ def continuity_list_service(
         },
     )
     return {"ok": True, "count": len(summaries), "capsules": summaries}
+
+
+def continuity_delete_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityDeleteRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Delete selected continuity artifacts for one exact selector."""
+    auth.require("write:projects")
+    active_rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
+    archive_prefix = f"{req.subject_kind}-{_normalize_subject_id(req.subject_id)}-"
+    archive_base = repo_root / CONTINUITY_DIR_REL / "archive"
+
+    selected_rels: list[str] = []
+    missing_paths: list[str] = []
+    paths_to_stage: list[Path] = []
+    original_bytes: dict[Path, bytes] = {}
+
+    if req.delete_active:
+        auth.require_write_path(active_rel)
+        active_path = safe_path(repo_root, active_rel)
+        if active_path.exists():
+            selected_rels.append(active_rel)
+            paths_to_stage.append(active_path)
+            original_bytes[active_path] = active_path.read_bytes()
+        else:
+            missing_paths.append(active_rel)
+
+    if req.delete_fallback:
+        auth.require_write_path(fallback_rel)
+        fallback_path = safe_path(repo_root, fallback_rel)
+        if fallback_path.exists():
+            selected_rels.append(fallback_rel)
+            paths_to_stage.append(fallback_path)
+            original_bytes[fallback_path] = fallback_path.read_bytes()
+        else:
+            missing_paths.append(fallback_rel)
+
+    if req.delete_archive and archive_base.exists() and archive_base.is_dir():
+        archive_paths: list[tuple[str, Path]] = []
+        for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
+            stem = path.stem
+            if path.is_dir() or path.suffix.lower() != ".json" or not stem.startswith(archive_prefix):
+                continue
+            archive_suffix = stem[len(archive_prefix):]
+            if re.fullmatch(r"\d{8}T\d{6}Z", archive_suffix) is None:
+                continue
+            rel = str(path.relative_to(repo_root))
+            auth.require_write_path(rel)
+            archive_paths.append((rel, path))
+        for rel, path in archive_paths:
+            selected_rels.append(rel)
+            paths_to_stage.append(path)
+            original_bytes[path] = path.read_bytes()
+
+    if not paths_to_stage:
+        audit(
+            auth,
+            "continuity_delete",
+            {
+                "subject_kind": req.subject_kind,
+                "subject_id": req.subject_id,
+                "deleted_paths": [],
+                "missing_paths": missing_paths,
+                "reason": req.reason,
+            },
+        )
+        return {
+            "ok": True,
+            "deleted_paths": [],
+            "missing_paths": missing_paths,
+            "latest_commit": gm.latest_commit(),
+        }
+
+    try:
+        for path in paths_to_stage:
+            path.unlink()
+        committed = gm.commit_paths(paths_to_stage, _delete_commit_message(req.subject_kind, req.subject_id, req.reason))
+        if not committed:
+            raise RuntimeError("Continuity delete commit produced no changes")
+    except Exception as exc:
+        restore_errors: list[str] = []
+        for path, data in original_bytes.items():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            except Exception as restore_exc:
+                restore_errors.append(f"{path}: {restore_exc}")
+        if restore_errors:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Continuity delete failed: {exc}; rollback failed for {', '.join(restore_errors)}",
+            ) from exc
+        raise HTTPException(status_code=500, detail=f"Continuity delete failed: {exc}") from exc
+    audit(
+        auth,
+        "continuity_delete",
+        {
+            "subject_kind": req.subject_kind,
+            "subject_id": req.subject_id,
+            "deleted_paths": selected_rels,
+            "missing_paths": missing_paths,
+            "reason": req.reason,
+        },
+    )
+    return {
+        "ok": True,
+        "deleted_paths": selected_rels,
+        "missing_paths": missing_paths,
+        "latest_commit": gm.latest_commit(),
+    }
+
+
+def continuity_refresh_plan_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityRefreshPlanRequest,
+    now: datetime,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Build and persist a deterministic continuity refresh plan."""
+    auth.require("read:files")
+    auth.require("write:projects")
+    refresh_rel = CONTINUITY_REFRESH_STATE_REL
+    auth.require_write_path(refresh_rel)
+    recent_selectors = _audit_recent_selectors(repo_root, now)
+    base = repo_root / CONTINUITY_DIR_REL
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    if base.exists() and base.is_dir():
+        for path in sorted(base.iterdir(), key=lambda item: item.name):
+            if path.is_dir() or path.suffix.lower() != ".json":
+                continue
+            if path.name == "refresh_state.json":
+                continue
+            rel = str(path.relative_to(repo_root))
+            if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
+                continue
+            try:
+                auth.require_read_path(rel)
+            except HTTPException:
+                continue
+            try:
+                capsule = _load_capsule(repo_root, rel)
+            except HTTPException as exc:
+                if exc.status_code in {400, 404}:
+                    continue
+                raise
+            selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
+            selector_key = _selector_key(selector[0], selector[1])
+            seen.add(selector_key)
+            codes = _refresh_reason_codes(
+                capsule=capsule,
+                fallback_only=False,
+                recently_used=selector_key in recent_selectors,
+                now=now,
+            )
+            if not req.include_healthy and (not codes or codes == ["recently_used"]):
+                continue
+            verification_status = _verification_status(capsule)
+            health_status, _health_reasons = _capsule_health_summary(capsule)
+            candidates.append(
+                {
+                    "subject_kind": selector[0],
+                    "subject_id": selector[1],
+                    "path": rel,
+                    "health_status": health_status,
+                    "verification_status": verification_status,
+                    "last_revalidated_at": (
+                        str(capsule.get("verification_state", {}).get("last_revalidated_at"))
+                        if isinstance(capsule.get("verification_state"), dict)
+                        and capsule.get("verification_state", {}).get("last_revalidated_at")
+                        else None
+                    ),
+                    "updated_at": capsule["updated_at"],
+                    "reason_codes": codes,
+                    "recommended_priority": _refresh_priority(
+                        codes,
+                        health_status=health_status,
+                        verification_status=verification_status,
+                    ),
+                }
+            )
+
+    fallback_dir = repo_root / CONTINUITY_DIR_REL / "fallback"
+    if fallback_dir.exists() and fallback_dir.is_dir():
+        for path in sorted(fallback_dir.iterdir(), key=lambda item: item.name):
+            if path.is_dir() or path.suffix.lower() != ".json":
+                continue
+            if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
+                continue
+            rel = str(path.relative_to(repo_root))
+            try:
+                auth.require_read_path(rel)
+            except HTTPException:
+                continue
+            try:
+                envelope = _load_fallback_envelope_payload(repo_root, rel)
+            except Exception:
+                continue
+            capsule = envelope["capsule"]
+            selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
+            selector_key = _selector_key(selector[0], selector[1])
+            if selector_key in seen:
+                continue
+            active_rel = continuity_rel_path(selector[0], selector[1])
+            try:
+                auth.require_read_path(active_rel)
+            except HTTPException:
+                continue
+            codes = _refresh_reason_codes(
+                capsule=capsule,
+                fallback_only=True,
+                recently_used=selector_key in recent_selectors,
+                now=now,
+            )
+            if not req.include_healthy and (not codes or codes == ["recently_used"]):
+                continue
+            verification_status = _verification_status(capsule)
+            health_status, _health_reasons = _capsule_health_summary(capsule)
+            candidates.append(
+                {
+                    "subject_kind": selector[0],
+                    "subject_id": selector[1],
+                    "path": active_rel,
+                    "health_status": health_status,
+                    "verification_status": verification_status,
+                    "last_revalidated_at": (
+                        str(capsule.get("verification_state", {}).get("last_revalidated_at"))
+                        if isinstance(capsule.get("verification_state"), dict)
+                        and capsule.get("verification_state", {}).get("last_revalidated_at")
+                        else None
+                    ),
+                    "updated_at": capsule["updated_at"],
+                    "reason_codes": codes,
+                    "recommended_priority": _refresh_priority(
+                        codes,
+                        health_status=health_status,
+                        verification_status=verification_status,
+                    ),
+                }
+            )
+
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    candidates.sort(key=lambda row: (priority_order.get(str(row["recommended_priority"]), 3), str(row["subject_kind"]), str(row["subject_id"])))
+    candidates = candidates[: req.limit]
+
+    refresh_path = safe_path(repo_root, refresh_rel)
+    payload = _refresh_state_payload(now, candidates)
+    canonical = canonical_json(payload)
+    old_bytes = refresh_path.read_bytes() if refresh_path.exists() else None
+    latest_commit = gm.latest_commit()
+    new_bytes = canonical.encode("utf-8")
+    if old_bytes != new_bytes:
+        try:
+            write_text_file(refresh_path, canonical)
+            committed = gm.commit_file(refresh_path, "continuity: refresh plan")
+            if not committed:
+                raise RuntimeError("git commit produced no changes")
+            latest_commit = gm.latest_commit()
+        except Exception as exc:
+            raise _restore_failed_refresh_state(refresh_path, old_bytes, exc) from exc
+
+    audit(
+        auth,
+        "continuity_refresh_plan",
+        {
+            "subject_kind": req.subject_kind,
+            "count": len(candidates),
+            "path": refresh_rel,
+        },
+    )
+    return {
+        "ok": True,
+        "count": len(candidates),
+        "generated_at": payload["last_planned_at"],
+        "candidates": candidates,
+        "latest_commit": latest_commit,
+    }
 
 
 def continuity_compare_service(
@@ -1011,6 +1729,13 @@ def continuity_revalidate_service(
         canonical=canonical,
         commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
     )
+    fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
+        repo_root=repo_root,
+        gm=gm,
+        subject_kind=req.subject_kind,
+        subject_id=req.subject_id,
+        capsule=final_capsule.model_dump(mode="json", exclude_none=True),
+    )
     audit(
         auth,
         "continuity_revalidate",
@@ -1021,6 +1746,9 @@ def continuity_revalidate_service(
             "outcome": result_outcome,
             "strongest_signal": strongest_signal,
             "updated": updated,
+            "fallback_path": fallback_rel,
+            "fallback_warning": CONTINUITY_WARNING_FALLBACK_WRITE_FAILED if fallback_status == "failed" else None,
+            "fallback_warning_detail": fallback_warning_detail,
         },
     )
     return {
@@ -1031,6 +1759,8 @@ def continuity_revalidate_service(
         "verification_state": final_capsule.verification_state.model_dump(mode="json", exclude_none=True),
         "capsule_health": final_capsule.capsule_health.model_dump(mode="json", exclude_none=True),
         "latest_commit": gm.latest_commit(),
+        "recovery_warnings": [CONTINUITY_WARNING_FALLBACK_WRITE_FAILED] if fallback_status == "failed" else [],
+        "fallback_warning_detail": fallback_warning_detail,
     }
 
 
@@ -1054,8 +1784,8 @@ def continuity_archive_service(
 
     capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
     archive_payload = {
-        "schema_type": "continuity_archive_envelope",
-        "schema_version": "1.0",
+        "schema_type": CONTINUITY_ARCHIVE_SCHEMA_TYPE,
+        "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
         "archived_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "archived_by": auth.peer_id,
         "reason": req.reason,
@@ -1067,7 +1797,7 @@ def continuity_archive_service(
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     active_path = safe_path(repo_root, rel)
     active_bytes = active_path.read_bytes()
-    write_text_file(archive_path, _canonical_json(archive_payload))
+    write_text_file(archive_path, canonical_json(archive_payload))
     # The active-path deletion must be staged before the git commit can atomically
     # record the archive write plus active-file removal. If the commit step fails,
     # restore the active capsule and discard the archive envelope immediately.
@@ -1127,6 +1857,8 @@ def build_continuity_state(
         "selection_order": [],
         "budget": budget,
         "warnings": [],
+        "fallback_used": False,
+        "recovery_warnings": [],
     }
     if req.continuity_mode == "off":
         return state
@@ -1141,24 +1873,52 @@ def build_continuity_state(
 
     loaded: list[dict[str, Any]] = []
     warnings: list[str] = []
+    recovery_warnings: list[str] = []
+    fallback_used = False
     for item in selectors:
         kind = item["subject_kind"]
         subject_id = item["subject_id"]
         resolution = item["resolution"]
         rel = continuity_rel_path(kind, subject_id)
         auth.require_read_path(rel)
-        path = repo_root / rel
-        if not path.exists():
-            state["omitted_selectors"].append(_format_selector(kind, subject_id))
-            continue
+        source_state = "active"
         try:
             capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
         except HTTPException as exc:
-            if exc.status_code == 400 and len(selectors) > 1:
-                state["omitted_selectors"].append(_format_selector(kind, subject_id))
-                warnings.append(_qualify_warning(CONTINUITY_WARNING_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+            selector_label = _format_selector(kind, subject_id)
+            if exc.status_code == 404:
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode))
+            elif exc.status_code == 400:
+                if "subject does not match" in str(exc.detail):
+                    raise
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+            else:
+                raise
+            resilience_policy = req.continuity_resilience_policy
+            if resilience_policy == "require_active":
+                state["omitted_selectors"].append(selector_label)
                 continue
-            raise
+            if resilience_policy not in {"allow_fallback", "prefer_active"}:
+                raise HTTPException(status_code=400, detail="Unsupported continuity_resilience_policy")
+            fallback_rel = continuity_fallback_rel_path(kind, subject_id)
+            auth.require_read_path(fallback_rel)
+            try:
+                capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(kind, subject_id))
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_USED, kind, subject_id, multi_mode=multi_warning_mode))
+                fallback_used = True
+                source_state = "fallback"
+            except HTTPException as fallback_exc:
+                if fallback_exc.status_code in {400, 404}:
+                    if exc.status_code == 404:
+                        recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode))
+                        state["omitted_selectors"].append(selector_label)
+                        continue
+                    if len(selectors) > 1:
+                        warnings.append(_qualify_warning(CONTINUITY_WARNING_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
+                        state["omitted_selectors"].append(selector_label)
+                        continue
+                    raise exc
+                raise
         phase, phase_warnings = _continuity_phase(capsule, now)
         warnings.extend(_qualify_warning(warning, kind, subject_id, multi_mode=multi_warning_mode) for warning in phase_warnings)
         if phase in {"expired", "expired_by_age"}:
@@ -1172,6 +1932,7 @@ def build_continuity_state(
                 "verification_status": _verification_status(capsule),
                 "health_status": health_status,
                 "health_reasons": health_reasons,
+                "source_state": source_state,
             }
         )
 
@@ -1179,6 +1940,8 @@ def build_continuity_state(
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         state["warnings"] = warnings
+        state["recovery_warnings"] = recovery_warnings
+        state["fallback_used"] = fallback_used
         return state
 
     if req.continuity_verification_policy == "prefer_healthy":
@@ -1200,6 +1963,8 @@ def build_continuity_state(
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         state["warnings"] = warnings
+        state["recovery_warnings"] = recovery_warnings
+        state["fallback_used"] = fallback_used
         return state
 
     reserve = budget["continuity_tokens_reserved"]
@@ -1220,6 +1985,7 @@ def build_continuity_state(
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUNCATED_MULTI, kind, subject_id, multi_mode=multi_warning_mode))
             continue
+        trimmed["source_state"] = row["source_state"]
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
         if row["health_status"] == "degraded":
@@ -1231,11 +1997,15 @@ def build_continuity_state(
         if req.continuity_mode == "required":
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         state["warnings"] = warnings
+        state["recovery_warnings"] = recovery_warnings
+        state["fallback_used"] = fallback_used
         return state
 
     state["present"] = True
     state["capsules"] = trimmed_capsules
     state["selection_order"] = trimmed_selection_order
     state["warnings"] = warnings
+    state["recovery_warnings"] = recovery_warnings
+    state["fallback_used"] = fallback_used
     state["budget"]["continuity_tokens_used"] = sum(_estimated_tokens(_render_value(item)) for item in trimmed_capsules)
     return state

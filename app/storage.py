@@ -57,6 +57,11 @@ def write_text_file(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def canonical_json(data: Any) -> str:
+    """Serialize JSON deterministically for hashing and idempotency checks."""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def append_jsonl(path: Path, record: Any) -> None:
     """Append one JSON line record to a file, creating parents as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)

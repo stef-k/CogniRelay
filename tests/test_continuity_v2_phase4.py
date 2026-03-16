@@ -190,7 +190,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
                 audit=lambda *_args: None,
             )
 
-            with self.assertRaises(HTTPException) as read_cm:
+            with self.assertRaises(HTTPException) as cm:
                 continuity_read_service(
                     repo_root=repo_root,
                     auth=_AuthStub(),
@@ -198,7 +198,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
                     audit=lambda *_args: None,
                 )
 
-            self.assertEqual(read_cm.exception.status_code, 404)
+            self.assertEqual(cm.exception.status_code, 404)
 
             listed = continuity_list_service(
                 repo_root=repo_root,

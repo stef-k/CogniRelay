@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.continuity import build_continuity_state
-from app.indexer import incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
+from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
 from app.storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
 
@@ -34,6 +34,11 @@ _CORE_MEMORY_PATHS = (
     "memory/core/identity.md",
     "memory/core/long_term_facts.json",
     "memory/core/values.md",
+)
+_PRIMARY_INDEX_ARTIFACTS = (
+    "index/files_index.json",
+    "index/search.db",
+    "index/index_state.json",
 )
 
 
@@ -228,6 +233,156 @@ def _load_core_memory(repo_root: Path, auth: AuthContext) -> list[dict[str, Any]
     return core_memory
 
 
+def _parse_utc_iso(value: str | None) -> datetime | None:
+    """Parse index metadata timestamps into UTC, treating legacy naive values as UTC."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _index_health(repo_root: Path, now: datetime) -> str:
+    """Classify derived index health for retrieval fallback decisions."""
+    for rel in _PRIMARY_INDEX_ARTIFACTS:
+        if not (repo_root / rel).exists():
+            return "missing"
+    try:
+        payload = json.loads((repo_root / "index" / "files_index.json").read_text(encoding="utf-8"))
+    except Exception:
+        return "stale"
+    generated_at = _parse_utc_iso(str(payload.get("generated_at") or ""))
+    if generated_at is None:
+        return "stale"
+    if (now - generated_at).total_seconds() > 86400:
+        return "stale"
+    return "healthy"
+
+
+def _task_terms(task: str) -> list[str]:
+    """Extract lowercased request terms preserving first appearance."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for term in SNAPSHOT_WORD_RE.findall(task):
+        lowered = term.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(lowered)
+    return out
+
+
+def _raw_scan_candidate_paths(repo_root: Path) -> list[tuple[Path, float]]:
+    """Enumerate deterministic raw-scan candidates using indexer eligibility rules."""
+    candidates: list[tuple[float, str, Path, float]] = []
+    for path in repo_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel_path = path.relative_to(repo_root)
+        except ValueError:
+            continue
+        rel = str(rel_path)
+        if rel in _CORE_MEMORY_PATHS:
+            continue
+        if ".git" in path.parts:
+            continue
+        if len(rel_path.parts) >= 2 and rel_path.parts[0] == "memory" and rel_path.parts[1] == "continuity":
+            continue
+        if rel_path.parts and rel_path.parts[0] == "index":
+            continue
+        if path.suffix.lower() not in TEXT_SUFFIXES:
+            continue
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
+        candidates.append((-stat.st_mtime, str(rel_path), path, stat.st_mtime))
+    candidates.sort()
+    return [(item[2], item[3]) for item in candidates[:200]]
+
+
+def _raw_scan_recent_relevant(
+    repo_root: Path,
+    auth: AuthContext,
+    req: ContextRetrieveRequest,
+) -> list[dict[str, Any]]:
+    """Build bounded retrieval evidence directly from repository files."""
+    include_set = {item.lower() for item in req.include_types if item}
+    task_terms = _task_terms(req.task)
+    rows: list[dict[str, Any]] = []
+    for path, mtime in _raw_scan_candidate_paths(repo_root):
+        rel = str(path.relative_to(repo_root))
+        try:
+            auth.require_read_path(rel)
+        except HTTPException:
+            continue
+        try:
+            raw = path.read_bytes()[:4096]
+        except Exception:
+            continue
+        text = raw.decode("utf-8", errors="ignore")
+        record_type, importance = _record_type_importance(rel, text)
+        if include_set and record_type.lower() not in include_set:
+            continue
+        low_rel = rel.lower()
+        low_text = text.lower()
+        path_matches = sum(1 for term in task_terms if term in low_rel)
+        snippet_matches = sum(1 for term in task_terms if term in low_text)
+        rows.append(
+            {
+                "path": rel,
+                "type": record_type,
+                "snippet": _snippet_text(text),
+                "importance": importance,
+                "modified_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+                "score": (path_matches * 1000) + snippet_matches,
+                "_path_matches": path_matches,
+                "_snippet_matches": snippet_matches,
+                "_mtime": mtime,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -int(row["_path_matches"]),
+            -int(row["_snippet_matches"]),
+            -float(row["_mtime"]),
+            str(row["path"]),
+        )
+    )
+    trimmed = rows[: req.limit]
+    for row in trimmed:
+        row.pop("_path_matches", None)
+        row.pop("_snippet_matches", None)
+        row.pop("_mtime", None)
+    return trimmed
+
+
+def _pack_recent_relevant(results: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Sort evidence using the established packing order and score tie-breaks."""
+    def _group(path: str) -> int:
+        """Bucket paths into summary, message, then everything-else ordering groups."""
+        if path.startswith("memory/summaries/"):
+            return 0
+        if path.startswith("messages/"):
+            return 1
+        return 2
+
+    packed = sorted(
+        results,
+        key=lambda row: (
+            _group(str(row.get("path", ""))),
+            -float(row.get("score", 0) or 0),
+            str(row.get("path", "")),
+        ),
+    )
+    return packed[:limit]
+
+
 def context_retrieve_service(
     *,
     repo_root: Path,
@@ -239,24 +394,32 @@ def context_retrieve_service(
     """Assemble a continuation bundle from core memory, search, and continuity state."""
     auth.require("search")
     core_memory = _load_core_memory(repo_root, auth)
-    recent = search_index(
-        repo_root,
-        req.task,
-        req.limit,
-        include_types=req.include_types or None,
-        time_window_days=req.time_window_days,
-    )
-    recent = _filter_search_results_for_auth(recent, auth)
-    recent = sorted(
-        recent,
-        key=lambda row: (
-            0 if str(row.get("path", "")).startswith("memory/summaries/") else 1,
-            0 if str(row.get("path", "")).startswith("messages/") else 1,
-            -float(row.get("score", 0) or 0),
-        ),
-    )[: req.limit]
-    open_questions = [row["snippet"] for row in recent[:10] if "?" in row.get("snippet", "")]
     continuity_state = build_continuity_state(repo_root=repo_root, auth=auth, req=req, now=now)
+    index_health = _index_health(repo_root, now)
+    if index_health == "missing":
+        recent = _raw_scan_recent_relevant(repo_root, auth, req)
+        continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + [
+            "continuity_index_missing"
+        ]
+    else:
+        try:
+            recent = search_index(
+                repo_root,
+                req.task,
+                req.limit,
+                include_types=req.include_types or None,
+                time_window_days=req.time_window_days,
+            )
+            recent = _filter_search_results_for_auth(recent, auth)
+        except Exception:
+            recent = _raw_scan_recent_relevant(repo_root, auth, req)
+            index_health = "stale"
+        if index_health == "stale":
+            continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + [
+                "continuity_index_stale"
+            ]
+    recent = _pack_recent_relevant(recent, req.limit)
+    open_questions = [row["snippet"] for row in recent[:10] if "?" in row.get("snippet", "")]
     bundle = {
         "task": req.task,
         "generated_at": now.isoformat(),
@@ -272,7 +435,24 @@ def context_retrieve_service(
         ],
         "continuity_state": continuity_state,
     }
-    audit(auth, "context_retrieve", {"task": req.task[:120], "count": len(recent)})
+    continuity_selectors = [
+        {
+            "subject_kind": item["subject_kind"],
+            "subject_id": item["subject_id"],
+            "source_state": item.get("source_state", "active"),
+        }
+        for item in continuity_state.get("capsules", [])
+        if isinstance(item, dict) and item.get("subject_kind") and item.get("subject_id")
+    ]
+    audit(
+        auth,
+        "context_retrieve",
+        {
+            "task": req.task[:120],
+            "count": len(recent),
+            "continuity_selectors": continuity_selectors,
+        },
+    )
     return {"ok": True, "bundle": bundle}
 
 

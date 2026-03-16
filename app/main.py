@@ -25,8 +25,10 @@ from .context import (
 from .continuity import (
     continuity_archive_service,
     continuity_compare_service,
+    continuity_delete_service,
     continuity_list_service,
     continuity_read_service,
+    continuity_refresh_plan_service,
     continuity_revalidate_service,
     continuity_upsert_service,
 )
@@ -55,8 +57,10 @@ from .models import (
     CompactRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
+    ContinuityDeleteRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     ContextSnapshotRequest,
@@ -245,8 +249,10 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         continuity_read=lambda req, auth_ctx: continuity_read(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_compare=lambda req, auth_ctx: continuity_compare(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_revalidate=lambda req, auth_ctx: continuity_revalidate(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_refresh_plan=lambda req, auth_ctx: continuity_refresh_plan(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_list=lambda req, auth_ctx: continuity_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_archive=lambda req, auth_ctx: continuity_archive(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_delete=lambda req, auth_ctx: continuity_delete(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_get=lambda snapshot_id, auth_ctx: context_snapshot_get(snapshot_id=snapshot_id, auth=auth_ctx),  # type: ignore[arg-type]
         tasks_create=lambda req, auth_ctx: tasks_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
@@ -564,12 +570,26 @@ def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(
 
 @app.post("/v1/continuity/read")
 def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(require_auth)) -> dict:
-    """Read one active continuity capsule by exact selector."""
+    """Read one continuity capsule by exact selector with optional fallback handling."""
     settings, _ = _services()
     return continuity_read_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/refresh/plan")
+def continuity_refresh_plan(req: ContinuityRefreshPlanRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Build and persist a deterministic continuity refresh plan."""
+    settings, gm = _services()
+    return continuity_refresh_plan_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 
@@ -601,7 +621,7 @@ def continuity_revalidate(req: ContinuityRevalidateRequest, auth: AuthContext = 
 
 @app.post("/v1/continuity/list")
 def continuity_list(req: ContinuityListRequest, auth: AuthContext = Depends(require_auth)) -> dict:
-    """List active continuity capsule summaries."""
+    """List active, fallback, and archived continuity capsule summaries."""
     settings, _ = _services()
     return continuity_list_service(
         repo_root=settings.repo_root,
@@ -622,6 +642,19 @@ def continuity_archive(req: ContinuityArchiveRequest, auth: AuthContext = Depend
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/delete")
+def continuity_delete(req: ContinuityDeleteRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Delete selected continuity artifacts for one exact selector."""
+    settings, gm = _services()
+    return continuity_delete_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 
@@ -1127,6 +1160,8 @@ def backup_restore_test(req: BackupRestoreTestRequest, auth: AuthContext = Depen
         rebuild_index=rebuild_index,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
+
+
 @app.post("/v1/compact/run")
 def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Generate a compaction plan for memory and summary candidates."""

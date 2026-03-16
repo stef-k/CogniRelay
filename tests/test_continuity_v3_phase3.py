@@ -42,6 +42,17 @@ class _FailingGitManagerStub(_GitManagerStub):
         raise RuntimeError("git commit failed")
 
 
+class _FailingFallbackGitManagerStub(_GitManagerStub):
+    """Git manager stub that fails only the fallback snapshot commit."""
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        """Raise on fallback snapshot commits while allowing the active revalidate commit."""
+        super().commit_file(path, message)
+        if "fallback" in path.parts:
+            raise RuntimeError("fallback git failure")
+        return True
+
+
 class TestContinuityV3Phase3(unittest.TestCase):
     """Validate the V3 revalidate endpoint and service contract."""
 
@@ -339,6 +350,28 @@ class TestContinuityV3Phase3(unittest.TestCase):
                 )
 
             self.assertEqual(cm.exception.status_code, 404)
+
+    def test_revalidate_surfaces_fallback_write_warning_in_response(self) -> None:
+        """Revalidate should degrade success when only the fallback snapshot write fails."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _FailingFallbackGitManagerStub()
+            payload = self._capsule_payload()
+            self._write_capsule(repo_root, payload)
+            req = ContinuityRevalidateRequest(
+                subject_kind="user",
+                subject_id="stef",
+                outcome="confirm",
+                signals=self._signals(),
+            )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_revalidate(req=req, auth=_AuthStub())
+
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["recovery_warnings"], ["continuity_fallback_write_failed"])
+            self.assertIn("Failed to persist continuity fallback snapshot", out["fallback_warning_detail"])
 
     def test_revalidate_enforces_outcome_specific_validation(self) -> None:
         """Revalidate should reject forbidden candidate and reason combinations."""

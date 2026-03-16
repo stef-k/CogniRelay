@@ -231,7 +231,7 @@ class TestContinuityV1(unittest.TestCase):
             self.assertEqual(state["selection_order"], ["inferred:task:build-v1"])
 
     def test_continuity_upsert_same_bytes_reports_update_false(self) -> None:
-        """Writing identical capsule bytes should report a no-op update."""
+        """Writing identical capsule bytes should avoid extra active or fallback commits."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             gm = _GitManagerStub()
@@ -244,7 +244,8 @@ class TestContinuityV1(unittest.TestCase):
             self.assertTrue(first["created"])
             self.assertFalse(second["created"])
             self.assertFalse(second["updated"])
-            self.assertEqual(len(gm.commits), 1)
+            self.assertEqual(len(gm.commits), 2)
+            self.assertTrue((repo_root / "memory" / "continuity" / "fallback" / "user-stef.json").exists())
 
     def test_continuity_upsert_older_capsule_rejected_when_newer_exists(self) -> None:
         """Older capsules should not overwrite newer continuity state."""
@@ -422,6 +423,16 @@ class TestContinuityV1(unittest.TestCase):
                 with self.assertRaises(HTTPException) as cm:
                     continuity_upsert(req=req, auth=_AuthStub())
             self.assertEqual(cm.exception.status_code, 400)
+
+    def test_continuity_upsert_commit_message_too_long_rejected(self) -> None:
+        """Overlong upsert commit messages should be rejected by the request model."""
+        with self.assertRaises(ValidationError):
+            ContinuityUpsertRequest(
+                subject_kind="user",
+                subject_id="stef",
+                capsule=self._capsule_payload(),
+                commit_message="x" * 241,
+            )  # type: ignore[arg-type]
 
     def test_trim_capsule_drops_lower_priority_optional_fields_before_constraints(self) -> None:
         """Trimming should drop lower-priority optional fields before active constraints."""

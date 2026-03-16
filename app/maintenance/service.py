@@ -18,13 +18,174 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.continuity.service import (
+    CONTINUITY_ARCHIVE_SCHEMA_TYPE,
+    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+    CONTINUITY_DIR_REL,
+    CONTINUITY_FALLBACK_SCHEMA_TYPE,
+    CONTINUITY_FALLBACK_SCHEMA_VERSION,
+    continuity_fallback_rel_path,
+    continuity_rel_path,
+)
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ReplicationPullRequest, ReplicationPushRequest
-from app.storage import read_text_file, safe_path, write_text_file
+from app.models import ContinuityCapsule
+from app.storage import canonical_json, read_text_file, safe_path, write_text_file
 
 REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
 REPLICATION_TOMBSTONES_REL = "peers/replication_tombstones.json"
 BACKUPS_DIR_REL = "backups"
+
+
+def _continuity_included(include_prefixes: list[str]) -> bool:
+    """Return whether the requested backup prefixes cover continuity artifacts."""
+    return any(
+        prefix == "memory"
+        or prefix == CONTINUITY_DIR_REL
+        or prefix.startswith(f"{CONTINUITY_DIR_REL}/")
+        for prefix in include_prefixes
+    )
+
+
+def _continuity_counts(repo_root: Path) -> dict[str, int]:
+    """Count continuity artifact classes in the repository."""
+    active_dir = safe_path(repo_root, CONTINUITY_DIR_REL)
+    fallback_dir = safe_path(repo_root, f"{CONTINUITY_DIR_REL}/fallback")
+    archive_dir = safe_path(repo_root, f"{CONTINUITY_DIR_REL}/archive")
+
+    def _count_json(directory: Path, *, top_level_only: bool = False) -> int:
+        """Count JSON artifacts in one directory, optionally without descending."""
+        if not directory.exists() or not directory.is_dir():
+            return 0
+        iterator = directory.glob("*.json") if top_level_only else directory.rglob("*.json")
+        return sum(
+            1
+            for path in iterator
+            if path.is_file()
+            and path.name != "refresh_state.json"
+        )
+
+    return {
+        "active_capsules": _count_json(active_dir, top_level_only=True),
+        "fallback_snapshots": _count_json(fallback_dir),
+        "archive_envelopes": _count_json(archive_dir),
+    }
+
+
+def _validate_active_continuity_payload(path: Path, restore_root: Path) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored active continuity capsule."""
+    rel = str(path.relative_to(restore_root))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
+        expected_rel = continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
+        if rel != expected_rel:
+            return False, None
+        return True, capsule
+    except Exception:
+        return False, None
+
+
+def _validate_fallback_snapshot_payload(path: Path, restore_root: Path) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored continuity fallback snapshot envelope."""
+    rel = str(path.relative_to(restore_root))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("schema_type") != CONTINUITY_FALLBACK_SCHEMA_TYPE:
+            return False, None
+        if payload.get("schema_version") != CONTINUITY_FALLBACK_SCHEMA_VERSION:
+            return False, None
+        capsule = ContinuityCapsule.model_validate(payload.get("capsule")).model_dump(mode="json", exclude_none=True)
+        expected_rel = continuity_fallback_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
+        if rel != expected_rel:
+            return False, None
+        payload["capsule"] = capsule
+        return True, payload
+    except Exception:
+        return False, None
+
+
+def _validate_archive_envelope_payload(path: Path, restore_root: Path) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored continuity archive envelope, including its active-path match."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
+            return False, None
+        if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+            return False, None
+        capsule = ContinuityCapsule.model_validate(payload.get("capsule")).model_dump(mode="json", exclude_none=True)
+        expected_active_rel = continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
+        if str(payload.get("active_path") or "") != expected_active_rel:
+            return False, None
+        payload["capsule"] = capsule
+        return True, payload
+    except Exception:
+        return False, None
+
+
+def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
+    """Inspect restored continuity artifacts and return structured validation output."""
+    active_dir = restore_root / CONTINUITY_DIR_REL
+    fallback_dir = restore_root / CONTINUITY_DIR_REL / "fallback"
+    archive_dir = restore_root / CONTINUITY_DIR_REL / "archive"
+
+    active_paths = sorted(
+        path for path in active_dir.glob("*.json") if path.is_file() and path.name != "refresh_state.json"
+    ) if active_dir.exists() and active_dir.is_dir() else []
+    fallback_paths = sorted(
+        path for path in fallback_dir.glob("*.json") if path.is_file()
+    ) if fallback_dir.exists() and fallback_dir.is_dir() else []
+    archive_paths = sorted(
+        path for path in archive_dir.glob("*.json") if path.is_file()
+    ) if archive_dir.exists() and archive_dir.is_dir() else []
+
+    invalid_capsules: list[str] = []
+    invalid_fallbacks: list[str] = []
+    invalid_archives: list[str] = []
+    missing_fallbacks: list[str] = []
+    warnings: list[str] = []
+    valid_fallbacks: set[str] = set()
+
+    for path in fallback_paths:
+        valid, payload = _validate_fallback_snapshot_payload(path, restore_root)
+        rel = str(path.relative_to(restore_root))
+        if not valid or not isinstance(payload, dict):
+            invalid_fallbacks.append(rel)
+            warnings.append(f"continuity_invalid_fallback:{rel}")
+            continue
+        capsule = payload["capsule"]
+        valid_fallbacks.add(continuity_fallback_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])))
+
+    for path in archive_paths:
+        valid, _payload = _validate_archive_envelope_payload(path, restore_root)
+        if not valid:
+            rel = str(path.relative_to(restore_root))
+            invalid_archives.append(rel)
+            warnings.append(f"continuity_invalid_archive:{rel}")
+
+    for path in active_paths:
+        valid, capsule = _validate_active_continuity_payload(path, restore_root)
+        rel = str(path.relative_to(restore_root))
+        if not valid or not isinstance(capsule, dict):
+            invalid_capsules.append(rel)
+            warnings.append(f"continuity_invalid_capsule:{rel}")
+            continue
+        fallback_rel = continuity_fallback_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
+        if fallback_rel not in valid_fallbacks:
+            missing_fallbacks.append(rel)
+            warnings.append(f"continuity_missing_fallback:{rel}")
+
+    return {
+        "ok": not (invalid_capsules or invalid_fallbacks or invalid_archives or missing_fallbacks),
+        "active_capsules": len(active_paths),
+        "fallback_capsules": len(fallback_paths),
+        "archive_envelopes": len(archive_paths),
+        "invalid_capsules": invalid_capsules,
+        "invalid_fallbacks": invalid_fallbacks,
+        "invalid_archives": invalid_archives,
+        "missing_fallbacks": missing_fallbacks,
+        "warnings": warnings,
+    }
 
 
 def _load_replication_tombstones(repo_root: Path) -> dict[str, Any]:
@@ -87,11 +248,6 @@ def _write_replication_state(repo_root: Path, payload: dict[str, Any]) -> Path:
 def _sha256_text(content: str) -> str:
     """Return the SHA-256 digest for text content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _canonical_json(data: Any) -> str:
-    """Serialize data using the canonical JSON form used in replication hashes."""
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def iter_replication_files(repo_root: Path, include_prefixes: list[str], max_files: int, include_deleted: bool = True) -> list[dict[str, Any]]:
@@ -528,7 +684,7 @@ def replication_push_service(
         if isinstance(peer, dict):
             target_base = str(peer.get("base_url") or "").strip() or None
 
-    push_id_source = req.idempotency_key or _canonical_json(
+    push_id_source = req.idempotency_key or canonical_json(
         {
             "peer": auth.peer_id,
             "target": target_base,
@@ -563,7 +719,7 @@ def replication_push_service(
     }
     enforce_payload_limit(settings, request_payload, "replication_push")
 
-    body = _canonical_json(request_payload).encode("utf-8")
+    body = canonical_json(request_payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if req.target_token:
         headers["Authorization"] = f"Bearer {req.target_token}"
@@ -669,6 +825,8 @@ def backup_create_service(
         "note": req.note,
         "contract_version": settings.contract_version,
     }
+    if _continuity_included(included_paths):
+        manifest_payload["continuity_counts"] = _continuity_counts(settings.repo_root)
     write_text_file(manifest_path, json.dumps(manifest_payload, ensure_ascii=False, indent=2))
 
     committed_files = []
@@ -752,14 +910,32 @@ def backup_restore_test_service(
             except Exception as e:
                 index_validation = {"ok": False, "error": str(e)}
 
-    ok = extracted_files > 0 and (index_validation is None or bool(index_validation.get("ok")))
-    audit(auth, "backup_restore_test", {"backup_path": rel, "ok": ok, "extracted_files": extracted_files})
+        continuity_validation = None
+        if req.verify_continuity:
+            continuity_validation = _validate_restored_continuity(restore_root)
+
+    ok = (
+        extracted_files > 0
+        and (index_validation is None or bool(index_validation.get("ok")))
+        and (continuity_validation is None or bool(continuity_validation.get("ok")))
+    )
+    audit(
+        auth,
+        "backup_restore_test",
+        {
+            "backup_path": rel,
+            "ok": ok,
+            "extracted_files": extracted_files,
+            "continuity_ok": None if continuity_validation is None else bool(continuity_validation.get("ok")),
+        },
+    )
     return {
         "ok": ok,
         "backup_path": rel,
         "extracted_files": extracted_files,
         "extracted_prefixes": sorted(extracted_prefixes),
         "index_validation": index_validation,
+        "continuity_validation": continuity_validation,
     }
 
 
