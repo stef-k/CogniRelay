@@ -460,6 +460,13 @@ class ContinuityListRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
 
 
+class ContinuityRefreshPlanRequest(BaseModel):
+    """Parameters for deterministic continuity refresh planning."""
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    limit: int = Field(default=25, ge=1, le=100)
+    include_healthy: bool = False
+
+
 class ContinuityArchiveRequest(BaseModel):
     """Exact-selector request for archiving one active continuity capsule."""
     subject_kind: Literal["user", "peer", "thread", "task"]

@@ -122,6 +122,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `continuity_verification_policy` on `POST /v1/context/retrieve` when you need to allow degraded continuity, prefer healthy continuity first, or require healthy capsules only
 - Use `continuity_resilience_policy` on `POST /v1/context/retrieve` when you need to permit fallback snapshots or insist on active continuity only
 - Use `POST /v1/continuity/read` when you need the full capsule for one exact selector and want structured fallback or missing-state degradation
+- Use `POST /v1/continuity/refresh/plan` when you need a deterministic list of the next continuity capsules that should be refreshed
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
 - Use `POST /v1/continuity/revalidate` when you need to confirm, correct, degrade, or conflict-mark one active capsule through the audited write path
 - Use `POST /v1/continuity/list` when you need active capsule summaries, ordering, freshness phase, and additive verification/health status without loading full retrieval bundles
@@ -132,6 +133,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Treat returned `open_questions` as continuation anchors for the next loop
 - Use `POST /v1/continuity/upsert` to persist or replace continuity capsules under `memory/continuity/`
 - Successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` also refresh the last-known-good fallback snapshot under `memory/continuity/fallback/`
+- `POST /v1/continuity/refresh/plan` persists the latest operator-visible plan under `memory/continuity/refresh_state.json`
 - Use `POST /v1/continuity/archive` to move an active capsule into `memory/continuity/archive/` through one git-backed archive commit
 - continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
 - interaction-boundary upserts require `source.update_reason=interaction_boundary` plus a valid scalar `metadata.interaction_boundary_kind`

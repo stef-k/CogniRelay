@@ -272,7 +272,24 @@ def context_retrieve_service(
         ],
         "continuity_state": continuity_state,
     }
-    audit(auth, "context_retrieve", {"task": req.task[:120], "count": len(recent)})
+    continuity_selectors = [
+        {
+            "subject_kind": item["subject_kind"],
+            "subject_id": item["subject_id"],
+            "source_state": item.get("source_state", "active"),
+        }
+        for item in continuity_state.get("capsules", [])
+        if isinstance(item, dict) and item.get("subject_kind") and item.get("subject_id")
+    ]
+    audit(
+        auth,
+        "context_retrieve",
+        {
+            "task": req.task[:120],
+            "count": len(recent),
+            "continuity_selectors": continuity_selectors,
+        },
+    )
     return {"ok": True, "bundle": bundle}
 
 

@@ -27,6 +27,7 @@ from .continuity import (
     continuity_compare_service,
     continuity_list_service,
     continuity_read_service,
+    continuity_refresh_plan_service,
     continuity_revalidate_service,
     continuity_upsert_service,
 )
@@ -57,6 +58,7 @@ from .models import (
     ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     ContextSnapshotRequest,
@@ -570,6 +572,20 @@ def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(requ
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/refresh/plan")
+def continuity_refresh_plan(req: ContinuityRefreshPlanRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Build and persist a deterministic continuity refresh plan."""
+    settings, gm = _services()
+    return continuity_refresh_plan_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 

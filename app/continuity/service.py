@@ -22,6 +22,7 @@ from app.models import (
     ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     ContinuityVerificationState,
@@ -111,6 +112,7 @@ CONTINUITY_SIGNAL_STATUS = {
     "system_check": "system_confirmed",
 }
 CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
+CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 
 
 def _canonical_json(data: Any) -> str:
@@ -630,6 +632,97 @@ def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
     return "healthy", []
 
 
+def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, str]]:
+    """Return selectors recently used by continuity reads or retrievals."""
+    path = repo_root / "logs" / "api_audit.jsonl"
+    if not path.exists() or not path.is_file():
+        return set()
+    rows = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-10000:]
+    cutoff = now.timestamp() - (7 * 86400)
+    recent: set[tuple[str, str]] = set()
+    for line in rows:
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        ts = _parse_iso(str(row.get("ts") or ""))
+        if ts is None or ts.timestamp() < cutoff:
+            continue
+        detail = row.get("detail")
+        if not isinstance(detail, dict):
+            continue
+        if row.get("event") == "continuity_read":
+            kind = detail.get("subject_kind")
+            subject_id = detail.get("subject_id")
+            if isinstance(kind, str) and isinstance(subject_id, str):
+                recent.add((kind, subject_id))
+            continue
+        if row.get("event") != "context_retrieve":
+            continue
+        selectors = detail.get("continuity_selectors")
+        if not isinstance(selectors, list):
+            continue
+        for item in selectors:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("subject_kind")
+            subject_id = item.get("subject_id")
+            if isinstance(kind, str) and isinstance(subject_id, str):
+                recent.add((kind, subject_id))
+    return recent
+
+
+def _refresh_reason_codes(
+    *,
+    capsule: dict[str, Any],
+    fallback_only: bool,
+    recently_used: bool,
+    now: datetime,
+) -> list[str]:
+    """Derive deterministic refresh reason codes for one capsule payload."""
+    codes: list[str] = []
+    health_status, _health_reasons = _capsule_health_summary(capsule)
+    if health_status == "degraded":
+        codes.append("health_degraded")
+    elif health_status == "conflicted":
+        codes.append("health_conflicted")
+
+    verification_status = _verification_status(capsule)
+    if verification_status == "unverified":
+        codes.append("verification_unverified")
+    elif verification_status == "self_attested":
+        codes.append("verification_self_attested")
+
+    verified_at = _parse_iso(str(capsule.get("verified_at") or ""))
+    if verified_at is not None and (now - verified_at).total_seconds() > 30 * 86400:
+        codes.append("stale_verified_at")
+    if recently_used:
+        codes.append("recently_used")
+    if fallback_only:
+        codes.append("fallback_only")
+    return codes
+
+
+def _refresh_priority(reason_codes: list[str], *, health_status: str, verification_status: str) -> str:
+    """Map deterministic refresh reason codes to high, medium, or low priority."""
+    if health_status in {"degraded", "conflicted"} or "fallback_only" in reason_codes:
+        return "high"
+    if verification_status in {"unverified", "self_attested"} or "stale_verified_at" in reason_codes:
+        return "medium"
+    return "low"
+
+
+def _refresh_state_payload(now: datetime, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the persisted refresh-state payload from one refresh-plan result."""
+    return {
+        "schema_version": "1.0",
+        "last_planned_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "last_run_at": None,
+        "last_run_count": 0,
+        "entries": candidates,
+    }
+
+
 def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list[str]]:
     """Determine freshness phase and warnings for the given capsule."""
     warnings: list[str] = []
@@ -1018,6 +1111,173 @@ def continuity_list_service(
         },
     )
     return {"ok": True, "count": len(summaries), "capsules": summaries}
+
+
+def continuity_refresh_plan_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityRefreshPlanRequest,
+    now: datetime,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Build and persist a deterministic continuity refresh plan."""
+    auth.require("read:files")
+    recent_selectors = _audit_recent_selectors(repo_root, now)
+    base = repo_root / CONTINUITY_DIR_REL
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    if base.exists() and base.is_dir():
+        for path in sorted(base.iterdir(), key=lambda item: item.name):
+            if path.is_dir() or path.suffix.lower() != ".json":
+                continue
+            rel = str(path.relative_to(repo_root))
+            if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
+                continue
+            try:
+                auth.require_read_path(rel)
+            except HTTPException:
+                continue
+            try:
+                capsule = _load_capsule(repo_root, rel)
+            except HTTPException as exc:
+                if exc.status_code in {400, 404}:
+                    continue
+                raise
+            selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
+            seen.add(selector)
+            codes = _refresh_reason_codes(
+                capsule=capsule,
+                fallback_only=False,
+                recently_used=selector in recent_selectors,
+                now=now,
+            )
+            if not req.include_healthy and codes == ["recently_used"]:
+                continue
+            verification_status = _verification_status(capsule)
+            health_status, _health_reasons = _capsule_health_summary(capsule)
+            candidates.append(
+                {
+                    "subject_kind": selector[0],
+                    "subject_id": selector[1],
+                    "path": rel,
+                    "health_status": health_status,
+                    "verification_status": verification_status,
+                    "last_revalidated_at": (
+                        str(capsule.get("verification_state", {}).get("last_revalidated_at"))
+                        if isinstance(capsule.get("verification_state"), dict)
+                        and capsule.get("verification_state", {}).get("last_revalidated_at")
+                        else None
+                    ),
+                    "updated_at": capsule["updated_at"],
+                    "reason_codes": codes,
+                    "recommended_priority": _refresh_priority(
+                        codes,
+                        health_status=health_status,
+                        verification_status=verification_status,
+                    ),
+                }
+            )
+
+    fallback_dir = repo_root / CONTINUITY_DIR_REL / "fallback"
+    if fallback_dir.exists() and fallback_dir.is_dir():
+        for path in sorted(fallback_dir.iterdir(), key=lambda item: item.name):
+            if path.is_dir() or path.suffix.lower() != ".json":
+                continue
+            rel = str(path.relative_to(repo_root))
+            try:
+                auth.require_read_path(rel)
+            except HTTPException:
+                continue
+            try:
+                capsule = _load_fallback_snapshot(
+                    repo_root,
+                    rel,
+                    expected_subject=(
+                        str(json.loads(path.read_text(encoding="utf-8")).get("capsule", {}).get("subject_kind") or ""),
+                        str(json.loads(path.read_text(encoding="utf-8")).get("capsule", {}).get("subject_id") or ""),
+                    ),
+                )
+            except Exception:
+                continue
+            selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
+            if req.subject_kind and selector[0] != req.subject_kind:
+                continue
+            if selector in seen:
+                continue
+            active_rel = continuity_rel_path(selector[0], selector[1])
+            try:
+                auth.require_read_path(active_rel)
+            except HTTPException:
+                continue
+            codes = _refresh_reason_codes(
+                capsule=capsule,
+                fallback_only=True,
+                recently_used=selector in recent_selectors,
+                now=now,
+            )
+            if not req.include_healthy and codes == ["recently_used"]:
+                continue
+            verification_status = _verification_status(capsule)
+            health_status, _health_reasons = _capsule_health_summary(capsule)
+            candidates.append(
+                {
+                    "subject_kind": selector[0],
+                    "subject_id": selector[1],
+                    "path": active_rel,
+                    "health_status": health_status,
+                    "verification_status": verification_status,
+                    "last_revalidated_at": (
+                        str(capsule.get("verification_state", {}).get("last_revalidated_at"))
+                        if isinstance(capsule.get("verification_state"), dict)
+                        and capsule.get("verification_state", {}).get("last_revalidated_at")
+                        else None
+                    ),
+                    "updated_at": capsule["updated_at"],
+                    "reason_codes": codes,
+                    "recommended_priority": _refresh_priority(
+                        codes,
+                        health_status=health_status,
+                        verification_status=verification_status,
+                    ),
+                }
+            )
+
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    candidates.sort(key=lambda row: (priority_order[str(row["recommended_priority"])], str(row["subject_kind"]), str(row["subject_id"])))
+    candidates = candidates[: req.limit]
+
+    refresh_rel = CONTINUITY_REFRESH_STATE_REL
+    auth.require_write_path(refresh_rel)
+    refresh_path = safe_path(repo_root, refresh_rel)
+    payload = _refresh_state_payload(now, candidates)
+    canonical = _canonical_json(payload)
+    old_bytes = refresh_path.read_bytes() if refresh_path.exists() else None
+    write_text_file(refresh_path, canonical)
+    latest_commit = gm.latest_commit()
+    if old_bytes != canonical.encode("utf-8"):
+        committed = gm.commit_file(refresh_path, "continuity: refresh plan")
+        if committed:
+            latest_commit = gm.latest_commit()
+
+    audit(
+        auth,
+        "continuity_refresh_plan",
+        {
+            "subject_kind": req.subject_kind,
+            "count": len(candidates),
+            "path": refresh_rel,
+        },
+    )
+    return {
+        "ok": True,
+        "count": len(candidates),
+        "generated_at": payload["last_planned_at"],
+        "candidates": candidates,
+        "latest_commit": latest_commit,
+    }
 
 
 def continuity_compare_service(
