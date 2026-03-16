@@ -59,6 +59,7 @@ CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
 CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
 CONTINUITY_ARCHIVE_SCHEMA_TYPE = "continuity_archive_envelope"
 CONTINUITY_ARCHIVE_SCHEMA_VERSION = "1.0"
+CONTINUITY_REFRESH_STATE_SCHEMA_VERSION = "1.0"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
     "thread_switch",
@@ -734,7 +735,10 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
             kind = detail.get("subject_kind")
             subject_id = detail.get("subject_id")
             if isinstance(kind, str) and isinstance(subject_id, str):
-                recent.add((kind, _normalize_subject_id(subject_id)))
+                try:
+                    recent.add((kind, _normalize_subject_id(subject_id)))
+                except HTTPException:
+                    continue
             continue
         if row.get("event") != "context_retrieve":
             continue
@@ -747,7 +751,10 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
             kind = item.get("subject_kind")
             subject_id = item.get("subject_id")
             if isinstance(kind, str) and isinstance(subject_id, str):
-                recent.add((kind, _normalize_subject_id(subject_id)))
+                try:
+                    recent.add((kind, _normalize_subject_id(subject_id)))
+                except HTTPException:
+                    continue
     return recent
 
 
@@ -794,7 +801,7 @@ def _refresh_priority(reason_codes: list[str], *, health_status: str, verificati
 def _refresh_state_payload(now: datetime, candidates: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the persisted refresh-state payload from one refresh-plan result."""
     return {
-        "schema_version": "1.0",
+        "schema_version": CONTINUITY_REFRESH_STATE_SCHEMA_VERSION,
         "last_planned_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "last_run_at": None,
         "last_run_count": 0,
@@ -1406,6 +1413,7 @@ def continuity_refresh_plan_service(
 ) -> dict[str, Any]:
     """Build and persist a deterministic continuity refresh plan."""
     auth.require("read:files")
+    auth.require("write:projects")
     refresh_rel = CONTINUITY_REFRESH_STATE_REL
     auth.require_write_path(refresh_rel)
     recent_selectors = _audit_recent_selectors(repo_root, now)
@@ -1416,6 +1424,8 @@ def continuity_refresh_plan_service(
     if base.exists() and base.is_dir():
         for path in sorted(base.iterdir(), key=lambda item: item.name):
             if path.is_dir() or path.suffix.lower() != ".json":
+                continue
+            if path.name == "refresh_state.json":
                 continue
             rel = str(path.relative_to(repo_root))
             if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
@@ -1432,7 +1442,7 @@ def continuity_refresh_plan_service(
                 raise
             selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
             selector_key = _selector_key(selector[0], selector[1])
-            seen.add(selector)
+            seen.add(selector_key)
             codes = _refresh_reason_codes(
                 capsule=capsule,
                 fallback_only=False,
@@ -1471,6 +1481,8 @@ def continuity_refresh_plan_service(
         for path in sorted(fallback_dir.iterdir(), key=lambda item: item.name):
             if path.is_dir() or path.suffix.lower() != ".json":
                 continue
+            if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
+                continue
             rel = str(path.relative_to(repo_root))
             try:
                 auth.require_read_path(rel)
@@ -1482,11 +1494,9 @@ def continuity_refresh_plan_service(
                 continue
             capsule = envelope["capsule"]
             selector = (str(capsule["subject_kind"]), str(capsule["subject_id"]))
-            if req.subject_kind and selector[0] != req.subject_kind:
-                continue
-            if selector in seen:
-                continue
             selector_key = _selector_key(selector[0], selector[1])
+            if selector_key in seen:
+                continue
             active_rel = continuity_rel_path(selector[0], selector[1])
             try:
                 auth.require_read_path(active_rel)

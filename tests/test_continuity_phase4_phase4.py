@@ -122,7 +122,7 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             self._write_valid_active(repo_root, subject_kind="user", subject_id="alpha", payload=payload)
             self._write_fallback(repo_root, subject_kind="user", subject_id="alpha", payload=payload)
             (repo_root / "memory" / "continuity" / "refresh_state.json").write_text(
-                json.dumps({"schema_version": "1.0", "last_planned_at": now, "candidates": []}),
+                json.dumps({"schema_version": "1.0", "last_planned_at": now, "entries": []}),
                 encoding="utf-8",
             )
             archive_dir = repo_root / "memory" / "continuity" / "archive"
@@ -169,7 +169,7 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             continuity_dir.mkdir(parents=True, exist_ok=True)
             (continuity_dir / "user-bad.json").write_text("{bad json", encoding="utf-8")
             (continuity_dir / "refresh_state.json").write_text(
-                json.dumps({"schema_version": "1.0", "last_planned_at": now, "candidates": []}),
+                json.dumps({"schema_version": "1.0", "last_planned_at": now, "entries": []}),
                 encoding="utf-8",
             )
 
@@ -196,6 +196,7 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
 
             self.assertFalse(restored["ok"])
             validation = restored["continuity_validation"]
+            self.assertFalse(validation["ok"])
             self.assertEqual(validation["active_capsules"], 2)
             self.assertEqual(validation["fallback_capsules"], 1)
             self.assertEqual(validation["archive_envelopes"], 1)

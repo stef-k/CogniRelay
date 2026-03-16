@@ -23,6 +23,16 @@ class _AuthStub(AllowAllAuthStub):
     """Auth stub that permits all scopes used by Phase 4 refresh tests."""
 
 
+class _ReadOnlyAuthStub(_AuthStub):
+    """Auth stub that denies project-write scope while allowing read behavior."""
+
+    def require(self, scope: str) -> None:
+        """Reject write:projects while preserving other allowed scopes."""
+        if scope == "write:projects":
+            raise HTTPException(status_code=403, detail="forbidden")
+        return super().require(scope)
+
+
 class _GitManagerStub(SimpleGitManagerStub):
     """Git stub that records refresh-state commits."""
 
@@ -352,6 +362,53 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
             )
             self.assertEqual(with_healthy["candidates"][0]["reason_codes"], ["recently_used"])
 
+    def test_refresh_plan_skips_malformed_audit_subject_ids_without_failing(self) -> None:
+        """Malformed audit selectors should be ignored instead of failing refresh planning."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            recent_iso = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            self._write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="alpha",
+                payload=self._capsule_payload(
+                    subject_kind="user",
+                    subject_id="alpha",
+                    updated_at=recent_iso,
+                    verified_at=recent_iso,
+                    verification_status="system_confirmed",
+                    health_status="healthy",
+                ),
+            )
+            self._write_audit_log(
+                repo_root,
+                [
+                    {
+                        "ts": recent_iso,
+                        "event": "continuity_read",
+                        "detail": {
+                            "subject_kind": "user",
+                            "subject_id": "---",
+                            "path": "memory/continuity/user-alpha.json",
+                            "source_state": "active",
+                        },
+                    }
+                ],
+            )
+
+            out = continuity_refresh_plan_service(
+                repo_root=repo_root,
+                gm=gm,
+                auth=_AuthStub(),
+                req=ContinuityRefreshPlanRequest(limit=10, include_healthy=True),
+                now=now,
+                audit=lambda *_args: None,
+            )
+            self.assertEqual(len(out["candidates"]), 1)
+            self.assertEqual(out["candidates"][0]["reason_codes"], [])
+
     def test_refresh_plan_skips_fully_healthy_candidates_by_default(self) -> None:
         """Healthy candidates with no reason codes should be omitted unless include_healthy is enabled."""
         with tempfile.TemporaryDirectory() as td:
@@ -393,6 +450,73 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
             )
             self.assertEqual(len(with_healthy["candidates"]), 1)
             self.assertEqual(with_healthy["candidates"][0]["reason_codes"], [])
+
+    def test_refresh_plan_requires_write_projects_scope(self) -> None:
+        """Refresh planning should reject callers without project-write scope."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+
+            with self.assertRaises(HTTPException) as ctx:
+                continuity_refresh_plan_service(
+                    repo_root=repo_root,
+                    gm=gm,
+                    auth=_ReadOnlyAuthStub(),
+                    req=ContinuityRefreshPlanRequest(limit=10),
+                    now=now,
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_refresh_plan_deduplicates_active_and_fallback_by_normalized_selector(self) -> None:
+        """Refresh planning should not emit duplicate candidates for normalized selector matches."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            gm = _GitManagerStub()
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            recent_iso = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            active_capsule = self._capsule_payload(
+                subject_kind="user",
+                subject_id="My Task",
+                updated_at=recent_iso,
+                verified_at=recent_iso,
+                verification_status="system_confirmed",
+                health_status="healthy",
+            )
+            fallback_capsule = self._capsule_payload(
+                subject_kind="user",
+                subject_id="my-task",
+                updated_at=recent_iso,
+                verified_at=recent_iso,
+                verification_status="peer_confirmed",
+                health_status="healthy",
+            )
+            self._write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="my-task",
+                payload=active_capsule,
+            )
+            self._write_fallback_snapshot(
+                repo_root,
+                subject_kind="user",
+                subject_id="my-task",
+                capsule=fallback_capsule,
+            )
+
+            out = continuity_refresh_plan_service(
+                repo_root=repo_root,
+                gm=gm,
+                auth=_AuthStub(),
+                req=ContinuityRefreshPlanRequest(limit=10, include_healthy=True),
+                now=now,
+                audit=lambda *_args: None,
+            )
+
+            self.assertEqual(len(out["candidates"]), 1)
+            self.assertEqual((out["candidates"][0]["subject_kind"], out["candidates"][0]["subject_id"]), ("user", "My Task"))
 
     def test_refresh_state_is_persisted_and_only_committed_when_bytes_change(self) -> None:
         """Refresh planning should rewrite refresh_state.json and skip no-op commits."""

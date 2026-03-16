@@ -177,7 +177,7 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
             warnings.append(f"continuity_missing_fallback:{rel}")
 
     return {
-        "ok": not (invalid_capsules or invalid_fallbacks or invalid_archives),
+        "ok": not (invalid_capsules or invalid_fallbacks or invalid_archives or missing_fallbacks),
         "active_capsules": len(active_paths),
         "fallback_capsules": len(fallback_paths),
         "archive_envelopes": len(archive_paths),

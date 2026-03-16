@@ -363,6 +363,7 @@ def _raw_scan_recent_relevant(
 def _pack_recent_relevant(results: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Sort evidence using the established packing order and score tie-breaks."""
     def _group(path: str) -> int:
+        """Bucket paths into summary, message, then everything-else ordering groups."""
         if path.startswith("memory/summaries/"):
             return 0
         if path.startswith("messages/"):
