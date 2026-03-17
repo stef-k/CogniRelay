@@ -125,6 +125,29 @@ class TestArtifactLockUnit(unittest.TestCase):
                 pass
         self.assertEqual(ctx.exception.status_code, 503)
 
+    def test_lock_timeout_returns_503(self) -> None:
+        """A held lock that exceeds the timeout returns HTTP 503."""
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with artifact_lock("timeout_id", lock_dir=self.lock_dir):
+                held.set()
+                release.wait(timeout=5)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        held.wait(timeout=5)
+
+        with self.assertRaises(HTTPException) as ctx:
+            with artifact_lock("timeout_id", lock_dir=self.lock_dir, timeout=0.15):
+                pass
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIn("timed out", ctx.exception.detail)
+
+        release.set()
+        holder.join(timeout=5)
+
 
 class TestSharedUpdateConcurrency(unittest.TestCase):
     """Validate that concurrent shared_update_service calls are serialized."""

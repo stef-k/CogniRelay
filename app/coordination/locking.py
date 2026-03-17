@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import re
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -14,6 +15,9 @@ from fastapi import HTTPException
 _log = logging.getLogger(__name__)
 
 _SAFE_ID = re.compile(r"^[a-z0-9_]+$")
+
+LOCK_TIMEOUT_SECONDS: float = 30.0
+_LOCK_POLL_INTERVAL: float = 0.05
 
 _lock_dir_ready: set[str] = set()
 
@@ -32,7 +36,9 @@ def _ensure_lock_dir(lock_dir: Path) -> None:
 
 
 @contextmanager
-def artifact_lock(artifact_id: str, *, lock_dir: Path) -> Generator[None, None, None]:
+def artifact_lock(
+    artifact_id: str, *, lock_dir: Path, timeout: float = LOCK_TIMEOUT_SECONDS
+) -> Generator[None, None, None]:
     """Acquire an exclusive per-artifact advisory lock for the duration of a mutation.
 
     Uses ``fcntl.flock`` on a dedicated lockfile so that concurrent requests
@@ -42,7 +48,7 @@ def artifact_lock(artifact_id: str, *, lock_dir: Path) -> Generator[None, None, 
 
     Raises ``HTTPException(400)`` if ``artifact_id`` contains path-traversal
     characters.  Raises ``HTTPException(503)`` if the lock infrastructure
-    is unavailable.
+    is unavailable or the lock cannot be acquired within the timeout.
     """
     if not _SAFE_ID.fullmatch(artifact_id):
         raise HTTPException(status_code=400, detail="Invalid artifact id for locking")
@@ -55,7 +61,19 @@ def artifact_lock(artifact_id: str, *, lock_dir: Path) -> Generator[None, None, 
         _log.error("Cannot open lock file %s: %s", lock_path, exc)
         raise HTTPException(status_code=503, detail="Coordination lock infrastructure unavailable") from exc
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    lock_file.close()
+                    _log.error("Lock acquisition timed out for artifact %s after %.1fs", artifact_id, timeout)
+                    raise HTTPException(
+                        status_code=503, detail="Coordination lock acquisition timed out"
+                    ) from None
+                time.sleep(_LOCK_POLL_INTERVAL)
         yield
     finally:
         lock_file.close()
