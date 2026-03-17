@@ -62,7 +62,7 @@ def _reconciliation_query_sort_key(artifact: dict[str, Any]) -> tuple[float, str
     try:
         dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
         updated_value = dt.timestamp()
-    except Exception:
+    except (ValueError, TypeError):
         updated_value = 0.0
     return (-updated_value, str(artifact.get("reconciliation_id") or ""))
 
@@ -467,7 +467,8 @@ def reconciliation_resolve_service(
     auth.require_write_path(RECONCILIATIONS_SAMPLE_REL)
     validate_prefixed_hex_id(reconciliation_id, prefix="recon_", detail=INVALID_RECONCILIATION_ID_DETAIL)
 
-    with artifact_lock(reconciliation_id):
+    lock_dir = repo_root / ".locks"
+    with artifact_lock(reconciliation_id, lock_dir=lock_dir):
         rel, artifact = _load_reconciliation_artifact(repo_root, reconciliation_id)
 
         # Owner-only resolve unless caller has admin:peers.
@@ -522,16 +523,16 @@ def reconciliation_resolve_service(
             commit_message=commit_message,
             error_detail="Failed to commit reconciliation resolve",
         )
-    audit(
-        auth,
-        "coordination_reconciliation_resolve",
-        {
-            "reconciliation_id": reconciliation_id,
-            "owner_peer": updated["owner_peer"],
-            "outcome": updated["resolution_outcome"],
-            "resolved_by": caller,
-            "version": updated["version"],
-            "path": rel,
-        },
-    )
+        audit(
+            auth,
+            "coordination_reconciliation_resolve",
+            {
+                "reconciliation_id": reconciliation_id,
+                "owner_peer": updated["owner_peer"],
+                "outcome": updated["resolution_outcome"],
+                "resolved_by": caller,
+                "version": updated["version"],
+                "path": rel,
+            },
+        )
     return {"ok": True, "reconciliation": updated, "path": rel, "updated": True, "latest_commit": gm.latest_commit()}

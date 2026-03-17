@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.coordination.locking import artifact_lock
+from fastapi import HTTPException
+
+from app.coordination.locking import _lock_dir_ready, artifact_lock
 from app.coordination.shared_service import shared_update_service
 from app.models import CoordinationSharedArtifact, CoordinationSharedUpdateRequest
 from app.storage import canonical_json, write_text_file
@@ -36,6 +38,14 @@ class _SlowGitManagerStub(SimpleGitManagerStub):
 class TestArtifactLockUnit(unittest.TestCase):
     """Validate the artifact_lock context manager in isolation."""
 
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.lock_dir = Path(self._tmpdir.name) / ".locks"
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+        _lock_dir_ready.discard(str(self.lock_dir))
+
     def test_lock_serializes_same_artifact(self) -> None:
         """Two threads acquiring a lock on the same id run sequentially."""
         order: list[str] = []
@@ -43,7 +53,7 @@ class TestArtifactLockUnit(unittest.TestCase):
 
         def worker(tag: str) -> None:
             barrier.wait()
-            with artifact_lock("same-id"):
+            with artifact_lock("same_id", lock_dir=self.lock_dir):
                 order.append(f"{tag}-enter")
                 time.sleep(0.05)
                 order.append(f"{tag}-exit")
@@ -68,31 +78,52 @@ class TestArtifactLockUnit(unittest.TestCase):
 
         def worker(artifact_id: str) -> None:
             barrier.wait()
-            with artifact_lock(artifact_id):
+            with artifact_lock(artifact_id, lock_dir=self.lock_dir):
                 entered[artifact_id] = time.monotonic()
                 time.sleep(0.05)
 
-        t1 = threading.Thread(target=worker, args=("id-A",))
-        t2 = threading.Thread(target=worker, args=("id-B",))
+        t1 = threading.Thread(target=worker, args=("id_a",))
+        t2 = threading.Thread(target=worker, args=("id_b",))
         t1.start()
         t2.start()
         t1.join(timeout=5)
         t2.join(timeout=5)
 
-        # Both should have entered — the exact overlap is timing-dependent,
-        # but both keys must be present.
-        self.assertIn("id-A", entered)
-        self.assertIn("id-B", entered)
+        self.assertIn("id_a", entered)
+        self.assertIn("id_b", entered)
 
     def test_lock_released_on_exception(self) -> None:
         """Lock is released even when the body raises."""
         with self.assertRaises(RuntimeError):
-            with artifact_lock("err-id"):
+            with artifact_lock("err_id", lock_dir=self.lock_dir):
                 raise RuntimeError("boom")
 
         # Must be able to re-acquire immediately.
-        with artifact_lock("err-id"):
+        with artifact_lock("err_id", lock_dir=self.lock_dir):
             pass  # Would deadlock if the first lock was not released.
+
+    def test_rejects_path_traversal_id(self) -> None:
+        """Artifact IDs containing path traversal characters are rejected."""
+        for bad_id in ["../../etc/passwd", "foo/bar", "foo\\bar", "ok\x00evil", "has-dash", "has.dot"]:
+            with self.assertRaises(HTTPException) as ctx:
+                with artifact_lock(bad_id, lock_dir=self.lock_dir):
+                    pass
+            self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_accepts_valid_artifact_ids(self) -> None:
+        """Well-formed artifact IDs with lowercase hex and underscores are accepted."""
+        for good_id in ["shared_abc123", "handoff_deadbeef", "recon_0123456789abcdef"]:
+            with artifact_lock(good_id, lock_dir=self.lock_dir):
+                pass  # Should not raise.
+
+    def test_raises_503_when_lock_dir_not_writable(self) -> None:
+        """Lock infrastructure failure returns HTTP 503."""
+        # Use a path under a non-existent read-only parent.
+        bad_dir = Path("/proc/nonexistent/.locks")
+        with self.assertRaises(HTTPException) as ctx:
+            with artifact_lock("some_id", lock_dir=bad_dir):
+                pass
+        self.assertEqual(ctx.exception.status_code, 503)
 
 
 class TestSharedUpdateConcurrency(unittest.TestCase):
