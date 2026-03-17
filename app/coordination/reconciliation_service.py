@@ -240,8 +240,9 @@ def reconciliation_open_service(
     _validate_open_text_bounds(req)
     _validate_open_structure(req)
 
+    # Steps 7-8: load peer registry, then validate all claimant peers in
+    # caller-supplied claim order before loading any source artifacts.
     registry = load_peers_registry(repo_root)
-    loaded_sources: list[tuple[CoordinationReconciliationClaim, dict[str, Any]]] = []
     for claim in req.claims:
         peer = registry.get("peers", {}).get(claim.claimant_peer)
         if not isinstance(peer, dict):
@@ -249,6 +250,10 @@ def reconciliation_open_service(
         trust_level = str(peer.get("trust_level") or "untrusted")
         if trust_level == "untrusted":
             raise HTTPException(status_code=409, detail=f"Peer is untrusted: {claim.claimant_peer}")
+
+    # Step 9: load each referenced source artifact in caller-supplied claim order.
+    loaded_sources: list[tuple[CoordinationReconciliationClaim, dict[str, Any]]] = []
+    for claim in req.claims:
         source_artifact = _load_source_artifact(repo_root, claim)
         loaded_sources.append((claim, source_artifact))
 
