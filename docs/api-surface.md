@@ -49,6 +49,10 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `GET /v1/coordination/shared/{shared_id}`: read one stored shared coordination artifact by id
 - `GET /v1/coordination/shared/query`: query visible shared coordination artifacts for one owner and/or participant identity
 - `POST /v1/coordination/shared/{shared_id}/update`: replace one shared coordination artifact under owner-only version checking
+- `POST /v1/coordination/reconciliation/open`: open one bounded reconciliation artifact from visible handoff/shared claims
+- `GET /v1/coordination/reconciliation/{reconciliation_id}`: read one stored reconciliation artifact by id
+- `GET /v1/coordination/reconciliations/query`: query visible reconciliation artifacts for one owner and/or claimant identity
+- `POST /v1/coordination/reconciliation/{reconciliation_id}/resolve`: resolve one open reconciliation record under first-write-wins version checking
 - `POST /v1/context/snapshot`: persist deterministic context snapshot
 - `GET /v1/context/snapshot/{snapshot_id}`: load a persisted snapshot
 - `POST /v1/compact/run`: compaction planning and summary/report generation
@@ -84,6 +88,16 @@ Notable behavior:
 - `GET /v1/coordination/shared/query` requires `read:files`, skips corrupt artifacts with a warning, returns list results under `shared_artifacts`, and keeps non-admin discovery bounded to the caller's own owner/participant identity
 - `POST /v1/coordination/shared/{shared_id}/update` is owner-only, requires an exact `expected_version`, replaces the bounded shared arrays wholesale, and restores the prior artifact bytes if the commit fails
 - shared coordination artifacts are additive coordination records: they do not mutate local continuity capsules and do not yet imply multi-writer or reconciliation semantics
+- `POST /v1/coordination/reconciliation/open` stores additive reconciliation artifacts under `memory/coordination/reconciliations/` from bounded visible handoff/shared claims rather than mutating local continuity or shared coordination state
+- reconciliation claims remain bounded to source artifact identity, claimant identity, claim summary, epistemic status, optional freeform evidence refs, and shared `observed_version` assertions
+- `GET /v1/coordination/reconciliation/{reconciliation_id}` is visible only to the owner, listed participant peers, or an admin caller; like the 5A/5B direct-read pattern, it requires authentication but not `read:files`
+- `GET /v1/coordination/reconciliations/query` requires `read:files`, applies all supplied filters conjunctively, skips corrupt artifacts with one warning, and keeps non-admin discovery bounded to the caller's own reconciliation identity
+- `POST /v1/coordination/reconciliation/{reconciliation_id}/resolve` is owner-only (or admin), requires `expected_version` for first-write-wins concurrency, and writes bounded resolve fields (`status`, `resolution_outcome`, `resolution_summary`, `resolved_at`, `resolved_by`, `version`) without mutating local continuity or 5B shared coordination state
+- resolve replay: if the artifact is already resolved with the same outcome and summary, the call returns `updated=false` without a new commit; a different outcome or summary returns HTTP 409
+- resolve restores the prior artifact bytes on commit failure and returns HTTP 500
+- first-slice reconciliation outcomes are bounded to `advisory_only`, `conflicted`, and `rejected`; stronger agreement outcomes that would mutate 5B shared artifacts or local continuity capsules are explicit non-goals of this slice
+- first-slice reconciliation artifacts are disagreement records: they open, read, query, and resolve bounded disputes without mutating local continuity capsules or 5B shared coordination artifacts
+- all four reconciliation endpoints are exposed through discovery tool catalog, manifest endpoint map, and MCP tool dispatch without introducing a separate transport plane
 - `POST /v1/backup/create` now includes `continuity_counts` in the manifest when continuity artifacts are part of the backup scope
 - `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, and archive artifacts
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes

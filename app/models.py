@@ -292,6 +292,101 @@ class CoordinationSharedUpdateRequest(BaseModel):
     commit_message: Optional[str] = None
 
 
+class CoordinationReconciliationClaim(BaseModel):
+    """One bounded coordination claim carried inside a reconciliation record."""
+    model_config = ConfigDict(extra="forbid")
+
+    source_kind: Literal["handoff", "shared"]
+    source_id: str = Field(min_length=1, max_length=64)
+    claimant_peer: PeerId
+    claim_summary: str
+    epistemic_status: Literal[
+        "frame_present",
+        "frame_absent_evidence_confirms",
+        "frame_status_unknown",
+    ]
+    evidence_refs: List[str] = Field(default_factory=list, max_length=4)
+    observed_version: Optional[int] = Field(default=None, ge=1)
+
+
+class CoordinationReconciliationArtifact(BaseModel):
+    """Stored reconciliation record for one bounded inter-agent disagreement."""
+    schema_type: Literal["coordination_reconciliation_record"] = "coordination_reconciliation_record"
+    schema_version: Literal["1.0"] = "1.0"
+    reconciliation_id: str = Field(min_length=1, max_length=64)
+    created_at: str
+    updated_at: str
+    opened_by: PeerId
+    owner_peer: PeerId
+    participant_peers: List[PeerId] = Field(default_factory=list, max_length=8)
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    title: str
+    summary: Optional[str] = None
+    classification: Literal["contradictory", "stale_observation", "frame_conflict", "concurrent_race"]
+    trigger: Literal["handoff_vs_handoff", "shared_vs_shared", "handoff_vs_shared", "concurrent_mutation_race"]
+    claims: List[CoordinationReconciliationClaim] = Field(default_factory=list, min_length=2, max_length=4)
+    status: Literal["open", "resolved"] = "open"
+    resolution_outcome: Optional[Literal["advisory_only", "conflicted", "rejected"]] = None
+    resolution_summary: Optional[str] = None
+    resolved_at: Optional[str] = None
+    resolved_by: Optional[PeerId] = None
+    version: int = Field(default=1, ge=1)
+    last_updated_by: PeerId
+
+
+class CoordinationReconciliationOpenRequest(BaseModel):
+    """Open request for one bounded reconciliation record."""
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    title: str
+    summary: Optional[str] = None
+    classification: Literal["contradictory", "stale_observation", "frame_conflict", "concurrent_race"]
+    trigger: Literal["handoff_vs_handoff", "shared_vs_shared", "handoff_vs_shared", "concurrent_mutation_race"]
+    claims: List[CoordinationReconciliationClaim] = Field(default_factory=list, max_length=4)
+    commit_message: Optional[str] = None
+
+
+class CoordinationReconciliationQueryRequest(BaseModel):
+    """Filter parameters for discovering visible reconciliation records."""
+    model_config = ConfigDict(extra="forbid")
+
+    owner_peer: Optional[str] = Field(default=None, max_length=200)
+    claimant_peer: Optional[str] = Field(default=None, max_length=200)
+    status: Optional[Literal["open", "resolved"]] = None
+    classification: Optional[Literal["contradictory", "stale_observation", "frame_conflict", "concurrent_race"]] = None
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _require_one_filter(self) -> "CoordinationReconciliationQueryRequest":
+        """Require at least one bounded query filter."""
+        if (
+            self.owner_peer is None
+            and self.claimant_peer is None
+            and self.status is None
+            and self.classification is None
+            and self.task_id is None
+            and self.thread_id is None
+        ):
+            raise ValueError("At least one reconciliation query filter is required")
+        return self
+
+
+class CoordinationReconciliationResolveRequest(BaseModel):
+    """Resolve request for one open reconciliation record under version checking."""
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    outcome: Literal["advisory_only", "conflicted", "rejected"]
+    resolution_summary: Optional[str] = None
+    commit_message: Optional[str] = None
+
+
 class TaskCreateRequest(BaseModel):
     """Task creation payload for shared task records."""
     task_id: str
