@@ -77,7 +77,3 @@ def artifact_lock(
         yield
     finally:
         lock_file.close()
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
