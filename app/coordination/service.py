@@ -242,6 +242,7 @@ def _persist_new_shared_artifact(
 ) -> str:
     """Persist one newly created shared artifact and roll it back on commit failure."""
     shared_id = str(artifact["shared_id"])
+    rel = _shared_rel_path(shared_id)
     path = _shared_path(repo_root, shared_id)
     write_text_file(path, canonical_json(artifact))
     try:
@@ -255,7 +256,7 @@ def _persist_new_shared_artifact(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Failed to commit shared coordination artifact") from exc
-    return _shared_rel_path(shared_id)
+    return rel
 
 
 def _persist_updated_shared_artifact(
@@ -686,6 +687,8 @@ def shared_update_service(
     """Replace one shared coordination payload under owner-only version-checked semantics."""
     enforce_rate_limit(settings, auth, "coordination_shared_update")
     enforce_payload_limit(settings, req.model_dump(), "coordination_shared_update")
+    auth.require("write:projects")
+    auth.require_write_path(SHARED_SAMPLE_REL)
     rel, artifact = _load_shared_artifact(repo_root, shared_id)
     if getattr(auth, "peer_id", "") != artifact.get("owner_peer"):
         raise HTTPException(status_code=403, detail="Only the owner may update this shared coordination artifact")

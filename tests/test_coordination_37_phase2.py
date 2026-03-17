@@ -22,10 +22,29 @@ from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 class _AuthStub(AllowAllAuthStub):
     """Auth stub that exposes optional admin scopes for shared update tests."""
 
-    def __init__(self, *, peer_id: str, scopes: set[str] | None = None) -> None:
-        """Store caller identity plus optional admin scopes."""
+    def __init__(
+        self,
+        *,
+        peer_id: str,
+        scopes: set[str] | None = None,
+        deny_scope: str | None = None,
+        deny_write_path: str | None = None,
+    ) -> None:
+        """Store caller identity plus optional scope and path denials."""
         super().__init__(peer_id=peer_id)
         self.scopes = scopes or set()
+        self.deny_scope = deny_scope
+        self.deny_write_path = deny_write_path
+
+    def require(self, scope: str) -> None:
+        """Raise when the test requests a denied scope."""
+        if self.deny_scope == scope:
+            raise HTTPException(status_code=403, detail=f"Missing scope: {scope}")
+
+    def require_write_path(self, path: str) -> None:
+        """Raise when the test requests a denied write namespace."""
+        if self.deny_write_path == path:
+            raise HTTPException(status_code=403, detail=f"Write path namespace not allowed: {path.split('/', 1)[0]}")
 
 
 class _GitManagerStub(SimpleGitManagerStub):
@@ -170,6 +189,34 @@ class TestCoordination37Phase2(unittest.TestCase):
             capsule_after = (repo_root / "memory" / "continuity" / "task-shared-state-source.json").read_text(encoding="utf-8")
             self.assertEqual(capsule_before, capsule_after)
 
+    def test_update_requires_write_scope_and_memory_path_access(self) -> None:
+        """Update should enforce both write:projects and memory path authorization."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            artifact = self._artifact_payload()
+            self._write_shared_artifact(repo_root, artifact)
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                with self.assertRaises(HTTPException) as scope_cm:
+                    coordination_shared_update(
+                        shared_id=artifact["shared_id"],
+                        req=self._update_request(),
+                        auth=_AuthStub(peer_id="peer-alpha", deny_scope="write:projects"),
+                    )
+            self.assertEqual(scope_cm.exception.status_code, 403)
+            self.assertEqual(scope_cm.exception.detail, "Missing scope: write:projects")
+
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                with self.assertRaises(HTTPException) as path_cm:
+                    coordination_shared_update(
+                        shared_id=artifact["shared_id"],
+                        req=self._update_request(),
+                        auth=_AuthStub(peer_id="peer-alpha", deny_write_path="memory/coordination/shared/x.json"),
+                    )
+            self.assertEqual(path_cm.exception.status_code, 403)
+            self.assertEqual(path_cm.exception.detail, "Write path namespace not allowed: memory")
+
     def test_update_rejects_stale_expected_version(self) -> None:
         """Update should fail with a deterministic conflict on stale expected_version."""
         with tempfile.TemporaryDirectory() as td:
@@ -188,6 +235,25 @@ class TestCoordination37Phase2(unittest.TestCase):
 
             self.assertEqual(ctx.exception.status_code, 409)
             self.assertEqual(ctx.exception.detail, "Shared coordination version conflict")
+
+    def test_update_rejects_all_empty_shared_state(self) -> None:
+        """Update should reject requests where all three shared-state arrays are empty."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            artifact = self._artifact_payload()
+            self._write_shared_artifact(repo_root, artifact)
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                with self.assertRaises(HTTPException) as ctx:
+                    coordination_shared_update(
+                        shared_id=artifact["shared_id"],
+                        req=self._update_request(constraints=[], drift_signals=[], coordination_alerts=[]),
+                        auth=_AuthStub(peer_id="peer-alpha"),
+                    )
+
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(ctx.exception.detail, "Shared coordination state must include at least one shared item")
 
     def test_two_updates_against_one_version_allow_only_one_success(self) -> None:
         """Two owner updates against the same stored version should allow at most one success."""

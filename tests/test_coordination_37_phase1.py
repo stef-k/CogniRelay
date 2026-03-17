@@ -201,6 +201,67 @@ class TestCoordination37Phase1(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 400)
             self.assertEqual(ctx.exception.detail, "Value too long in coordination_shared.commit_message")
 
+    def test_create_rejects_title_summary_and_item_length_bounds(self) -> None:
+        """Create should enforce the deterministic title, summary, and item-length validation rules."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._write_peer_registry(repo_root, "peer-beta", trust_level="trusted")
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            cases = [
+                (
+                    {"title": ""},
+                    "Value too short in coordination_shared.title",
+                ),
+                (
+                    {"title": "x" * 121},
+                    "Value too long in coordination_shared.title",
+                ),
+                (
+                    {"summary": ""},
+                    "Value too short in coordination_shared.summary",
+                ),
+                (
+                    {"summary": "x" * 241},
+                    "Value too long in coordination_shared.summary",
+                ),
+                (
+                    {"constraints": [""]},
+                    "Value too short in coordination_shared.constraints",
+                ),
+                (
+                    {"constraints": ["x" * 161]},
+                    "Value too long in coordination_shared.constraints",
+                ),
+                (
+                    {"drift_signals": [""]},
+                    "Value too short in coordination_shared.drift_signals",
+                ),
+                (
+                    {"drift_signals": ["x" * 161]},
+                    "Value too long in coordination_shared.drift_signals",
+                ),
+                (
+                    {"coordination_alerts": [""]},
+                    "Value too short in coordination_shared.coordination_alerts",
+                ),
+                (
+                    {"coordination_alerts": ["x" * 161]},
+                    "Value too long in coordination_shared.coordination_alerts",
+                ),
+            ]
+
+            for overrides, expected_detail in cases:
+                with self.subTest(expected_detail=expected_detail):
+                    with patch("app.main._services", return_value=(settings, gm)):
+                        with self.assertRaises(HTTPException) as ctx:
+                            coordination_shared_create(
+                                req=self._create_request(participant_peers=["peer-beta"], **overrides),
+                                auth=_AuthStub(peer_id="peer-alpha"),
+                            )
+                    self.assertEqual(ctx.exception.status_code, 400)
+                    self.assertEqual(ctx.exception.detail, expected_detail)
+
     def test_create_rejects_all_empty_shared_state(self) -> None:
         """Create should reject requests where all three shared-state arrays are empty."""
         with tempfile.TemporaryDirectory() as td:
@@ -427,6 +488,25 @@ class TestCoordination37Phase1(unittest.TestCase):
             self.assertEqual(out["count"], 1)
             self.assertIn("shared_artifacts", out)
             self.assertNotIn("shared", out)
+
+    def test_create_rolls_back_artifact_when_commit_fails(self) -> None:
+        """Create should remove the newly written shared artifact if the commit fails."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._write_peer_registry(repo_root, "peer-beta", trust_level="trusted")
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, _GitManagerStub(fail_message_prefix="coordination: create"))):
+                with self.assertRaises(HTTPException) as ctx:
+                    coordination_shared_create(
+                        req=self._create_request(participant_peers=["peer-beta"]),
+                        auth=_AuthStub(peer_id="peer-alpha"),
+                    )
+
+            self.assertEqual(ctx.exception.status_code, 500)
+            self.assertEqual(ctx.exception.detail, "Failed to commit shared coordination artifact")
+            shared_dir = repo_root / "memory" / "coordination" / "shared"
+            self.assertEqual(sorted(shared_dir.glob("*.json")), [])
 
     def test_http_query_route_hits_query_handler_not_read_handler(self) -> None:
         """HTTP GET /v1/coordination/shared/query should reach the query route, not the {shared_id} read route."""
