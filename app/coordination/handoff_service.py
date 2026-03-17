@@ -36,6 +36,7 @@ HANDOFFS_DIR_REL = "memory/coordination/handoffs"
 INVALID_HANDOFF_ID_DETAIL = "Invalid handoff artifact id"
 HANDOFFS_SAMPLE_REL = f"{HANDOFFS_DIR_REL}/x.json"
 HANDOFF_INVALID_WARNING = "handoff_artifact_skipped_invalid"
+SCAN_THRESHOLD_WARNING = "coordination_query_scan_threshold_exceeded"
 
 
 def _handoff_rel_path(handoff_id: str) -> str:
@@ -203,6 +204,15 @@ def handoff_create_service(
     if commit_message is None or not commit_message.strip():
         commit_message = f"handoff: create {artifact['handoff_id']}"
     rel = _persist_new_handoff(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
+    # Keep the SQLite sidecar index in sync after successful persist.
+    try:
+        from app.coordination.query_index import get_coordination_index
+
+        _idx = get_coordination_index()
+        if _idx is not None:
+            _idx.upsert_handoff(artifact)
+    except Exception:
+        _log.warning("Index upsert failed after handoff create", exc_info=True)
     audit(
         auth,
         "handoff_create",
@@ -243,7 +253,12 @@ def handoffs_query_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """List visible handoff artifacts for one sender or recipient identity filter."""
+    """List visible handoff artifacts for one sender or recipient identity filter.
+
+    Uses the SQLite sidecar index when available for O(log N) queries.
+    Falls back to a full directory scan if the index is unavailable,
+    adding a threshold warning when the file count is high.
+    """
     enforce_rate_limit(settings, auth, "coordination_handoff_query")
     auth.require("read:files")
     if req.recipient_peer is None and req.sender_peer is None:
@@ -251,26 +266,27 @@ def handoffs_query_service(
     if not query_identity_allowed(auth, req.recipient_peer) or not query_identity_allowed(auth, req.sender_peer):
         raise HTTPException(status_code=403, detail="Non-admin callers may query only their own handoff identity")
 
-    directory = safe_path(repo_root, HANDOFFS_DIR_REL)
     warnings: list[str] = []
     visible: list[dict[str, Any]] = []
-    if directory.exists() and directory.is_dir():
-        invalid_seen = False
-        for path in sorted(directory.iterdir(), key=lambda item: item.name):
-            if path.is_dir() or path.suffix.lower() != ".json":
-                continue
+    total_matches = 0
+
+    # --- Index path: O(log N) via SQLite sidecar ---
+    from app.coordination.query_index import get_coordination_index
+
+    idx = get_coordination_index()
+    if idx is not None and idx.is_available:
+        ids, total_matches = idx.query_handoffs(
+            sender_peer=req.sender_peer,
+            recipient_peer=req.recipient_peer,
+            status=req.status,
+            offset=req.offset,
+            limit=req.limit,
+        )
+        for hid in ids:
             try:
-                payload = json.loads(read_text_file(path))
-                artifact = CoordinationHandoffArtifact.model_validate(payload).model_dump(mode="json")
-            except (json.JSONDecodeError, ValidationError, OSError):
-                _log.warning("Skipping invalid handoff artifact: %s", path.name, exc_info=True)
-                invalid_seen = True
-                continue
-            if req.recipient_peer is not None and artifact.get("recipient_peer") != req.recipient_peer:
-                continue
-            if req.sender_peer is not None and artifact.get("sender_peer") != req.sender_peer:
-                continue
-            if req.status is not None and artifact.get("recipient_status") != req.status:
+                _, artifact = _load_handoff_artifact(repo_root, hid)
+            except HTTPException:
+                # File may have been removed between index and load.
                 continue
             try:
                 _ensure_read_visibility(auth, artifact)
@@ -279,12 +295,46 @@ def handoffs_query_service(
                     continue
                 raise
             visible.append(artifact)
-        if invalid_seen:
-            warnings.append(HANDOFF_INVALID_WARNING)
+    else:
+        # --- Fallback: full directory scan ---
+        directory = safe_path(repo_root, HANDOFFS_DIR_REL)
+        if directory.exists() and directory.is_dir():
+            invalid_seen = False
+            file_count = 0
+            for path in sorted(directory.iterdir(), key=lambda item: item.name):
+                if path.is_dir() or path.suffix.lower() != ".json":
+                    continue
+                file_count += 1
+                try:
+                    payload = json.loads(read_text_file(path))
+                    artifact = CoordinationHandoffArtifact.model_validate(payload).model_dump(mode="json")
+                except (json.JSONDecodeError, ValidationError, OSError):
+                    _log.warning("Skipping invalid handoff artifact: %s", path.name, exc_info=True)
+                    invalid_seen = True
+                    continue
+                if req.recipient_peer is not None and artifact.get("recipient_peer") != req.recipient_peer:
+                    continue
+                if req.sender_peer is not None and artifact.get("sender_peer") != req.sender_peer:
+                    continue
+                if req.status is not None and artifact.get("recipient_status") != req.status:
+                    continue
+                try:
+                    _ensure_read_visibility(auth, artifact)
+                except HTTPException as exc:
+                    if exc.status_code == 403:
+                        continue
+                    raise
+                visible.append(artifact)
+            if invalid_seen:
+                warnings.append(HANDOFF_INVALID_WARNING)
+            if file_count > getattr(settings, "coordination_query_scan_threshold", 5000):
+                warnings.append(SCAN_THRESHOLD_WARNING)
 
-    visible.sort(key=_query_sort_key)
-    total_matches = len(visible)
-    handoffs = visible[req.offset : req.offset + req.limit]
+        visible.sort(key=_query_sort_key)
+        total_matches = len(visible)
+        visible = visible[req.offset : req.offset + req.limit]
+
+    handoffs = visible
     audit(
         auth,
         "handoff_query",
@@ -354,6 +404,15 @@ def handoff_consume_service(
             artifact=updated,
             commit_message=f"handoff: consume {handoff_id} {req.status}",
         )
+        # Keep the SQLite sidecar index in sync after successful persist.
+        try:
+            from app.coordination.query_index import get_coordination_index
+
+            _idx = get_coordination_index()
+            if _idx is not None:
+                _idx.upsert_handoff(updated)
+        except Exception:
+            _log.warning("Index upsert failed after handoff consume", exc_info=True)
         audit(
             auth,
             "handoff_consume",

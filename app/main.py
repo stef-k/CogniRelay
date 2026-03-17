@@ -183,6 +183,18 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Run startup housekeeping before the app begins serving requests."""
     settings = get_settings()
     purge_stale_lockfiles(settings.repo_root / ".locks")
+
+    # Build the SQLite sidecar index for O(log N) coordination queries.
+    from app.coordination.query_index import CoordinationQueryIndex, set_coordination_index
+
+    db_path = settings.repo_root / "memory" / "coordination" / ".query_index.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    idx = CoordinationQueryIndex(db_path)
+    idx.rebuild_handoffs(settings.repo_root / "memory" / "coordination" / "handoffs")
+    idx.rebuild_shared(settings.repo_root / "memory" / "coordination" / "shared")
+    idx.rebuild_reconciliations(settings.repo_root / "memory" / "coordination" / "reconciliations")
+    set_coordination_index(idx)
+
     yield
 
 

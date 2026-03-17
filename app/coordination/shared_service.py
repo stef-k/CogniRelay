@@ -36,6 +36,7 @@ _log = logging.getLogger(__name__)
 SHARED_DIR_REL = "memory/coordination/shared"
 SHARED_SAMPLE_REL = f"{SHARED_DIR_REL}/x.json"
 SHARED_INVALID_WARNING = "coordination_shared_artifact_skipped_invalid"
+SCAN_THRESHOLD_WARNING = "coordination_query_scan_threshold_exceeded"
 INVALID_SHARED_ID_DETAIL = "Invalid shared coordination artifact id"
 
 
@@ -233,6 +234,15 @@ def shared_create_service(
     if commit_message is None or not commit_message.strip():
         commit_message = f"coordination: create {artifact['shared_id']}"
     rel = _persist_new_shared_artifact(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
+    # Keep the SQLite sidecar index in sync after successful persist.
+    try:
+        from app.coordination.query_index import get_coordination_index
+
+        _idx = get_coordination_index()
+        if _idx is not None:
+            _idx.upsert_shared(artifact)
+    except Exception:
+        _log.warning("Index upsert failed after shared create", exc_info=True)
     audit(
         auth,
         "coordination_shared_create",
@@ -278,7 +288,12 @@ def shared_query_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """List visible shared coordination artifacts for bounded owner/participant queries."""
+    """List visible shared coordination artifacts for bounded owner/participant queries.
+
+    Uses the SQLite sidecar index when available for O(log N) queries.
+    Falls back to a full directory scan if the index is unavailable,
+    adding a threshold warning when the file count is high.
+    """
     enforce_rate_limit(settings, auth, "coordination_shared_query")
     auth.require("read:files")
     if not is_admin(auth):
@@ -289,29 +304,27 @@ def shared_query_service(
     if not query_identity_allowed(auth, req.owner_peer) or not query_identity_allowed(auth, req.participant_peer):
         raise HTTPException(status_code=403, detail="Non-admin callers may query only their own shared coordination identity")
 
-    directory = safe_path(repo_root, SHARED_DIR_REL)
     warnings: list[str] = []
     visible: list[dict[str, Any]] = []
-    if directory.exists() and directory.is_dir():
-        invalid_seen = False
-        for path in sorted(directory.iterdir(), key=lambda item: item.name):
-            if path.is_dir() or path.suffix.lower() != ".json":
-                continue
+    total_matches = 0
+
+    # --- Index path: O(log N) via SQLite sidecar ---
+    from app.coordination.query_index import get_coordination_index
+
+    idx = get_coordination_index()
+    if idx is not None and idx.is_available:
+        ids, total_matches = idx.query_shared(
+            owner_peer=req.owner_peer,
+            participant_peer=req.participant_peer,
+            task_id=req.task_id,
+            thread_id=req.thread_id,
+            offset=req.offset,
+            limit=req.limit,
+        )
+        for sid in ids:
             try:
-                payload = json.loads(read_text_file(path))
-                artifact = CoordinationSharedArtifact.model_validate(payload).model_dump(mode="json")
-            except (json.JSONDecodeError, ValidationError, OSError):
-                _log.warning("Skipping invalid shared coordination artifact: %s", path.name, exc_info=True)
-                invalid_seen = True
-                continue
-            if req.owner_peer is not None and artifact.get("owner_peer") != req.owner_peer:
-                continue
-            participants = artifact.get("participant_peers")
-            if req.participant_peer is not None and (not isinstance(participants, list) or req.participant_peer not in participants):
-                continue
-            if req.task_id is not None and artifact.get("task_id") != req.task_id:
-                continue
-            if req.thread_id is not None and artifact.get("thread_id") != req.thread_id:
+                _, artifact = _load_shared_artifact(repo_root, sid)
+            except HTTPException:
                 continue
             try:
                 _ensure_shared_read_visibility(auth, artifact)
@@ -320,12 +333,49 @@ def shared_query_service(
                     continue
                 raise
             visible.append(artifact)
-        if invalid_seen:
-            warnings.append(SHARED_INVALID_WARNING)
+    else:
+        # --- Fallback: full directory scan ---
+        directory = safe_path(repo_root, SHARED_DIR_REL)
+        if directory.exists() and directory.is_dir():
+            invalid_seen = False
+            file_count = 0
+            for path in sorted(directory.iterdir(), key=lambda item: item.name):
+                if path.is_dir() or path.suffix.lower() != ".json":
+                    continue
+                file_count += 1
+                try:
+                    payload = json.loads(read_text_file(path))
+                    artifact = CoordinationSharedArtifact.model_validate(payload).model_dump(mode="json")
+                except (json.JSONDecodeError, ValidationError, OSError):
+                    _log.warning("Skipping invalid shared coordination artifact: %s", path.name, exc_info=True)
+                    invalid_seen = True
+                    continue
+                if req.owner_peer is not None and artifact.get("owner_peer") != req.owner_peer:
+                    continue
+                participants = artifact.get("participant_peers")
+                if req.participant_peer is not None and (not isinstance(participants, list) or req.participant_peer not in participants):
+                    continue
+                if req.task_id is not None and artifact.get("task_id") != req.task_id:
+                    continue
+                if req.thread_id is not None and artifact.get("thread_id") != req.thread_id:
+                    continue
+                try:
+                    _ensure_shared_read_visibility(auth, artifact)
+                except HTTPException as exc:
+                    if exc.status_code == 403:
+                        continue
+                    raise
+                visible.append(artifact)
+            if invalid_seen:
+                warnings.append(SHARED_INVALID_WARNING)
+            if file_count > getattr(settings, "coordination_query_scan_threshold", 5000):
+                warnings.append(SCAN_THRESHOLD_WARNING)
 
-    visible.sort(key=_shared_query_sort_key)
-    total_matches = len(visible)
-    shared_artifacts = visible[req.offset : req.offset + req.limit]
+        visible.sort(key=_shared_query_sort_key)
+        total_matches = len(visible)
+        visible = visible[req.offset : req.offset + req.limit]
+
+    shared_artifacts = visible
     audit(
         auth,
         "coordination_shared_query",
@@ -403,6 +453,15 @@ def shared_update_service(
             artifact=updated,
             commit_message=commit_message,
         )
+        # Keep the SQLite sidecar index in sync after successful persist.
+        try:
+            from app.coordination.query_index import get_coordination_index
+
+            _idx = get_coordination_index()
+            if _idx is not None:
+                _idx.upsert_shared(updated)
+        except Exception:
+            _log.warning("Index upsert failed after shared update", exc_info=True)
         audit(
             auth,
             "coordination_shared_update",
