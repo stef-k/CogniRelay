@@ -40,7 +40,7 @@ SHARED_INVALID_WARNING = "coordination_shared_artifact_skipped_invalid"
 
 
 def _utc_now() -> str:
-    """Return a normalized UTC timestamp for persisted handoff artifacts."""
+    """Return a normalized UTC timestamp for persisted coordination artifacts."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -293,7 +293,7 @@ def _persist_new_handoff(
     gm: Any,
     artifact: dict[str, Any],
     commit_message: str,
-) -> tuple[str, str]:
+) -> str:
     """Persist one newly created handoff artifact and roll it back on commit failure."""
     handoff_id = str(artifact["handoff_id"])
     rel = _handoff_rel_path(handoff_id)
@@ -310,7 +310,7 @@ def _persist_new_handoff(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Failed to commit handoff artifact") from exc
-    return rel, canonical_json(artifact)
+    return rel
 
 
 def _persist_updated_handoff(
@@ -366,6 +366,8 @@ def handoff_create_service(
     trust_level = str(peer.get("trust_level") or "untrusted")
     if trust_level == "untrusted":
         raise HTTPException(status_code=409, detail=f"Peer is untrusted: {req.recipient_peer}")
+    if req.commit_message is not None and len(req.commit_message) > 120:
+        raise HTTPException(status_code=400, detail="Value too long in coordination_handoff.commit_message")
 
     source_path = continuity_rel_path(req.subject_kind, req.subject_id)
     capsule = _load_capsule(repo_root, source_path, expected_subject=(req.subject_kind, req.subject_id))
@@ -386,7 +388,7 @@ def handoff_create_service(
     commit_message = req.commit_message if req.commit_message is not None else None
     if commit_message is None or not commit_message.strip():
         commit_message = f"handoff: create {artifact['handoff_id']}"
-    rel, _canonical = _persist_new_handoff(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
+    rel = _persist_new_handoff(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
     audit(
         auth,
         "handoff_create",
@@ -605,8 +607,10 @@ def shared_query_service(
     enforce_rate_limit(settings, auth, "coordination_shared_query")
     auth.require("read:files")
     if not _is_admin(auth):
+        # First require a self identity to block task-only/thread-only discovery for non-admin callers.
         if req.owner_peer != auth.peer_id and req.participant_peer != auth.peer_id:
             raise HTTPException(status_code=403, detail="Non-admin callers must include their own shared coordination identity")
+    # Then reject mixed self/foreign identity combinations deterministically.
     if not _shared_query_identity_allowed(auth, req.owner_peer) or not _shared_query_identity_allowed(auth, req.participant_peer):
         raise HTTPException(status_code=403, detail="Non-admin callers may query only their own shared coordination identity")
 

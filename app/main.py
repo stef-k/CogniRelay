@@ -797,20 +797,6 @@ def coordination_shared_create(req: CoordinationSharedCreateRequest, auth: AuthC
     )
 
 
-@app.get("/v1/coordination/shared/{shared_id}")
-def coordination_shared_read(shared_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
-    """Read one shared coordination artifact using owner/participant/admin visibility."""
-    settings, _ = _services()
-    return shared_read_service(
-        repo_root=settings.repo_root,
-        auth=auth,
-        shared_id=shared_id,
-        enforce_rate_limit=_enforce_rate_limit,
-        settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
-    )
-
-
 @app.get("/v1/coordination/shared/query")
 def coordination_shared_query(
     owner_peer: Annotated[str | None, Query()] = None,
@@ -838,6 +824,20 @@ def coordination_shared_query(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.get("/v1/coordination/shared/{shared_id}")
+def coordination_shared_read(shared_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read one shared coordination artifact using owner/participant/admin visibility."""
+    settings, _ = _services()
+    return shared_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        shared_id=shared_id,
         enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),

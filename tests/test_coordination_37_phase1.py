@@ -10,9 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import Settings
-from app.main import coordination_shared_create, coordination_shared_read, coordination_shared_query
+from app.auth import require_auth
+from app.main import app, coordination_shared_create, coordination_shared_read, coordination_shared_query
 from app.models import CoordinationSharedCreateRequest
 from app.storage import canonical_json
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -234,6 +237,45 @@ class TestCoordination37Phase1(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 404)
             self.assertEqual(ctx.exception.detail, "Peer not found: peer-missing")
 
+    def test_create_rejects_empty_duplicate_owner_and_untrusted_participants(self) -> None:
+        """Create should reject the remaining participant admission failure modes explicitly."""
+        with self.assertRaises(ValidationError):
+            self._create_request(participant_peers=[])
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._write_peer_registry(repo_root, "peer-dup", trust_level="trusted")
+            self._write_peer_registry(repo_root, "peer-beta", trust_level="untrusted")
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as dup_ctx:
+                    coordination_shared_create(
+                        req=self._create_request(participant_peers=["peer-dup", "peer-dup"]),
+                        auth=_AuthStub(peer_id="peer-alpha"),
+                    )
+            self.assertEqual(dup_ctx.exception.status_code, 400)
+            self.assertEqual(dup_ctx.exception.detail, "participant_peers must not contain duplicates")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as owner_ctx:
+                    coordination_shared_create(
+                        req=self._create_request(participant_peers=["peer-alpha"]),
+                        auth=_AuthStub(peer_id="peer-alpha"),
+                    )
+            self.assertEqual(owner_ctx.exception.status_code, 400)
+            self.assertEqual(owner_ctx.exception.detail, "participant_peers must not include owner_peer")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException) as untrusted_ctx:
+                    coordination_shared_create(
+                        req=self._create_request(participant_peers=["peer-beta"]),
+                        auth=_AuthStub(peer_id="peer-alpha"),
+                    )
+            self.assertEqual(untrusted_ctx.exception.status_code, 409)
+            self.assertEqual(untrusted_ctx.exception.detail, "Peer is untrusted: peer-beta")
+
     def test_read_allows_owner_participant_and_admin(self) -> None:
         """Read should allow only the owner, listed participants, or an admin caller."""
         with tempfile.TemporaryDirectory() as td:
@@ -310,6 +352,63 @@ class TestCoordination37Phase1(unittest.TestCase):
             self.assertEqual(out["total_matches"], 1)
             self.assertEqual(out["shared_artifacts"][0]["shared_id"], newer["shared_id"])
 
+    def test_query_uses_conjunctive_filters_and_deterministic_sorting(self) -> None:
+        """Query should apply all filters conjunctively and sort by updated_at desc then shared_id asc."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            first = self._artifact_payload(
+                shared_id="shared_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                owner_peer="peer-alpha",
+                participant_peers=["peer-beta"],
+                task_id="task-123",
+                updated_at="2026-03-17T12:00:00Z",
+            )
+            second = self._artifact_payload(
+                shared_id="shared_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                owner_peer="peer-alpha",
+                participant_peers=["peer-beta"],
+                task_id="task-123",
+                updated_at="2026-03-17T12:00:00Z",
+            )
+            third = self._artifact_payload(
+                shared_id="shared_cccccccccccccccccccccccccccccccc",
+                owner_peer="peer-alpha",
+                participant_peers=["peer-beta"],
+                task_id="task-123",
+                updated_at="2026-03-18T12:00:00Z",
+            )
+            filtered = self._artifact_payload(
+                shared_id="shared_dddddddddddddddddddddddddddddddd",
+                owner_peer="peer-alpha",
+                participant_peers=["peer-beta"],
+                task_id="task-other",
+                updated_at="2026-03-19T12:00:00Z",
+            )
+            self._write_shared_artifact(repo_root, first)
+            self._write_shared_artifact(repo_root, second)
+            self._write_shared_artifact(repo_root, third)
+            self._write_shared_artifact(repo_root, filtered)
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, None)):
+                out = coordination_shared_query(
+                    owner_peer="peer-alpha",
+                    participant_peer="peer-beta",
+                    task_id="task-123",
+                    auth=_AuthStub(peer_id="peer-admin", scopes={"admin:peers"}),
+                )
+
+            self.assertEqual(out["count"], 3)
+            self.assertEqual(out["total_matches"], 3)
+            self.assertEqual(
+                [item["shared_id"] for item in out["shared_artifacts"]],
+                [
+                    "shared_cccccccccccccccccccccccccccccccc",
+                    "shared_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "shared_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ],
+            )
+
     def test_query_skips_invalid_artifacts_and_uses_shared_artifacts_key(self) -> None:
         """Query should skip invalid stored artifacts and surface a single warning."""
         with tempfile.TemporaryDirectory() as td:
@@ -328,6 +427,31 @@ class TestCoordination37Phase1(unittest.TestCase):
             self.assertEqual(out["count"], 1)
             self.assertIn("shared_artifacts", out)
             self.assertNotIn("shared", out)
+
+    def test_http_query_route_hits_query_handler_not_read_handler(self) -> None:
+        """HTTP GET /v1/coordination/shared/query should reach the query route, not the {shared_id} read route."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            valid = self._artifact_payload(updated_at="2026-03-17T12:00:00Z")
+            self._write_shared_artifact(repo_root, valid)
+            settings = self._settings(repo_root)
+            auth = _AuthStub(peer_id="peer-alpha")
+            client = TestClient(app)
+            app.dependency_overrides[require_auth] = lambda: auth
+            try:
+                with patch("app.main._services", return_value=(settings, None)):
+                    response = client.get(
+                        "/v1/coordination/shared/query",
+                        params={"owner_peer": "peer-alpha"},
+                    )
+            finally:
+                app.dependency_overrides.clear()
+
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertIn("shared_artifacts", body)
+            self.assertNotIn("shared", body)
+            self.assertEqual(body["count"], 1)
 
 
 if __name__ == "__main__":

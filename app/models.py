@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+PeerId = Annotated[str, Field(min_length=1, max_length=200)]
 
 
 class WriteRequest(BaseModel):
@@ -197,7 +200,7 @@ class CoordinationHandoffCreateRequest(BaseModel):
     task_id: Optional[str] = Field(default=None, max_length=200)
     thread_id: Optional[str] = Field(default=None, max_length=200)
     note: Optional[str] = Field(default=None, max_length=240)
-    commit_message: Optional[str] = Field(default=None, max_length=120)
+    commit_message: Optional[str] = None
 
 
 class CoordinationHandoffQueryRequest(BaseModel):
@@ -231,7 +234,7 @@ class CoordinationSharedArtifact(BaseModel):
     updated_at: str
     created_by: str = Field(min_length=1, max_length=200)
     owner_peer: str = Field(min_length=1, max_length=200)
-    participant_peers: List[str] = Field(..., min_length=1, max_length=8)
+    participant_peers: List[PeerId] = Field(..., min_length=1, max_length=8)
     task_id: Optional[str] = Field(default=None, max_length=200)
     thread_id: Optional[str] = Field(default=None, max_length=200)
     title: str
@@ -243,7 +246,7 @@ class CoordinationSharedArtifact(BaseModel):
 
 class CoordinationSharedCreateRequest(BaseModel):
     """Create request for one owner-authored shared coordination artifact."""
-    participant_peers: List[str] = Field(default_factory=list, min_length=1, max_length=8)
+    participant_peers: List[PeerId] = Field(default_factory=list, min_length=1, max_length=8)
     task_id: Optional[str] = Field(default=None, max_length=200)
     thread_id: Optional[str] = Field(default=None, max_length=200)
     title: str
@@ -278,6 +281,8 @@ class CoordinationSharedQueryRequest(BaseModel):
 
 class CoordinationSharedUpdateRequest(BaseModel):
     """Owner-only replacement request for one shared coordination artifact."""
+    model_config = ConfigDict(extra="forbid")
+
     expected_version: int = Field(ge=1)
     title: str
     summary: Optional[str] = None

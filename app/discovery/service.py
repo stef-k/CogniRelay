@@ -426,7 +426,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "description": "Replace one shared coordination artifact under owner-only version checking without mutating local continuity.",
             "method": "POST",
             "path": "/v1/coordination/shared/{shared_id}/update",
-            "scopes": ["authenticated"],
+            "scopes": ["authenticated owner"],
             "idempotent": False,
             "input_schema": {
                 "type": "object",

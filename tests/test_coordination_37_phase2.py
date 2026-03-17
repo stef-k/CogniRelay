@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.main import coordination_shared_read, coordination_shared_update
@@ -285,4 +286,17 @@ class TestCoordination37Phase2(unittest.TestCase):
                     "drift_signals": [],
                     "coordination_alerts": ["Waiting on owner confirmation."],
                 },
+            )
+
+    def test_update_request_rejects_forbidden_participant_peers_field(self) -> None:
+        """Update should reject participant membership mutation fields in 5B."""
+        with self.assertRaises(ValidationError):
+            CoordinationSharedUpdateRequest(
+                expected_version=1,
+                title="Retry slice coordination v2",
+                summary="Updated shared constraints and alerts.",
+                constraints=["Do not weaken durability guarantees."],
+                drift_signals=[],
+                coordination_alerts=["Waiting on owner confirmation."],
+                participant_peers=["peer-beta"],
             )
