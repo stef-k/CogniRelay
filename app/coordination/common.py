@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,8 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.storage import canonical_json, write_text_file
+
+_log = logging.getLogger(__name__)
 
 _UUID_HEX = re.compile(r"^[0-9a-f]{32}$")
 
@@ -63,7 +66,7 @@ def persist_new_artifact(
             if path.exists():
                 path.unlink()
         except Exception:
-            pass
+            _log.exception("Rollback failed for %s", path)
         raise HTTPException(status_code=500, detail=error_detail) from exc
     return rel
 
@@ -92,6 +95,6 @@ def persist_updated_artifact(
             else:
                 path.write_bytes(old_bytes)
         except Exception:
-            pass
+            _log.exception("Rollback failed for %s", path)
         raise HTTPException(status_code=500, detail=error_detail) from exc
     return rel

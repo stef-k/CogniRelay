@@ -8,6 +8,7 @@ with rollback-safe persistence and replay idempotency.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +36,8 @@ from app.models import (
 )
 from app.peers.service import load_peers_registry
 from app.storage import read_text_file, safe_path
+
+_log = logging.getLogger(__name__)
 
 RECONCILIATIONS_DIR_REL = "memory/coordination/reconciliations"
 RECONCILIATIONS_SAMPLE_REL = f"{RECONCILIATIONS_DIR_REL}/x.json"
@@ -72,6 +75,8 @@ def _load_reconciliation_artifact(repo_root: Path, reconciliation_id: str) -> tu
         raise HTTPException(status_code=404, detail="Reconciliation artifact not found")
     try:
         payload = json.loads(read_text_file(path))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Reconciliation artifact not found") from exc
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid reconciliation artifact JSON") from exc
     try:
@@ -96,6 +101,7 @@ def _ensure_reconciliation_visibility(auth: AuthContext, artifact: dict[str, Any
 
 def _load_handoff_source(repo_root: Path, source_id: str) -> dict[str, Any]:
     """Load one referenced handoff source artifact for reconciliation open."""
+    validate_prefixed_hex_id(source_id, prefix="handoff_", detail=f"Referenced source artifact is invalid: {source_id}")
     path = safe_path(repo_root, f"memory/coordination/handoffs/{source_id}.json")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Referenced source artifact not found")
@@ -108,6 +114,7 @@ def _load_handoff_source(repo_root: Path, source_id: str) -> dict[str, Any]:
 
 def _load_shared_source(repo_root: Path, source_id: str) -> dict[str, Any]:
     """Load one referenced shared source artifact for reconciliation open."""
+    validate_prefixed_hex_id(source_id, prefix="shared_", detail=f"Referenced source artifact is invalid: {source_id}")
     path = safe_path(repo_root, f"memory/coordination/shared/{source_id}.json")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Referenced source artifact not found")
@@ -373,7 +380,8 @@ def reconciliation_query_service(
             try:
                 payload = json.loads(read_text_file(path))
                 artifact = CoordinationReconciliationArtifact.model_validate(payload).model_dump(mode="json")
-            except (json.JSONDecodeError, ValidationError, OSError):
+            except (json.JSONDecodeError, ValidationError, OSError, UnicodeDecodeError):
+                _log.warning("Skipping invalid reconciliation artifact: %s", path.name, exc_info=True)
                 invalid_seen = True
                 continue
             if req.owner_peer is not None and artifact.get("owner_peer") != req.owner_peer:
