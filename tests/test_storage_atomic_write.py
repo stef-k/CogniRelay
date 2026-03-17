@@ -63,8 +63,8 @@ class TestAtomicWriteTextFile(unittest.TestCase):
 
         def crashing_fdopen(fd, *args, **kwargs):
             f = original_fdopen(fd, *args, **kwargs)
-            # Write partial content then raise to simulate crash
             f.write("PARTIAL")
+            f.close()
             raise OSError("simulated crash")
 
         with patch("app.storage.os.fdopen", side_effect=crashing_fdopen):
