@@ -251,6 +251,24 @@ class TestCoordination36Phase1(unittest.TestCase):
                     coordination_handoff_create(req=self._create_request(), auth=_AuthStub(peer_id="peer-alpha"))
             self.assertEqual(untrusted_cm.exception.status_code, 409)
 
+    def test_create_rejects_overlong_commit_message_with_service_level_400(self) -> None:
+        """Create should reject overlong custom commit messages through the service-layer contract."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._write_peer_registry(repo_root, "peer-beta", trust_level="trusted")
+            self._write_capsule(repo_root)
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                with self.assertRaises(HTTPException) as ctx:
+                    coordination_handoff_create(
+                        req=self._create_request(commit_message="x" * 121),
+                        auth=_AuthStub(peer_id="peer-alpha"),
+                    )
+
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(ctx.exception.detail, "Value too long in coordination_handoff.commit_message")
+
     def test_create_requires_write_scope_and_memory_path_access(self) -> None:
         """Create should enforce both write:projects and memory path authorization."""
         with tempfile.TemporaryDirectory() as td:

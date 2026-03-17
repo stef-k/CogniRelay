@@ -20,6 +20,9 @@ from app.models import (
     CoordinationHandoffConsumeRequest,
     CoordinationHandoffCreateRequest,
     CoordinationHandoffQueryRequest,
+    CoordinationSharedCreateRequest,
+    CoordinationSharedQueryRequest,
+    CoordinationSharedUpdateRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
@@ -383,6 +386,55 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
                     **schema_for_model(CoordinationHandoffConsumeRequest).get("properties", {}),
                 },
                 "required": ["handoff_id", "status"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "coordination.shared_create",
+            "description": "Create one owner-authored shared coordination artifact without implying broader agreement semantics.",
+            "method": "POST",
+            "path": "/v1/coordination/shared/create",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(CoordinationSharedCreateRequest),
+        },
+        {
+            "name": "coordination.shared_read",
+            "description": "Read one bounded shared coordination artifact using owner, participant, or admin visibility.",
+            "method": "GET",
+            "path": "/v1/coordination/shared/{shared_id}",
+            "scopes": ["authenticated"],
+            "idempotent": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {"shared_id": {"type": "string"}},
+                "required": ["shared_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "coordination.shared_query",
+            "description": "Query visible shared coordination artifacts without implying multi-writer merge semantics.",
+            "method": "GET",
+            "path": "/v1/coordination/shared/query",
+            "scopes": ["read:files"],
+            "idempotent": True,
+            "input_schema": schema_for_model(CoordinationSharedQueryRequest),
+        },
+        {
+            "name": "coordination.shared_update",
+            "description": "Replace one shared coordination artifact under owner-only version checking without mutating local continuity.",
+            "method": "POST",
+            "path": "/v1/coordination/shared/{shared_id}/update",
+            "scopes": ["write:projects", "write_namespaces", "authenticated owner"],
+            "idempotent": False,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "shared_id": {"type": "string"},
+                    **schema_for_model(CoordinationSharedUpdateRequest).get("properties", {}),
+                },
+                "required": ["shared_id", "expected_version", "title"],
                 "additionalProperties": False,
             },
         },
@@ -969,6 +1021,10 @@ def invoke_tool_by_name(
     handoff_read: Callable[[str, AuthContext | None], dict[str, Any]],
     handoff_query: Callable[[CoordinationHandoffQueryRequest, AuthContext | None], dict[str, Any]],
     handoff_consume: Callable[[str, CoordinationHandoffConsumeRequest, AuthContext | None], dict[str, Any]],
+    shared_create: Callable[[CoordinationSharedCreateRequest, AuthContext | None], dict[str, Any]],
+    shared_read: Callable[[str, AuthContext | None], dict[str, Any]],
+    shared_query: Callable[[CoordinationSharedQueryRequest, AuthContext | None], dict[str, Any]],
+    shared_update: Callable[[str, CoordinationSharedUpdateRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_create: Callable[[ContextSnapshotRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_get: Callable[[str, AuthContext | None], dict[str, Any]],
     tasks_create: Callable[[TaskCreateRequest, AuthContext | None], dict[str, Any]],
@@ -1078,6 +1134,16 @@ def invoke_tool_by_name(
         req_args = dict(args)
         handoff_id = str(req_args.pop("handoff_id"))
         return handoff_consume(handoff_id, CoordinationHandoffConsumeRequest(**req_args), auth)
+    if name == "coordination.shared_create":
+        return shared_create(CoordinationSharedCreateRequest(**args), auth)
+    if name == "coordination.shared_read":
+        return shared_read(str(args["shared_id"]), auth)
+    if name == "coordination.shared_query":
+        return shared_query(CoordinationSharedQueryRequest(**args), auth)
+    if name == "coordination.shared_update":
+        req_args = dict(args)
+        shared_id = str(req_args.pop("shared_id"))
+        return shared_update(shared_id, CoordinationSharedUpdateRequest(**req_args), auth)
     if name == "context.snapshot_create":
         return context_snapshot_create(ContextSnapshotRequest(**args), auth)
     if name == "context.snapshot_get":
@@ -1405,6 +1471,10 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "GET /v1/coordination/handoff/{handoff_id}": {"scope": "authenticated sender|recipient|admin"},
             "GET /v1/coordination/handoffs/query": {"scope": "read:files"},
             "POST /v1/coordination/handoff/{handoff_id}/consume": {"scope": "authenticated recipient"},
+            "POST /v1/coordination/shared/create": {"scope": "write:projects"},
+            "GET /v1/coordination/shared/{shared_id}": {"scope": "authenticated owner|participant|admin"},
+            "GET /v1/coordination/shared/query": {"scope": "read:files"},
+            "POST /v1/coordination/shared/{shared_id}/update": {"scope": "authenticated owner"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},
             "GET /v1/context/snapshot/{snapshot_id}": {"scope": "read:files"},
             "POST /v1/tasks": {"scope": "write:projects"},

@@ -1,9 +1,9 @@
-"""Inter-agent handoff artifact creation, discovery, and consume logic."""
+"""Inter-agent handoff artifact service logic."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -18,6 +18,7 @@ from app.continuity.service import (
     _verification_status,
     continuity_rel_path,
 )
+from app.coordination.common import is_admin, persist_new_artifact, persist_updated_artifact, query_identity_allowed, utc_now
 from app.models import (
     CoordinationHandoffArtifact,
     CoordinationHandoffConsumeRequest,
@@ -25,21 +26,11 @@ from app.models import (
     CoordinationHandoffQueryRequest,
 )
 from app.peers.service import load_peers_registry
-from app.storage import canonical_json, read_text_file, safe_path, write_text_file
+from app.storage import read_text_file, safe_path
 
 HANDOFFS_DIR_REL = "memory/coordination/handoffs"
 HANDOFFS_SAMPLE_REL = f"{HANDOFFS_DIR_REL}/x.json"
 HANDOFF_INVALID_WARNING = "handoff_artifact_skipped_invalid"
-
-
-def _utc_now() -> str:
-    """Return a normalized UTC timestamp for persisted handoff artifacts."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _is_admin(auth: AuthContext) -> bool:
-    """Return whether the caller can bypass sender/recipient visibility checks."""
-    return "admin:peers" in getattr(auth, "scopes", set())
 
 
 def _handoff_rel_path(handoff_id: str) -> str:
@@ -94,7 +85,7 @@ def _load_handoff_artifact(repo_root: Path, handoff_id: str) -> tuple[str, dict[
 
 def _ensure_read_visibility(auth: AuthContext, artifact: dict[str, Any]) -> None:
     """Require sender, recipient, or admin visibility for a loaded handoff artifact."""
-    if _is_admin(auth):
+    if is_admin(auth):
         return
     caller = getattr(auth, "peer_id", "")
     if caller == artifact.get("sender_peer") or caller == artifact.get("recipient_peer"):
@@ -107,15 +98,6 @@ def _ensure_consume_visibility(auth: AuthContext, artifact: dict[str, Any]) -> N
     if getattr(auth, "peer_id", "") == artifact.get("recipient_peer"):
         return
     raise HTTPException(status_code=403, detail="Only the intended recipient may consume this handoff")
-
-
-def _query_identity_allowed(auth: AuthContext, peer_id: str | None) -> bool:
-    """Return whether the caller may query for the provided sender or recipient identity."""
-    if peer_id is None:
-        return True
-    if _is_admin(auth):
-        return True
-    return getattr(auth, "peer_id", "") == peer_id
 
 
 def _query_sort_key(artifact: dict[str, Any]) -> tuple[float, str]:
@@ -135,24 +117,18 @@ def _persist_new_handoff(
     gm: Any,
     artifact: dict[str, Any],
     commit_message: str,
-) -> tuple[str, str]:
+) -> str:
     """Persist one newly created handoff artifact and roll it back on commit failure."""
     handoff_id = str(artifact["handoff_id"])
     rel = _handoff_rel_path(handoff_id)
-    path = _handoff_path(repo_root, handoff_id)
-    write_text_file(path, canonical_json(artifact))
-    try:
-        committed = gm.commit_file(path, commit_message)
-        if not committed:
-            raise RuntimeError("git commit produced no changes")
-    except Exception as exc:
-        try:
-            if path.exists():
-                path.unlink()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail="Failed to commit handoff artifact") from exc
-    return rel, canonical_json(artifact)
+    return persist_new_artifact(
+        path=_handoff_path(repo_root, handoff_id),
+        rel=rel,
+        gm=gm,
+        artifact=artifact,
+        commit_message=commit_message,
+        error_detail="Failed to commit handoff artifact",
+    )
 
 
 def _persist_updated_handoff(
@@ -164,24 +140,15 @@ def _persist_updated_handoff(
     commit_message: str,
 ) -> str:
     """Persist an updated handoff artifact and restore prior bytes if commit fails."""
-    path = _handoff_path(repo_root, handoff_id)
-    old_bytes = path.read_bytes() if path.exists() else None
-    write_text_file(path, canonical_json(artifact))
-    try:
-        committed = gm.commit_file(path, commit_message)
-        if not committed:
-            raise RuntimeError("git commit produced no changes")
-    except Exception as exc:
-        try:
-            if old_bytes is None:
-                if path.exists():
-                    path.unlink()
-            else:
-                path.write_bytes(old_bytes)
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail="Failed to commit handoff consume update") from exc
-    return _handoff_rel_path(handoff_id)
+    rel = _handoff_rel_path(handoff_id)
+    return persist_updated_artifact(
+        path=_handoff_path(repo_root, handoff_id),
+        rel=rel,
+        gm=gm,
+        artifact=artifact,
+        commit_message=commit_message,
+        error_detail="Failed to commit handoff consume update",
+    )
 
 
 def handoff_create_service(
@@ -208,12 +175,14 @@ def handoff_create_service(
     trust_level = str(peer.get("trust_level") or "untrusted")
     if trust_level == "untrusted":
         raise HTTPException(status_code=409, detail=f"Peer is untrusted: {req.recipient_peer}")
+    if req.commit_message is not None and len(req.commit_message) > 120:
+        raise HTTPException(status_code=400, detail="Value too long in coordination_handoff.commit_message")
 
     source_path = continuity_rel_path(req.subject_kind, req.subject_id)
     capsule = _load_capsule(repo_root, source_path, expected_subject=(req.subject_kind, req.subject_id))
     artifact = CoordinationHandoffArtifact(
         handoff_id=f"handoff_{uuid4().hex}",
-        created_at=_utc_now(),
+        created_at=utc_now(),
         created_by=auth.peer_id,
         sender_peer=auth.peer_id,
         recipient_peer=req.recipient_peer,
@@ -225,10 +194,10 @@ def handoff_create_service(
         shared_continuity=_project_shared_continuity(capsule),
     ).model_dump(mode="json")
 
-    commit_message = req.commit_message if req.commit_message is not None else None
+    commit_message = req.commit_message
     if commit_message is None or not commit_message.strip():
         commit_message = f"handoff: create {artifact['handoff_id']}"
-    rel, _canonical = _persist_new_handoff(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
+    rel = _persist_new_handoff(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
     audit(
         auth,
         "handoff_create",
@@ -274,7 +243,7 @@ def handoffs_query_service(
     auth.require("read:files")
     if req.recipient_peer is None and req.sender_peer is None:
         raise HTTPException(status_code=400, detail="recipient_peer or sender_peer is required")
-    if not _query_identity_allowed(auth, req.recipient_peer) or not _query_identity_allowed(auth, req.sender_peer):
+    if not query_identity_allowed(auth, req.recipient_peer) or not query_identity_allowed(auth, req.sender_peer):
         raise HTTPException(status_code=403, detail="Non-admin callers may query only their own handoff identity")
 
     directory = safe_path(repo_root, HANDOFFS_DIR_REL)
@@ -367,7 +336,7 @@ def handoff_consume_service(
     updated = dict(artifact)
     updated["recipient_status"] = req.status
     updated["recipient_reason"] = req.reason
-    updated["consumed_at"] = _utc_now()
+    updated["consumed_at"] = utc_now()
     updated["consumed_by"] = auth.peer_id
     rel = _persist_updated_handoff(
         repo_root=repo_root,
