@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from app.coordination.locking import _lock_dir_ready, artifact_lock
+from app.coordination.locking import _lock_dir_ready, artifact_lock, purge_stale_lockfiles
 from app.coordination.shared_service import shared_update_service
 from app.models import CoordinationSharedArtifact, CoordinationSharedUpdateRequest
 from app.storage import canonical_json, write_text_file
@@ -147,6 +147,29 @@ class TestArtifactLockUnit(unittest.TestCase):
 
         release.set()
         holder.join(timeout=5)
+
+
+class TestPurgeStaleFiles(unittest.TestCase):
+    """Validate startup lockfile purge."""
+
+    def test_purge_removes_lockfiles(self) -> None:
+        """purge_stale_lockfiles removes .lock files and returns the count."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_dir = Path(tmp) / ".locks"
+            lock_dir.mkdir()
+            (lock_dir / "shared_abc.lock").touch()
+            (lock_dir / "handoff_def.lock").touch()
+            (lock_dir / "not_a_lock.txt").touch()
+
+            removed = purge_stale_lockfiles(lock_dir)
+            self.assertEqual(removed, 2)
+            self.assertTrue((lock_dir / "not_a_lock.txt").exists())
+            self.assertFalse((lock_dir / "shared_abc.lock").exists())
+
+    def test_purge_noop_when_dir_missing(self) -> None:
+        """purge_stale_lockfiles returns 0 if the directory doesn't exist."""
+        removed = purge_stale_lockfiles(Path("/nonexistent/.locks"))
+        self.assertEqual(removed, 0)
 
 
 class TestSharedUpdateConcurrency(unittest.TestCase):

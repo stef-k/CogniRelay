@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
@@ -48,6 +50,7 @@ from .coordination import (
     shared_update_service,
 )
 from .config import get_settings
+from .coordination.locking import purge_stale_lockfiles
 from .discovery import (
     capabilities_payload,
     contracts_payload,
@@ -175,7 +178,15 @@ from .tasks import (
 )
 
 
-app = FastAPI(title="CogniRelay", version="0.3.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    """Run startup housekeeping before the app begins serving requests."""
+    settings = get_settings()
+    purge_stale_lockfiles(settings.repo_root / ".locks")
+    yield
+
+
+app = FastAPI(title="CogniRelay", version="0.3.0", lifespan=_lifespan)
 
 
 def _services() -> tuple:

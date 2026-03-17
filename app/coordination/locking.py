@@ -22,6 +22,27 @@ _LOCK_POLL_INTERVAL: float = 0.05
 _lock_dir_ready: set[str] = set()
 
 
+def purge_stale_lockfiles(lock_dir: Path) -> int:
+    """Remove all lockfiles from the lock directory.
+
+    Safe to call only at application startup before any requests are served.
+    Returns the number of files removed.
+    """
+    removed = 0
+    if not lock_dir.is_dir():
+        return removed
+    for entry in lock_dir.iterdir():
+        if entry.is_file() and entry.suffix == ".lock":
+            try:
+                entry.unlink()
+                removed += 1
+            except OSError:
+                _log.warning("Could not remove stale lockfile: %s", entry)
+    if removed:
+        _log.info("Purged %d stale lockfile(s) from %s", removed, lock_dir)
+    return removed
+
+
 def _ensure_lock_dir(lock_dir: Path) -> None:
     """Create the lock directory once per unique path, per process lifetime."""
     key = str(lock_dir)
