@@ -12,6 +12,7 @@ from .service import (
     shared_create_service,
     shared_query_service,
     shared_read_service,
+    shared_update_service,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "shared_create_service",
     "shared_query_service",
     "shared_read_service",
+    "shared_update_service",
 ]

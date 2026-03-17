@@ -41,6 +41,7 @@ from .coordination import (
     shared_create_service,
     shared_query_service,
     shared_read_service,
+    shared_update_service,
 )
 from .config import get_settings
 from .discovery import (
@@ -70,6 +71,7 @@ from .models import (
     CoordinationHandoffQueryRequest,
     CoordinationSharedCreateRequest,
     CoordinationSharedQueryRequest,
+    CoordinationSharedUpdateRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
@@ -825,6 +827,27 @@ def coordination_shared_query(
         auth=auth,
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/coordination/shared/{shared_id}/update")
+def coordination_shared_update(
+    shared_id: str,
+    req: CoordinationSharedUpdateRequest,
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
+    """Replace one shared coordination artifact payload under owner-only version checking."""
+    settings, gm = _services()
+    return shared_update_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        shared_id=shared_id,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )

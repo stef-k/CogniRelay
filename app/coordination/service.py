@@ -26,6 +26,7 @@ from app.models import (
     CoordinationSharedArtifact,
     CoordinationSharedCreateRequest,
     CoordinationSharedQueryRequest,
+    CoordinationSharedUpdateRequest,
 )
 from app.peers.service import load_peers_registry
 from app.storage import canonical_json, read_text_file, safe_path, write_text_file
@@ -254,6 +255,35 @@ def _persist_new_shared_artifact(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Failed to commit shared coordination artifact") from exc
+    return _shared_rel_path(shared_id)
+
+
+def _persist_updated_shared_artifact(
+    *,
+    repo_root: Path,
+    gm: Any,
+    shared_id: str,
+    artifact: dict[str, Any],
+    commit_message: str,
+) -> str:
+    """Persist an updated shared artifact and restore prior bytes if commit fails."""
+    path = _shared_path(repo_root, shared_id)
+    old_bytes = path.read_bytes() if path.exists() else None
+    write_text_file(path, canonical_json(artifact))
+    try:
+        committed = gm.commit_file(path, commit_message)
+        if not committed:
+            raise RuntimeError("git commit produced no changes")
+    except Exception as exc:
+        try:
+            if old_bytes is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.write_bytes(old_bytes)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Failed to commit shared coordination update") from exc
     return _shared_rel_path(shared_id)
 
 
@@ -635,6 +665,72 @@ def shared_query_service(
         "warnings": warnings,
         "shared_artifacts": shared_artifacts,
     }
+
+
+def shared_update_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: AuthContext,
+    shared_id: str,
+    req: CoordinationSharedUpdateRequest,
+    enforce_rate_limit: Callable[[Any, AuthContext, str], None],
+    enforce_payload_limit: Callable[[Any, Any, str], None],
+    settings: Any,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Replace one shared coordination payload under owner-only version-checked semantics."""
+    enforce_rate_limit(settings, auth, "coordination_shared_update")
+    enforce_payload_limit(settings, req.model_dump(), "coordination_shared_update")
+    rel, artifact = _load_shared_artifact(repo_root, shared_id)
+    if getattr(auth, "peer_id", "") != artifact.get("owner_peer"):
+        raise HTTPException(status_code=403, detail="Only the owner may update this shared coordination artifact")
+
+    _validate_shared_coordination_request(
+        title=req.title,
+        summary=req.summary,
+        constraints=req.constraints,
+        drift_signals=req.drift_signals,
+        coordination_alerts=req.coordination_alerts,
+        commit_message=req.commit_message,
+    )
+    current_version = int(artifact.get("version") or 0)
+    if req.expected_version != current_version:
+        raise HTTPException(status_code=409, detail="Shared coordination version conflict")
+
+    updated = dict(artifact)
+    updated["title"] = req.title
+    updated["summary"] = req.summary
+    updated["shared_state"] = {
+        "constraints": list(req.constraints),
+        "drift_signals": list(req.drift_signals),
+        "coordination_alerts": list(req.coordination_alerts),
+    }
+    updated["updated_at"] = _utc_now()
+    updated["version"] = current_version + 1
+    updated["last_updated_by"] = auth.peer_id
+    commit_message = req.commit_message if req.commit_message is not None else None
+    if commit_message is None or not commit_message.strip():
+        commit_message = f"coordination: update {shared_id} v{updated['version']}"
+    rel = _persist_updated_shared_artifact(
+        repo_root=repo_root,
+        gm=gm,
+        shared_id=shared_id,
+        artifact=updated,
+        commit_message=commit_message,
+    )
+    audit(
+        auth,
+        "coordination_shared_update",
+        {
+            "shared_id": shared_id,
+            "owner_peer": artifact["owner_peer"],
+            "version": updated["version"],
+            "updated_by": auth.peer_id,
+            "path": rel,
+        },
+    )
+    return {"ok": True, "shared": updated, "path": rel, "updated": True, "latest_commit": gm.latest_commit()}
 
 
 def handoff_consume_service(

@@ -276,6 +276,17 @@ class CoordinationSharedQueryRequest(BaseModel):
         return self
 
 
+class CoordinationSharedUpdateRequest(BaseModel):
+    """Owner-only replacement request for one shared coordination artifact."""
+    expected_version: int = Field(ge=1)
+    title: str
+    summary: Optional[str] = None
+    constraints: List[str] = Field(default_factory=list, max_length=8)
+    drift_signals: List[str] = Field(default_factory=list, max_length=8)
+    coordination_alerts: List[str] = Field(default_factory=list, max_length=8)
+    commit_message: Optional[str] = None
+
+
 class TaskCreateRequest(BaseModel):
     """Task creation payload for shared task records."""
     task_id: str

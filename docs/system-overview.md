@@ -140,6 +140,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Expect Phase 5A handoffs to remain local-first: only `active_constraints` and `drift_signals` cross the boundary, and consume outcomes do not automatically promote into local capsules
 - Use `GET /v1/coordination/shared/{shared_id}` and `GET /v1/coordination/shared/query` when multiple agents need to observe the same bounded coordination artifact rather than pass a one-way handoff
 - Expect Phase 5B shared coordination to remain bounded and owner-authored: only `constraints`, `drift_signals`, and `coordination_alerts` are shared, direct read is visibility-gated by artifact membership, and discovery remains scoped to the caller's own owner/participant identity unless the caller is an admin
+- Use `POST /v1/coordination/shared/{shared_id}/update` when the owning agent needs to replace the current shared coordination payload under explicit version checking; non-owners cannot mutate shared state in 5B
 - Treat Phase 5B shared coordination artifacts as additive coordination state layered on top of local continuity, not as shared capsules or automatic local-memory updates
 - Use `POST /v1/recent` when you want the latest indexed material without query matching
 - Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches

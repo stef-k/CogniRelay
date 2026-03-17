@@ -48,6 +48,7 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `POST /v1/coordination/shared/create`: create one owner-authored shared coordination artifact
 - `GET /v1/coordination/shared/{shared_id}`: read one stored shared coordination artifact by id
 - `GET /v1/coordination/shared/query`: query visible shared coordination artifacts for one owner and/or participant identity
+- `POST /v1/coordination/shared/{shared_id}/update`: replace one shared coordination artifact under owner-only version checking
 - `POST /v1/context/snapshot`: persist deterministic context snapshot
 - `GET /v1/context/snapshot/{snapshot_id}`: load a persisted snapshot
 - `POST /v1/compact/run`: compaction planning and summary/report generation
@@ -81,6 +82,7 @@ Notable behavior:
 - shared coordination artifacts expose only the bounded 5B payload of `constraints`, `drift_signals`, and `coordination_alerts`
 - `GET /v1/coordination/shared/{shared_id}` is visible only to the owner, listed participants, or an admin caller; unlike query, direct read does not require `read:files`
 - `GET /v1/coordination/shared/query` requires `read:files`, skips corrupt artifacts with a warning, returns list results under `shared_artifacts`, and keeps non-admin discovery bounded to the caller's own owner/participant identity
+- `POST /v1/coordination/shared/{shared_id}/update` is owner-only, requires an exact `expected_version`, replaces the bounded shared arrays wholesale, and restores the prior artifact bytes if the commit fails
 - shared coordination artifacts are additive coordination records: they do not mutate local continuity capsules and do not yet imply multi-writer or reconciliation semantics
 - `POST /v1/backup/create` now includes `continuity_counts` in the manifest when continuity artifacts are part of the backup scope
 - `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, and archive artifacts
