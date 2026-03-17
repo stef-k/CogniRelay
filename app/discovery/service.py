@@ -20,6 +20,9 @@ from app.models import (
     CoordinationHandoffConsumeRequest,
     CoordinationHandoffCreateRequest,
     CoordinationHandoffQueryRequest,
+    CoordinationReconciliationOpenRequest,
+    CoordinationReconciliationQueryRequest,
+    CoordinationReconciliationResolveRequest,
     CoordinationSharedCreateRequest,
     CoordinationSharedQueryRequest,
     CoordinationSharedUpdateRequest,
@@ -435,6 +438,55 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
                     **schema_for_model(CoordinationSharedUpdateRequest).get("properties", {}),
                 },
                 "required": ["shared_id", "expected_version", "title"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "coordination.reconciliation_open",
+            "description": "Open one bounded reconciliation artifact from visible coordination claims without mutating local continuity or shared state.",
+            "method": "POST",
+            "path": "/v1/coordination/reconciliation/open",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(CoordinationReconciliationOpenRequest),
+        },
+        {
+            "name": "coordination.reconciliation_read",
+            "description": "Read one stored reconciliation artifact using owner, participant, or admin visibility.",
+            "method": "GET",
+            "path": "/v1/coordination/reconciliation/{reconciliation_id}",
+            "scopes": ["authenticated"],
+            "idempotent": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {"reconciliation_id": {"type": "string"}},
+                "required": ["reconciliation_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "coordination.reconciliations_query",
+            "description": "Query visible reconciliation artifacts for one owner and/or claimant identity without mutating any coordination state.",
+            "method": "GET",
+            "path": "/v1/coordination/reconciliations/query",
+            "scopes": ["read:files"],
+            "idempotent": True,
+            "input_schema": schema_for_model(CoordinationReconciliationQueryRequest),
+        },
+        {
+            "name": "coordination.reconciliation_resolve",
+            "description": "Resolve one open reconciliation record under first-write-wins version checking without mutating local continuity or shared state.",
+            "method": "POST",
+            "path": "/v1/coordination/reconciliation/{reconciliation_id}/resolve",
+            "scopes": ["write:projects", "write_namespaces", "authenticated owner"],
+            "idempotent": False,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "reconciliation_id": {"type": "string"},
+                    **schema_for_model(CoordinationReconciliationResolveRequest).get("properties", {}),
+                },
+                "required": ["reconciliation_id", "expected_version", "outcome"],
                 "additionalProperties": False,
             },
         },
@@ -1025,6 +1077,10 @@ def invoke_tool_by_name(
     shared_read: Callable[[str, AuthContext | None], dict[str, Any]],
     shared_query: Callable[[CoordinationSharedQueryRequest, AuthContext | None], dict[str, Any]],
     shared_update: Callable[[str, CoordinationSharedUpdateRequest, AuthContext | None], dict[str, Any]],
+    reconciliation_open: Callable[[CoordinationReconciliationOpenRequest, AuthContext | None], dict[str, Any]],
+    reconciliation_read: Callable[[str, AuthContext | None], dict[str, Any]],
+    reconciliation_query: Callable[[CoordinationReconciliationQueryRequest, AuthContext | None], dict[str, Any]],
+    reconciliation_resolve: Callable[[str, CoordinationReconciliationResolveRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_create: Callable[[ContextSnapshotRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_get: Callable[[str, AuthContext | None], dict[str, Any]],
     tasks_create: Callable[[TaskCreateRequest, AuthContext | None], dict[str, Any]],
@@ -1144,6 +1200,16 @@ def invoke_tool_by_name(
         req_args = dict(args)
         shared_id = str(req_args.pop("shared_id"))
         return shared_update(shared_id, CoordinationSharedUpdateRequest(**req_args), auth)
+    if name == "coordination.reconciliation_open":
+        return reconciliation_open(CoordinationReconciliationOpenRequest(**args), auth)
+    if name == "coordination.reconciliation_read":
+        return reconciliation_read(str(args["reconciliation_id"]), auth)
+    if name == "coordination.reconciliations_query":
+        return reconciliation_query(CoordinationReconciliationQueryRequest(**args), auth)
+    if name == "coordination.reconciliation_resolve":
+        req_args = dict(args)
+        reconciliation_id = str(req_args.pop("reconciliation_id"))
+        return reconciliation_resolve(reconciliation_id, CoordinationReconciliationResolveRequest(**req_args), auth)
     if name == "context.snapshot_create":
         return context_snapshot_create(ContextSnapshotRequest(**args), auth)
     if name == "context.snapshot_get":
@@ -1475,6 +1541,10 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "GET /v1/coordination/shared/{shared_id}": {"scope": "authenticated owner|participant|admin"},
             "GET /v1/coordination/shared/query": {"scope": "read:files"},
             "POST /v1/coordination/shared/{shared_id}/update": {"scope": "authenticated owner"},
+            "POST /v1/coordination/reconciliation/open": {"scope": "write:projects"},
+            "GET /v1/coordination/reconciliation/{reconciliation_id}": {"scope": "authenticated owner|participant|admin"},
+            "GET /v1/coordination/reconciliations/query": {"scope": "read:files"},
+            "POST /v1/coordination/reconciliation/{reconciliation_id}/resolve": {"scope": "authenticated owner|admin"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},
             "GET /v1/context/snapshot/{snapshot_id}": {"scope": "read:files"},
             "POST /v1/tasks": {"scope": "write:projects"},

@@ -38,6 +38,10 @@ from .coordination import (
     handoff_create_service,
     handoff_read_service,
     handoffs_query_service,
+    reconciliation_open_service,
+    reconciliation_query_service,
+    reconciliation_read_service,
+    reconciliation_resolve_service,
     shared_create_service,
     shared_query_service,
     shared_read_service,
@@ -69,6 +73,9 @@ from .models import (
     CoordinationHandoffConsumeRequest,
     CoordinationHandoffCreateRequest,
     CoordinationHandoffQueryRequest,
+    CoordinationReconciliationOpenRequest,
+    CoordinationReconciliationQueryRequest,
+    CoordinationReconciliationResolveRequest,
     CoordinationSharedCreateRequest,
     CoordinationSharedQueryRequest,
     CoordinationSharedUpdateRequest,
@@ -293,6 +300,20 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
             auth=auth_ctx,
         ),
         shared_update=lambda shared_id, req, auth_ctx: coordination_shared_update(shared_id=shared_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        reconciliation_open=lambda req, auth_ctx: coordination_reconciliation_open(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        reconciliation_read=lambda reconciliation_id, auth_ctx: coordination_reconciliation_read(reconciliation_id=reconciliation_id, auth=auth_ctx),  # type: ignore[arg-type]
+        reconciliation_query=lambda req, auth_ctx: coordination_reconciliations_query(
+            owner_peer=req.owner_peer,
+            claimant_peer=req.claimant_peer,
+            status=req.status,
+            classification=req.classification,
+            task_id=req.task_id,
+            thread_id=req.thread_id,
+            offset=req.offset,
+            limit=req.limit,
+            auth=auth_ctx,
+        ),
+        reconciliation_resolve=lambda reconciliation_id, req, auth_ctx: coordination_reconciliation_resolve(reconciliation_id=reconciliation_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_get=lambda snapshot_id, auth_ctx: context_snapshot_get(snapshot_id=snapshot_id, auth=auth_ctx),  # type: ignore[arg-type]
         tasks_create=lambda req, auth_ctx: tasks_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
@@ -857,6 +878,98 @@ def coordination_shared_update(
         gm=gm,
         auth=auth,
         shared_id=shared_id,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/coordination/reconciliation/open")
+def coordination_reconciliation_open(req: CoordinationReconciliationOpenRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Open one bounded reconciliation record from visible coordination artifacts."""
+    settings, gm = _services()
+    return reconciliation_open_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.get("/v1/coordination/reconciliations/query")
+def coordination_reconciliations_query(
+    owner_peer: Annotated[str | None, Query()] = None,
+    claimant_peer: Annotated[str | None, Query()] = None,
+    status: Annotated[Literal["open", "resolved"] | None, Query()] = None,
+    classification: Annotated[
+        Literal["contradictory", "stale_observation", "frame_conflict", "concurrent_race"] | None, Query()
+    ] = None,
+    task_id: Annotated[str | None, Query()] = None,
+    thread_id: Annotated[str | None, Query()] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
+    """Query visible reconciliation artifacts for bounded owner or claimant filters."""
+    settings, _ = _services()
+    try:
+        req = CoordinationReconciliationQueryRequest(
+            owner_peer=owner_peer,
+            claimant_peer=claimant_peer,
+            status=status,
+            classification=classification,
+            task_id=task_id,
+            thread_id=thread_id,
+            offset=offset,
+            limit=limit,
+        )
+    except ValidationError as exc:
+        if "At least one reconciliation query filter is required" in str(exc):
+            raise HTTPException(status_code=400, detail="At least one reconciliation query filter is required") from exc
+        raise HTTPException(status_code=400, detail=f"Invalid reconciliation query: {exc}") from exc
+    return reconciliation_query_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.get("/v1/coordination/reconciliation/{reconciliation_id}")
+def coordination_reconciliation_read(reconciliation_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read one stored reconciliation artifact using owner/participant/admin visibility."""
+    settings, _ = _services()
+    return reconciliation_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        reconciliation_id=reconciliation_id,
+        enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/coordination/reconciliation/{reconciliation_id}/resolve")
+def coordination_reconciliation_resolve(
+    reconciliation_id: str,
+    req: CoordinationReconciliationResolveRequest,
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
+    """Resolve one open reconciliation record under first-write-wins version checking."""
+    settings, gm = _services()
+    return reconciliation_resolve_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        reconciliation_id=reconciliation_id,
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,

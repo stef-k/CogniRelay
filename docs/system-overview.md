@@ -117,6 +117,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/relay/forward` for relay transport logging plus inbox/thread fan-out
 - Use `POST /v1/coordination/handoff/create` when one agent needs to project a bounded continuity subset into an auditable handoff artifact for another agent
 - Use `POST /v1/coordination/shared/create` when one agent needs to author a bounded shared coordination artifact for a participant set without projecting or mutating any continuity capsule
+- Use `POST /v1/coordination/reconciliation/open` when visible handoff/shared claims disagree and that disagreement needs a durable bounded reconciliation record rather than an in-place mutation
 - Use tasks and patch flows for collaborative work instead of ad hoc file mutation where coordination matters
 
 ### Retrieval behavior
@@ -142,6 +143,9 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Expect Phase 5B shared coordination to remain bounded and owner-authored: only `constraints`, `drift_signals`, and `coordination_alerts` are shared, direct read is visibility-gated by artifact membership, and discovery remains scoped to the caller's own owner/participant identity unless the caller is an admin
 - Use `POST /v1/coordination/shared/{shared_id}/update` when the owning agent needs to replace the current shared coordination payload under explicit version checking; non-owners cannot mutate shared state in 5B
 - Treat Phase 5B shared coordination artifacts as additive coordination state layered on top of local continuity, not as shared capsules or automatic local-memory updates
+- Use `GET /v1/coordination/reconciliation/{reconciliation_id}` and `GET /v1/coordination/reconciliations/query` when agents need to inspect or discover explicit disagreement records rather than infer conflict from raw handoff/shared artifacts
+- Use `POST /v1/coordination/reconciliation/{reconciliation_id}/resolve` when an owner (or admin) needs to close a bounded disagreement with one of the first-slice outcomes: `advisory_only`, `conflicted`, or `rejected`; resolve is version-checked, replay-idempotent, and does not mutate 5B shared coordination artifacts or local continuity capsules
+- Expect Phase 5C first-slice reconciliation to stay disagreement-first and additive: records name the bounded claims under dispute, preserve epistemic status and evidence refs, and resolve conservatively without mutating local continuity or 5B shared coordination artifacts
 - Use `POST /v1/recent` when you want the latest indexed material without query matching
 - Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches
 - Prefer summaries over raw episodic logs when both cover the same time window
