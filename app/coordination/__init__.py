@@ -16,7 +16,14 @@ from .shared_service import (
     shared_read_service,
     shared_update_service,
 )
-from .query_index import get_coordination_index, set_coordination_index
+from .query_index import (
+    INDEX_UNAVAILABLE_WARNING,
+    get_coordination_index,
+    set_coordination_index,
+    try_upsert_handoff,
+    try_upsert_reconciliation,
+    try_upsert_shared,
+)
 from .reconciliation_service import (
     RECONCILIATIONS_DIR_REL,
     RECONCILIATION_INVALID_WARNING,
@@ -27,8 +34,12 @@ from .reconciliation_service import (
 )
 
 __all__ = [
+    "INDEX_UNAVAILABLE_WARNING",
     "get_coordination_index",
     "set_coordination_index",
+    "try_upsert_handoff",
+    "try_upsert_reconciliation",
+    "try_upsert_shared",
     "HANDOFFS_DIR_REL",
     "HANDOFF_INVALID_WARNING",
     "RECONCILIATIONS_DIR_REL",

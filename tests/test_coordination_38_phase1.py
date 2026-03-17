@@ -932,7 +932,7 @@ class TestCoordination38Phase1(unittest.TestCase):
 
             self.assertEqual(owner_claimant["count"], 3)
             self.assertEqual(owner_claimant["reconciliations"][0]["reconciliation_id"], newest["reconciliation_id"])
-            self.assertEqual(owner_claimant["warnings"], ["coordination_reconciliation_artifact_skipped_invalid"])
+            self.assertIn("coordination_reconciliation_artifact_skipped_invalid", owner_claimant["warnings"])
             self.assertEqual(paged["total_matches"], 3)
             self.assertEqual(paged["count"], 2)
             self.assertEqual(

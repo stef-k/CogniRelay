@@ -235,14 +235,9 @@ def shared_create_service(
         commit_message = f"coordination: create {artifact['shared_id']}"
     rel = _persist_new_shared_artifact(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
     # Keep the SQLite sidecar index in sync after successful persist.
-    try:
-        from app.coordination.query_index import get_coordination_index
+    from app.coordination.query_index import try_upsert_shared
 
-        _idx = get_coordination_index()
-        if _idx is not None:
-            _idx.upsert_shared(artifact)
-    except Exception:
-        _log.warning("Index upsert failed after shared create", exc_info=True)
+    try_upsert_shared(artifact)
     audit(
         auth,
         "coordination_shared_create",
@@ -309,7 +304,7 @@ def shared_query_service(
     total_matches = 0
 
     # --- Index path: O(log N) via SQLite sidecar ---
-    from app.coordination.query_index import get_coordination_index
+    from app.coordination.query_index import INDEX_UNAVAILABLE_WARNING, get_coordination_index
 
     idx = get_coordination_index()
     if idx is not None and idx.is_available:
@@ -324,17 +319,24 @@ def shared_query_service(
         for sid in ids:
             try:
                 _, artifact = _load_shared_artifact(repo_root, sid)
-            except HTTPException:
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    total_matches -= 1
+                    continue
+                _log.warning("Unexpected error loading indexed shared %s: %s", sid, exc.detail)
+                total_matches -= 1
                 continue
             try:
                 _ensure_shared_read_visibility(auth, artifact)
             except HTTPException as exc:
                 if exc.status_code == 403:
+                    total_matches -= 1
                     continue
                 raise
             visible.append(artifact)
     else:
         # --- Fallback: full directory scan ---
+        warnings.append(INDEX_UNAVAILABLE_WARNING)
         directory = safe_path(repo_root, SHARED_DIR_REL)
         if directory.exists() and directory.is_dir():
             invalid_seen = False
@@ -454,14 +456,9 @@ def shared_update_service(
             commit_message=commit_message,
         )
         # Keep the SQLite sidecar index in sync after successful persist.
-        try:
-            from app.coordination.query_index import get_coordination_index
+        from app.coordination.query_index import try_upsert_shared
 
-            _idx = get_coordination_index()
-            if _idx is not None:
-                _idx.upsert_shared(updated)
-        except Exception:
-            _log.warning("Index upsert failed after shared update", exc_info=True)
+        try_upsert_shared(updated)
         audit(
             auth,
             "coordination_shared_update",

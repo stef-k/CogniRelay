@@ -103,6 +103,9 @@ CREATE TABLE IF NOT EXISTS reconciliation_claimants (
 CREATE INDEX IF NOT EXISTS idx_recon_claimant ON reconciliation_claimants(claimant_peer);
 """
 
+# Warning key emitted when the index is unavailable and fallback scan is used.
+INDEX_UNAVAILABLE_WARNING = "coordination_query_index_unavailable"
+
 
 # ---------------------------------------------------------------------------
 # CoordinationQueryIndex
@@ -142,6 +145,22 @@ class CoordinationQueryIndex:
     def is_available(self) -> bool:
         """Return whether the index database is open and usable."""
         return self._conn is not None
+
+    # -- close (shutdown) ---------------------------------------------------
+
+    def close(self) -> None:
+        """Close the SQLite connection, flushing WAL checkpoint.
+
+        Called during application shutdown to ensure ``-wal`` and ``-shm``
+        files are cleaned up.  Safe to call multiple times.
+        """
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                _log.exception("Error closing coordination query index")
+            finally:
+                self._conn = None
 
     # -- rebuild (startup) --------------------------------------------------
 
@@ -352,7 +371,8 @@ class CoordinationQueryIndex:
             )
             self._conn.commit()
         except Exception:
-            _log.exception("Index upsert failed for handoff %s", artifact.get("handoff_id"))
+            self._conn.rollback()
+            _log.error("Index upsert failed for handoff %s", artifact.get("handoff_id"), exc_info=True)
 
     def upsert_shared(self, artifact: dict[str, Any]) -> None:
         """Insert or update one shared-artifact index entry and its participants.
@@ -391,7 +411,8 @@ class CoordinationQueryIndex:
                         )
             self._conn.commit()
         except Exception:
-            _log.exception("Index upsert failed for shared %s", artifact.get("shared_id"))
+            self._conn.rollback()
+            _log.error("Index upsert failed for shared %s", artifact.get("shared_id"), exc_info=True)
 
     def upsert_reconciliation(self, artifact: dict[str, Any]) -> None:
         """Insert or update one reconciliation index entry and its claimants.
@@ -440,9 +461,11 @@ class CoordinationQueryIndex:
                             )
             self._conn.commit()
         except Exception:
-            _log.exception(
+            self._conn.rollback()
+            _log.error(
                 "Index upsert failed for reconciliation %s",
                 artifact.get("reconciliation_id"),
+                exc_info=True,
             )
 
     # -- query --------------------------------------------------------------
@@ -461,18 +484,8 @@ class CoordinationQueryIndex:
         Filters are conjunctive (AND).  Sort order: ``created_at`` descending,
         ``handoff_id`` ascending (matching the existing in-memory sort key).
 
-        Parameters
-        ----------
-        sender_peer:
-            Exact match on ``sender_peer``.
-        recipient_peer:
-            Exact match on ``recipient_peer``.
-        status:
-            Exact match on ``recipient_status``.
-        offset:
-            Number of rows to skip for pagination.
-        limit:
-            Maximum rows to return.
+        On SQLite errors, returns ``([], 0)`` with logging so the caller
+        can fall back to a full directory scan.
 
         Returns
         -------
@@ -482,35 +495,37 @@ class CoordinationQueryIndex:
         if self._conn is None:
             return [], 0
 
-        conditions: list[str] = []
-        params: list[Any] = []
-        if sender_peer is not None:
-            conditions.append("sender_peer = ?")
-            params.append(sender_peer)
-        if recipient_peer is not None:
-            conditions.append("recipient_peer = ?")
-            params.append(recipient_peer)
-        if status is not None:
-            conditions.append("recipient_status = ?")
-            params.append(status)
+        try:
+            conditions: list[str] = []
+            params: list[Any] = []
+            if sender_peer is not None:
+                conditions.append("sender_peer = ?")
+                params.append(sender_peer)
+            if recipient_peer is not None:
+                conditions.append("recipient_peer = ?")
+                params.append(recipient_peer)
+            if status is not None:
+                conditions.append("recipient_status = ?")
+                params.append(status)
 
-        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
-        # Total count for pagination metadata.
-        count_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM handoff_index{where}", params,
-        ).fetchone()
-        total = count_row[0] if count_row else 0
+            count_row = self._conn.execute(
+                f"SELECT COUNT(*) FROM handoff_index{where}", params,
+            ).fetchone()
+            total = count_row[0] if count_row else 0
 
-        # Page of IDs, sorted to match existing query behaviour.
-        rows = self._conn.execute(
-            f"SELECT handoff_id FROM handoff_index{where}"
-            " ORDER BY created_at_ts DESC, handoff_id ASC"
-            " LIMIT ? OFFSET ?",
-            [*params, limit, offset],
-        ).fetchall()
+            rows = self._conn.execute(
+                f"SELECT handoff_id FROM handoff_index{where}"
+                " ORDER BY created_at_ts DESC, handoff_id ASC"
+                " LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
 
-        return [r[0] for r in rows], total
+            return [r[0] for r in rows], total
+        except Exception:
+            _log.exception("Index query failed for handoffs")
+            return [], 0
 
     def query_shared(
         self,
@@ -528,6 +543,9 @@ class CoordinationQueryIndex:
         ``shared_participants`` junction table.  Sort order: ``updated_at``
         descending, ``shared_id`` ascending.
 
+        On SQLite errors, returns ``([], 0)`` with logging so the caller
+        can fall back to a full directory scan.
+
         Returns
         -------
         tuple:
@@ -536,40 +554,43 @@ class CoordinationQueryIndex:
         if self._conn is None:
             return [], 0
 
-        conditions: list[str] = []
-        params: list[Any] = []
-        if owner_peer is not None:
-            conditions.append("s.owner_peer = ?")
-            params.append(owner_peer)
-        if participant_peer is not None:
-            # Sub-query: the shared artifact has this peer as a participant.
-            conditions.append(
-                "EXISTS (SELECT 1 FROM shared_participants sp"
-                " WHERE sp.shared_id = s.shared_id AND sp.participant_peer = ?)"
-            )
-            params.append(participant_peer)
-        if task_id is not None:
-            conditions.append("s.task_id = ?")
-            params.append(task_id)
-        if thread_id is not None:
-            conditions.append("s.thread_id = ?")
-            params.append(thread_id)
+        try:
+            conditions: list[str] = []
+            params: list[Any] = []
+            if owner_peer is not None:
+                conditions.append("s.owner_peer = ?")
+                params.append(owner_peer)
+            if participant_peer is not None:
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM shared_participants sp"
+                    " WHERE sp.shared_id = s.shared_id AND sp.participant_peer = ?)"
+                )
+                params.append(participant_peer)
+            if task_id is not None:
+                conditions.append("s.task_id = ?")
+                params.append(task_id)
+            if thread_id is not None:
+                conditions.append("s.thread_id = ?")
+                params.append(thread_id)
 
-        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
-        count_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM shared_index s{where}", params,
-        ).fetchone()
-        total = count_row[0] if count_row else 0
+            count_row = self._conn.execute(
+                f"SELECT COUNT(*) FROM shared_index s{where}", params,
+            ).fetchone()
+            total = count_row[0] if count_row else 0
 
-        rows = self._conn.execute(
-            f"SELECT s.shared_id FROM shared_index s{where}"
-            " ORDER BY s.updated_at_ts DESC, s.shared_id ASC"
-            " LIMIT ? OFFSET ?",
-            [*params, limit, offset],
-        ).fetchall()
+            rows = self._conn.execute(
+                f"SELECT s.shared_id FROM shared_index s{where}"
+                " ORDER BY s.updated_at_ts DESC, s.shared_id ASC"
+                " LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
 
-        return [r[0] for r in rows], total
+            return [r[0] for r in rows], total
+        except Exception:
+            _log.exception("Index query failed for shared artifacts")
+            return [], 0
 
     def query_reconciliations(
         self,
@@ -589,6 +610,9 @@ class CoordinationQueryIndex:
         ``reconciliation_claimants`` junction table.  Sort order:
         ``updated_at`` descending, ``reconciliation_id`` ascending.
 
+        On SQLite errors, returns ``([], 0)`` with logging so the caller
+        can fall back to a full directory scan.
+
         Returns
         -------
         tuple:
@@ -597,46 +621,49 @@ class CoordinationQueryIndex:
         if self._conn is None:
             return [], 0
 
-        conditions: list[str] = []
-        params: list[Any] = []
-        if owner_peer is not None:
-            conditions.append("r.owner_peer = ?")
-            params.append(owner_peer)
-        if claimant_peer is not None:
-            # Sub-query: the reconciliation has this peer as a claimant.
-            conditions.append(
-                "EXISTS (SELECT 1 FROM reconciliation_claimants rc"
-                " WHERE rc.reconciliation_id = r.reconciliation_id AND rc.claimant_peer = ?)"
-            )
-            params.append(claimant_peer)
-        if status is not None:
-            conditions.append("r.status = ?")
-            params.append(status)
-        if classification is not None:
-            conditions.append("r.classification = ?")
-            params.append(classification)
-        if task_id is not None:
-            conditions.append("r.task_id = ?")
-            params.append(task_id)
-        if thread_id is not None:
-            conditions.append("r.thread_id = ?")
-            params.append(thread_id)
+        try:
+            conditions: list[str] = []
+            params: list[Any] = []
+            if owner_peer is not None:
+                conditions.append("r.owner_peer = ?")
+                params.append(owner_peer)
+            if claimant_peer is not None:
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM reconciliation_claimants rc"
+                    " WHERE rc.reconciliation_id = r.reconciliation_id AND rc.claimant_peer = ?)"
+                )
+                params.append(claimant_peer)
+            if status is not None:
+                conditions.append("r.status = ?")
+                params.append(status)
+            if classification is not None:
+                conditions.append("r.classification = ?")
+                params.append(classification)
+            if task_id is not None:
+                conditions.append("r.task_id = ?")
+                params.append(task_id)
+            if thread_id is not None:
+                conditions.append("r.thread_id = ?")
+                params.append(thread_id)
 
-        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
-        count_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM reconciliation_index r{where}", params,
-        ).fetchone()
-        total = count_row[0] if count_row else 0
+            count_row = self._conn.execute(
+                f"SELECT COUNT(*) FROM reconciliation_index r{where}", params,
+            ).fetchone()
+            total = count_row[0] if count_row else 0
 
-        rows = self._conn.execute(
-            f"SELECT r.reconciliation_id FROM reconciliation_index r{where}"
-            " ORDER BY r.updated_at_ts DESC, r.reconciliation_id ASC"
-            " LIMIT ? OFFSET ?",
-            [*params, limit, offset],
-        ).fetchall()
+            rows = self._conn.execute(
+                f"SELECT r.reconciliation_id FROM reconciliation_index r{where}"
+                " ORDER BY r.updated_at_ts DESC, r.reconciliation_id ASC"
+                " LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
 
-        return [r[0] for r in rows], total
+            return [r[0] for r in rows], total
+        except Exception:
+            _log.exception("Index query failed for reconciliation artifacts")
+            return [], 0
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +673,7 @@ class CoordinationQueryIndex:
 _coordination_index: CoordinationQueryIndex | None = None
 
 
-def set_coordination_index(idx: CoordinationQueryIndex) -> None:
+def set_coordination_index(idx: CoordinationQueryIndex | None) -> None:
     """Set the module-level coordination query index (called during lifespan startup)."""
     global _coordination_index
     _coordination_index = idx
@@ -655,3 +682,37 @@ def set_coordination_index(idx: CoordinationQueryIndex) -> None:
 def get_coordination_index() -> CoordinationQueryIndex | None:
     """Return the current coordination query index, or ``None`` if unavailable."""
     return _coordination_index
+
+
+def try_upsert_handoff(artifact: dict[str, Any]) -> None:
+    """Best-effort upsert of a handoff entry into the sidecar index.
+
+    Intended for use in mutation service functions after a successful persist.
+    Silently returns if no index is available.  Failures are logged at ERROR
+    but never raised.
+    """
+    idx = _coordination_index
+    if idx is not None:
+        idx.upsert_handoff(artifact)
+
+
+def try_upsert_shared(artifact: dict[str, Any]) -> None:
+    """Best-effort upsert of a shared-artifact entry into the sidecar index.
+
+    Silently returns if no index is available.  Failures are logged at ERROR
+    but never raised.
+    """
+    idx = _coordination_index
+    if idx is not None:
+        idx.upsert_shared(artifact)
+
+
+def try_upsert_reconciliation(artifact: dict[str, Any]) -> None:
+    """Best-effort upsert of a reconciliation entry into the sidecar index.
+
+    Silently returns if no index is available.  Failures are logged at ERROR
+    but never raised.
+    """
+    idx = _coordination_index
+    if idx is not None:
+        idx.upsert_reconciliation(artifact)

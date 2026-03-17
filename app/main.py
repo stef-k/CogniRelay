@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -177,25 +178,57 @@ from .tasks import (
     tasks_update_service,
 )
 
+_log = logging.getLogger(__name__)
 
-@asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    """Run startup housekeeping before the app begins serving requests."""
-    settings = get_settings()
-    purge_stale_lockfiles(settings.repo_root / ".locks")
 
-    # Build the SQLite sidecar index for O(log N) coordination queries.
+def _rebuild_coordination_index(settings: Any) -> None:
+    """Build the SQLite sidecar index for O(log N) coordination queries.
+
+    Each rebuild is wrapped individually so that a failure in one artifact
+    type does not prevent the others from being indexed.  A partially built
+    index is still set as the singleton — the query services fall back to
+    full scan for any type whose rebuild failed.
+    """
     from app.coordination.query_index import CoordinationQueryIndex, set_coordination_index
 
     db_path = settings.repo_root / "memory" / "coordination" / ".query_index.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     idx = CoordinationQueryIndex(db_path)
-    idx.rebuild_handoffs(settings.repo_root / "memory" / "coordination" / "handoffs")
-    idx.rebuild_shared(settings.repo_root / "memory" / "coordination" / "shared")
-    idx.rebuild_reconciliations(settings.repo_root / "memory" / "coordination" / "reconciliations")
+
+    for label, method, directory in [
+        ("handoffs", idx.rebuild_handoffs, settings.repo_root / "memory" / "coordination" / "handoffs"),
+        ("shared", idx.rebuild_shared, settings.repo_root / "memory" / "coordination" / "shared"),
+        ("reconciliations", idx.rebuild_reconciliations, settings.repo_root / "memory" / "coordination" / "reconciliations"),
+    ]:
+        try:
+            method(directory)
+        except Exception:
+            _log.error("Coordination index rebuild failed for %s — queries will use fallback scan", label, exc_info=True)
+
+    # Always register the index, even if partially rebuilt.
     set_coordination_index(idx)
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    """Run startup housekeeping before the app begins serving requests."""
+    import asyncio
+
+    settings = get_settings()
+    purge_stale_lockfiles(settings.repo_root / ".locks")
+
+    # Run synchronous index rebuild off the event loop to avoid blocking startup.
+    await asyncio.to_thread(_rebuild_coordination_index, settings)
+
     yield
+
+    # Shutdown: close the SQLite connection to flush WAL checkpoint.
+    from app.coordination.query_index import get_coordination_index, set_coordination_index
+
+    idx = get_coordination_index()
+    if idx is not None:
+        idx.close()
+        set_coordination_index(None)
 
 
 app = FastAPI(title="CogniRelay", version="0.3.0", lifespan=_lifespan)

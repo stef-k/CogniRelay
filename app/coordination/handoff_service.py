@@ -205,14 +205,9 @@ def handoff_create_service(
         commit_message = f"handoff: create {artifact['handoff_id']}"
     rel = _persist_new_handoff(repo_root=repo_root, gm=gm, artifact=artifact, commit_message=commit_message)
     # Keep the SQLite sidecar index in sync after successful persist.
-    try:
-        from app.coordination.query_index import get_coordination_index
+    from app.coordination.query_index import try_upsert_handoff
 
-        _idx = get_coordination_index()
-        if _idx is not None:
-            _idx.upsert_handoff(artifact)
-    except Exception:
-        _log.warning("Index upsert failed after handoff create", exc_info=True)
+    try_upsert_handoff(artifact)
     audit(
         auth,
         "handoff_create",
@@ -271,7 +266,7 @@ def handoffs_query_service(
     total_matches = 0
 
     # --- Index path: O(log N) via SQLite sidecar ---
-    from app.coordination.query_index import get_coordination_index
+    from app.coordination.query_index import INDEX_UNAVAILABLE_WARNING, get_coordination_index
 
     idx = get_coordination_index()
     if idx is not None and idx.is_available:
@@ -285,18 +280,25 @@ def handoffs_query_service(
         for hid in ids:
             try:
                 _, artifact = _load_handoff_artifact(repo_root, hid)
-            except HTTPException:
-                # File may have been removed between index and load.
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    # File removed between index and load — adjust count.
+                    total_matches -= 1
+                    continue
+                _log.warning("Unexpected error loading indexed handoff %s: %s", hid, exc.detail)
+                total_matches -= 1
                 continue
             try:
                 _ensure_read_visibility(auth, artifact)
             except HTTPException as exc:
                 if exc.status_code == 403:
+                    total_matches -= 1
                     continue
                 raise
             visible.append(artifact)
     else:
         # --- Fallback: full directory scan ---
+        warnings.append(INDEX_UNAVAILABLE_WARNING)
         directory = safe_path(repo_root, HANDOFFS_DIR_REL)
         if directory.exists() and directory.is_dir():
             invalid_seen = False
@@ -405,14 +407,9 @@ def handoff_consume_service(
             commit_message=f"handoff: consume {handoff_id} {req.status}",
         )
         # Keep the SQLite sidecar index in sync after successful persist.
-        try:
-            from app.coordination.query_index import get_coordination_index
+        from app.coordination.query_index import try_upsert_handoff
 
-            _idx = get_coordination_index()
-            if _idx is not None:
-                _idx.upsert_handoff(updated)
-        except Exception:
-            _log.warning("Index upsert failed after handoff consume", exc_info=True)
+        try_upsert_handoff(updated)
         audit(
             auth,
             "handoff_consume",

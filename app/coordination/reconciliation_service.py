@@ -306,14 +306,9 @@ def reconciliation_open_service(
         error_detail="Failed to commit reconciliation artifact",
     )
     # Keep the SQLite sidecar index in sync after successful persist.
-    try:
-        from app.coordination.query_index import get_coordination_index
+    from app.coordination.query_index import try_upsert_reconciliation
 
-        _idx = get_coordination_index()
-        if _idx is not None:
-            _idx.upsert_reconciliation(artifact)
-    except Exception:
-        _log.warning("Index upsert failed after reconciliation open", exc_info=True)
+    try_upsert_reconciliation(artifact)
     audit(
         auth,
         "coordination_reconciliation_open",
@@ -390,7 +385,7 @@ def reconciliation_query_service(
     total_matches = 0
 
     # --- Index path: O(log N) via SQLite sidecar ---
-    from app.coordination.query_index import get_coordination_index
+    from app.coordination.query_index import INDEX_UNAVAILABLE_WARNING, get_coordination_index
 
     idx = get_coordination_index()
     if idx is not None and idx.is_available:
@@ -407,17 +402,24 @@ def reconciliation_query_service(
         for rid in ids:
             try:
                 _, artifact = _load_reconciliation_artifact(repo_root, rid)
-            except HTTPException:
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    total_matches -= 1
+                    continue
+                _log.warning("Unexpected error loading indexed reconciliation %s: %s", rid, exc.detail)
+                total_matches -= 1
                 continue
             try:
                 _ensure_reconciliation_visibility(auth, artifact)
             except HTTPException as exc:
                 if exc.status_code == 403:
+                    total_matches -= 1
                     continue
                 raise
             visible.append(artifact)
     else:
         # --- Fallback: full directory scan ---
+        warnings.append(INDEX_UNAVAILABLE_WARNING)
         directory = safe_path(repo_root, RECONCILIATIONS_DIR_REL)
         if directory.exists() and directory.is_dir():
             invalid_seen = False
@@ -576,14 +578,9 @@ def reconciliation_resolve_service(
             error_detail="Failed to commit reconciliation resolve",
         )
         # Keep the SQLite sidecar index in sync after successful persist.
-        try:
-            from app.coordination.query_index import get_coordination_index
+        from app.coordination.query_index import try_upsert_reconciliation
 
-            _idx = get_coordination_index()
-            if _idx is not None:
-                _idx.upsert_reconciliation(updated)
-        except Exception:
-            _log.warning("Index upsert failed after reconciliation resolve", exc_info=True)
+        try_upsert_reconciliation(updated)
         audit(
             auth,
             "coordination_reconciliation_resolve",
