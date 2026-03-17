@@ -66,8 +66,12 @@ def write_text_file(path: Path, content: str) -> None:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.rename(tmp_path, path)
+        os.replace(tmp_path, path)
     except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         try:
             os.unlink(tmp_path)
         except OSError:

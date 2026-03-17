@@ -77,27 +77,44 @@ class TestAtomicWriteTextFile(unittest.TestCase):
         tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
         self.assertEqual(tmp_files, [])
 
-    def test_fsync_called_before_rename(self):
-        """Verify os.fsync is called before os.rename for durability."""
+    def test_fsync_called_before_replace(self):
+        """Verify os.fsync is called before os.replace for durability."""
         target = self.tmpdir / "file.json"
         call_order = []
 
         original_fsync = os.fsync
-        original_rename = os.rename
+        original_replace = os.replace
 
         def tracking_fsync(fd):
             call_order.append("fsync")
             return original_fsync(fd)
 
-        def tracking_rename(src, dst):
-            call_order.append("rename")
-            return original_rename(src, dst)
+        def tracking_replace(src, dst):
+            call_order.append("replace")
+            return original_replace(src, dst)
 
         with patch("app.storage.os.fsync", side_effect=tracking_fsync), \
-             patch("app.storage.os.rename", side_effect=tracking_rename):
+             patch("app.storage.os.replace", side_effect=tracking_replace):
             write_text_file(target, "durable content")
 
-        self.assertEqual(call_order, ["fsync", "rename"])
+        self.assertEqual(call_order, ["fsync", "replace"])
+
+    def test_fd_closed_on_fdopen_failure(self):
+        """If os.fdopen fails, the raw fd must be closed to prevent leaks."""
+        target = self.tmpdir / "file.json"
+        closed_fds = []
+        original_close = os.close
+
+        def tracking_close(fd):
+            closed_fds.append(fd)
+            return original_close(fd)
+
+        with patch("app.storage.os.fdopen", side_effect=OSError("encoding error")), \
+             patch("app.storage.os.close", side_effect=tracking_close):
+            with self.assertRaises(OSError):
+                write_text_file(target, "content")
+
+        self.assertEqual(len(closed_fds), 1, "fd should be closed exactly once")
 
 
 if __name__ == "__main__":
