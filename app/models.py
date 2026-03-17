@@ -147,6 +147,74 @@ class PeerTrustTransitionRequest(BaseModel):
     expected_public_key_fingerprint: Optional[str] = None
 
 
+class CoordinationHandoffSourceSelector(BaseModel):
+    """Explicit continuity selector projected into a coordination handoff."""
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+
+
+class CoordinationHandoffSourceSummary(BaseModel):
+    """Source-capsule summary copied into a coordination handoff artifact."""
+    path: str
+    updated_at: str
+    verified_at: str
+    verification_status: str
+    health_status: str
+
+
+class CoordinationHandoffSharedContinuity(BaseModel):
+    """The bounded 5A continuity subset allowed to cross the peer boundary."""
+    active_constraints: List[str] = Field(default_factory=list, max_length=5)
+    drift_signals: List[str] = Field(default_factory=list, max_length=5)
+
+
+class CoordinationHandoffArtifact(BaseModel):
+    """Stored handoff artifact exchanged between one sender and one recipient."""
+    schema_type: Literal["continuity_handoff"] = "continuity_handoff"
+    schema_version: Literal["1.0"] = "1.0"
+    handoff_id: str = Field(min_length=1, max_length=64)
+    created_at: str
+    created_by: str = Field(min_length=1, max_length=200)
+    sender_peer: str = Field(min_length=1, max_length=200)
+    recipient_peer: str = Field(min_length=1, max_length=200)
+    source_selector: CoordinationHandoffSourceSelector
+    source_summary: CoordinationHandoffSourceSummary
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    note: Optional[str] = Field(default=None, max_length=240)
+    shared_continuity: CoordinationHandoffSharedContinuity
+    recipient_status: Literal["pending", "accepted_advisory", "deferred", "rejected"] = "pending"
+    recipient_reason: Optional[str] = Field(default=None, max_length=240)
+    consumed_at: Optional[str] = None
+    consumed_by: Optional[str] = Field(default=None, max_length=200)
+
+
+class CoordinationHandoffCreateRequest(BaseModel):
+    """Create request for one inter-agent continuity handoff artifact."""
+    recipient_peer: str = Field(min_length=1, max_length=200)
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    note: Optional[str] = Field(default=None, max_length=240)
+    commit_message: Optional[str] = Field(default=None, max_length=120)
+
+
+class CoordinationHandoffQueryRequest(BaseModel):
+    """Filter parameters for discovering visible handoff artifacts."""
+    recipient_peer: Optional[str] = Field(default=None, max_length=200)
+    sender_peer: Optional[str] = Field(default=None, max_length=200)
+    status: Optional[Literal["pending", "accepted_advisory", "deferred", "rejected"]] = None
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class CoordinationHandoffConsumeRequest(BaseModel):
+    """Recipient-only consume request for one handoff artifact."""
+    status: Literal["accepted_advisory", "deferred", "rejected"]
+    reason: Optional[str] = Field(default=None, max_length=240)
+
+
 class TaskCreateRequest(BaseModel):
     """Task creation payload for shared task records."""
     task_id: str

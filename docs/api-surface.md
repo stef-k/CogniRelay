@@ -41,6 +41,10 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `POST /v1/continuity/revalidate`: confirm, correct, degrade, or conflict-mark one active continuity capsule
 - `POST /v1/continuity/list`: list active continuity capsule summaries
 - `POST /v1/continuity/archive`: archive one active continuity capsule and remove the active file
+- `POST /v1/coordination/handoff/create`: create one local-first inter-agent handoff artifact from an active continuity capsule
+- `GET /v1/coordination/handoff/{handoff_id}`: read one stored handoff artifact by id
+- `GET /v1/coordination/handoffs/query`: query visible handoff artifacts for one sender and/or recipient identity
+- `POST /v1/coordination/handoff/{handoff_id}/consume`: record the recipient's advisory, deferred, or rejected consume outcome
 - `POST /v1/context/snapshot`: persist deterministic context snapshot
 - `GET /v1/context/snapshot/{snapshot_id}`: load a persisted snapshot
 - `POST /v1/compact/run`: compaction planning and summary/report generation
@@ -65,6 +69,11 @@ Notable behavior:
 - `POST /v1/continuity/list` now supports `include_fallback` and `include_archived`, and returns additive `artifact_state` plus `retention_class`
 - `POST /v1/continuity/delete` deletes exact-selector active, fallback, and archive artifacts through one audited git-backed delete path
 - `POST /v1/continuity/archive` writes an archive envelope under `memory/continuity/archive/` and removes the active capsule in one git-backed commit
+- `POST /v1/coordination/handoff/create` projects only `continuity.active_constraints` and `continuity.drift_signals` from one exact active continuity capsule into a stored handoff artifact under `memory/coordination/handoffs/`
+- handoff artifacts are additive coordination records: they do not mutate local continuity capsules, and `POST /v1/coordination/handoff/{handoff_id}/consume` records only recipient outcome fields
+- `GET /v1/coordination/handoffs/query` lets senders and recipients discover visible handoffs without relying on successful message or task-reference delivery; corrupt handoff artifacts are skipped with a warning instead of failing the whole query
+- `GET /v1/coordination/handoff/{handoff_id}` is visible only to the sender, the recipient, or an admin caller; `POST /v1/coordination/handoff/{handoff_id}/consume` is recipient-only
+- handoff artifacts use canonical JSON serialization and git-backed rollback on create or consume commit failure
 - `POST /v1/backup/create` now includes `continuity_counts` in the manifest when continuity artifacts are part of the backup scope
 - `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, and archive artifacts
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
@@ -93,6 +102,7 @@ Notable behavior:
 - direct delivery supports idempotency keys and acknowledgment tracking
 - relay forwarding writes immutable transport records plus inbox/thread artifacts
 - signed ingress can be enforced for direct and relayed message flows
+- messages and relay flows may carry stable handoff references via `attachments: ["handoff:{handoff_id}"]`; handoff ids become valid only after the referenced handoff artifact commits successfully
 
 ## Shared work and code workflows
 
@@ -108,6 +118,7 @@ Notable behavior:
 Notable behavior:
 
 - task transitions are deterministic and constrained
+- tasks may carry a coordination handoff link through `metadata.handoff_id`; 5A treats this as a deterministic reference convention rather than automatic shared-state coupling
 - patch application validates working tree state and base reference compatibility
 - code merge decisions depend on persisted check evidence rather than implicit local state
 
