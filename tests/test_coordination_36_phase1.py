@@ -469,6 +469,26 @@ class TestCoordination36Phase1(unittest.TestCase):
             self.assertEqual(out["total_matches"], 1)
             self.assertEqual(out["warnings"], ["handoff_artifact_skipped_invalid"])
 
+    def test_query_rejects_invalid_status_value_with_http_400(self) -> None:
+        """Direct route calls should surface invalid status values as HTTP 400 instead of 500."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                with self.assertRaises(HTTPException) as cm:
+                    coordination_handoffs_query(
+                        recipient_peer="peer-beta",
+                        sender_peer=None,
+                        status="invalid",  # type: ignore[arg-type]
+                        offset=0,
+                        limit=20,
+                        auth=_AuthStub(peer_id="peer-beta"),
+                    )
+
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertIn("Invalid coordination handoff query", str(cm.exception.detail))
+
     def test_create_rolls_back_artifact_when_commit_fails(self) -> None:
         """Create should remove the newly written artifact if the commit fails."""
         with tempfile.TemporaryDirectory() as td:

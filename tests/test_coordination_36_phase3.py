@@ -142,6 +142,76 @@ class TestCoordination36Phase3(unittest.TestCase):
         self.assertTrue(structured["ok"])
         self.assertEqual(structured["handoff"]["recipient_peer"], "peer-beta")
 
+    def test_mcp_tools_call_can_query_handoff_artifacts(self) -> None:
+        """MCP tool dispatch should expose handoff query through the new coordination tool."""
+        req = {
+            "jsonrpc": "2.0",
+            "id": 82,
+            "method": "tools/call",
+            "params": {
+                "name": "coordination.handoffs_query",
+                "arguments": {
+                    "recipient_peer": "peer-beta",
+                    "status": "pending",
+                    "offset": 0,
+                    "limit": 20,
+                },
+            },
+        }
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-beta",
+            scopes={"read:files"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            handoff_dir = repo_root / "memory" / "coordination" / "handoffs"
+            handoff_dir.mkdir(parents=True, exist_ok=True)
+            (handoff_dir / "handoff_1234567890abcdef1234567890abcdef.json").write_text(
+                json.dumps(
+                    {
+                        "schema_type": "continuity_handoff",
+                        "schema_version": "1.0",
+                        "handoff_id": "handoff_1234567890abcdef1234567890abcdef",
+                        "created_at": "2026-03-17T12:00:00Z",
+                        "created_by": "peer-alpha",
+                        "sender_peer": "peer-alpha",
+                        "recipient_peer": "peer-beta",
+                        "source_selector": {"subject_kind": "task", "subject_id": "build-phase-5a"},
+                        "source_summary": {
+                            "path": "memory/continuity/task-build-phase-5a.json",
+                            "updated_at": "2026-03-17T10:00:00Z",
+                            "verified_at": "2026-03-17T10:00:00Z",
+                            "verification_status": "peer_confirmed",
+                            "health_status": "healthy",
+                        },
+                        "task_id": None,
+                        "thread_id": None,
+                        "note": None,
+                        "shared_continuity": {"active_constraints": [], "drift_signals": []},
+                        "recipient_status": "pending",
+                        "recipient_reason": None,
+                        "consumed_at": None,
+                        "consumed_by": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
+                "app.main.require_auth", return_value=auth
+            ):
+                res = mcp_rpc(req, authorization="Bearer token", http_request=_RequestStub("127.0.0.1"))
+
+        structured = res["result"]["structuredContent"]
+        self.assertTrue(structured["ok"])
+        self.assertEqual(structured["count"], 1)
+        self.assertEqual(structured["handoffs"][0]["recipient_peer"], "peer-beta")
+
 
 if __name__ == "__main__":
     unittest.main()

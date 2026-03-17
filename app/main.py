@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, Query, Request as FastAPIRequest, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
 from .context import (
@@ -264,7 +265,14 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         continuity_delete=lambda req, auth_ctx: continuity_delete(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_create=lambda req, auth_ctx: coordination_handoff_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_read=lambda handoff_id, auth_ctx: coordination_handoff_read(handoff_id=handoff_id, auth=auth_ctx),  # type: ignore[arg-type]
-        handoff_query=lambda req, auth_ctx: coordination_handoffs_query(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        handoff_query=lambda req, auth_ctx: coordination_handoffs_query(
+            recipient_peer=req.recipient_peer,
+            sender_peer=req.sender_peer,
+            status=req.status,
+            offset=req.offset,
+            limit=req.limit,
+            auth=auth_ctx,
+        ),
         handoff_consume=lambda handoff_id, req, auth_ctx: coordination_handoff_consume(handoff_id=handoff_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_get=lambda snapshot_id, auth_ctx: context_snapshot_get(snapshot_id=snapshot_id, auth=auth_ctx),  # type: ignore[arg-type]
@@ -706,20 +714,23 @@ def coordination_handoff_read(handoff_id: str, auth: AuthContext = Depends(requi
 def coordination_handoffs_query(
     recipient_peer: str | None = Query(default=None),
     sender_peer: str | None = Query(default=None),
-    status: str | None = Query(default=None),
+    status: Literal["pending", "accepted_advisory", "deferred", "rejected"] | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """Query visible handoff artifacts for one sender and/or recipient identity."""
     settings, _ = _services()
-    req = CoordinationHandoffQueryRequest(
-        recipient_peer=recipient_peer,
-        sender_peer=sender_peer,
-        status=status,
-        offset=offset,
-        limit=limit,
-    )
+    try:
+        req = CoordinationHandoffQueryRequest(
+            recipient_peer=recipient_peer,
+            sender_peer=sender_peer,
+            status=status,
+            offset=offset,
+            limit=limit,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid coordination handoff query: {exc}") from exc
     return handoffs_query_service(
         repo_root=settings.repo_root,
         auth=auth,
