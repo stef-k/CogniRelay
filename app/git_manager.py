@@ -66,7 +66,7 @@ class GitManager:
             "GIT_COMMITTER_EMAIL": self.author_email,
         }
         subprocess.run(
-            ["git", "commit", "-m", message],
+            ["git", "commit", "-m", message, "--", *rels],
             cwd=self.repo_root,
             check=True,
             text=True,
