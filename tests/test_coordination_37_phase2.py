@@ -236,6 +236,23 @@ class TestCoordination37Phase2(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 409)
             self.assertEqual(ctx.exception.detail, "Shared coordination version conflict")
 
+    def test_update_rejects_invalid_shared_id_format(self) -> None:
+        """Update should reject malformed shared ids before probing the filesystem."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                with self.assertRaises(HTTPException) as ctx:
+                    coordination_shared_update(
+                        shared_id="shared_foo",
+                        req=self._update_request(),
+                        auth=_AuthStub(peer_id="peer-alpha"),
+                    )
+
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(ctx.exception.detail, "Invalid shared coordination artifact id")
+
     def test_update_rejects_all_empty_shared_state(self) -> None:
         """Update should reject requests where all three shared-state arrays are empty."""
         with tempfile.TemporaryDirectory() as td:

@@ -372,6 +372,19 @@ class TestCoordination37Phase1(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 403)
             self.assertEqual(ctx.exception.detail, "Shared coordination artifact not visible to caller")
 
+    def test_read_rejects_invalid_shared_id_format(self) -> None:
+        """Read should reject malformed shared ids before probing the filesystem."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+
+            with patch("app.main._services", return_value=(settings, None)):
+                with self.assertRaises(HTTPException) as ctx:
+                    coordination_shared_read(shared_id="shared_foo", auth=_AuthStub(peer_id="peer-alpha"))
+
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(ctx.exception.detail, "Invalid shared coordination artifact id")
+
     def test_query_requires_explicit_self_identity_for_non_admin(self) -> None:
         """Non-admin callers should not be able to run task-only or thread-only queries."""
         with tempfile.TemporaryDirectory() as td:
