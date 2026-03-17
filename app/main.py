@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, Query, Request as FastAPIRequest, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
 from .context import (
@@ -32,6 +33,12 @@ from .continuity import (
     continuity_revalidate_service,
     continuity_upsert_service,
 )
+from .coordination import (
+    handoff_consume_service,
+    handoff_create_service,
+    handoff_read_service,
+    handoffs_query_service,
+)
 from .config import get_settings
 from .discovery import (
     capabilities_payload,
@@ -55,6 +62,9 @@ from .models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
+    CoordinationHandoffConsumeRequest,
+    CoordinationHandoffCreateRequest,
+    CoordinationHandoffQueryRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
@@ -253,6 +263,17 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         continuity_list=lambda req, auth_ctx: continuity_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_archive=lambda req, auth_ctx: continuity_archive(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_delete=lambda req, auth_ctx: continuity_delete(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        handoff_create=lambda req, auth_ctx: coordination_handoff_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        handoff_read=lambda handoff_id, auth_ctx: coordination_handoff_read(handoff_id=handoff_id, auth=auth_ctx),  # type: ignore[arg-type]
+        handoff_query=lambda req, auth_ctx: coordination_handoffs_query(
+            recipient_peer=req.recipient_peer,
+            sender_peer=req.sender_peer,
+            status=req.status,
+            offset=req.offset,
+            limit=req.limit,
+            auth=auth_ctx,
+        ),
+        handoff_consume=lambda handoff_id, req, auth_ctx: coordination_handoff_consume(handoff_id=handoff_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_get=lambda snapshot_id, auth_ctx: context_snapshot_get(snapshot_id=snapshot_id, auth=auth_ctx),  # type: ignore[arg-type]
         tasks_create=lambda req, auth_ctx: tasks_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
@@ -655,6 +676,88 @@ def continuity_delete(req: ContinuityDeleteRequest, auth: AuthContext = Depends(
         gm=gm,
         auth=auth,
         req=req,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/coordination/handoff/create")
+def coordination_handoff_create(req: CoordinationHandoffCreateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Create one local-first inter-agent handoff artifact from an active capsule."""
+    settings, gm = _services()
+    return handoff_create_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.get("/v1/coordination/handoff/{handoff_id}")
+def coordination_handoff_read(handoff_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read one stored handoff artifact using sender/recipient/admin visibility."""
+    settings, _ = _services()
+    return handoff_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        handoff_id=handoff_id,
+        enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.get("/v1/coordination/handoffs/query")
+def coordination_handoffs_query(
+    recipient_peer: str | None = Query(default=None),
+    sender_peer: str | None = Query(default=None),
+    status: Literal["pending", "accepted_advisory", "deferred", "rejected"] | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
+    """Query visible handoff artifacts for one sender and/or recipient identity."""
+    settings, _ = _services()
+    try:
+        req = CoordinationHandoffQueryRequest(
+            recipient_peer=recipient_peer,
+            sender_peer=sender_peer,
+            status=status,
+            offset=offset,
+            limit=limit,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid coordination handoff query: {exc}") from exc
+    return handoffs_query_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/coordination/handoff/{handoff_id}/consume")
+def coordination_handoff_consume(
+    handoff_id: str,
+    req: CoordinationHandoffConsumeRequest,
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
+    """Record the intended recipient's consume outcome for one handoff artifact."""
+    settings, gm = _services()
+    return handoff_consume_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        handoff_id=handoff_id,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 

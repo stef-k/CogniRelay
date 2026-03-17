@@ -17,6 +17,9 @@ from app.models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
+    CoordinationHandoffConsumeRequest,
+    CoordinationHandoffCreateRequest,
+    CoordinationHandoffQueryRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
@@ -333,6 +336,55 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
             "idempotent": False,
             "input_schema": schema_for_model(ContinuityDeleteRequest),
+        },
+        {
+            "name": "coordination.handoff_create",
+            "description": "Create one local-first inter-agent handoff artifact from an active continuity capsule.",
+            "method": "POST",
+            "path": "/v1/coordination/handoff/create",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(CoordinationHandoffCreateRequest),
+        },
+        {
+            "name": "coordination.handoff_read",
+            "description": "Read one stored handoff artifact using sender, recipient, or admin visibility.",
+            "method": "GET",
+            "path": "/v1/coordination/handoff/{handoff_id}",
+            "scopes": ["authenticated"],
+            "idempotent": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {"handoff_id": {"type": "string"}},
+                "required": ["handoff_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "coordination.handoffs_query",
+            "description": "Query visible handoff artifacts for one sender and/or recipient identity without shared-state mutation.",
+            "method": "GET",
+            "path": "/v1/coordination/handoffs/query",
+            "scopes": ["read:files"],
+            "idempotent": True,
+            "input_schema": schema_for_model(CoordinationHandoffQueryRequest),
+        },
+        {
+            "name": "coordination.handoff_consume",
+            "description": "Record the recipient's consume outcome for one handoff artifact without mutating local continuity.",
+            "method": "POST",
+            "path": "/v1/coordination/handoff/{handoff_id}/consume",
+            "scopes": ["authenticated"],
+            "idempotent": False,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "handoff_id": {"type": "string"},
+                    **schema_for_model(CoordinationHandoffConsumeRequest).get("properties", {}),
+                },
+                "required": ["handoff_id", "status"],
+                "additionalProperties": False,
+            },
         },
         {
             "name": "context.snapshot_create",
@@ -913,6 +965,10 @@ def invoke_tool_by_name(
     continuity_list: Callable[[ContinuityListRequest, AuthContext | None], dict[str, Any]],
     continuity_archive: Callable[[ContinuityArchiveRequest, AuthContext | None], dict[str, Any]],
     continuity_delete: Callable[[ContinuityDeleteRequest, AuthContext | None], dict[str, Any]],
+    handoff_create: Callable[[CoordinationHandoffCreateRequest, AuthContext | None], dict[str, Any]],
+    handoff_read: Callable[[str, AuthContext | None], dict[str, Any]],
+    handoff_query: Callable[[CoordinationHandoffQueryRequest, AuthContext | None], dict[str, Any]],
+    handoff_consume: Callable[[str, CoordinationHandoffConsumeRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_create: Callable[[ContextSnapshotRequest, AuthContext | None], dict[str, Any]],
     context_snapshot_get: Callable[[str, AuthContext | None], dict[str, Any]],
     tasks_create: Callable[[TaskCreateRequest, AuthContext | None], dict[str, Any]],
@@ -1012,6 +1068,16 @@ def invoke_tool_by_name(
         return continuity_archive(ContinuityArchiveRequest(**args), auth)
     if name == "continuity.delete":
         return continuity_delete(ContinuityDeleteRequest(**args), auth)
+    if name == "coordination.handoff_create":
+        return handoff_create(CoordinationHandoffCreateRequest(**args), auth)
+    if name == "coordination.handoff_read":
+        return handoff_read(str(args["handoff_id"]), auth)
+    if name == "coordination.handoffs_query":
+        return handoff_query(CoordinationHandoffQueryRequest(**args), auth)
+    if name == "coordination.handoff_consume":
+        req_args = dict(args)
+        handoff_id = str(req_args.pop("handoff_id"))
+        return handoff_consume(handoff_id, CoordinationHandoffConsumeRequest(**req_args), auth)
     if name == "context.snapshot_create":
         return context_snapshot_create(ContextSnapshotRequest(**args), auth)
     if name == "context.snapshot_get":
@@ -1335,6 +1401,10 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "POST /v1/continuity/list": {"scope": "read:files"},
             "POST /v1/continuity/archive": {"scope": "write:projects"},
             "POST /v1/continuity/delete": {"scope": "write:projects"},
+            "POST /v1/coordination/handoff/create": {"scope": "write:projects"},
+            "GET /v1/coordination/handoff/{handoff_id}": {"scope": "authenticated sender|recipient|admin"},
+            "GET /v1/coordination/handoffs/query": {"scope": "read:files"},
+            "POST /v1/coordination/handoff/{handoff_id}/consume": {"scope": "authenticated recipient"},
             "POST /v1/context/snapshot": {"scope": "search + write:projects"},
             "GET /v1/context/snapshot/{snapshot_id}": {"scope": "read:files"},
             "POST /v1/tasks": {"scope": "write:projects"},

@@ -37,6 +37,7 @@ CogniRelay combines a small number of building blocks:
 
 - Register peers and discover remote manifests
 - Maintain explicit trust transitions for peer relationships
+- Create bounded continuity handoff artifacts between peers without shared-state mutation
 - Exchange direct messages with delivery tracking and acknowledgments
 - Forward relayed messages with immutable transport logging
 
@@ -76,6 +77,7 @@ The runtime repo under `data_repo/` is organized around durable memory and colla
 - `memory/` for core, episodic, and summary memory
 - `journal/` for dated logs
 - `messages/` for inbox, relay, threads, acknowledgments, and delivery state
+- `memory/coordination/` for local-first inter-agent handoff artifacts
 - `peers/` for peer metadata and replication state
 - `snapshots/` for deterministic context artifacts
 - `index/` for derived indexes and `search.db`
@@ -112,6 +114,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Put collaboration traffic in `messages/*`
 - Use `POST /v1/messages/send` for tracked direct delivery
 - Use `POST /v1/relay/forward` for relay transport logging plus inbox/thread fan-out
+- Use `POST /v1/coordination/handoff/create` when one agent needs to project a bounded continuity subset into an auditable handoff artifact for another agent
 - Use tasks and patch flows for collaborative work instead of ad hoc file mutation where coordination matters
 
 ### Retrieval behavior
@@ -130,6 +133,9 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/continuity/list` when you need active, fallback, or archived continuity summaries with deterministic artifact-state and retention-class labeling
 - Use `POST /v1/continuity/delete` when you need an explicit hard-delete path for active, fallback, or archive continuity artifacts
 - Use `POST /v1/continuity/archive` when you need to remove an active capsule from retrieval while preserving its final archived envelope
+- Use `GET /v1/coordination/handoff/{handoff_id}` and `GET /v1/coordination/handoffs/query` when you need to read or discover existing handoff artifacts without assuming the sender's message or task reference already arrived
+- Use `POST /v1/coordination/handoff/{handoff_id}/consume` when the intended recipient needs to record `accepted_advisory`, `deferred`, or `rejected` without mutating local continuity
+- Expect Phase 5A handoffs to remain local-first: only `active_constraints` and `drift_signals` cross the boundary, and consume outcomes do not automatically promote into local capsules
 - Use `POST /v1/recent` when you want the latest indexed material without query matching
 - Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches
 - Prefer summaries over raw episodic logs when both cover the same time window
@@ -160,6 +166,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - For collaboration peers, a typical split is read access to shared memory and messages, with write access limited to `messages`
 - Prefer API-driven token lifecycle operations over manual file edits so audit state stays consistent
 - Keep trust transitions explicit through `POST /v1/peers/{peer_id}/trust`
+- Treat Phase 5A handoff artifacts as advisory coordination context layered on top of local continuity, not as remote truth that silently rewrites private orientation
 
 ### Host-local authority boundary
 
