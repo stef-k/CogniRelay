@@ -281,6 +281,18 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
             auth=auth_ctx,
         ),
         handoff_consume=lambda handoff_id, req, auth_ctx: coordination_handoff_consume(handoff_id=handoff_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        shared_create=lambda req, auth_ctx: coordination_shared_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        shared_read=lambda shared_id, auth_ctx: coordination_shared_read(shared_id=shared_id, auth=auth_ctx),  # type: ignore[arg-type]
+        shared_query=lambda req, auth_ctx: coordination_shared_query(
+            owner_peer=req.owner_peer,
+            participant_peer=req.participant_peer,
+            task_id=req.task_id,
+            thread_id=req.thread_id,
+            offset=req.offset,
+            limit=req.limit,
+            auth=auth_ctx,
+        ),
+        shared_update=lambda shared_id, req, auth_ctx: coordination_shared_update(shared_id=shared_id, req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_create=lambda req, auth_ctx: context_snapshot_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         context_snapshot_get=lambda snapshot_id, auth_ctx: context_snapshot_get(snapshot_id=snapshot_id, auth=auth_ctx),  # type: ignore[arg-type]
         tasks_create=lambda req, auth_ctx: tasks_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
