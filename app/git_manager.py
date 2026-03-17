@@ -71,7 +71,7 @@ class GitManager:
             check=True,
             text=True,
             capture_output=True,
-            env={**env, **os.environ},
+            env={**os.environ, **env},
         )
         return True
 
