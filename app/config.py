@@ -64,6 +64,7 @@ class Settings:
     verification_alarm_threshold: int = 20
     replication_drift_max_age_seconds: int = 3_600
     contract_version: str = "2026-02-25"
+    coordination_query_scan_threshold: int = 5000
 
 
 _cached: Settings | None = None
@@ -203,5 +204,8 @@ def get_settings(force_reload: bool = False) -> Settings:
         verification_alarm_threshold=_parse_int(_env_first("COGNIRELAY_VERIFICATION_ALARM_THRESHOLD", "AMR_VERIFICATION_ALARM_THRESHOLD"), 20, minimum=1),
         replication_drift_max_age_seconds=_parse_int(_env_first("COGNIRELAY_REPLICATION_DRIFT_MAX_AGE_SECONDS", "AMR_REPLICATION_DRIFT_MAX_AGE_SECONDS"), 3600, minimum=60),
         contract_version=_env_first("COGNIRELAY_CONTRACT_VERSION", "AMR_CONTRACT_VERSION", default="2026-02-25") or "2026-02-25",
+        coordination_query_scan_threshold=_parse_int(
+            _env_first("COGNIRELAY_COORDINATION_QUERY_SCAN_THRESHOLD"), 5000, minimum=100,
+        ),
     )
     return _cached

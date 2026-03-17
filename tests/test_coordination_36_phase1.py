@@ -423,7 +423,7 @@ class TestCoordination36Phase1(unittest.TestCase):
 
             self.assertEqual(out["total_matches"], 3)
             self.assertEqual(out["count"], 1)
-            self.assertEqual(out["warnings"], [])
+            self.assertNotIn("handoff_artifact_skipped_invalid", out["warnings"])
             self.assertEqual(out["handoffs"][0]["handoff_id"], "handoff_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
     def test_query_rejects_foreign_identity_and_skips_invalid_artifacts_with_warning(self) -> None:
@@ -485,7 +485,7 @@ class TestCoordination36Phase1(unittest.TestCase):
                 )
             self.assertEqual(out["count"], 1)
             self.assertEqual(out["total_matches"], 1)
-            self.assertEqual(out["warnings"], ["handoff_artifact_skipped_invalid"])
+            self.assertIn("handoff_artifact_skipped_invalid", out["warnings"])
 
     def test_query_rejects_invalid_status_value_with_http_400(self) -> None:
         """Direct route calls should surface invalid status values as HTTP 400 instead of 500."""

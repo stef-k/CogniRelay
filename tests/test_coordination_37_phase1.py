@@ -497,7 +497,7 @@ class TestCoordination37Phase1(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, None)):
                 out = coordination_shared_query(owner_peer="peer-alpha", auth=_AuthStub(peer_id="peer-alpha"))
 
-            self.assertEqual(out["warnings"], ["coordination_shared_artifact_skipped_invalid"])
+            self.assertIn("coordination_shared_artifact_skipped_invalid", out["warnings"])
             self.assertEqual(out["count"], 1)
             self.assertIn("shared_artifacts", out)
             self.assertNotIn("shared", out)

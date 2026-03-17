@@ -43,6 +43,7 @@ _log = logging.getLogger(__name__)
 RECONCILIATIONS_DIR_REL = "memory/coordination/reconciliations"
 RECONCILIATIONS_SAMPLE_REL = f"{RECONCILIATIONS_DIR_REL}/x.json"
 RECONCILIATION_INVALID_WARNING = "coordination_reconciliation_artifact_skipped_invalid"
+SCAN_THRESHOLD_WARNING = "coordination_query_scan_threshold_exceeded"
 INVALID_RECONCILIATION_ID_DETAIL = "Invalid reconciliation artifact id"
 
 
@@ -304,6 +305,10 @@ def reconciliation_open_service(
         commit_message=commit_message,
         error_detail="Failed to commit reconciliation artifact",
     )
+    # Keep the SQLite sidecar index in sync after successful persist.
+    from app.coordination.query_index import try_upsert_reconciliation
+
+    try_upsert_reconciliation(artifact)
     audit(
         auth,
         "coordination_reconciliation_open",
@@ -356,7 +361,12 @@ def reconciliation_query_service(
     settings: Any,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """List visible reconciliation artifacts for bounded owner/claimant queries."""
+    """List visible reconciliation artifacts for bounded owner/claimant queries.
+
+    Uses the SQLite sidecar index when available for O(log N) queries.
+    Falls back to a full directory scan if the index is unavailable,
+    adding a threshold warning when the file count is high.
+    """
     enforce_rate_limit(settings, auth, "coordination_reconciliation_query")
     auth.require("read:files")
     if not is_admin(auth):
@@ -370,50 +380,99 @@ def reconciliation_query_service(
         ):
             raise HTTPException(status_code=403, detail="Non-admin callers may query only their own reconciliation identity")
 
-    directory = safe_path(repo_root, RECONCILIATIONS_DIR_REL)
     warnings: list[str] = []
     visible: list[dict[str, Any]] = []
-    if directory.exists() and directory.is_dir():
-        invalid_seen = False
-        for path in sorted(directory.iterdir(), key=lambda item: item.name):
-            if path.is_dir() or path.suffix.lower() != ".json":
-                continue
+    total_matches = 0
+
+    # --- Index path: O(log N) via SQLite sidecar ---
+    from app.coordination.query_index import INDEX_UNAVAILABLE_WARNING, get_coordination_index
+
+    idx = get_coordination_index()
+    index_result = (
+        idx.query_reconciliations(
+            owner_peer=req.owner_peer,
+            claimant_peer=req.claimant_peer,
+            status=req.status,
+            classification=req.classification,
+            task_id=req.task_id,
+            thread_id=req.thread_id,
+            offset=req.offset,
+            limit=req.limit,
+        )
+        if idx is not None and idx.is_available
+        else None
+    )
+    if index_result is not None:
+        ids, total_matches = index_result
+        for rid in ids:
             try:
-                payload = json.loads(read_text_file(path))
-                artifact = CoordinationReconciliationArtifact.model_validate(payload).model_dump(mode="json")
-            except (json.JSONDecodeError, ValidationError, OSError, UnicodeDecodeError):
-                _log.warning("Skipping invalid reconciliation artifact: %s", path.name, exc_info=True)
-                invalid_seen = True
-                continue
-            if req.owner_peer is not None and artifact.get("owner_peer") != req.owner_peer:
-                continue
-            if req.claimant_peer is not None:
-                claims = artifact.get("claims")
-                if not isinstance(claims, list) or not any(
-                    isinstance(item, dict) and item.get("claimant_peer") == req.claimant_peer for item in claims
-                ):
+                _, artifact = _load_reconciliation_artifact(repo_root, rid)
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    total_matches -= 1
                     continue
-            if req.status is not None and artifact.get("status") != req.status:
-                continue
-            if req.classification is not None and artifact.get("classification") != req.classification:
-                continue
-            if req.task_id is not None and artifact.get("task_id") != req.task_id:
-                continue
-            if req.thread_id is not None and artifact.get("thread_id") != req.thread_id:
+                _log.warning("Unexpected error loading indexed reconciliation %s: %s", rid, exc.detail)
+                total_matches -= 1
                 continue
             try:
                 _ensure_reconciliation_visibility(auth, artifact)
             except HTTPException as exc:
                 if exc.status_code == 403:
+                    total_matches -= 1
                     continue
                 raise
             visible.append(artifact)
-        if invalid_seen:
-            warnings.append(RECONCILIATION_INVALID_WARNING)
+    else:
+        # --- Fallback: full directory scan ---
+        warnings.append(INDEX_UNAVAILABLE_WARNING)
+        directory = safe_path(repo_root, RECONCILIATIONS_DIR_REL)
+        if directory.exists() and directory.is_dir():
+            invalid_seen = False
+            file_count = 0
+            for path in sorted(directory.iterdir(), key=lambda item: item.name):
+                if path.is_dir() or path.suffix.lower() != ".json":
+                    continue
+                file_count += 1
+                try:
+                    payload = json.loads(read_text_file(path))
+                    artifact = CoordinationReconciliationArtifact.model_validate(payload).model_dump(mode="json")
+                except (json.JSONDecodeError, ValidationError, OSError, UnicodeDecodeError):
+                    _log.warning("Skipping invalid reconciliation artifact: %s", path.name, exc_info=True)
+                    invalid_seen = True
+                    continue
+                if req.owner_peer is not None and artifact.get("owner_peer") != req.owner_peer:
+                    continue
+                if req.claimant_peer is not None:
+                    claims = artifact.get("claims")
+                    if not isinstance(claims, list) or not any(
+                        isinstance(item, dict) and item.get("claimant_peer") == req.claimant_peer for item in claims
+                    ):
+                        continue
+                if req.status is not None and artifact.get("status") != req.status:
+                    continue
+                if req.classification is not None and artifact.get("classification") != req.classification:
+                    continue
+                if req.task_id is not None and artifact.get("task_id") != req.task_id:
+                    continue
+                if req.thread_id is not None and artifact.get("thread_id") != req.thread_id:
+                    continue
+                try:
+                    _ensure_reconciliation_visibility(auth, artifact)
+                except HTTPException as exc:
+                    if exc.status_code == 403:
+                        continue
+                    raise
+                visible.append(artifact)
+            if invalid_seen:
+                warnings.append(RECONCILIATION_INVALID_WARNING)
+            if file_count > getattr(settings, "coordination_query_scan_threshold", 5000):
+                warnings.append(SCAN_THRESHOLD_WARNING)
 
-    visible.sort(key=_reconciliation_query_sort_key)
-    total_matches = len(visible)
-    reconciliations = visible[req.offset : req.offset + req.limit]
+        visible.sort(key=_reconciliation_query_sort_key)
+        total_matches = len(visible)
+        visible = visible[req.offset : req.offset + req.limit]
+
+    reconciliations = visible
     audit(
         auth,
         "coordination_reconciliation_query",
@@ -523,6 +582,10 @@ def reconciliation_resolve_service(
             commit_message=commit_message,
             error_detail="Failed to commit reconciliation resolve",
         )
+        # Keep the SQLite sidecar index in sync after successful persist.
+        from app.coordination.query_index import try_upsert_reconciliation
+
+        try_upsert_reconciliation(updated)
         audit(
             auth,
             "coordination_reconciliation_resolve",
