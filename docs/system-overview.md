@@ -38,6 +38,7 @@ CogniRelay combines a small number of building blocks:
 - Register peers and discover remote manifests
 - Maintain explicit trust transitions for peer relationships
 - Create bounded continuity handoff artifacts between peers without shared-state mutation
+- Create owner-authored shared coordination artifacts visible to a bounded participant set
 - Exchange direct messages with delivery tracking and acknowledgments
 - Forward relayed messages with immutable transport logging
 
@@ -77,7 +78,7 @@ The runtime repo under `data_repo/` is organized around durable memory and colla
 - `memory/` for core, episodic, and summary memory
 - `journal/` for dated logs
 - `messages/` for inbox, relay, threads, acknowledgments, and delivery state
-- `memory/coordination/` for local-first inter-agent handoff artifacts
+- `memory/coordination/` for local-first inter-agent handoff artifacts and owner-authored shared coordination artifacts
 - `peers/` for peer metadata and replication state
 - `snapshots/` for deterministic context artifacts
 - `index/` for derived indexes and `search.db`
@@ -115,6 +116,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/messages/send` for tracked direct delivery
 - Use `POST /v1/relay/forward` for relay transport logging plus inbox/thread fan-out
 - Use `POST /v1/coordination/handoff/create` when one agent needs to project a bounded continuity subset into an auditable handoff artifact for another agent
+- Use `POST /v1/coordination/shared/create` when one agent needs to author a bounded shared coordination artifact for a participant set without projecting or mutating any continuity capsule
 - Use tasks and patch flows for collaborative work instead of ad hoc file mutation where coordination matters
 
 ### Retrieval behavior
@@ -136,6 +138,9 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `GET /v1/coordination/handoff/{handoff_id}` and `GET /v1/coordination/handoffs/query` when you need to read or discover existing handoff artifacts without assuming the sender's message or task reference already arrived
 - Use `POST /v1/coordination/handoff/{handoff_id}/consume` when the intended recipient needs to record `accepted_advisory`, `deferred`, or `rejected` without mutating local continuity
 - Expect Phase 5A handoffs to remain local-first: only `active_constraints` and `drift_signals` cross the boundary, and consume outcomes do not automatically promote into local capsules
+- Use `GET /v1/coordination/shared/{shared_id}` and `GET /v1/coordination/shared/query` when multiple agents need to observe the same bounded coordination artifact rather than pass a one-way handoff
+- Expect Phase 5B shared coordination to remain bounded and owner-authored: only `constraints`, `drift_signals`, and `coordination_alerts` are shared, direct read is visibility-gated by artifact membership, and discovery remains scoped to the caller's own owner/participant identity unless the caller is an admin
+- Treat Phase 5B shared coordination artifacts as additive coordination state layered on top of local continuity, not as shared capsules or automatic local-memory updates
 - Use `POST /v1/recent` when you want the latest indexed material without query matching
 - Use `POST /v1/search` for query-driven lookup; multi-word queries are term-based, not strict phrase matches
 - Prefer summaries over raw episodic logs when both cover the same time window

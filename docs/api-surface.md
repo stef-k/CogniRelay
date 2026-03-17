@@ -45,6 +45,9 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `GET /v1/coordination/handoff/{handoff_id}`: read one stored handoff artifact by id
 - `GET /v1/coordination/handoffs/query`: query visible handoff artifacts for one sender and/or recipient identity
 - `POST /v1/coordination/handoff/{handoff_id}/consume`: record the recipient's advisory, deferred, or rejected consume outcome
+- `POST /v1/coordination/shared/create`: create one owner-authored shared coordination artifact
+- `GET /v1/coordination/shared/{shared_id}`: read one stored shared coordination artifact by id
+- `GET /v1/coordination/shared/query`: query visible shared coordination artifacts for one owner and/or participant identity
 - `POST /v1/context/snapshot`: persist deterministic context snapshot
 - `GET /v1/context/snapshot/{snapshot_id}`: load a persisted snapshot
 - `POST /v1/compact/run`: compaction planning and summary/report generation
@@ -74,6 +77,11 @@ Notable behavior:
 - `GET /v1/coordination/handoffs/query` lets senders and recipients discover visible handoffs without relying on successful message or task-reference delivery; corrupt handoff artifacts are skipped with a warning instead of failing the whole query
 - `GET /v1/coordination/handoff/{handoff_id}` is visible only to the sender, the recipient, or an admin caller; `POST /v1/coordination/handoff/{handoff_id}/consume` is recipient-only
 - handoff artifacts use canonical JSON serialization and git-backed rollback on create or consume commit failure
+- `POST /v1/coordination/shared/create` stores owner-authored shared coordination artifacts under `memory/coordination/shared/` rather than projecting from a continuity capsule
+- shared coordination artifacts expose only the bounded 5B payload of `constraints`, `drift_signals`, and `coordination_alerts`
+- `GET /v1/coordination/shared/{shared_id}` is visible only to the owner, listed participants, or an admin caller; unlike query, direct read does not require `read:files`
+- `GET /v1/coordination/shared/query` requires `read:files`, skips corrupt artifacts with a warning, returns list results under `shared_artifacts`, and keeps non-admin discovery bounded to the caller's own owner/participant identity
+- shared coordination artifacts are additive coordination records: they do not mutate local continuity capsules and do not yet imply multi-writer or reconciliation semantics
 - `POST /v1/backup/create` now includes `continuity_counts` in the manifest when continuity artifacts are part of the backup scope
 - `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, and archive artifacts
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes

@@ -215,6 +215,67 @@ class CoordinationHandoffConsumeRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=240)
 
 
+class SharedCoordinationState(BaseModel):
+    """The bounded 5B shared coordination payload visible across participants."""
+    constraints: List[str] = Field(default_factory=list, max_length=8)
+    drift_signals: List[str] = Field(default_factory=list, max_length=8)
+    coordination_alerts: List[str] = Field(default_factory=list, max_length=8)
+
+
+class CoordinationSharedArtifact(BaseModel):
+    """Stored shared coordination artifact owned by one peer and visible to participants."""
+    schema_type: Literal["coordination_shared_state"] = "coordination_shared_state"
+    schema_version: Literal["1.0"] = "1.0"
+    shared_id: str = Field(min_length=1, max_length=64)
+    created_at: str
+    updated_at: str
+    created_by: str = Field(min_length=1, max_length=200)
+    owner_peer: str = Field(min_length=1, max_length=200)
+    participant_peers: List[str] = Field(..., min_length=1, max_length=8)
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    title: str
+    summary: Optional[str] = None
+    shared_state: SharedCoordinationState
+    version: int = Field(ge=1)
+    last_updated_by: str = Field(min_length=1, max_length=200)
+
+
+class CoordinationSharedCreateRequest(BaseModel):
+    """Create request for one owner-authored shared coordination artifact."""
+    participant_peers: List[str] = Field(default_factory=list, min_length=1, max_length=8)
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    title: str
+    summary: Optional[str] = None
+    constraints: List[str] = Field(default_factory=list, max_length=8)
+    drift_signals: List[str] = Field(default_factory=list, max_length=8)
+    coordination_alerts: List[str] = Field(default_factory=list, max_length=8)
+    commit_message: Optional[str] = None
+
+
+class CoordinationSharedQueryRequest(BaseModel):
+    """Filter parameters for discovering visible shared coordination artifacts."""
+    owner_peer: Optional[str] = Field(default=None, max_length=200)
+    participant_peer: Optional[str] = Field(default=None, max_length=200)
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=200)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _require_one_filter(self) -> "CoordinationSharedQueryRequest":
+        """Require at least one query filter for shared coordination discovery."""
+        if (
+            self.owner_peer is None
+            and self.participant_peer is None
+            and self.task_id is None
+            and self.thread_id is None
+        ):
+            raise ValueError("owner_peer, participant_peer, task_id, or thread_id is required")
+        return self
+
+
 class TaskCreateRequest(BaseModel):
     """Task creation payload for shared task records."""
     task_id: str

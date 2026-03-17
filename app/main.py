@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
@@ -38,6 +38,9 @@ from .coordination import (
     handoff_create_service,
     handoff_read_service,
     handoffs_query_service,
+    shared_create_service,
+    shared_query_service,
+    shared_read_service,
 )
 from .config import get_settings
 from .discovery import (
@@ -65,6 +68,8 @@ from .models import (
     CoordinationHandoffConsumeRequest,
     CoordinationHandoffCreateRequest,
     CoordinationHandoffQueryRequest,
+    CoordinationSharedCreateRequest,
+    CoordinationSharedQueryRequest,
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
@@ -757,6 +762,69 @@ def coordination_handoff_consume(
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/coordination/shared/create")
+def coordination_shared_create(req: CoordinationSharedCreateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Create one owner-authored shared coordination artifact."""
+    settings, gm = _services()
+    return shared_create_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
+        enforce_payload_limit=_enforce_payload_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.get("/v1/coordination/shared/{shared_id}")
+def coordination_shared_read(shared_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read one shared coordination artifact using owner/participant/admin visibility."""
+    settings, _ = _services()
+    return shared_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        shared_id=shared_id,
+        enforce_rate_limit=_enforce_rate_limit,
+        settings=settings,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.get("/v1/coordination/shared/query")
+def coordination_shared_query(
+    owner_peer: Annotated[str | None, Query()] = None,
+    participant_peer: Annotated[str | None, Query()] = None,
+    task_id: Annotated[str | None, Query()] = None,
+    thread_id: Annotated[str | None, Query()] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
+    """Query visible shared coordination artifacts for bounded identity filters."""
+    settings, _ = _services()
+    try:
+        req = CoordinationSharedQueryRequest(
+            owner_peer=owner_peer,
+            participant_peer=participant_peer,
+            task_id=task_id,
+            thread_id=thread_id,
+            offset=offset,
+            limit=limit,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid shared coordination query: {exc}") from exc
+    return shared_query_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=req,
+        enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
