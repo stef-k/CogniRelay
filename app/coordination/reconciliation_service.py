@@ -25,6 +25,7 @@ from app.coordination.common import (
     utc_now,
     validate_prefixed_hex_id,
 )
+from app.coordination.locking import artifact_lock
 from app.models import (
     CoordinationHandoffArtifact,
     CoordinationReconciliationArtifact,
@@ -466,60 +467,61 @@ def reconciliation_resolve_service(
     auth.require_write_path(RECONCILIATIONS_SAMPLE_REL)
     validate_prefixed_hex_id(reconciliation_id, prefix="recon_", detail=INVALID_RECONCILIATION_ID_DETAIL)
 
-    rel, artifact = _load_reconciliation_artifact(repo_root, reconciliation_id)
+    with artifact_lock(reconciliation_id):
+        rel, artifact = _load_reconciliation_artifact(repo_root, reconciliation_id)
 
-    # Owner-only resolve unless caller has admin:peers.
-    caller = getattr(auth, "peer_id", "")
-    if caller != artifact.get("owner_peer") and not is_admin(auth):
-        raise HTTPException(status_code=403, detail="Only the owner may resolve this reconciliation artifact")
+        # Owner-only resolve unless caller has admin:peers.
+        caller = getattr(auth, "peer_id", "")
+        if caller != artifact.get("owner_peer") and not is_admin(auth):
+            raise HTTPException(status_code=403, detail="Only the owner may resolve this reconciliation artifact")
 
-    # Require resolution_summary.
-    if req.resolution_summary is None:
-        raise HTTPException(status_code=400, detail="resolution_summary is required for reconciliation resolve")
+        # Require resolution_summary.
+        if req.resolution_summary is None:
+            raise HTTPException(status_code=400, detail="resolution_summary is required for reconciliation resolve")
 
-    # Validate text bounds for resolution_summary and commit_message.
-    if len(req.resolution_summary) < 1:
-        raise HTTPException(status_code=400, detail="Value too short in coordination_reconciliation.resolution_summary")
-    if len(req.resolution_summary) > 240:
-        raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.resolution_summary")
-    if req.commit_message is not None and len(req.commit_message) > 120:
-        raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.commit_message")
+        # Validate text bounds for resolution_summary and commit_message.
+        if len(req.resolution_summary) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in coordination_reconciliation.resolution_summary")
+        if len(req.resolution_summary) > 240:
+            raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.resolution_summary")
+        if req.commit_message is not None and len(req.commit_message) > 120:
+            raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.commit_message")
 
-    # Handle already-resolved artifacts: replay or conflict.
-    if artifact.get("status") == "resolved":
-        if artifact.get("resolution_outcome") == req.outcome and artifact.get("resolution_summary") == req.resolution_summary:
-            return {"ok": True, "reconciliation": artifact, "path": rel, "updated": False, "latest_commit": gm.latest_commit()}
-        raise HTTPException(status_code=409, detail="Reconciliation has already been resolved")
+        # Handle already-resolved artifacts: replay or conflict.
+        if artifact.get("status") == "resolved":
+            if artifact.get("resolution_outcome") == req.outcome and artifact.get("resolution_summary") == req.resolution_summary:
+                return {"ok": True, "reconciliation": artifact, "path": rel, "updated": False, "latest_commit": gm.latest_commit()}
+            raise HTTPException(status_code=409, detail="Reconciliation has already been resolved")
 
-    # Version check: first-write-wins.
-    stored_version = int(artifact.get("version") or 0)
-    if req.expected_version != stored_version:
-        raise HTTPException(status_code=409, detail="Reconciliation version conflict")
+        # Version check: first-write-wins.
+        stored_version = int(artifact.get("version") or 0)
+        if req.expected_version != stored_version:
+            raise HTTPException(status_code=409, detail="Reconciliation version conflict")
 
-    # Build updated artifact.
-    now = utc_now()
-    updated = dict(artifact)
-    updated["status"] = "resolved"
-    updated["resolution_outcome"] = req.outcome
-    updated["resolution_summary"] = req.resolution_summary
-    updated["resolved_at"] = now
-    updated["resolved_by"] = caller
-    updated["updated_at"] = now
-    updated["last_updated_by"] = caller
-    updated["version"] = stored_version + 1
+        # Build updated artifact.
+        now = utc_now()
+        updated = dict(artifact)
+        updated["status"] = "resolved"
+        updated["resolution_outcome"] = req.outcome
+        updated["resolution_summary"] = req.resolution_summary
+        updated["resolved_at"] = now
+        updated["resolved_by"] = caller
+        updated["updated_at"] = now
+        updated["last_updated_by"] = caller
+        updated["version"] = stored_version + 1
 
-    commit_message = req.commit_message
-    if commit_message is None or not commit_message.strip():
-        commit_message = f"coordination: resolve {reconciliation_id} {req.outcome}"
+        commit_message = req.commit_message
+        if commit_message is None or not commit_message.strip():
+            commit_message = f"coordination: resolve {reconciliation_id} {req.outcome}"
 
-    persist_updated_artifact(
-        path=_reconciliation_path(repo_root, reconciliation_id),
-        rel=rel,
-        gm=gm,
-        artifact=updated,
-        commit_message=commit_message,
-        error_detail="Failed to commit reconciliation resolve",
-    )
+        persist_updated_artifact(
+            path=_reconciliation_path(repo_root, reconciliation_id),
+            rel=rel,
+            gm=gm,
+            artifact=updated,
+            commit_message=commit_message,
+            error_detail="Failed to commit reconciliation resolve",
+        )
     audit(
         auth,
         "coordination_reconciliation_resolve",

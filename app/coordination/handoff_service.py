@@ -19,6 +19,7 @@ from app.continuity.service import (
     continuity_rel_path,
 )
 from app.coordination.common import is_admin, persist_new_artifact, persist_updated_artifact, query_identity_allowed, utc_now
+from app.coordination.locking import artifact_lock
 from app.models import (
     CoordinationHandoffArtifact,
     CoordinationHandoffConsumeRequest,
@@ -317,34 +318,35 @@ def handoff_consume_service(
     """Record the recipient's deterministic consume outcome for one handoff artifact."""
     enforce_rate_limit(settings, auth, "coordination_handoff_consume")
     enforce_payload_limit(settings, req.model_dump(), "coordination_handoff_consume")
-    rel, artifact = _load_handoff_artifact(repo_root, handoff_id)
-    _ensure_consume_visibility(auth, artifact)
+    with artifact_lock(handoff_id):
+        rel, artifact = _load_handoff_artifact(repo_root, handoff_id)
+        _ensure_consume_visibility(auth, artifact)
 
-    current_status = str(artifact.get("recipient_status") or "pending")
-    current_reason = artifact.get("recipient_reason")
-    if current_status == req.status and current_reason == req.reason:
-        return {
-            "ok": True,
-            "handoff": artifact,
-            "path": rel,
-            "updated": False,
-            "latest_commit": gm.latest_commit(),
-        }
-    if current_status != "pending":
-        raise HTTPException(status_code=409, detail="Handoff has already been consumed")
+        current_status = str(artifact.get("recipient_status") or "pending")
+        current_reason = artifact.get("recipient_reason")
+        if current_status == req.status and current_reason == req.reason:
+            return {
+                "ok": True,
+                "handoff": artifact,
+                "path": rel,
+                "updated": False,
+                "latest_commit": gm.latest_commit(),
+            }
+        if current_status != "pending":
+            raise HTTPException(status_code=409, detail="Handoff has already been consumed")
 
-    updated = dict(artifact)
-    updated["recipient_status"] = req.status
-    updated["recipient_reason"] = req.reason
-    updated["consumed_at"] = utc_now()
-    updated["consumed_by"] = auth.peer_id
-    rel = _persist_updated_handoff(
-        repo_root=repo_root,
-        gm=gm,
-        handoff_id=handoff_id,
-        artifact=updated,
-        commit_message=f"handoff: consume {handoff_id} {req.status}",
-    )
+        updated = dict(artifact)
+        updated["recipient_status"] = req.status
+        updated["recipient_reason"] = req.reason
+        updated["consumed_at"] = utc_now()
+        updated["consumed_by"] = auth.peer_id
+        rel = _persist_updated_handoff(
+            repo_root=repo_root,
+            gm=gm,
+            handoff_id=handoff_id,
+            artifact=updated,
+            commit_message=f"handoff: consume {handoff_id} {req.status}",
+        )
     audit(
         auth,
         "handoff_consume",

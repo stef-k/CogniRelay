@@ -20,6 +20,7 @@ from app.coordination.common import (
     utc_now,
     validate_prefixed_hex_id,
 )
+from app.coordination.locking import artifact_lock
 from app.models import (
     CoordinationSharedArtifact,
     CoordinationSharedCreateRequest,
@@ -359,43 +360,44 @@ def shared_update_service(
     enforce_payload_limit(settings, req.model_dump(), "coordination_shared_update")
     auth.require("write:projects")
     auth.require_write_path(SHARED_SAMPLE_REL)
-    _, artifact = _load_shared_artifact(repo_root, shared_id)
-    if getattr(auth, "peer_id", "") != artifact.get("owner_peer"):
-        raise HTTPException(status_code=403, detail="Only the owner may update this shared coordination artifact")
+    with artifact_lock(shared_id):
+        _, artifact = _load_shared_artifact(repo_root, shared_id)
+        if getattr(auth, "peer_id", "") != artifact.get("owner_peer"):
+            raise HTTPException(status_code=403, detail="Only the owner may update this shared coordination artifact")
 
-    _validate_shared_coordination_request(
-        title=req.title,
-        summary=req.summary,
-        constraints=req.constraints,
-        drift_signals=req.drift_signals,
-        coordination_alerts=req.coordination_alerts,
-        commit_message=req.commit_message,
-    )
-    current_version = int(artifact.get("version") or 0)
-    if req.expected_version != current_version:
-        raise HTTPException(status_code=409, detail="Shared coordination version conflict")
+        _validate_shared_coordination_request(
+            title=req.title,
+            summary=req.summary,
+            constraints=req.constraints,
+            drift_signals=req.drift_signals,
+            coordination_alerts=req.coordination_alerts,
+            commit_message=req.commit_message,
+        )
+        current_version = int(artifact.get("version") or 0)
+        if req.expected_version != current_version:
+            raise HTTPException(status_code=409, detail="Shared coordination version conflict")
 
-    updated = dict(artifact)
-    updated["title"] = req.title
-    updated["summary"] = req.summary
-    updated["shared_state"] = {
-        "constraints": list(req.constraints),
-        "drift_signals": list(req.drift_signals),
-        "coordination_alerts": list(req.coordination_alerts),
-    }
-    updated["updated_at"] = utc_now()
-    updated["version"] = current_version + 1
-    updated["last_updated_by"] = auth.peer_id
-    commit_message = req.commit_message
-    if commit_message is None or not commit_message.strip():
-        commit_message = f"coordination: update {shared_id} v{updated['version']}"
-    rel = _persist_updated_shared_artifact(
-        repo_root=repo_root,
-        gm=gm,
-        shared_id=shared_id,
-        artifact=updated,
-        commit_message=commit_message,
-    )
+        updated = dict(artifact)
+        updated["title"] = req.title
+        updated["summary"] = req.summary
+        updated["shared_state"] = {
+            "constraints": list(req.constraints),
+            "drift_signals": list(req.drift_signals),
+            "coordination_alerts": list(req.coordination_alerts),
+        }
+        updated["updated_at"] = utc_now()
+        updated["version"] = current_version + 1
+        updated["last_updated_by"] = auth.peer_id
+        commit_message = req.commit_message
+        if commit_message is None or not commit_message.strip():
+            commit_message = f"coordination: update {shared_id} v{updated['version']}"
+        rel = _persist_updated_shared_artifact(
+            repo_root=repo_root,
+            gm=gm,
+            shared_id=shared_id,
+            artifact=updated,
+            commit_message=commit_message,
+        )
     audit(
         auth,
         "coordination_shared_update",
