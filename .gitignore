@@ -6,3 +6,4 @@ __pycache__/
 !.env.example
 .venv_local/
 .pytest_cache/
+.locks/
