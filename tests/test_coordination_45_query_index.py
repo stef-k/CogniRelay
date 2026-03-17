@@ -514,22 +514,14 @@ class TestCoordinationQueryIndex(unittest.TestCase):
 
     # -- unavailable index returns empty -----------------------------------
 
-    def test_query_on_unavailable_index_returns_empty(self) -> None:
-        """An unavailable index should return empty results, never raise."""
+    def test_query_on_unavailable_index_returns_none(self) -> None:
+        """An unavailable index should return None to signal failure."""
         idx = CoordinationQueryIndex(Path("/nonexistent/dir/.query_index.db"))
         self.assertFalse(idx.is_available)
 
-        ids, total = idx.query_handoffs(sender_peer="alice")
-        self.assertEqual(ids, [])
-        self.assertEqual(total, 0)
-
-        ids, total = idx.query_shared(owner_peer="alice")
-        self.assertEqual(ids, [])
-        self.assertEqual(total, 0)
-
-        ids, total = idx.query_reconciliations(owner_peer="alice")
-        self.assertEqual(ids, [])
-        self.assertEqual(total, 0)
+        self.assertIsNone(idx.query_handoffs(sender_peer="alice"))
+        self.assertIsNone(idx.query_shared(owner_peer="alice"))
+        self.assertIsNone(idx.query_reconciliations(owner_peer="alice"))
 
     # -- upsert on unavailable index is silent -----------------------------
 

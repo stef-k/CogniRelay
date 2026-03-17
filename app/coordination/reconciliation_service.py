@@ -388,8 +388,8 @@ def reconciliation_query_service(
     from app.coordination.query_index import INDEX_UNAVAILABLE_WARNING, get_coordination_index
 
     idx = get_coordination_index()
-    if idx is not None and idx.is_available:
-        ids, total_matches = idx.query_reconciliations(
+    index_result = (
+        idx.query_reconciliations(
             owner_peer=req.owner_peer,
             claimant_peer=req.claimant_peer,
             status=req.status,
@@ -399,6 +399,11 @@ def reconciliation_query_service(
             offset=req.offset,
             limit=req.limit,
         )
+        if idx is not None and idx.is_available
+        else None
+    )
+    if index_result is not None:
+        ids, total_matches = index_result
         for rid in ids:
             try:
                 _, artifact = _load_reconciliation_artifact(repo_root, rid)

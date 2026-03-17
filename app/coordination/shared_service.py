@@ -307,8 +307,8 @@ def shared_query_service(
     from app.coordination.query_index import INDEX_UNAVAILABLE_WARNING, get_coordination_index
 
     idx = get_coordination_index()
-    if idx is not None and idx.is_available:
-        ids, total_matches = idx.query_shared(
+    index_result = (
+        idx.query_shared(
             owner_peer=req.owner_peer,
             participant_peer=req.participant_peer,
             task_id=req.task_id,
@@ -316,6 +316,11 @@ def shared_query_service(
             offset=req.offset,
             limit=req.limit,
         )
+        if idx is not None and idx.is_available
+        else None
+    )
+    if index_result is not None:
+        ids, total_matches = index_result
         for sid in ids:
             try:
                 _, artifact = _load_shared_artifact(repo_root, sid)

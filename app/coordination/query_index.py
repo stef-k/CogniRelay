@@ -371,7 +371,10 @@ class CoordinationQueryIndex:
             )
             self._conn.commit()
         except Exception:
-            self._conn.rollback()
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             _log.error("Index upsert failed for handoff %s", artifact.get("handoff_id"), exc_info=True)
 
     def upsert_shared(self, artifact: dict[str, Any]) -> None:
@@ -411,7 +414,10 @@ class CoordinationQueryIndex:
                         )
             self._conn.commit()
         except Exception:
-            self._conn.rollback()
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             _log.error("Index upsert failed for shared %s", artifact.get("shared_id"), exc_info=True)
 
     def upsert_reconciliation(self, artifact: dict[str, Any]) -> None:
@@ -461,7 +467,10 @@ class CoordinationQueryIndex:
                             )
             self._conn.commit()
         except Exception:
-            self._conn.rollback()
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             _log.error(
                 "Index upsert failed for reconciliation %s",
                 artifact.get("reconciliation_id"),
@@ -478,22 +487,23 @@ class CoordinationQueryIndex:
         status: str | None = None,
         offset: int = 0,
         limit: int = 20,
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[str], int] | None:
         """Query the handoff index and return a page of IDs with total count.
 
         Filters are conjunctive (AND).  Sort order: ``created_at`` descending,
         ``handoff_id`` ascending (matching the existing in-memory sort key).
 
-        On SQLite errors, returns ``([], 0)`` with logging so the caller
-        can fall back to a full directory scan.
+        Returns ``None`` on SQLite errors (logged at ERROR) so the caller
+        can fall through to the full directory scan.
 
         Returns
         -------
-        tuple:
-            ``(list_of_handoff_ids, total_matches)``
+        tuple or None:
+            ``(list_of_handoff_ids, total_matches)`` on success, ``None``
+            on failure.
         """
         if self._conn is None:
-            return [], 0
+            return None
 
         try:
             conditions: list[str] = []
@@ -525,7 +535,7 @@ class CoordinationQueryIndex:
             return [r[0] for r in rows], total
         except Exception:
             _log.exception("Index query failed for handoffs")
-            return [], 0
+            return None
 
     def query_shared(
         self,
@@ -536,23 +546,24 @@ class CoordinationQueryIndex:
         thread_id: str | None = None,
         offset: int = 0,
         limit: int = 20,
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[str], int] | None:
         """Query the shared-artifact index and return a page of IDs with total count.
 
         The ``participant_peer`` filter uses an EXISTS sub-query against the
         ``shared_participants`` junction table.  Sort order: ``updated_at``
         descending, ``shared_id`` ascending.
 
-        On SQLite errors, returns ``([], 0)`` with logging so the caller
-        can fall back to a full directory scan.
+        Returns ``None`` on SQLite errors (logged at ERROR) so the caller
+        can fall through to the full directory scan.
 
         Returns
         -------
-        tuple:
-            ``(list_of_shared_ids, total_matches)``
+        tuple or None:
+            ``(list_of_shared_ids, total_matches)`` on success, ``None``
+            on failure.
         """
         if self._conn is None:
-            return [], 0
+            return None
 
         try:
             conditions: list[str] = []
@@ -590,7 +601,7 @@ class CoordinationQueryIndex:
             return [r[0] for r in rows], total
         except Exception:
             _log.exception("Index query failed for shared artifacts")
-            return [], 0
+            return None
 
     def query_reconciliations(
         self,
@@ -603,23 +614,24 @@ class CoordinationQueryIndex:
         thread_id: str | None = None,
         offset: int = 0,
         limit: int = 20,
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[str], int] | None:
         """Query the reconciliation index and return a page of IDs with total count.
 
         The ``claimant_peer`` filter uses an EXISTS sub-query against the
         ``reconciliation_claimants`` junction table.  Sort order:
         ``updated_at`` descending, ``reconciliation_id`` ascending.
 
-        On SQLite errors, returns ``([], 0)`` with logging so the caller
-        can fall back to a full directory scan.
+        Returns ``None`` on SQLite errors (logged at ERROR) so the caller
+        can fall through to the full directory scan.
 
         Returns
         -------
-        tuple:
-            ``(list_of_reconciliation_ids, total_matches)``
+        tuple or None:
+            ``(list_of_reconciliation_ids, total_matches)`` on success,
+            ``None`` on failure.
         """
         if self._conn is None:
-            return [], 0
+            return None
 
         try:
             conditions: list[str] = []
@@ -663,7 +675,7 @@ class CoordinationQueryIndex:
             return [r[0] for r in rows], total
         except Exception:
             _log.exception("Index query failed for reconciliation artifacts")
-            return [], 0
+            return None
 
 
 # ---------------------------------------------------------------------------
