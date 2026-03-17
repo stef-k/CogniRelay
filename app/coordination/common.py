@@ -93,7 +93,7 @@ def persist_updated_artifact(
                 if path.exists():
                     path.unlink()
             else:
-                path.write_bytes(old_bytes)
+                write_text_file(path, old_bytes.decode("utf-8"))
         except Exception:
             _log.exception("Rollback failed for %s", path)
         raise HTTPException(status_code=500, detail=error_detail) from exc
