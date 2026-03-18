@@ -243,7 +243,12 @@ class TestTryCommitFile(unittest.TestCase):
     """Tests for try_commit_file."""
 
     def setUp(self):
-        self.gm = MagicMock()
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.gm = _make_gm(self.dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
 
     def test_success_returns_true(self):
         """Successful commit returns True."""
@@ -281,6 +286,21 @@ class TestTryCommitFile(unittest.TestCase):
                 commit_message="index update",
             )
         self.assertTrue(any("Git commit failed (non-fatal)" in msg for msg in cm.output))
+
+    @patch("app.git_safety.subprocess.run")
+    def test_failure_unstages_from_index(self, mock_run):
+        """On failure, git reset HEAD is called to prevent stale staging."""
+        path = self.dir / "index_artifact.json"
+        path.write_text("{}")
+        self.gm.commit_file.side_effect = RuntimeError("git broke")
+        with self.assertLogs("app.git_safety", level="ERROR"):
+            try_commit_file(
+                path=path, gm=self.gm,
+                commit_message="index update",
+            )
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[:4], ["git", "reset", "HEAD", "--"])
 
 
 if __name__ == "__main__":

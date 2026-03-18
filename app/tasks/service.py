@@ -433,6 +433,8 @@ def docs_patch_apply_service(
     proposal["applied_at"] = now
     proposal["applied_by"] = auth.peer_id
     proposal["updated_at"] = now
+    # applied_commit is set to pre-commit HEAD here; the on-disk proposal
+    # records the base — the response overrides with the actual commit SHA.
     proposal["applied_commit"] = gm.latest_commit()
     proposal_old_bytes = proposal_path.read_bytes() if proposal_path.exists() else None
     write_text_file(proposal_path, json.dumps(proposal, ensure_ascii=False, indent=2))
@@ -448,10 +450,15 @@ def docs_patch_apply_service(
     ):
         committed_files.extend([target_path, proposal_rel])
 
+    # Resolve the actual apply commit SHA now that the atomic commit landed
+    applied_commit = gm.latest_commit()
+
     # Archive is non-critical — use try_commit_file so partial success doesn't abort
     applied_rel = f"{PATCH_APPLIED_DIR_REL}/{req.patch_id}.json"
     auth.require_write_path(applied_rel)
     applied_path = safe_path(repo_root, applied_rel)
+    # Update the in-memory proposal with the real commit SHA for the archive copy
+    proposal["applied_commit"] = applied_commit
     write_text_file(applied_path, json.dumps(proposal, ensure_ascii=False, indent=2))
     if try_commit_file(
         path=applied_path, gm=gm,
@@ -460,7 +467,7 @@ def docs_patch_apply_service(
         committed_files.append(applied_rel)
 
     audit(auth, "patch_apply", {"patch_id": req.patch_id, "target_path": target_path})
-    return {"ok": True, "patch_id": req.patch_id, "target_path": target_path, "committed_files": committed_files, "latest_commit": gm.latest_commit()}
+    return {"ok": True, "patch_id": req.patch_id, "target_path": target_path, "committed_files": committed_files, "applied_commit": applied_commit, "latest_commit": gm.latest_commit()}
 
 
 def code_checks_run_service(

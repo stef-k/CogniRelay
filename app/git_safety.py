@@ -143,5 +143,6 @@ def try_commit_file(
     try:
         return gm.commit_file(path, commit_message)
     except Exception:
+        _unstage(gm, [path])
         _log.exception("Git commit failed (non-fatal) for %s", path)
         return False
