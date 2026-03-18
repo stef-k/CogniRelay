@@ -429,21 +429,42 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
     if not path.exists():
         return {"ok": True, "recipient": recipient, "count": 0, "messages": []}
 
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    messages = []
-    skipped = 0
-    for line in lines[-limit:]:
+    try:
+        all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:  # noqa: BLE001 — mission-critical degradation
+        _logger.error("Failed to read inbox file for %s", recipient, exc_info=True)
+        result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
+        result["warnings"] = ["inbox_unreadable: I/O error reading inbox file"]
+        audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
+        return result
+    tail = all_lines[-limit:]
+    file_offset = len(all_lines) - len(tail)
+    messages: list[dict[str, Any]] = []
+    malformed = 0
+    non_dict = 0
+    for idx, line in enumerate(tail):
         try:
-            messages.append(json.loads(line))
-        except json.JSONDecodeError:
-            skipped += 1
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            malformed += 1
+            preview = repr(line[:200]) + ("..." if len(line) > 200 else "") if line else "<empty>"
+            _logger.warning("malformed JSONL in inbox %s (file line %d, %d chars): %s", recipient, file_offset + idx + 1, len(line), preview)
             continue
-    if skipped:
-        _logger.warning("Skipped %d malformed JSONL line(s) in inbox for %s", skipped, recipient)
+        if not isinstance(row, dict):
+            non_dict += 1
+            _logger.warning("non-dict JSON in inbox %s (file line %d), skipping", recipient, file_offset + idx + 1)
+            continue
+        messages.append(row)
     audit(auth, "messages_inbox", {"recipient": recipient, "count": len(messages)})
-    result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": len(messages), "messages": messages}
+    result = {"ok": True, "recipient": recipient, "count": len(messages), "messages": messages}
+    skipped = malformed + non_dict
     if skipped:
-        result["warnings"] = [f"inbox_partial_corrupt: {skipped} malformed line(s) skipped"]
+        parts = []
+        if malformed:
+            parts.append(f"{malformed} malformed")
+        if non_dict:
+            parts.append(f"{non_dict} non-dict")
+        result["warnings"] = [f"inbox_partial_corrupt: {', '.join(parts)} line(s) skipped"]
     return result
 
 
@@ -455,19 +476,39 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
     path = safe_path(repo_root, rel)
     if not path.exists():
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": []}
-    messages = []
-    skipped = 0
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]:
+    try:
+        all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:  # noqa: BLE001 — mission-critical degradation
+        _logger.error("Failed to read thread file for %s", thread_id, exc_info=True)
+        return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
+                "warnings": ["thread_unreadable: I/O error reading thread file"]}
+    tail = all_lines[-limit:]
+    file_offset = len(all_lines) - len(tail)
+    messages: list[dict[str, Any]] = []
+    malformed = 0
+    non_dict = 0
+    for idx, line in enumerate(tail):
         try:
-            messages.append(json.loads(line))
-        except json.JSONDecodeError:
-            skipped += 1
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            malformed += 1
+            preview = repr(line[:200]) + ("..." if len(line) > 200 else "") if line else "<empty>"
+            _logger.warning("malformed JSONL in thread %s (file line %d, %d chars): %s", thread_id, file_offset + idx + 1, len(line), preview)
             continue
-    if skipped:
-        _logger.warning("Skipped %d malformed JSONL line(s) in thread %s", skipped, thread_id)
+        if not isinstance(row, dict):
+            non_dict += 1
+            _logger.warning("non-dict JSON in thread %s (file line %d), skipping", thread_id, file_offset + idx + 1)
+            continue
+        messages.append(row)
     result: dict[str, Any] = {"ok": True, "thread_id": thread_id, "count": len(messages), "messages": messages}
+    skipped = malformed + non_dict
     if skipped:
-        result["warnings"] = [f"thread_partial_corrupt: {skipped} malformed line(s) skipped"]
+        parts = []
+        if malformed:
+            parts.append(f"{malformed} malformed")
+        if non_dict:
+            parts.append(f"{non_dict} non-dict")
+        result["warnings"] = [f"thread_partial_corrupt: {', '.join(parts)} line(s) skipped"]
     return result
 
 
