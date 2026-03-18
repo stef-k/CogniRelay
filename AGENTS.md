@@ -13,7 +13,8 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 ## PR and Issue Hygiene
 
 - Keep refactors and features in small, reviewable PRs.
-- Use `Refs #<issue>` for tracking issues unless the PR truly completes the issue.
+- Use `Refs #<issue>` when the PR only tracks or partially addresses an issue.
+- Use `Closes #<issue>` or `Fixes #<issue>` when merging the PR should automatically close the issue.
 - Include the exact verification commands used in the PR body.
 - Merge behavior-preserving refactor slices before starting the next slice.
 
