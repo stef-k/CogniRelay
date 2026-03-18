@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
@@ -47,24 +47,25 @@ class _GitManagerStub:
         return "test-sha"
 
 
+def _make_settings(repo_root: Path) -> Settings:
+    """Build a settings object rooted at a temporary repository."""
+    return Settings(
+        repo_root=repo_root,
+        auto_init_git=False,
+        git_author_name="n/a",
+        git_author_email="n/a",
+        tokens={},
+        audit_log_enabled=False,
+    )
+
+
 class TestOpsHostLocal(unittest.TestCase):
     """Validate local-only ops access, status, and schedule rendering."""
-
-    def _settings(self, repo_root: Path) -> Settings:
-        """Build a settings object rooted at the temporary repository."""
-        return Settings(
-            repo_root=repo_root,
-            auto_init_git=False,
-            git_author_name="n/a",
-            git_author_email="n/a",
-            tokens={},
-            audit_log_enabled=False,
-        )
 
     def test_ops_catalog_local_only_enforcement(self) -> None:
         """Ops catalog should reject non-local callers and allow loopback callers."""
         with tempfile.TemporaryDirectory() as td:
-            settings = self._settings(Path(td))
+            settings = _make_settings(Path(td))
             with patch("app.main._services", return_value=(settings, _GitManagerStub())):
                 local = ops_catalog(auth=_AuthStub(client_ip="127.0.0.1"))
                 with self.assertRaises(HTTPException) as err:
@@ -79,7 +80,7 @@ class TestOpsHostLocal(unittest.TestCase):
         """Running an ops job should write a run record and show up in status."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
-            settings = self._settings(repo_root)
+            settings = _make_settings(repo_root)
             with patch("app.main._services", return_value=(settings, _GitManagerStub())):
                 out = ops_run(
                     req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
@@ -105,7 +106,7 @@ class TestOpsHostLocal(unittest.TestCase):
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_path.write_text("{}", encoding="utf-8")
 
-            settings = self._settings(repo_root)
+            settings = _make_settings(repo_root)
             with patch("app.main._services", return_value=(settings, _GitManagerStub())):
                 with self.assertRaises(HTTPException) as err:
                     ops_run(
@@ -119,7 +120,7 @@ class TestOpsHostLocal(unittest.TestCase):
     def test_ops_schedule_export(self) -> None:
         """Schedule export should render both systemd and cron examples."""
         with tempfile.TemporaryDirectory() as td:
-            settings = self._settings(Path(td))
+            settings = _make_settings(Path(td))
             with patch("app.main._services", return_value=(settings, _GitManagerStub())):
                 systemd = ops_schedule_export(format="systemd", auth=_AuthStub(client_ip="127.0.0.1"))
                 cron = ops_schedule_export(format="cron", auth=_AuthStub(client_ip="127.0.0.1"))
@@ -135,26 +136,50 @@ class TestOpsHostLocal(unittest.TestCase):
 
 
 class TestOpsLockReleasedOnAppendFailure(unittest.TestCase):
-    """Lock must be released even when _append_ops_run raises."""
-
-    def _settings(self, repo_root: Path) -> Settings:
-        """Build a settings object rooted at the temporary repository."""
-        return Settings(
-            repo_root=repo_root,
-            auto_init_git=False,
-            git_author_name="n/a",
-            git_author_email="n/a",
-            tokens={},
-            audit_log_enabled=False,
-        )
+    """Lock must be released and audit must fire even when _append_ops_run raises."""
 
     def test_lock_released_when_append_ops_run_raises(self) -> None:
         """If _append_ops_run raises OSError, the lock file must still be removed."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
-            settings = self._settings(repo_root)
+            settings = _make_settings(repo_root)
             lock_dir = repo_root / "logs" / "ops_locks"
             lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_file = lock_dir / "metrics.poll_and_alarm_eval.lock"
+
+            append_called = False
+
+            def _fail_append(*_args: object, **_kwargs: object) -> None:
+                nonlocal append_called
+                append_called = True
+                assert lock_file.exists(), "Lock must exist when _append_ops_run is called"
+                raise OSError("disk full")
+
+            with (
+                patch("app.main._services", return_value=(settings, _GitManagerStub())),
+                patch("app.ops.service._append_ops_run", side_effect=_fail_append),
+            ):
+                with self.assertLogs("app.ops.service", level="WARNING"):
+                    result = ops_run(
+                        req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
+                        auth=_AuthStub(client_ip="127.0.0.1"),
+                    )
+
+            self.assertTrue(append_called, "_append_ops_run must have been called")
+            self.assertFalse(
+                lock_file.exists(),
+                "Lock file must be removed even when _append_ops_run raises",
+            )
+            self.assertTrue(result["ok"])
+
+    def test_audit_called_when_append_ops_run_raises(self) -> None:
+        """Audit must still fire even when _append_ops_run raises."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _make_settings(repo_root)
+            lock_dir = repo_root / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            audit_spy = MagicMock()
 
             with (
                 patch("app.main._services", return_value=(settings, _GitManagerStub())),
@@ -162,32 +187,66 @@ class TestOpsLockReleasedOnAppendFailure(unittest.TestCase):
                     "app.ops.service._append_ops_run",
                     side_effect=OSError("disk full"),
                 ),
+                patch("app.main._audit", audit_spy),
             ):
-                with self.assertRaises(OSError):
+                with self.assertLogs("app.ops.service", level="WARNING"):
                     ops_run(
                         req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
                         auth=_AuthStub(client_ip="127.0.0.1"),
                     )
 
+            audit_spy.assert_called_once()
+            call_args = audit_spy.call_args
+            # _audit is called as _audit(settings, auth, event, detail)
+            self.assertEqual(call_args[0][2], "ops_run")
+            self.assertIn("run_id", call_args[0][3])
+            self.assertEqual(call_args[0][3]["job_id"], "metrics.poll_and_alarm_eval")
+
+    def test_original_exception_preserved_on_double_failure(self) -> None:
+        """When both job execution and _append_ops_run fail, the original job exception must propagate."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _make_settings(repo_root)
+            lock_dir = repo_root / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
             lock_file = lock_dir / "metrics.poll_and_alarm_eval.lock"
-            self.assertFalse(
-                lock_file.exists(),
-                "Lock file must be removed even when _append_ops_run raises",
-            )
+
+            with (
+                patch("app.main._services", return_value=(settings, _GitManagerStub())),
+                patch(
+                    "app.ops.service._append_ops_run",
+                    side_effect=OSError("disk full"),
+                ),
+                patch(
+                    "app.ops.service._ops_execute_job",
+                    side_effect=HTTPException(status_code=500, detail="job exploded"),
+                ),
+            ):
+                with self.assertRaises(HTTPException) as ctx:
+                    with self.assertLogs("app.ops.service", level="WARNING"):
+                        ops_run(
+                            req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
+                            auth=_AuthStub(client_ip="127.0.0.1"),
+                        )
+
+            self.assertEqual(ctx.exception.status_code, 500)
+            self.assertIn("job exploded", str(ctx.exception.detail))
+            self.assertFalse(lock_file.exists())
 
 
 class TestReleaseOpsLock(unittest.TestCase):
     """Tests for _release_ops_lock error handling."""
 
     def test_release_ops_lock_logs_on_oserror(self) -> None:
-        """OSError during lock release must be logged, not silently swallowed."""
+        """OSError during lock release must be logged at ERROR, not silently swallowed."""
         with tempfile.TemporaryDirectory() as td:
             lock = Path(td) / "test.lock"
             lock.touch()
             with patch.object(Path, "unlink", side_effect=PermissionError("denied")):
-                with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                with self.assertLogs("app.ops.service", level="ERROR") as cm:
                     _release_ops_lock(lock)
             self.assertIn("failed to release ops lock", cm.output[0])
+            self.assertIn("manual cleanup", cm.output[0])
 
     def test_release_ops_lock_succeeds_normally(self) -> None:
         """Lock release should delete the file without logging."""

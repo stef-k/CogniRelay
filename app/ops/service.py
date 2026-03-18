@@ -115,7 +115,11 @@ def _release_ops_lock(lock_path: Path) -> None:
     try:
         lock_path.unlink(missing_ok=True)
     except OSError:
-        _log.warning("failed to release ops lock %s", lock_path, exc_info=True)
+        _log.error(
+            "failed to release ops lock %s — next run of this job will be blocked until manual cleanup",
+            lock_path,
+            exc_info=True,
+        )
 
 
 def _list_ops_locks(repo_root: Path) -> list[dict[str, Any]]:
@@ -576,8 +580,13 @@ def ops_run_service(
         }
         try:
             _append_ops_run(settings.repo_root, run_row)
+        except Exception:
+            _log.warning("failed to append ops run log for %s", run_id, exc_info=True)
         finally:
             _release_ops_lock(lock_path)
-        audit(auth, "ops_run", {"run_id": run_id, "job_id": req.job_id, "status": status, "client_ip": ip})
+            try:
+                audit(auth, "ops_run", {"run_id": run_id, "job_id": req.job_id, "status": status, "client_ip": ip})
+            except Exception:
+                _log.warning("audit event failed for ops run %s", run_id, exc_info=True)
 
     return {"ok": True, "run_id": run_id, "job_id": req.job_id, "status": status, "local_only": True, "job_result": job_result}
