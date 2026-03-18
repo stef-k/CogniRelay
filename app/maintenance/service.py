@@ -447,7 +447,7 @@ def metrics_service(
                     }
                 )
 
-    return {
+    result = {
         "ok": True,
         "generated_at": now.isoformat(),
         "delivery": {
@@ -468,6 +468,9 @@ def metrics_service(
         },
         "alarms": alarms,
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
 
 
 def replication_pull_service(

@@ -18,6 +18,13 @@ from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_text_
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
+_logger = logging.getLogger(__name__)
+
+
+def _empty_state() -> dict[str, Any]:
+    """Return a fresh empty delivery state dict."""
+    return {"version": "1", "records": {}, "idempotency": {}}
+
 
 def _delivery_state_path(repo_root: Path) -> Path:
     """Return the repository path for delivery-state persistence."""
@@ -25,29 +32,57 @@ def _delivery_state_path(repo_root: Path) -> Path:
 
 
 def load_delivery_state(repo_root: Path) -> dict[str, Any]:
-    """Load normalized delivery state from disk."""
+    """Load normalized delivery state from disk.
+
+    Returns a dict with keys ``version``, ``records``, ``idempotency``, and
+    optionally ``warnings`` when the on-disk state could not be loaded cleanly.
+
+    Logs at WARNING for parse/structural issues and at ERROR with traceback
+    for unexpected exceptions (e.g. PermissionError, OSError).
+    """
     path = _delivery_state_path(repo_root)
     if not path.exists():
-        return {"version": "1", "records": {}, "idempotency": {}}
+        return _empty_state()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"version": "1", "records": {}, "idempotency": {}}
+    except (json.JSONDecodeError, ValueError):
+        _logger.warning("Corrupt delivery state at %s; returning empty state", path)
+        state = _empty_state()
+        state["warnings"] = ["delivery_state_corrupt: parse error; state reset to empty"]
+        return state
+    except Exception:  # noqa: BLE001 — intentionally broad for mission-critical degradation
+        _logger.error("Unexpected error reading delivery state at %s", path, exc_info=True)
+        state = _empty_state()
+        state["warnings"] = ["delivery_state_unreadable: unexpected error; state reset to empty"]
+        return state
     if not isinstance(data, dict):
-        return {"version": "1", "records": {}, "idempotency": {}}
+        _logger.warning("Delivery state at %s is not a JSON object; returning empty state", path)
+        state = _empty_state()
+        state["warnings"] = ["delivery_state_corrupt: expected JSON object; state reset to empty"]
+        return state
+    warnings: list[str] = []
     records = data.get("records")
     idempotency = data.get("idempotency")
     if not isinstance(records, dict):
+        _logger.warning("Delivery state at %s has non-dict 'records'; resetting to empty", path)
+        warnings.append("delivery_state_partial_corrupt: 'records' was not a dict; reset to empty")
         records = {}
     if not isinstance(idempotency, dict):
+        _logger.warning("Delivery state at %s has non-dict 'idempotency'; resetting to empty", path)
+        warnings.append("delivery_state_partial_corrupt: 'idempotency' was not a dict; reset to empty")
         idempotency = {}
-    return {"version": "1", "records": records, "idempotency": idempotency}
+    result: dict[str, Any] = {"version": "1", "records": records, "idempotency": idempotency}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def _write_delivery_state(repo_root: Path, state: dict[str, Any]) -> Path:
-    """Persist the delivery-state file."""
+    """Persist the delivery-state file, including only durable keys (version, records, idempotency)."""
     path = _delivery_state_path(repo_root)
-    write_text_file(path, json.dumps(state, ensure_ascii=False, indent=2))
+    # Allowlist: update this tuple when adding new persistent keys to the schema.
+    persist = {k: state[k] for k in ("version", "records", "idempotency") if k in state}
+    write_text_file(path, json.dumps(persist, ensure_ascii=False, indent=2))
     return path
 
 
@@ -141,7 +176,7 @@ def messages_send_service(
 
                 now = datetime.now(timezone.utc)
                 audit(auth, "message_send_idempotent_replay", {"idempotency_key": req.idempotency_key, "message_id": existing_id})
-                return {
+                early_result: dict[str, Any] = {
                     "ok": True,
                     "idempotent_replay": True,
                     "message": existing.get("message"),
@@ -150,6 +185,9 @@ def messages_send_service(
                     "committed_files": [],
                     "latest_commit": gm.latest_commit(),
                 }
+                if state.get("warnings"):
+                    early_result["warnings"] = state["warnings"]
+                return early_result
 
     signature_verification = None
     committed_files: list[str] = []
@@ -211,7 +249,7 @@ def messages_send_service(
         if gm.commit_paths(paths, f"messages: send {msg['id']}"):
             committed_files.extend(rels)
     except (OSError, subprocess.CalledProcessError):
-        logging.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
+        _logger.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
 
     should_track_delivery = bool(req.idempotency_key or req.delivery.requires_ack)
     delivery_state = None
@@ -248,7 +286,7 @@ def messages_send_service(
         delivery_state = delivery_record_view(record, now, parse_iso=parse_iso)
 
     audit(auth, "message_send", {"thread_id": req.thread_id, "to": req.recipient})
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "idempotent_replay": False,
         "message": msg,
@@ -257,6 +295,9 @@ def messages_send_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
 
 
 def messages_ack_service(
@@ -310,7 +351,7 @@ def messages_ack_service(
         committed_files.append(ack_rel)
 
     audit(auth, "messages_ack", {"message_id": req.message_id, "status": req.status})
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "message_id": req.message_id,
         "ack": ack_row,
@@ -318,6 +359,9 @@ def messages_ack_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
 
 
 def messages_pending_service(
@@ -336,11 +380,14 @@ def messages_pending_service(
     auth.require_read_path(DELIVERY_STATE_REL)
 
     state = load_delivery_state(repo_root)
+    warnings: list[str] = list(state.get("warnings") or [])
     now = datetime.now(timezone.utc)
     rows = []
     summary: dict[str, int] = {}
+    skipped_records = 0
     for record in state.get("records", {}).values():
         if not isinstance(record, dict):
+            skipped_records += 1
             continue
         view = delivery_record_view(record, now, parse_iso=parse_iso)
         eff = str(view.get("effective_status"))
@@ -352,11 +399,17 @@ def messages_pending_service(
         if not include_terminal and eff in {"acked", "dead_letter", "delivered"}:
             continue
         rows.append(view)
+    if skipped_records:
+        _logger.warning("Skipped %d non-dict record(s) in delivery state", skipped_records)
+        warnings.append(f"delivery_state_partial_corrupt: {skipped_records} non-dict record(s) skipped")
 
     rows.sort(key=lambda x: str(x.get("sent_at", "")), reverse=True)
     out = rows[:limit]
     audit(auth, "messages_pending", {"count": len(out), "recipient": recipient, "status": status})
-    return {"ok": True, "count": len(out), "summary": summary, "messages": out}
+    result: dict[str, Any] = {"ok": True, "count": len(out), "summary": summary, "messages": out}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str, limit: int, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict:
@@ -369,13 +422,20 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
 
     lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     messages = []
+    skipped = 0
     for line in lines[-limit:]:
         try:
             messages.append(json.loads(line))
-        except Exception:
+        except json.JSONDecodeError:
+            skipped += 1
             continue
+    if skipped:
+        _logger.warning("Skipped %d malformed JSONL line(s) in inbox for %s", skipped, recipient)
     audit(auth, "messages_inbox", {"recipient": recipient, "count": len(messages)})
-    return {"ok": True, "recipient": recipient, "count": len(messages), "messages": messages}
+    result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": len(messages), "messages": messages}
+    if skipped:
+        result["warnings"] = [f"inbox_partial_corrupt: {skipped} malformed line(s) skipped"]
+    return result
 
 
 def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int) -> dict:
@@ -387,12 +447,19 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
     if not path.exists():
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": []}
     messages = []
+    skipped = 0
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]:
         try:
             messages.append(json.loads(line))
-        except Exception:
+        except json.JSONDecodeError:
+            skipped += 1
             continue
-    return {"ok": True, "thread_id": thread_id, "count": len(messages), "messages": messages}
+    if skipped:
+        _logger.warning("Skipped %d malformed JSONL line(s) in thread %s", skipped, thread_id)
+    result: dict[str, Any] = {"ok": True, "thread_id": thread_id, "count": len(messages), "messages": messages}
+    if skipped:
+        result["warnings"] = [f"thread_partial_corrupt: {skipped} malformed line(s) skipped"]
+    return result
 
 
 def relay_forward_service(
@@ -474,7 +541,7 @@ def relay_forward_service(
         if gm.commit_paths(paths, f"relay: forward {msg['id']}"):
             committed_files.extend(rels)
     except (OSError, subprocess.CalledProcessError):
-        logging.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
+        _logger.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
     audit(auth, "relay_forward", {"relay_id": req.relay_id, "to": req.target_recipient, "thread_id": req.thread_id})
     return {
         "ok": True,
@@ -552,7 +619,7 @@ def replay_messages_service(
         if gm.commit_paths(paths, f"messages: replay {req.message_id}"):
             committed_files.extend(rels)
     except (OSError, subprocess.CalledProcessError):
-        logging.error("commit_paths failed for %s — data on disk but not in git", req.message_id, exc_info=True)
+        _logger.error("commit_paths failed for %s — data on disk but not in git", req.message_id, exc_info=True)
 
     if req.requires_ack:
         ack_deadline = (now + timedelta(seconds=req.ack_timeout_seconds)).isoformat()
@@ -592,7 +659,7 @@ def replay_messages_service(
         committed_files.append(DELIVERY_STATE_REL)
 
     audit(auth, "messages_replay", {"message_id": req.message_id, "new_message_id": new_message_id, "reason": req.reason, "force": req.force})
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "message_id": req.message_id,
         "replayed_message_id": new_message_id,
@@ -600,3 +667,6 @@ def replay_messages_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
