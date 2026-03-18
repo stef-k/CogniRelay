@@ -505,7 +505,6 @@ def metrics_service(
     all_warnings = list(state.get("warnings") or []) + metrics_warnings
     if all_warnings:
         result["warnings"] = all_warnings
-    if metrics_warnings:
         result["degraded"] = True
     return result
 
@@ -1301,7 +1300,7 @@ This endpoint is an **orchestrator/planner**, not an LLM summarizer. It proposes
             committed.append(rel)
 
     audit(auth, "compact_run", {"report_id": report_id, "source": source_rel, "candidates": len(candidates)})
-    return {
+    result = {
         "ok": True,
         "report_id": report_id,
         "paths": [report_md_rel, report_json_rel],
@@ -1309,5 +1308,8 @@ This endpoint is an **orchestrator/planner**, not an LLM summarizer. It proposes
         "latest_commit": gm.latest_commit(),
         "planner_only": True,
         "summary_counts": payload["summary_counts"],
-        **({"degraded": True, "warnings": access_warnings} if access_warnings else {}),
     }
+    if access_warnings:
+        result["degraded"] = True
+        result["warnings"] = access_warnings
+    return result

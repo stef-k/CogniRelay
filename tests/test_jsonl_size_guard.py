@@ -16,7 +16,7 @@ from unittest.mock import patch
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.models import CompactRequest
 from app.messages.service import messages_inbox_service, messages_thread_service
-from app.ops.service import _load_ops_runs
+from app.ops.service import _load_ops_runs, ops_status_service
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
@@ -53,9 +53,8 @@ def _stat_fails_on_target(target_path: Path, *, allow_calls: int = 2):
     then raise on the next one.
 
     Args:
-        allow_calls: Number of stat() calls to let through before raising.
-            Use 2 for service functions that go through ``safe_path`` (resolve
-            + exists), and 1 for code that uses ``path.exists()`` directly.
+        allow_calls: Number of stat() calls that should succeed before the
+            test triggers the OSError.
 
     The ``state["raised"]`` flag can be asserted after the test to confirm
     the error path was actually triggered.
@@ -209,6 +208,25 @@ class TestInboxSizeGuard(unittest.TestCase):
             self.assertEqual(result["count"], 0)
             self.assertTrue(any("inbox_unreadable" in w for w in result["warnings"]))
 
+    def test_inbox_memoryerror_is_reraised(self) -> None:
+        """Inbox reader must re-raise MemoryError instead of degrading it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            inbox_dir = repo / "messages" / "inbox"
+            inbox_dir.mkdir(parents=True)
+            inbox_file = inbox_dir / "agent-a.jsonl"
+            inbox_file.write_text(json.dumps({"body": "hello"}) + "\n", encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=MemoryError("oom")):
+                with self.assertRaises(MemoryError):
+                    messages_inbox_service(
+                        repo_root=repo,
+                        auth=AllowAllAuthStub(),
+                        recipient="agent-a",
+                        limit=20,
+                        audit=_noop_audit,
+                    )
+
 
 # ---------------------------------------------------------------------------
 # Thread size guard
@@ -242,6 +260,30 @@ class TestThreadSizeGuard(unittest.TestCase):
             self.assertIn("warnings", result)
             self.assertTrue(any("thread_too_large" in w for w in result["warnings"]))
             self.assertTrue(any("compacted or truncated" in w for w in result["warnings"]))
+
+    def test_oversized_thread_audits_degraded_access(self) -> None:
+        """Thread oversized-file degradation should still emit an audit record."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            thread_dir = repo / "messages" / "threads"
+            thread_dir.mkdir(parents=True)
+            thread_file = thread_dir / "thread-xyz.jsonl"
+            threshold = 1024
+            _make_large_jsonl(thread_file, threshold)
+            audit = _AuditRecorder()
+
+            result = messages_thread_service(
+                repo_root=repo,
+                auth=AllowAllAuthStub(),
+                thread_id="thread-xyz",
+                limit=100,
+                audit=audit,
+                max_jsonl_read_bytes=threshold,
+            )
+
+            self.assertTrue(result["degraded"])
+            self.assertEqual(audit.calls[0][1], "messages_thread")
+            self.assertEqual(audit.calls[0][2], {"thread_id": "thread-xyz", "count": 0})
 
     def test_thread_under_limit_reads_normally(self) -> None:
         """Thread reader works normally when file is under the size limit."""
@@ -289,6 +331,30 @@ class TestThreadSizeGuard(unittest.TestCase):
             self.assertTrue(result["degraded"])
             self.assertEqual(result["count"], 0)
             self.assertTrue(any("thread_stat_failed" in w for w in result["warnings"]))
+
+    def test_thread_stat_oserror_audits_degraded_access(self) -> None:
+        """Thread stat failures should still emit an audit record."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            thread_dir = repo / "messages" / "threads"
+            thread_dir.mkdir(parents=True)
+            thread_file = thread_dir / "thread-xyz.jsonl"
+            thread_file.write_text(json.dumps({"body": "x"}) + "\n", encoding="utf-8")
+            replacement = _stat_fails_on_target(thread_file)
+            audit = _AuditRecorder()
+
+            with patch.object(Path, "stat", replacement):
+                result = messages_thread_service(
+                    repo_root=repo,
+                    auth=AllowAllAuthStub(),
+                    thread_id="thread-xyz",
+                    limit=100,
+                    audit=audit,
+                )
+
+            self.assertTrue(result["degraded"])
+            self.assertEqual(audit.calls[0][1], "messages_thread")
+            self.assertEqual(audit.calls[0][2], {"thread_id": "thread-xyz", "count": 0})
 
     def test_thread_read_failure_returns_degraded_and_audited(self) -> None:
         """Thread read I/O failures surface degraded state and still audit the access."""
@@ -398,6 +464,32 @@ class TestOpsRunsSizeGuard(unittest.TestCase):
 
             self.assertEqual(runs, [])
             self.assertTrue(any("ops_runs_read_failed" in w for w in warnings))
+
+
+class TestOpsStatusWarnings(unittest.TestCase):
+    """ops_status_service surfaces degraded warnings from run history loading."""
+
+    def test_ops_status_propagates_run_history_warning(self) -> None:
+        """Ops status should mark the response degraded when the run log is unreadable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            ops_file = logs_dir / "ops_runs.jsonl"
+            ops_file.write_text(json.dumps({"job_id": "test"}) + "\n", encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=OSError("disk error")):
+                result = ops_status_service(
+                    repo_root=repo,
+                    auth=AllowAllAuthStub(client_ip="127.0.0.1"),
+                    limit=20,
+                    audit=_noop_audit,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertEqual(result["recent_runs"], [])
+            self.assertTrue(any("ops_runs_read_failed" in w for w in result["warnings"]))
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +621,54 @@ class TestMetricsSizeGuard(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertTrue(result.get("degraded"))
             self.assertTrue(any("audit_stat_failed" in w for w in result["warnings"]))
+
+    def test_delivery_warnings_mark_metrics_degraded(self) -> None:
+        """Delivery-state warnings should also set the degraded flag on metrics."""
+        from app.maintenance.service import metrics_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+
+            result = metrics_service(
+                settings=_FakeSettings(repo),
+                auth=AllowAllAuthStub(),
+                load_delivery_state=lambda _r: {"records": {}, "warnings": ["delivery_state_partial: degraded input"]},
+                delivery_record_view=_stub_delivery_view,
+                load_check_artifacts=_stub_check_artifacts,
+                load_rate_limit_state=_stub_rate_limit_state,
+                parse_iso=_stub_parse_iso,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertTrue(any("delivery_state_partial" in w for w in result["warnings"]))
+
+    def test_audit_read_failure_returns_degraded_with_warning(self) -> None:
+        """Metrics should surface unreadable audit-log warnings in the response."""
+        from app.maintenance.service import metrics_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            audit_file = logs_dir / "api_audit.jsonl"
+            audit_file.write_text(json.dumps({"event": "test"}) + "\n", encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=OSError("disk error")):
+                with self.assertLogs("app.maintenance.service", level=logging.WARNING):
+                    result = metrics_service(
+                        settings=_FakeSettings(repo),
+                        auth=AllowAllAuthStub(),
+                        load_delivery_state=_stub_delivery_state,
+                        delivery_record_view=_stub_delivery_view,
+                        load_check_artifacts=_stub_check_artifacts,
+                        load_rate_limit_state=_stub_rate_limit_state,
+                        parse_iso=_stub_parse_iso,
+                    )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertTrue(any("audit_read_failed" in w for w in result["warnings"]))
 
 
 class TestAccessStatsSizeGuard(unittest.TestCase):

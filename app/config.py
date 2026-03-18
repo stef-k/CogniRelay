@@ -30,7 +30,7 @@ ALL_SCOPES = {
 # memory. Used as the fallback when Settings.max_jsonl_read_bytes is not
 # provided (e.g. in direct test calls). See issue #75.
 #
-# NOTE: There is a small TOCTOU window between stat() and read_text() a file
+# NOTE: There is a small TOCTOU window between stat() and read_text(): a file
 # can grow past the threshold after the check (risking OOM), or shrink below
 # it (e.g. log rotation), causing a false-positive degraded response. This is
 # an accepted trade-off; the guard is best-effort, not a guarantee.
