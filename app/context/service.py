@@ -16,6 +16,7 @@ from app.auth import AuthContext
 from app.continuity import build_continuity_state
 from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
+from app.git_safety import safe_commit_new_file, safe_commit_updated_file, try_commit_file
 from app.storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
 
 SNAPSHOT_DIR_REL = "snapshots/context"
@@ -65,7 +66,10 @@ def _commit_index_artifacts(repo_root: Path, gm: Any, message_prefix: str) -> li
     commits: list[str] = []
     for rel in _INDEX_ARTIFACTS:
         path = repo_root / rel
-        if path.exists() and gm.commit_file(path, f"{message_prefix} {Path(rel).name}"):
+        if path.exists() and try_commit_file(
+            path=path, gm=gm,
+            commit_message=f"{message_prefix} {Path(rel).name}",
+        ):
             commits.append(rel)
     return commits
 
@@ -140,8 +144,14 @@ def write_file_service(
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    write_old_bytes = path.read_bytes() if path.exists() else None
     write_text_file(path, req.content)
-    committed = gm.commit_file(path, req.commit_message or f"write: {req.path}")
+    committed = safe_commit_updated_file(
+        path=path, gm=gm,
+        commit_message=req.commit_message or f"write: {req.path}",
+        error_detail=f"Failed to commit write for {req.path}",
+        old_bytes=write_old_bytes,
+    )
     audit(auth, "write", {"path": req.path, "committed": committed})
     return {"ok": True, "path": req.path, "committed": committed, "latest_commit": gm.latest_commit()}
 
@@ -181,8 +191,14 @@ def append_record_service(
         path = safe_path(repo_root, req.path)
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    append_old_bytes = path.read_bytes() if path.exists() else None
     append_jsonl(path, req.record)
-    committed = gm.commit_file(path, req.commit_message or f"append: {req.path}")
+    committed = safe_commit_updated_file(
+        path=path, gm=gm,
+        commit_message=req.commit_message or f"append: {req.path}",
+        error_detail=f"Failed to commit append for {req.path}",
+        old_bytes=append_old_bytes,
+    )
     audit(auth, "append", {"path": req.path, "committed": committed})
     return {"ok": True, "path": req.path, "committed": committed, "latest_commit": gm.latest_commit()}
 
@@ -666,7 +682,11 @@ def context_snapshot_create_service(
     }
     path = safe_path(repo_root, snapshot_rel)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(path, f"snapshot: create {snapshot_id}")
+    committed = safe_commit_new_file(
+        path=path, gm=gm,
+        commit_message=f"snapshot: create {snapshot_id}",
+        error_detail=f"Failed to commit snapshot {snapshot_id}",
+    )
     audit(auth, "context_snapshot_create", {"snapshot_id": snapshot_id, "as_of_mode": as_of["mode"], "items": len(items)})
     return {
         "ok": True,

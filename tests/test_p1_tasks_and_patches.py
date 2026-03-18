@@ -36,6 +36,14 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub that pretends every file commit succeeds."""
 
+    def __init__(self, repo_root: Path | None = None) -> None:
+        """Store repo_root for git_safety unstage compatibility."""
+        self.repo_root = repo_root or Path("/tmp/stub-repo")
+
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
+        """Report a successful multi-path commit without touching git."""
+        return True
+
     def commit_file(self, _path: Path, _message: str) -> bool:
         """Report a successful commit without touching git."""
         return True
