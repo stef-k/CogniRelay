@@ -32,11 +32,18 @@ class GitCommitter(Protocol):
     def commit_paths(self, paths: list[Path], message: str) -> bool: ...
 
 
-def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
+def unstage_paths(gm: GitCommitter, paths: list[Path]) -> None:
     """Best-effort unstage paths from the git index after a failed commit."""
     try:
         resolved_root = gm.repo_root.resolve()
-        rels = [str(p.resolve().relative_to(resolved_root)) for p in paths]
+        rels: list[str] = []
+        for path in paths:
+            try:
+                rels.append(str(path.resolve().relative_to(resolved_root)))
+            except ValueError:
+                continue
+        if not rels:
+            return
         subprocess.run(
             ["git", "reset", "HEAD", "--", *rels],
             cwd=gm.repo_root,
@@ -46,6 +53,11 @@ def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
         )
     except Exception:
         _log.exception("Failed to unstage paths after rollback")
+
+
+def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
+    """Backward-compatible alias for tests and existing internal callers."""
+    unstage_paths(gm, paths)
 
 
 def _restore_files(rollback_plan: list[tuple[Path, bytes | None]]) -> None:

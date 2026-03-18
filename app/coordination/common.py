@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.git_locking import repository_mutation_lock
+from app.git_safety import unstage_paths
 from app.storage import canonical_json, write_text_file
 
 _log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ def persist_new_artifact(
             if not committed:
                 raise RuntimeError("git commit produced no changes")
         except Exception as exc:
+            unstage_paths(gm, [path])
             try:
                 if path.exists():
                     path.unlink()
@@ -91,6 +93,7 @@ def persist_updated_artifact(
             if not committed:
                 raise RuntimeError("git commit produced no changes")
         except Exception as exc:
+            unstage_paths(gm, [path])
             try:
                 if old_bytes is None:
                     if path.exists():

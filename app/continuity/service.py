@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from app.auth import AuthContext
 from app.git_locking import repository_mutation_lock
 from app.git_manager import GitManager
+from app.git_safety import unstage_paths
 from app.models import (
     ContinuityArchiveRequest,
     ContinuityCapsuleHealth,
@@ -439,6 +440,7 @@ def _persist_active_capsule(
                 raise RuntimeError("git commit produced no changes")
         except Exception as exc:
             restore_error: Exception | None = None
+            unstage_paths(gm, [path])
             try:
                 if old_bytes is None:
                     path.unlink(missing_ok=True)
@@ -552,6 +554,7 @@ def _persist_fallback_snapshot(
                 raise RuntimeError("git commit produced no changes")
     except Exception as exc:
         if path is not None:
+            unstage_paths(gm, [path])
             return fallback_rel, "failed", _restore_failed_fallback_snapshot(path, old_bytes, exc)
         return fallback_rel, "failed", f"Failed to persist continuity fallback snapshot: {exc}"
     return fallback_rel, "committed", None
@@ -1443,6 +1446,7 @@ def continuity_delete_service(
                 if not committed:
                     raise RuntimeError("Continuity delete commit produced no changes")
             except Exception as exc:
+                unstage_paths(gm, paths_to_stage)
                 restore_errors: list[str] = []
                 for path, data in original_bytes.items():
                     try:
@@ -1626,6 +1630,7 @@ def continuity_refresh_plan_service(
                     raise RuntimeError("git commit produced no changes")
                 latest_commit = gm.latest_commit()
         except Exception as exc:
+            unstage_paths(gm, [refresh_path])
             raise _restore_failed_refresh_state(refresh_path, old_bytes, exc) from exc
 
     audit(
@@ -1873,6 +1878,7 @@ def continuity_archive_service(
                     f"continuity: archive {req.subject_kind} {req.subject_id}",
                 )
             except Exception as exc:
+                unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
@@ -1881,6 +1887,7 @@ def continuity_archive_service(
                     ) from exc
                 raise
             if not committed:
+                unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:

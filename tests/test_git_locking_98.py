@@ -12,8 +12,12 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 import app.git_safety as git_safety
+from app.continuity.service import continuity_delete_service
+from app.coordination.common import persist_new_artifact
 from app.git_manager import GitManager
 from app.git_safety import safe_commit_new_file
+from app.models import ContinuityDeleteRequest
+from tests.helpers import AllowAllAuthStub
 
 
 class TestRepositoryMutationLocking(unittest.TestCase):
@@ -70,6 +74,17 @@ class TestRepositoryMutationLocking(unittest.TestCase):
             if subject == message:
                 return sha
         raise AssertionError(f"Commit not found: {message}")
+
+    def _status(self, *rels: str) -> str:
+        """Return porcelain status for the selected paths."""
+        cp = subprocess.run(
+            ["git", "status", "--porcelain", "--", *rels],
+            cwd=self.repo,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return cp.stdout.strip()
 
     def test_unrelated_concurrent_commits_do_not_cross_contaminate(self) -> None:
         """One blocked commit must keep another commit out of the shared index."""
@@ -181,6 +196,70 @@ class TestRepositoryMutationLocking(unittest.TestCase):
             capture_output=True,
         )
         self.assertEqual(status.stdout.strip(), "")
+
+    def test_continuity_delete_rollback_cleans_index(self) -> None:
+        """Failed continuity delete should restore files and leave no staged deletions."""
+        active = self.repo / "memory" / "continuity" / "user-stef.json"
+        fallback = self.repo / "memory" / "continuity" / "fallback" / "user-stef.json"
+        active.parent.mkdir(parents=True, exist_ok=True)
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        active.write_text('{"active": true}\n', encoding="utf-8")
+        fallback.write_text('{"fallback": true}\n', encoding="utf-8")
+        self.gm.commit_paths([active, fallback], "seed continuity")
+
+        real_run = subprocess.run
+
+        def fail_commit(*args, **kwargs):
+            cmd = args[0]
+            if cmd[:2] == ["git", "commit"]:
+                raise subprocess.CalledProcessError(1, cmd, stderr="boom")
+            return real_run(*args, **kwargs)
+
+        with patch("app.git_manager.subprocess.run", side_effect=fail_commit):
+            with self.assertRaises(HTTPException):
+                continuity_delete_service(
+                    repo_root=self.repo,
+                    gm=self.gm,
+                    auth=AllowAllAuthStub(),
+                    req=ContinuityDeleteRequest(
+                        subject_kind="user",
+                        subject_id="stef",
+                        delete_active=True,
+                        delete_fallback=True,
+                        reason="cleanup",
+                    ),
+                    audit=lambda *_args: None,
+                )
+
+        self.assertTrue(active.exists())
+        self.assertTrue(fallback.exists())
+        self.assertEqual(self._status("memory/continuity/user-stef.json", "memory/continuity/fallback/user-stef.json"), "")
+
+    def test_persist_new_artifact_rollback_cleans_index(self) -> None:
+        """Failed coordination artifact persist should remove staged AD entries."""
+        artifact_path = self.repo / "memory" / "coordination" / "handoffs" / "handoff_test.json"
+        artifact = {"handoff_id": "handoff_test", "created_at": "2026-03-18T00:00:00Z"}
+        real_run = subprocess.run
+
+        def fail_commit(*args, **kwargs):
+            cmd = args[0]
+            if cmd[:2] == ["git", "commit"]:
+                raise subprocess.CalledProcessError(1, cmd, stderr="boom")
+            return real_run(*args, **kwargs)
+
+        with patch("app.git_manager.subprocess.run", side_effect=fail_commit):
+            with self.assertRaises(HTTPException):
+                persist_new_artifact(
+                    path=artifact_path,
+                    rel="memory/coordination/handoffs/handoff_test.json",
+                    gm=self.gm,
+                    artifact=artifact,
+                    commit_message="handoff: create handoff_test",
+                    error_detail="expected failure",
+                )
+
+        self.assertFalse(artifact_path.exists())
+        self.assertEqual(self._status("memory/coordination/handoffs/handoff_test.json"), "")
 
 
 if __name__ == "__main__":
