@@ -61,21 +61,33 @@ class TestAppendJsonl(unittest.TestCase):
         line = target.read_text(encoding="utf-8").strip()
         self.assertEqual(json.loads(line), record)
 
-    def test_flush_precedes_fsync_in_source(self):
-        """Implementation must call flush() before fsync() for durability."""
+    def test_flush_precedes_fsync(self):
+        """flush() must be called before fsync() for durability.
+
+        Structural assertion: verifies call ordering in the source since
+        TextIOWrapper.flush cannot be patched at the C level.
+        """
         import inspect
 
         source = inspect.getsource(append_jsonl)
-        flush_pos = source.index("f.flush()")
+        # Match the method calls; resilient to variable renames as long as
+        # the pattern .flush() / os.fsync( appears in the expected order.
+        flush_pos = source.index(".flush()")
         fsync_pos = source.index("os.fsync(")
         self.assertLess(flush_pos, fsync_pos, "flush() must appear before fsync()")
 
-    def test_fsync_oserror_propagates(self):
-        """An OSError from fsync must propagate to the caller."""
+    def test_fsync_oserror_propagates_and_record_written(self):
+        """An OSError from fsync must propagate; the record should still be on disk."""
         target = self.tmpdir / "log.jsonl"
-        with patch("app.storage.os.fsync", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                append_jsonl(target, {"fragile": True})
+        with self.assertLogs("root", level="ERROR") as log_cm:
+            with patch("app.storage.os.fsync", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    append_jsonl(target, {"fragile": True})
+        # Record was written before fsync failed
+        content = target.read_text(encoding="utf-8").strip()
+        self.assertEqual(json.loads(content), {"fragile": True})
+        # logging.error was called
+        self.assertTrue(any("record may not be durable" in msg for msg in log_cm.output))
 
 
 if __name__ == "__main__":

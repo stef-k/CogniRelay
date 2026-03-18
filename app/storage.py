@@ -135,14 +135,15 @@ def append_jsonl(path: Path, record: Any) -> None:
 
     ``record`` must be JSON-serializable. Calls fsync after writing for
     durability. On a crash, consumers should tolerate a truncated trailing
-    line as the accepted failure mode.
+    line as the accepted failure mode. Raises ``OSError`` on I/O failure
+    (the record may have been partially written but is not guaranteed durable).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
         try:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
         except OSError:
-            logging.error("fsync failed for %s — record may not be durable", path, exc_info=True)
+            logging.error("append_jsonl I/O failed for %s — record may not be durable", path, exc_info=True)
             raise
