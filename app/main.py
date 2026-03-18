@@ -522,6 +522,7 @@ def ops_status(limit: int = Query(default=50, ge=1, le=500), auth: AuthContext =
         auth=auth,
         limit=limit,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
     )
 
 
@@ -1314,6 +1315,7 @@ def messages_inbox(recipient: str = Query(...), limit: int = Query(default=20, g
         recipient=recipient,
         limit=limit,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
     )
 
 
@@ -1321,7 +1323,14 @@ def messages_inbox(recipient: str = Query(...), limit: int = Query(default=20, g
 def messages_thread(thread_id: str = Query(...), limit: int = Query(default=100, ge=1, le=1000), auth: AuthContext = Depends(require_auth)) -> dict:
     """Return messages for one thread."""
     settings, _ = _services()
-    return messages_thread_service(repo_root=settings.repo_root, auth=auth, thread_id=thread_id, limit=limit)
+    return messages_thread_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        thread_id=thread_id,
+        limit=limit,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
+    )
 
 
 @app.post("/v1/relay/forward")
@@ -1457,6 +1466,7 @@ def metrics(auth: AuthContext = Depends(require_auth)) -> dict:
         load_check_artifacts=load_check_artifacts,
         load_rate_limit_state=_load_rate_limit_state,
         parse_iso=_parse_iso,
+        max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
     )
 
 

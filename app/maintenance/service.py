@@ -19,6 +19,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.continuity.service import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
@@ -329,6 +330,7 @@ def metrics_service(
     load_check_artifacts: Callable[[Path], list[dict[str, Any]]],
     load_rate_limit_state: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
 ) -> dict:
     """Assemble operational metrics, summaries, and alarm conditions."""
     auth.require("read:index")
@@ -362,13 +364,35 @@ def metrics_service(
 
     event_counts: dict[str, int] = {}
     peer_counts: dict[str, int] = {}
+    metrics_warnings: list[str] = []
+    audit_raw: str | None = None
     audit_path = settings.repo_root / "logs" / "api_audit.jsonl"
     if audit_path.exists():
         try:
-            audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001 — mission-critical degradation
-            _logger.warning("Failed to read audit log %s for metrics", audit_path, exc_info=True)
-            audit_raw = ""
+            audit_file_size = audit_path.stat().st_size
+        except OSError:
+            _logger.warning("stat() failed on audit log %s; skipping audit metrics", audit_path, exc_info=True)
+            metrics_warnings.append("audit_stat_failed: unable to determine audit log size; audit metrics unavailable")
+        else:
+            if audit_file_size > max_jsonl_read_bytes:
+                _logger.warning(
+                    "Audit log %s is %d bytes (limit %d); skipping audit metrics",
+                    audit_path, audit_file_size, max_jsonl_read_bytes,
+                )
+                metrics_warnings.append(
+                    f"audit_too_large: file is {audit_file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                    "audit metrics unavailable until file is compacted or truncated"
+                )
+            else:
+                try:
+                    audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+                except MemoryError:
+                    _logger.critical("OOM while reading audit log %s", audit_path, exc_info=True)
+                    raise
+                except Exception:  # noqa: BLE001 — mission-critical degradation
+                    _logger.warning("Failed to read audit log %s for metrics", audit_path, exc_info=True)
+                    metrics_warnings.append("audit_read_failed: I/O error reading audit log; audit metrics unavailable")
+    if audit_raw:
         if "\ufffd" in audit_raw:
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", audit_path)
         for line in audit_raw.splitlines()[-10000:]:
@@ -478,8 +502,10 @@ def metrics_service(
         },
         "alarms": alarms,
     }
-    if state.get("warnings"):
-        result["warnings"] = state["warnings"]
+    all_warnings = list(state.get("warnings") or []) + metrics_warnings
+    if all_warnings:
+        result["warnings"] = all_warnings
+        result["degraded"] = True
     return result
 
 
@@ -951,17 +977,42 @@ def backup_restore_test_service(
     }
 
 
-def _load_access_stats(repo_root: Path) -> dict[str, dict]:
+def _load_access_stats(
+    repo_root: Path,
+    *,
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
+) -> tuple[dict[str, dict], list[str]]:
     """Load normalized access statistics used by compaction planning."""
     out: dict[str, dict] = {}
+    warnings: list[str] = []
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
-        return out
+        return out, warnings
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        _logger.warning("stat() failed on audit log %s; skipping access stats", path, exc_info=True)
+        warnings.append("access_stats_stat_failed: unable to determine audit log size; compaction planning ignores access recency")
+        return out, warnings
+    if file_size > max_jsonl_read_bytes:
+        _logger.warning(
+            "Audit log %s is %d bytes (limit %d); skipping access stats to avoid OOM",
+            path, file_size, max_jsonl_read_bytes,
+        )
+        warnings.append(
+            f"access_stats_too_large: audit log is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+            "compaction planning ignores access recency until the log is compacted or truncated"
+        )
+        return out, warnings
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
+    except MemoryError:
+        _logger.critical("OOM while reading audit log %s", path, exc_info=True)
+        raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.warning("Failed to read audit log %s for access stats", path, exc_info=True)
-        return out
+        warnings.append("access_stats_read_failed: I/O error reading audit log; compaction planning ignores access recency")
+        return out, warnings
     if "\ufffd" in raw:
         _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     for line in raw.splitlines()[-5000:]:
@@ -980,7 +1031,7 @@ def _load_access_stats(repo_root: Path) -> dict[str, dict]:
         ts = row.get("ts")
         if ts and (stat["last_access_at"] is None or ts > stat["last_access_at"]):
             stat["last_access_at"] = ts
-    return out
+    return out, warnings
 
 
 def _memory_class_for_path(rel: str) -> str:
@@ -1090,7 +1141,10 @@ def compact_run_service(
     report_id = f"compact_{now.strftime('%Y%m%dT%H%M%SZ')}"
     source_rel = req.source_path or "(policy-scan)"
 
-    access_stats = _load_access_stats(settings.repo_root)
+    access_stats, access_warnings = _load_access_stats(
+        settings.repo_root,
+        max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
+    )
     candidates = []
     for path in settings.repo_root.rglob("*"):
         if not path.is_file():
@@ -1246,7 +1300,7 @@ This endpoint is an **orchestrator/planner**, not an LLM summarizer. It proposes
             committed.append(rel)
 
     audit(auth, "compact_run", {"report_id": report_id, "source": source_rel, "candidates": len(candidates)})
-    return {
+    result = {
         "ok": True,
         "report_id": report_id,
         "paths": [report_md_rel, report_json_rel],
@@ -1255,3 +1309,7 @@ This endpoint is an **orchestrator/planner**, not an LLM summarizer. It proposes
         "planner_only": True,
         "summary_counts": payload["summary_counts"],
     }
+    if access_warnings:
+        result["degraded"] = True
+        result["warnings"] = access_warnings
+    return result

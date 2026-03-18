@@ -13,6 +13,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
 from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_text_file
 
@@ -421,13 +422,44 @@ def messages_pending_service(
     return result
 
 
-def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str, limit: int, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict:
+def messages_inbox_service(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    recipient: str,
+    limit: int,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
+) -> dict:
     """Return recent inbox messages for a recipient."""
     auth.require("read:files")
     auth.require_read_path(f"messages/inbox/{recipient}.jsonl")
     path = safe_path(repo_root, f"messages/inbox/{recipient}.jsonl")
     if not path.exists():
         return {"ok": True, "recipient": recipient, "count": 0, "messages": []}
+
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        _logger.warning("stat() failed on inbox file for %s; returning degraded response", recipient, exc_info=True)
+        audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
+        return {
+            "ok": True, "degraded": True, "recipient": recipient, "count": 0, "messages": [],
+            "warnings": ["inbox_stat_failed: unable to determine file size; returning empty to avoid unbounded read"],
+        }
+    if file_size > max_jsonl_read_bytes:
+        _logger.warning(
+            "Inbox file for %s is %d bytes (limit %d); returning degraded response",
+            recipient, file_size, max_jsonl_read_bytes,
+        )
+        audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
+        return {
+            "ok": True, "degraded": True, "recipient": recipient, "count": 0, "messages": [],
+            "warnings": [
+                f"inbox_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                "all messages unavailable until file is compacted or truncated"
+            ],
+        }
 
     utf8_corrupted = False
     try:
@@ -436,9 +468,12 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
             utf8_corrupted = True
         all_lines = raw.splitlines()
+    except MemoryError:
+        _logger.critical("OOM while reading inbox file for %s", recipient, exc_info=True)
+        raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read inbox file for %s", recipient, exc_info=True)
-        result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
+        result: dict[str, Any] = {"ok": True, "degraded": True, "recipient": recipient, "count": 0, "messages": []}
         result["warnings"] = ["inbox_unreadable: I/O error reading inbox file"]
         audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
         return result
@@ -478,7 +513,15 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
     return result
 
 
-def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int) -> dict:
+def messages_thread_service(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    thread_id: str,
+    limit: int,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None] | None = None,
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
+) -> dict:
     """Return recent messages for a thread."""
     auth.require("read:files")
     rel = f"messages/threads/{thread_id}.jsonl"
@@ -486,6 +529,32 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
     path = safe_path(repo_root, rel)
     if not path.exists():
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": []}
+
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        _logger.warning("stat() failed on thread file for %s; returning degraded response", thread_id, exc_info=True)
+        if audit:
+            audit(auth, "messages_thread", {"thread_id": thread_id, "count": 0})
+        return {
+            "ok": True, "degraded": True, "thread_id": thread_id, "count": 0, "messages": [],
+            "warnings": ["thread_stat_failed: unable to determine file size; returning empty to avoid unbounded read"],
+        }
+    if file_size > max_jsonl_read_bytes:
+        _logger.warning(
+            "Thread file for %s is %d bytes (limit %d); returning degraded response",
+            thread_id, file_size, max_jsonl_read_bytes,
+        )
+        if audit:
+            audit(auth, "messages_thread", {"thread_id": thread_id, "count": 0})
+        return {
+            "ok": True, "degraded": True, "thread_id": thread_id, "count": 0, "messages": [],
+            "warnings": [
+                f"thread_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                "all messages unavailable until file is compacted or truncated"
+            ],
+        }
+
     utf8_corrupted = False
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
@@ -493,10 +562,21 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
             utf8_corrupted = True
         all_lines = raw.splitlines()
+    except MemoryError:
+        _logger.critical("OOM while reading thread file for %s", thread_id, exc_info=True)
+        raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read thread file for %s", thread_id, exc_info=True)
-        return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
-                "warnings": ["thread_unreadable: I/O error reading thread file"]}
+        if audit:
+            audit(auth, "messages_thread", {"thread_id": thread_id, "count": 0})
+        return {
+            "ok": True,
+            "degraded": True,
+            "thread_id": thread_id,
+            "count": 0,
+            "messages": [],
+            "warnings": ["thread_unreadable: I/O error reading thread file"],
+        }
     tail = all_lines[-limit:]
     file_offset = len(all_lines) - len(tail)
     messages: list[dict[str, Any]] = []
@@ -527,6 +607,8 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
         warnings.append(f"thread_partial_corrupt: {', '.join(parts)} line(s) skipped")
     if utf8_corrupted:
         warnings.append("thread_utf8_corrupted: file contains invalid UTF-8 bytes replaced with U+FFFD")
+    if audit:
+        audit(auth, "messages_thread", {"thread_id": thread_id, "count": len(messages)})
     if warnings:
         result["warnings"] = warnings
     return result

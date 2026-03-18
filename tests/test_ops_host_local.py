@@ -360,7 +360,7 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
             )
 
             with self.assertLogs("app.ops.service", level="WARNING") as cm:
-                result = _load_ops_runs(repo)
+                result, _warnings = _load_ops_runs(repo)
 
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["job_id"], "a")
@@ -383,7 +383,7 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
             )
 
             with self.assertLogs("app.ops.service", level="DEBUG") as cm:
-                result = _load_ops_runs(repo)
+                result, _warnings = _load_ops_runs(repo)
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["job_id"], "valid")
@@ -403,7 +403,7 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
             )
 
             with self.assertLogs("app.ops.service", level="WARNING") as cm:
-                result = _load_ops_runs(repo)
+                result, _warnings = _load_ops_runs(repo)
 
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["job_id"], "a")

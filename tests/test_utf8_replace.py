@@ -144,7 +144,7 @@ class TestUtf8ReplacementOps(unittest.TestCase):
             (runs_dir / "ops_runs.jsonl").write_bytes(good + bad)
 
             with self.assertLogs("app.ops.service", level=logging.WARNING) as cm:
-                result = _load_ops_runs(repo)
+                result, _warnings = _load_ops_runs(repo)
 
             self.assertGreaterEqual(len(result), 1)
             self.assertTrue(any("U+FFFD" in msg for msg in cm.output))
@@ -160,7 +160,7 @@ class TestUtf8ReplacementOps(unittest.TestCase):
             path.chmod(0o000)
             try:
                 with self.assertLogs("app.ops.service", level=logging.WARNING):
-                    result = _load_ops_runs(repo)
+                    result, _warnings = _load_ops_runs(repo)
                 self.assertEqual(result, [])
             finally:
                 path.chmod(0o644)
@@ -265,8 +265,9 @@ class TestUtf8ReplacementMaintenance(unittest.TestCase):
             path.chmod(0o000)
             try:
                 with self.assertLogs("app.maintenance.service", level=logging.WARNING):
-                    result = _load_access_stats(repo)
+                    result, warnings = _load_access_stats(repo)
                 self.assertEqual(result, {})
+                self.assertTrue(any("access_stats_read_failed" in w for w in warnings))
             finally:
                 path.chmod(0o644)
 
@@ -315,7 +316,7 @@ class TestUtf8ReplacementMaintenance(unittest.TestCase):
                 tokens={}, audit_log_enabled=False,
             )
 
-            try:
+            with patch.object(Path, "read_text", side_effect=OSError("disk error")):
                 with self.assertLogs("app.maintenance.service", level=logging.WARNING):
                     result = metrics_service(
                         settings=settings, auth=AllowAllAuthStub(),
@@ -325,10 +326,9 @@ class TestUtf8ReplacementMaintenance(unittest.TestCase):
                         load_rate_limit_state=lambda _r: {},
                         parse_iso=_parse_iso_stub,
                     )
-                # Should not crash; event/peer counts should be empty
-                self.assertEqual(result.get("event_counts", {}), {})
-            finally:
-                path.chmod(0o644)
+            self.assertEqual(result["audit"]["event_counts"], {})
+            self.assertTrue(result["degraded"])
+            self.assertTrue(any("audit_read_failed" in w for w in result["warnings"]))
 
 
 class TestUtf8ReplacementContext(unittest.TestCase):

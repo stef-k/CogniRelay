@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.models import OpsRunRequest
 from app.storage import append_jsonl, safe_path
 
@@ -68,17 +69,45 @@ def _ops_lock_path(repo_root: Path, job_id: str) -> Path:
     return safe_path(repo_root, f"{OPS_LOCKS_DIR_REL}/{safe_job}.lock")
 
 
-def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
-    """Load recent ops run history entries."""
+def _load_ops_runs(
+    repo_root: Path,
+    limit: int = 200,
+    *,
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Load recent ops run history entries.
+
+    Returns ``(runs, warnings)`` so callers can surface degradation in API responses.
+    """
     path = _ops_runs_path(repo_root)
+    warnings: list[str] = []
     if not path.exists():
-        return []
+        return [], warnings
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        _log.warning("stat() failed on ops runs file %s; returning empty to avoid unbounded read", path, exc_info=True)
+        return [], ["ops_runs_stat_failed: unable to determine file size; returning empty to avoid unbounded read"]
+    if file_size > max_jsonl_read_bytes:
+        _log.warning(
+            "Ops runs file %s is %d bytes (limit %d); returning empty to avoid OOM",
+            path, file_size, max_jsonl_read_bytes,
+        )
+        warnings.append(
+            f"ops_runs_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+            "run history unavailable until file is compacted or truncated"
+        )
+        return [], warnings
     out: list[dict[str, Any]] = []
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
+    except MemoryError:
+        _log.critical("OOM while reading ops runs file %s", path, exc_info=True)
+        raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _log.warning("Failed to read ops runs file %s", path, exc_info=True)
-        return out
+        warnings.append("ops_runs_read_failed: I/O error reading ops run history; returning empty")
+        return out, warnings
     if "\ufffd" in raw:
         _log.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     all_lines = raw.splitlines()
@@ -94,7 +123,7 @@ def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
             _log.debug("non-dict JSON in ops runs (file line %d), skipping", file_offset + idx + 1)
             continue
         out.append(row)
-    return out
+    return out, warnings
 
 
 def _append_ops_run(repo_root: Path, payload: dict[str, Any]) -> Path:
@@ -427,10 +456,11 @@ def ops_status_service(
     auth: AuthContext,
     limit: int,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
 ) -> dict[str, Any]:
     """Return the current ops lock and recent run status summary."""
     ip = _require_local_ops_access(auth)
-    runs = _load_ops_runs(repo_root, limit=limit)
+    runs, run_warnings = _load_ops_runs(repo_root, limit=limit, max_jsonl_read_bytes=max_jsonl_read_bytes)
     locks = _list_ops_locks(repo_root)
 
     by_job: dict[str, dict[str, Any]] = {}
@@ -446,7 +476,7 @@ def ops_status_service(
         }
 
     audit(auth, "ops_status", {"limit": limit, "client_ip": ip, "runs": len(runs), "locks": len(locks)})
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "local_only": True,
         "client_ip": ip,
@@ -454,6 +484,10 @@ def ops_status_service(
         "recent_runs": runs,
         "last_by_job": by_job,
     }
+    if run_warnings:
+        result["degraded"] = True
+        result["warnings"] = run_warnings
+    return result
 
 
 def ops_schedule_export_service(*, settings: Any, auth: AuthContext, format: str, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict[str, Any]:
