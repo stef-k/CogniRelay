@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,8 @@ from fastapi import HTTPException
 from app.auth import AuthContext
 from app.models import OpsRunRequest
 from app.storage import append_jsonl, safe_path
+
+_log = logging.getLogger(__name__)
 
 OPS_RUNS_REL = "logs/ops_runs.jsonl"
 OPS_LOCKS_DIR_REL = "logs/ops_locks"
@@ -102,11 +105,11 @@ def _acquire_ops_lock(repo_root: Path, job_id: str, run_id: str, started_at: str
 
 
 def _release_ops_lock(lock_path: Path) -> None:
-    """Release an ops job lockfile, ignoring cleanup failures."""
+    """Release an ops job lockfile, logging cleanup failures."""
     try:
         lock_path.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except OSError:
+        _log.warning("failed to release ops lock %s", lock_path, exc_info=True)
 
 
 def _list_ops_locks(repo_root: Path) -> list[dict[str, Any]]:

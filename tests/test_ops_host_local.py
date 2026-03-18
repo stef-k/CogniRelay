@@ -133,5 +133,31 @@ class TestOpsHostLocal(unittest.TestCase):
         self.assertIn('{"job_id":"index.rebuild_incremental"}', cron["examples"]["cron_examples"][0])
 
 
+class TestReleaseOpsLock(unittest.TestCase):
+    """Tests for _release_ops_lock error handling."""
+
+    def test_release_ops_lock_logs_on_oserror(self) -> None:
+        """OSError during lock release must be logged, not silently swallowed."""
+        from app.ops.service import _release_ops_lock
+
+        with tempfile.TemporaryDirectory() as td:
+            lock = Path(td) / "test.lock"
+            lock.touch()
+            with patch.object(Path, "unlink", side_effect=PermissionError("denied")):
+                with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                    _release_ops_lock(lock)
+            self.assertIn("failed to release ops lock", cm.output[0])
+
+    def test_release_ops_lock_succeeds_normally(self) -> None:
+        """Lock release should delete the file without logging."""
+        from app.ops.service import _release_ops_lock
+
+        with tempfile.TemporaryDirectory() as td:
+            lock = Path(td) / "test.lock"
+            lock.touch()
+            _release_ops_lock(lock)
+            self.assertFalse(lock.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
