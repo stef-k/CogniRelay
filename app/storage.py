@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -191,3 +192,114 @@ def append_jsonl(path: Path, record: Any) -> None:
         except OSError:
             logging.error("append_jsonl I/O failed for %s — record may not be durable", path, exc_info=True)
             raise
+
+
+@dataclass(frozen=True, slots=True)
+class _AppendTarget:
+    """Tracks a single file's state for multi-file append rollback."""
+
+    path: Path
+    prior_size: int
+    is_new: bool
+
+
+def _rollback_appends(targets: list[_AppendTarget]) -> None:
+    """Best-effort rollback of already-appended files after a mid-loop failure.
+
+    Truncates each file back to its prior size, or deletes it if it was newly
+    created. Logs errors on failure rather than raising so the original
+    exception propagates cleanly.
+    """
+    for t in targets:
+        try:
+            if t.is_new:
+                t.path.unlink(missing_ok=True)
+            else:
+                with t.path.open("r+b") as f:
+                    f.truncate(t.prior_size)
+                    f.flush()
+                    os.fsync(f.fileno())
+        except OSError:
+            logging.error(
+                "rollback failed for %s — file may contain a partial append",
+                t.path,
+                exc_info=True,
+            )
+
+
+def append_jsonl_multi(paths: list[Path], record: dict[str, Any]) -> None:
+    """Append one JSON line record to multiple files with best-effort rollback on failure.
+
+    Serializes the record once, then appends to each unique path in
+    sequence with fsync.  On ``OSError`` at file N, files 0..N-1 are
+    truncated back to their prior size (or deleted if newly created),
+    and the original exception is re-raised.
+
+    Not truly atomic — a process crash mid-operation can leave a
+    partial append across files.  On a process crash, some files may
+    contain the appended record while others do not.  Consumers should
+    tolerate both partial multi-file application and truncated trailing
+    lines.
+
+    Duplicate paths (after resolution) are collapsed so the record is
+    appended only once per physical file.
+
+    Raises ``TypeError`` or ``ValueError`` if the record is not
+    JSON-serializable (before any I/O occurs).
+    """
+    if not paths:
+        return
+
+    # Serialize once upfront — catches TypeError before any I/O.
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+
+    # Deduplicate paths so a self-send (sender == recipient) doesn't
+    # append twice to the same physical file.
+    seen: set[Path] = set()
+    unique_paths: list[Path] = []
+    for p in paths:
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique_paths.append(p)
+
+    # Append to each file in sequence.  Size capture, mkdir, and
+    # append are merged per-file to minimise the TOCTOU window.
+    targets: list[_AppendTarget] = []
+    for i, p in enumerate(unique_paths):
+        prior_size = -1
+        is_new = False
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # Micro-TOCTOU: another process could create the file between
+            # exists() and open().  Acceptable for the deployment context;
+            # the window is microseconds and requires concurrent writers.
+            is_new = not p.exists()
+            with p.open("a", encoding="utf-8") as f:
+                prior_size = f.tell()
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+            targets.append(_AppendTarget(path=p, prior_size=prior_size, is_new=is_new))
+        except OSError:
+            # Include the current file in rollback if we captured its
+            # prior size (meaning the file was opened successfully).
+            if prior_size >= 0:
+                targets.append(_AppendTarget(path=p, prior_size=prior_size, is_new=is_new))
+            logging.error(
+                "append_jsonl_multi I/O failed at file %d/%d (%s) — rolling back",
+                i + 1,
+                len(unique_paths),
+                p,
+                exc_info=True,
+            )
+            _rollback_appends(targets)
+            raise
+
+    # Fsync parent directories of newly created files for entry
+    # durability (consistent with write_text_file / write_bytes_file).
+    fsynced_dirs: set[Path] = set()
+    for t in targets:
+        if t.is_new and t.path.parent not in fsynced_dirs:
+            _try_fsync_directory(t.path.parent)
+            fsynced_dirs.add(t.path.parent)
