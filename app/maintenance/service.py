@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import json
 import math
 import re
@@ -29,6 +30,8 @@ from app.continuity.service import (
 )
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
 from app.storage import canonical_json, read_text_file, safe_path, write_text_file
+
+_logger = logging.getLogger(__name__)
 
 REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
@@ -361,7 +364,10 @@ def metrics_service(
     peer_counts: dict[str, int] = {}
     audit_path = settings.repo_root / "logs" / "api_audit.jsonl"
     if audit_path.exists():
-        for line in audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-10000:]:
+        _audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+        if "\ufffd" in _audit_raw:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", audit_path)
+        for line in _audit_raw.splitlines()[-10000:]:
             try:
                 item = json.loads(line)
             except Exception:
@@ -947,7 +953,10 @@ def _load_access_stats(repo_root: Path) -> dict[str, dict]:
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
         return out
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-5000:]:
+    _raw = path.read_text(encoding="utf-8", errors="replace")
+    if "\ufffd" in _raw:
+        _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+    for line in _raw.splitlines()[-5000:]:
         try:
             row = json.loads(line)
         except Exception:
@@ -998,7 +1007,9 @@ def _candidate_policy(repo_root: Path, path: Path, access_stats: dict[str, dict]
     text = ""
     if path.suffix.lower() in {".md", ".json", ".jsonl", ".txt"}:
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "\ufffd" in text:
+                _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
             snippet = " ".join(text.split())[:240]
         except Exception:
             text = ""

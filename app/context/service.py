@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_fi
 from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
 from app.git_safety import safe_commit_new_file, safe_commit_updated_file, try_commit_file
 from app.storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
+
+_logger = logging.getLogger(__name__)
 
 SNAPSHOT_DIR_REL = "snapshots/context"
 SNAPSHOT_TEXT_SUFFIXES = {".md", ".json", ".jsonl", ".txt"}
@@ -341,7 +344,9 @@ def _raw_scan_recent_relevant(
             raw = path.read_bytes()[:4096]
         except Exception:
             continue
-        text = raw.decode("utf-8", errors="ignore")
+        text = raw.decode("utf-8", errors="replace")
+        if "\ufffd" in text:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
         record_type, importance = _record_type_importance(rel, text)
         if include_set and record_type.lower() not in include_set:
             continue

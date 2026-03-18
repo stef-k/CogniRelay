@@ -74,7 +74,10 @@ def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     out: list[dict[str, Any]] = []
-    all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    if "\ufffd" in raw:
+        _log.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+    all_lines = raw.splitlines()
     tail = all_lines[-max(1, int(limit)):]
     file_offset = len(all_lines) - len(tail)
     for idx, line in enumerate(tail):

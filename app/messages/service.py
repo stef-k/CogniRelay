@@ -430,7 +430,10 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
         return {"ok": True, "recipient": recipient, "count": 0, "messages": []}
 
     try:
-        all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        if "\ufffd" in raw:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+        all_lines = raw.splitlines()
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read inbox file for %s", recipient, exc_info=True)
         result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
@@ -477,7 +480,10 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
     if not path.exists():
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": []}
     try:
-        all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        if "\ufffd" in raw:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+        all_lines = raw.splitlines()
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read thread file for %s", thread_id, exc_info=True)
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
