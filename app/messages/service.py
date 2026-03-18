@@ -429,8 +429,13 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
     if not path.exists():
         return {"ok": True, "recipient": recipient, "count": 0, "messages": []}
 
+    utf8_corrupted = False
     try:
-        all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        if "\ufffd" in raw:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+            utf8_corrupted = True
+        all_lines = raw.splitlines()
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read inbox file for %s", recipient, exc_info=True)
         result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
@@ -457,6 +462,7 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
         messages.append(row)
     audit(auth, "messages_inbox", {"recipient": recipient, "count": len(messages)})
     result = {"ok": True, "recipient": recipient, "count": len(messages), "messages": messages}
+    warnings: list[str] = []
     skipped = malformed + non_dict
     if skipped:
         parts = []
@@ -464,7 +470,11 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
             parts.append(f"{malformed} malformed")
         if non_dict:
             parts.append(f"{non_dict} non-dict")
-        result["warnings"] = [f"inbox_partial_corrupt: {', '.join(parts)} line(s) skipped"]
+        warnings.append(f"inbox_partial_corrupt: {', '.join(parts)} line(s) skipped")
+    if utf8_corrupted:
+        warnings.append("inbox_utf8_corrupted: file contains invalid UTF-8 bytes replaced with U+FFFD")
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 
@@ -476,8 +486,13 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
     path = safe_path(repo_root, rel)
     if not path.exists():
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": []}
+    utf8_corrupted = False
     try:
-        all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        if "\ufffd" in raw:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+            utf8_corrupted = True
+        all_lines = raw.splitlines()
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read thread file for %s", thread_id, exc_info=True)
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
@@ -501,6 +516,7 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
             continue
         messages.append(row)
     result: dict[str, Any] = {"ok": True, "thread_id": thread_id, "count": len(messages), "messages": messages}
+    warnings: list[str] = []
     skipped = malformed + non_dict
     if skipped:
         parts = []
@@ -508,7 +524,11 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
             parts.append(f"{malformed} malformed")
         if non_dict:
             parts.append(f"{non_dict} non-dict")
-        result["warnings"] = [f"thread_partial_corrupt: {', '.join(parts)} line(s) skipped"]
+        warnings.append(f"thread_partial_corrupt: {', '.join(parts)} line(s) skipped")
+    if utf8_corrupted:
+        warnings.append("thread_utf8_corrupted: file contains invalid UTF-8 bytes replaced with U+FFFD")
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 

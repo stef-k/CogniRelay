@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 from collections import deque
@@ -32,6 +33,8 @@ from app.models import (
     ContextRetrieveRequest,
 )
 from app.storage import StorageError, canonical_json, safe_path, write_bytes_file, write_text_file
+
+_logger = logging.getLogger(__name__)
 
 CONTINUITY_DIR_REL = "memory/continuity"
 CONTINUITY_SUBJECT_RE = re.compile(r"^(task|thread):(.+)$")
@@ -741,16 +744,19 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
     if not path.exists() or not path.is_file():
         return set()
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
             rows = list(deque(handle, maxlen=10000))
-    except Exception:
+    except Exception:  # noqa: BLE001 — mission-critical degradation
+        _logger.warning("Failed to read audit log %s for selector scan", path, exc_info=True)
         return set()
+    if any("\ufffd" in line for line in rows):
+        _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     cutoff = now.timestamp() - (7 * 86400)
     recent: set[tuple[str, str]] = set()
     for line in rows:
         try:
             row = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             continue
         ts = _parse_iso(str(row.get("ts") or ""))
         if ts is None or ts.timestamp() < cutoff:

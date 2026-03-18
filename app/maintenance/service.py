@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import tarfile
@@ -29,6 +30,8 @@ from app.continuity.service import (
 )
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
 from app.storage import canonical_json, read_text_file, safe_path, write_text_file
+
+_logger = logging.getLogger(__name__)
 
 REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
@@ -361,10 +364,17 @@ def metrics_service(
     peer_counts: dict[str, int] = {}
     audit_path = settings.repo_root / "logs" / "api_audit.jsonl"
     if audit_path.exists():
-        for line in audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-10000:]:
+        try:
+            audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — mission-critical degradation
+            _logger.warning("Failed to read audit log %s for metrics", audit_path, exc_info=True)
+            audit_raw = ""
+        if "\ufffd" in audit_raw:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", audit_path)
+        for line in audit_raw.splitlines()[-10000:]:
             try:
                 item = json.loads(line)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 continue
             ev = str(item.get("event") or "unknown")
             event_counts[ev] = event_counts.get(ev, 0) + 1
@@ -947,10 +957,17 @@ def _load_access_stats(repo_root: Path) -> dict[str, dict]:
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
         return out
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-5000:]:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — mission-critical degradation
+        _logger.warning("Failed to read audit log %s for access stats", path, exc_info=True)
+        return out
+    if "\ufffd" in raw:
+        _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+    for line in raw.splitlines()[-5000:]:
         try:
             row = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             continue
         if row.get("event") not in {"read", "messages_inbox", "search", "context_retrieve"}:
             continue
@@ -998,9 +1015,12 @@ def _candidate_policy(repo_root: Path, path: Path, access_stats: dict[str, dict]
     text = ""
     if path.suffix.lower() in {".md", ".json", ".jsonl", ".txt"}:
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "\ufffd" in text:
+                _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
             snippet = " ".join(text.split())[:240]
-        except Exception:
+        except Exception:  # noqa: BLE001 — mission-critical degradation
+            _logger.warning("Failed to read %s for compaction policy", path, exc_info=True)
             text = ""
         if path.suffix.lower() == ".md":
             m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
