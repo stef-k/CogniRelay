@@ -23,6 +23,7 @@ from app.models import (
     TaskCreateRequest,
     TaskUpdateRequest,
 )
+from app.git_safety import safe_commit_new_file, safe_commit_updated_file
 from app.storage import safe_path, write_text_file
 
 TASKS_OPEN_DIR_REL = "tasks/open"
@@ -169,7 +170,11 @@ def tasks_create_service(
     auth.require_write_path(rel)
     path = safe_path(repo_root, rel)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(path, f"tasks: create {req.task_id}")
+    committed = safe_commit_new_file(
+        path=path, gm=gm,
+        commit_message=f"tasks: create {req.task_id}",
+        error_detail=f"Failed to commit new task {req.task_id}",
+    )
     audit(auth, "tasks_create", {"task_id": req.task_id, "status": req.status})
     return {"ok": True, "task": payload, "path": rel, "committed": committed, "latest_commit": gm.latest_commit()}
 
@@ -204,14 +209,26 @@ def tasks_update_service(
     next_rel = _task_rel(task_id, new_status)
     auth.require_write_path(next_rel)
     next_path = safe_path(repo_root, next_rel)
+    update_old_bytes = next_path.read_bytes() if next_path.exists() else None
     write_text_file(next_path, json.dumps(task, ensure_ascii=False, indent=2))
     committed_files: list[str] = []
-    if gm.commit_file(next_path, f"tasks: update {task_id}"):
+    if safe_commit_updated_file(
+        path=next_path, gm=gm,
+        commit_message=f"tasks: update {task_id}",
+        error_detail=f"Failed to commit task update for {task_id}",
+        old_bytes=update_old_bytes,
+    ):
         committed_files.append(next_rel)
 
     if path != next_path and path.exists():
+        move_old_bytes = path.read_bytes()
         path.unlink()
-        if gm.commit_file(path, f"tasks: move {task_id}"):
+        if safe_commit_updated_file(
+            path=path, gm=gm,
+            commit_message=f"tasks: move {task_id}",
+            error_detail=f"Failed to commit task move for {task_id}",
+            old_bytes=move_old_bytes,
+        ):
             committed_files.append(rel)
 
     audit(auth, "tasks_update", {"task_id": task_id, "status": new_status})
@@ -308,7 +325,11 @@ def _patch_propose_service(
         "updated_at": now,
     }
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(path, f"patches: propose {patch_id}")
+    committed = safe_commit_new_file(
+        path=path, gm=gm,
+        commit_message=f"patches: propose {patch_id}",
+        error_detail=f"Failed to commit patch proposal {patch_id}",
+    )
     audit(auth, "patch_propose", {"patch_id": patch_id, "patch_type": kind, "target_path": req.target_path})
     return {"ok": True, "patch": payload, "path": rel, "committed": committed, "latest_commit": gm.latest_commit()}
 
@@ -405,7 +426,13 @@ def docs_patch_apply_service(
 
     committed_files: list[str] = []
     commit_msg = req.commit_message or f"patches: apply {req.patch_id}"
-    if gm.commit_file(target_abs, commit_msg):
+    target_old_bytes = target_abs.read_bytes() if target_abs.exists() else None
+    if safe_commit_updated_file(
+        path=target_abs, gm=gm,
+        commit_message=commit_msg,
+        error_detail=f"Failed to commit applied patch {req.patch_id} for {target_path}",
+        old_bytes=target_old_bytes,
+    ):
         committed_files.append(target_path)
 
     now = datetime.now(timezone.utc).isoformat()
@@ -414,15 +441,25 @@ def docs_patch_apply_service(
     proposal["applied_by"] = auth.peer_id
     proposal["updated_at"] = now
     proposal["applied_commit"] = gm.latest_commit()
+    proposal_old_bytes = proposal_path.read_bytes() if proposal_path.exists() else None
     write_text_file(proposal_path, json.dumps(proposal, ensure_ascii=False, indent=2))
-    if gm.commit_file(proposal_path, f"patches: mark applied {req.patch_id}"):
+    if safe_commit_updated_file(
+        path=proposal_path, gm=gm,
+        commit_message=f"patches: mark applied {req.patch_id}",
+        error_detail=f"Failed to commit patch status update for {req.patch_id}",
+        old_bytes=proposal_old_bytes,
+    ):
         committed_files.append(proposal_rel)
 
     applied_rel = f"{PATCH_APPLIED_DIR_REL}/{req.patch_id}.json"
     auth.require_write_path(applied_rel)
     applied_path = safe_path(repo_root, applied_rel)
     write_text_file(applied_path, json.dumps(proposal, ensure_ascii=False, indent=2))
-    if gm.commit_file(applied_path, f"patches: archive applied {req.patch_id}"):
+    if safe_commit_new_file(
+        path=applied_path, gm=gm,
+        commit_message=f"patches: archive applied {req.patch_id}",
+        error_detail=f"Failed to commit patch archive for {req.patch_id}",
+    ):
         committed_files.append(applied_rel)
 
     audit(auth, "patch_apply", {"patch_id": req.patch_id, "target_path": target_path})
@@ -463,7 +500,11 @@ def code_checks_run_service(
     auth.require_write_path(rel)
     path = safe_path(repo_root, rel)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
-    committed = gm.commit_file(path, f"runs: check {run_id}")
+    committed = safe_commit_new_file(
+        path=path, gm=gm,
+        commit_message=f"runs: check {run_id}",
+        error_detail=f"Failed to commit check run {run_id}",
+    )
     audit(auth, "code_checks_run", {"run_id": run_id, "profile": req.profile, "status": status, "ref": ref_resolved})
     return {"ok": True, "run": payload, "path": rel, "committed": committed, "latest_commit": gm.latest_commit()}
 

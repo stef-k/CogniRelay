@@ -22,6 +22,7 @@ from app.models import (
     SecurityTokenRevokeRequest,
     SecurityTokenRotateRequest,
 )
+from app.git_safety import safe_commit_updated_file
 from app.storage import safe_path, write_text_file
 
 TOKEN_CONFIG_REL = "config/peer_tokens.json"
@@ -410,8 +411,15 @@ def security_tokens_issue_service(
     }
     tokens.append(entry)
 
+    config_path = safe_path(repo_root, TOKEN_CONFIG_REL)
+    token_old_bytes = config_path.read_bytes() if config_path.exists() else None
     path = _write_token_config(repo_root, payload)
-    committed = gm.commit_file(path, f"security: issue token {token_id}")
+    committed = safe_commit_updated_file(
+        path=path, gm=gm,
+        commit_message=f"security: issue token {token_id}",
+        error_detail=f"Failed to commit token issuance for {token_id}",
+        old_bytes=token_old_bytes,
+    )
     refresh_settings()
     audit(auth, "security_tokens_issue", {"token_id": token_id, "peer_id": req.peer_id, "expires_at": expires_at})
     return {"ok": True, "token": token_plain, "token_meta": _token_public_view(entry, now_dt), "committed": committed, "latest_commit": gm.latest_commit()}
@@ -481,8 +489,15 @@ def security_tokens_revoke_service(
 
     committed = False
     if revoked > 0:
+        revoke_config_path = safe_path(repo_root, TOKEN_CONFIG_REL)
+        revoke_old_bytes = revoke_config_path.read_bytes() if revoke_config_path.exists() else None
         path = _write_token_config(repo_root, payload)
-        committed = gm.commit_file(path, "security: revoke token(s)")
+        committed = safe_commit_updated_file(
+            path=path, gm=gm,
+            commit_message="security: revoke token(s)",
+            error_detail="Failed to commit token revocation",
+            old_bytes=revoke_old_bytes,
+        )
     refresh_settings()
     audit(auth, "security_tokens_revoke", {"matched": matched, "revoked": revoked, "reason": req.reason})
     return {"ok": True, "matched": matched, "revoked": revoked, "tokens": revoked_rows, "committed": committed, "latest_commit": gm.latest_commit()}
@@ -593,9 +608,16 @@ def security_tokens_rotate_service(
     }
     tokens.append(entry)
 
+    rotate_config_path = safe_path(repo_root, TOKEN_CONFIG_REL)
+    rotate_old_bytes = rotate_config_path.read_bytes() if rotate_config_path.exists() else None
     path = _write_token_config(repo_root, payload)
     source_ref = source_token_id or "sha-match"
-    committed = gm.commit_file(path, f"security: rotate token {source_ref} -> {new_token_id}")
+    committed = safe_commit_updated_file(
+        path=path, gm=gm,
+        commit_message=f"security: rotate token {source_ref} -> {new_token_id}",
+        error_detail=f"Failed to commit token rotation {source_ref} -> {new_token_id}",
+        old_bytes=rotate_old_bytes,
+    )
     refresh_settings()
     audit(
         auth,
@@ -680,8 +702,15 @@ def security_keys_rotate_service(
     if req.activate:
         payload["active_key_id"] = key_id
 
+    keys_file_path = safe_path(repo_root, SECURITY_KEYS_REL)
+    keys_old_bytes = keys_file_path.read_bytes() if keys_file_path.exists() else None
     path = _write_security_keys(repo_root, payload)
-    committed = gm.commit_file(path, f"security: rotate key {key_id}")
+    committed = safe_commit_updated_file(
+        path=path, gm=gm,
+        commit_message=f"security: rotate key {key_id}",
+        error_detail=f"Failed to commit key rotation for {key_id}",
+        old_bytes=keys_old_bytes,
+    )
     audit(auth, "security_keys_rotate", {"key_id": key_id, "activate": req.activate, "retire_previous": req.retire_previous, "storage_mode": storage_mode})
 
     key_view = {
@@ -775,8 +804,15 @@ def verify_signed_payload_service(
             reason = "replay_detected"
         else:
             entries[key] = {"key_id": key_id, "nonce": nonce, "first_seen_at": now.isoformat(), "expires_at": expires_at}
+            nonce_file_path = safe_path(settings.repo_root, NONCE_INDEX_REL)
+            nonce_old_bytes = nonce_file_path.read_bytes() if nonce_file_path.exists() else None
             nonce_path = _write_nonce_index(settings.repo_root, nonce_payload)
-            if gm.commit_file(nonce_path, f"messages: consume nonce {key_id}:{nonce}"):
+            if safe_commit_updated_file(
+                path=nonce_path, gm=gm,
+                commit_message=f"messages: consume nonce {key_id}:{nonce}",
+                error_detail=f"Failed to commit nonce consumption for {key_id}:{nonce}",
+                old_bytes=nonce_old_bytes,
+            ):
                 committed_files.append(NONCE_INDEX_REL)
             nonce_consumed = True
 
