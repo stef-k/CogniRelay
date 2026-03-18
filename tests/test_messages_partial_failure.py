@@ -1,6 +1,7 @@
 """Tests for partial-failure handling in message service append operations."""
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,10 +48,17 @@ class _FailingCommitGitManagerStub(_GitManagerStub):
 
 
 class _FailingCommitFileGitManagerStub(_GitManagerStub):
-    """Git manager stub where commit_file raises an exception."""
+    """Git manager stub where commit_file raises OSError."""
 
     def commit_file(self, _path: Path, _message: str) -> bool:
         raise OSError("git commit failed")
+
+
+class _FailingCommitFileCalledProcessErrorStub(_GitManagerStub):
+    """Git manager stub where commit_file raises CalledProcessError."""
+
+    def commit_file(self, _path: Path, _message: str) -> bool:
+        raise subprocess.CalledProcessError(1, "git commit")
 
 
 class _FalseCommitGitManagerStub(_GitManagerStub):
@@ -309,7 +317,7 @@ class TestReplayPartialFailure(unittest.TestCase):
 
 
 class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
-    """Verify that commit_file failures degrade gracefully instead of causing 500s."""
+    """Verify that commit_file failures degrade gracefully instead of propagating as unhandled exceptions."""
 
     def test_send_commit_file_exception_degrades_gracefully(self) -> None:
         """When commit_file raises during delivery state commit, send still returns ok."""
@@ -380,7 +388,7 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
         return "msg_pending"
 
     def test_ack_commit_file_exception_degrades_gracefully(self) -> None:
-        """When commit_file raises during ack, service still returns ok."""
+        """When commit_file raises during ack (both delivery state and ack log commits), service still returns ok."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
@@ -393,9 +401,11 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["committed_files"], [])
-            # Delivery state file should still exist on disk
+            # Both files should still exist on disk despite commit failures
             state_path = repo_root / "messages" / "state" / "delivery_index.json"
             self.assertTrue(state_path.exists())
+            ack_path = repo_root / "messages" / "acks" / f"{msg_id}.jsonl"
+            self.assertTrue(ack_path.exists())
 
     def _seed_dead_letter(self, repo_root: Path) -> str:
         """Create a dead-letter delivery record and return its message_id."""
@@ -455,6 +465,36 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
                 "messages/state/delivery_index.json",
                 result["committed_files"],
             )
+
+
+class TestCommitFileCalledProcessErrorDegradation(unittest.TestCase):
+    """Verify that CalledProcessError from commit_file also degrades gracefully."""
+
+    def test_send_commit_file_called_process_error_degrades(self) -> None:
+        """When commit_file raises CalledProcessError, send still returns ok."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _FailingCommitFileCalledProcessErrorStub()
+            req = MessageSendRequest(
+                thread_id="thread-1",
+                sender="peer-a",
+                recipient="peer-b",
+                subject="hello",
+                body_md="content",
+                idempotency_key="idem-1",
+            )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                result = messages_send(req=req, auth=_AuthStub())
+
+            self.assertTrue(result["ok"])
+            self.assertNotIn(
+                "messages/state/delivery_index.json",
+                result["committed_files"],
+            )
+            state_path = repo_root / "messages" / "state" / "delivery_index.json"
+            self.assertTrue(state_path.exists())
 
 
 if __name__ == "__main__":

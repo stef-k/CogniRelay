@@ -668,7 +668,7 @@ def replay_messages_service(
         if gm.commit_file(state_path, f"messages: replay {req.message_id} -> {new_message_id}"):
             committed_files.append(DELIVERY_STATE_REL)
     except (OSError, subprocess.CalledProcessError):
-        _logger.error("commit_file failed for delivery state replay %s — data on disk but not in git", req.message_id, exc_info=True)
+        _logger.error("commit_file failed for delivery state during replay %s — data on disk but not in git", req.message_id, exc_info=True)
 
     audit(auth, "messages_replay", {"message_id": req.message_id, "new_message_id": new_message_id, "reason": req.reason, "force": req.force})
     result: dict[str, Any] = {
