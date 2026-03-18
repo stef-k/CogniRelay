@@ -306,7 +306,7 @@ def _ops_replay_dead_letter_sweep(
         except HTTPException as exc:
             errors.append({"message_id": message_id, "status_code": exc.status_code, "detail": str(exc.detail)})
 
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "dead_letter_candidates": len(dead_ids),
         "replayed_count": len(replayed),
@@ -314,6 +314,9 @@ def _ops_replay_dead_letter_sweep(
         "errors": errors,
         "force": force,
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
 
 
 def _ops_execute_job(
