@@ -397,6 +397,53 @@ class TestInboxThreadJsonlParsing(unittest.TestCase):
         self.assertIn("1 non-dict", result["warnings"][0])
         self.assertTrue(any("non-dict JSON" in m for m in cm.output))
 
+    def test_inbox_mixed_malformed_and_non_dict(self) -> None:
+        """Compound warning should list both malformed and non-dict counts."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            inbox_path = safe_path(root, "messages/inbox/agent-mix.jsonl")
+            inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [
+                json.dumps({"id": "msg1"}),
+                "{corrupt",
+                json.dumps([1, 2]),
+                json.dumps({"id": "msg2"}),
+            ]
+            inbox_path.write_text("\n".join(lines), encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.WARNING):
+                result = messages_inbox_service(
+                    repo_root=root,
+                    auth=_AuthStub(),  # type: ignore[arg-type]
+                    recipient="agent-mix",
+                    limit=100,
+                    audit=_noop_audit,
+                )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["count"], 2)
+        warn = result["warnings"][0]
+        self.assertIn("1 malformed", warn)
+        self.assertIn("1 non-dict", warn)
+
+    def test_inbox_truncation_indicator_on_long_line(self) -> None:
+        """Lines >200 chars should log with '...' suffix and correct char count."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            inbox_path = safe_path(root, "messages/inbox/agent-long.jsonl")
+            inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            long_line = "{" + "x" * 300
+            inbox_path.write_text(long_line, encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.WARNING) as cm:
+                result = messages_inbox_service(
+                    repo_root=root,
+                    auth=_AuthStub(),  # type: ignore[arg-type]
+                    recipient="agent-long",
+                    limit=100,
+                    audit=_noop_audit,
+                )
+        self.assertEqual(result["count"], 0)
+        self.assertTrue(any("..." in m for m in cm.output))
+        self.assertTrue(any("301 chars" in m for m in cm.output))
+
     def test_inbox_file_offset_with_small_limit(self) -> None:
         """File line numbers should be correct when limit < total lines."""
         with tempfile.TemporaryDirectory() as td:
