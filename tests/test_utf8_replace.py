@@ -15,10 +15,12 @@ from unittest.mock import patch
 
 from tests.helpers import AllowAllAuthStub
 
+from app.context.service import _raw_scan_recent_relevant
 from app.continuity.service import _audit_recent_selectors
 from app.indexer import _record_for_file
 from app.maintenance.service import _candidate_policy, _load_access_stats
 from app.messages.service import messages_inbox_service, messages_thread_service
+from app.models import ContextRetrieveRequest
 from app.ops.service import _load_ops_runs
 
 
@@ -101,6 +103,12 @@ class TestUtf8ReplacementMessages(unittest.TestCase):
             self.assertTrue(any("U+FFFD" in msg for msg in cm.output))
             warnings = result.get("warnings", [])
             self.assertTrue(any("utf8_corrupted" in w for w in warnings))
+            # U+FFFD should appear in returned message bodies
+            bodies = [m.get("body", "") for m in result["messages"]]
+            self.assertTrue(
+                any("\ufffd" in body for body in bodies),
+                "Expected U+FFFD in at least one thread message body",
+            )
 
     def test_inbox_clean_utf8_no_warning(self) -> None:
         """No warning when inbox file contains only valid UTF-8."""
@@ -244,6 +252,31 @@ class TestUtf8ReplacementMaintenance(unittest.TestCase):
                 self.assertIsNotNone(result)
             finally:
                 test_file.chmod(0o644)
+
+
+class TestUtf8ReplacementContext(unittest.TestCase):
+    """Invalid UTF-8 bytes in context scan should be replaced, not dropped."""
+
+    def test_raw_scan_warns_on_corrupt_utf8(self) -> None:
+        """_raw_scan_recent_relevant logs warning when a scanned file has invalid UTF-8."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            journal = repo / "journal"
+            journal.mkdir(parents=True)
+            (journal / "note.md").write_bytes(b"# Caf\xc3\xa9\xfe content\n")
+
+            req = ContextRetrieveRequest(task="café note")
+
+            with self.assertLogs("app.context.service", level=logging.WARNING) as cm:
+                results = _raw_scan_recent_relevant(repo, AllowAllAuthStub(), req)
+
+            self.assertGreaterEqual(len(results), 1)
+            self.assertTrue(any("U+FFFD" in msg for msg in cm.output))
+            # U+FFFD should appear in the scanned snippet
+            self.assertTrue(
+                any("\ufffd" in r.get("snippet", "") for r in results),
+                "Expected U+FFFD in at least one context scan snippet",
+            )
 
 
 class TestUtf8ReplacementIndexer(unittest.TestCase):

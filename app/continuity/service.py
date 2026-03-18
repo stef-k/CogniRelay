@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import json
+import logging
 import math
 import re
 from collections import deque
@@ -756,7 +756,7 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
     for line in rows:
         try:
             row = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             continue
         ts = _parse_iso(str(row.get("ts") or ""))
         if ts is None or ts.timestamp() < cutoff:

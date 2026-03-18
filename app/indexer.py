@@ -75,7 +75,8 @@ def _record_for_file(repo_root: Path, path: Path) -> dict[str, Any] | None:
         content = path.read_text(encoding='utf-8', errors='replace')
         if "\ufffd" in content:
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
-    except Exception:
+    except Exception:  # noqa: BLE001 — graceful degradation
+        _logger.warning("Failed to read %s for indexing", path, exc_info=True)
         return None
 
     fm = _parse_frontmatter(content) if path.suffix.lower() == '.md' else {}

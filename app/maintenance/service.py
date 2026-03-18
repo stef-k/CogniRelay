@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import json
+import logging
 import math
 import re
 import tarfile
@@ -364,13 +364,17 @@ def metrics_service(
     peer_counts: dict[str, int] = {}
     audit_path = settings.repo_root / "logs" / "api_audit.jsonl"
     if audit_path.exists():
-        audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+        try:
+            audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — mission-critical degradation
+            _logger.warning("Failed to read audit log %s for metrics", audit_path, exc_info=True)
+            audit_raw = ""
         if "\ufffd" in audit_raw:
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", audit_path)
         for line in audit_raw.splitlines()[-10000:]:
             try:
                 item = json.loads(line)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 continue
             ev = str(item.get("event") or "unknown")
             event_counts[ev] = event_counts.get(ev, 0) + 1
@@ -953,7 +957,11 @@ def _load_access_stats(repo_root: Path) -> dict[str, dict]:
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
         return out
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — mission-critical degradation
+        _logger.warning("Failed to read audit log %s for access stats", path, exc_info=True)
+        return out
     if "\ufffd" in raw:
         _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     for line in raw.splitlines()[-5000:]:
