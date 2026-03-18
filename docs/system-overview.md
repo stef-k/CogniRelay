@@ -8,6 +8,8 @@ The core design principle is simple:
 
 **git is the storage engine; the API is the machine interface**
 
+This system should be read as a bounded continuity and orientation substrate. It aims to preserve enough state for useful continuation and recovery, while making degradation, fallback, and authority boundaries explicit rather than pretending persistence is lossless.
+
 ## Architecture
 
 CogniRelay combines a small number of building blocks:
@@ -201,6 +203,7 @@ If automated, run these through a local scheduler such as `systemd` or `cron` an
 
 ## How To Navigate The Docs
 
+- Use [Reviewer Guide](reviewer-guide.md) first when you want the system thesis, non-goals, recovery model, and inter-agent authority boundaries
 - Start here for product shape and system boundaries
 - Use [API Surface](api-surface.md) for the currently implemented HTTP surface
 - Use [`DESIGN_DOC.md`](../DESIGN_DOC.md) for architecture rationale
