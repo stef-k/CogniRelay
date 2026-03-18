@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
-from app.main import messages_send, relay_forward, replay_messages
-from app.models import MessageReplayRequest, MessageSendRequest, RelayForwardRequest
+from app.main import messages_ack, messages_send, relay_forward, replay_messages
+from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
 
 
 class _AuthStub:
@@ -43,6 +43,13 @@ class _FailingCommitGitManagerStub(_GitManagerStub):
     """Git manager stub where commit_paths raises an exception."""
 
     def commit_paths(self, _paths: list[Path], _message: str) -> bool:
+        raise OSError("git commit failed")
+
+
+class _FailingCommitFileGitManagerStub(_GitManagerStub):
+    """Git manager stub where commit_file raises an exception."""
+
+    def commit_file(self, _path: Path, _message: str) -> bool:
         raise OSError("git commit failed")
 
 
@@ -299,6 +306,155 @@ class TestReplayPartialFailure(unittest.TestCase):
                 result = replay_messages(req=req, auth=_AuthStub())
 
             self.assertTrue(result["ok"])
+
+
+class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
+    """Verify that commit_file failures degrade gracefully instead of causing 500s."""
+
+    def test_send_commit_file_exception_degrades_gracefully(self) -> None:
+        """When commit_file raises during delivery state commit, send still returns ok."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _FailingCommitFileGitManagerStub()
+            req = MessageSendRequest(
+                thread_id="thread-1",
+                sender="peer-a",
+                recipient="peer-b",
+                subject="hello",
+                body_md="content",
+                idempotency_key="idem-1",
+            )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                result = messages_send(req=req, auth=_AuthStub())
+
+            self.assertTrue(result["ok"])
+            self.assertNotIn(
+                "messages/state/delivery_index.json",
+                result["committed_files"],
+            )
+            # Delivery state file should still exist on disk
+            state_path = repo_root / "messages" / "state" / "delivery_index.json"
+            self.assertTrue(state_path.exists())
+
+    def _seed_pending_ack(self, repo_root: Path) -> str:
+        """Create a pending_ack delivery record and return its message_id."""
+        state = {
+            "version": "1",
+            "records": {
+                "msg_pending": {
+                    "message_id": "msg_pending",
+                    "thread_id": "thread-1",
+                    "from": "peer-a",
+                    "to": "peer-b",
+                    "subject": "test",
+                    "status": "pending_ack",
+                    "requires_ack": True,
+                    "ack_timeout_seconds": 300,
+                    "max_retries": 3,
+                    "retry_count": 0,
+                    "sent_at": "2026-03-01T00:00:00+00:00",
+                    "ack_deadline": "2099-01-01T00:00:00+00:00",
+                    "acks": [],
+                    "last_error": None,
+                    "message": {
+                        "id": "msg_pending",
+                        "thread_id": "thread-1",
+                        "from": "peer-a",
+                        "to": "peer-b",
+                        "subject": "test",
+                        "body_md": "content",
+                        "priority": "normal",
+                        "attachments": [],
+                    },
+                }
+            },
+            "idempotency": {},
+        }
+        state_dir = repo_root / "messages" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "delivery_index.json").write_text(
+            json.dumps(state), encoding="utf-8"
+        )
+        return "msg_pending"
+
+    def test_ack_commit_file_exception_degrades_gracefully(self) -> None:
+        """When commit_file raises during ack, service still returns ok."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _FailingCommitFileGitManagerStub()
+            msg_id = self._seed_pending_ack(repo_root)
+            req = MessageAckRequest(message_id=msg_id, status="accepted")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                result = messages_ack(req=req, auth=_AuthStub())
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["committed_files"], [])
+            # Delivery state file should still exist on disk
+            state_path = repo_root / "messages" / "state" / "delivery_index.json"
+            self.assertTrue(state_path.exists())
+
+    def _seed_dead_letter(self, repo_root: Path) -> str:
+        """Create a dead-letter delivery record and return its message_id."""
+        state = {
+            "version": "1",
+            "records": {
+                "msg_dead": {
+                    "message_id": "msg_dead",
+                    "thread_id": "thread-1",
+                    "from": "peer-a",
+                    "to": "peer-b",
+                    "subject": "test",
+                    "status": "dead_letter",
+                    "requires_ack": True,
+                    "ack_timeout_seconds": 300,
+                    "max_retries": 3,
+                    "retry_count": 0,
+                    "sent_at": "2026-03-01T00:00:00+00:00",
+                    "ack_deadline": "2026-03-01T00:05:00+00:00",
+                    "acks": [],
+                    "last_error": "timeout",
+                    "message": {
+                        "id": "msg_dead",
+                        "thread_id": "thread-1",
+                        "from": "peer-a",
+                        "to": "peer-b",
+                        "subject": "test",
+                        "body_md": "content",
+                        "priority": "normal",
+                        "attachments": [],
+                    },
+                }
+            },
+            "idempotency": {},
+        }
+        state_dir = repo_root / "messages" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "delivery_index.json").write_text(
+            json.dumps(state), encoding="utf-8"
+        )
+        return "msg_dead"
+
+    def test_replay_commit_file_exception_degrades_gracefully(self) -> None:
+        """When commit_file raises during replay delivery state commit, service still returns ok."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _FailingCommitFileGitManagerStub()
+            msg_id = self._seed_dead_letter(repo_root)
+            req = MessageReplayRequest(message_id=msg_id)
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                result = replay_messages(req=req, auth=_AuthStub())
+
+            self.assertTrue(result["ok"])
+            self.assertNotIn(
+                "messages/state/delivery_index.json",
+                result["committed_files"],
+            )
 
 
 if __name__ == "__main__":

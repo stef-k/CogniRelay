@@ -281,8 +281,11 @@ def messages_send_service(
             key = _idempotency_scope_key(req.sender, req.recipient, req.idempotency_key)
             state.setdefault("idempotency", {})[key] = msg["id"]
         state_path = _write_delivery_state(settings.repo_root, state)
-        if gm.commit_file(state_path, f"messages: update delivery state {msg['id']}"):
-            committed_files.append(DELIVERY_STATE_REL)
+        try:
+            if gm.commit_file(state_path, f"messages: update delivery state {msg['id']}"):
+                committed_files.append(DELIVERY_STATE_REL)
+        except (OSError, subprocess.CalledProcessError):
+            _logger.error("commit_file failed for delivery state %s — data on disk but not in git", msg["id"], exc_info=True)
         delivery_state = delivery_record_view(record, now, parse_iso=parse_iso)
 
     audit(auth, "message_send", {"thread_id": req.thread_id, "to": req.recipient})
@@ -341,14 +344,20 @@ def messages_ack_service(
 
     state_path = _write_delivery_state(repo_root, state)
     committed_files = []
-    if gm.commit_file(state_path, f"messages: ack {req.message_id}"):
-        committed_files.append(DELIVERY_STATE_REL)
+    try:
+        if gm.commit_file(state_path, f"messages: ack {req.message_id}"):
+            committed_files.append(DELIVERY_STATE_REL)
+    except (OSError, subprocess.CalledProcessError):
+        _logger.error("commit_file failed for delivery state ack %s — data on disk but not in git", req.message_id, exc_info=True)
 
     ack_rel = f"messages/acks/{req.message_id}.jsonl"
     ack_path = safe_path(repo_root, ack_rel)
     append_jsonl(ack_path, ack_row)
-    if gm.commit_file(ack_path, f"messages: ack log {req.message_id}"):
-        committed_files.append(ack_rel)
+    try:
+        if gm.commit_file(ack_path, f"messages: ack log {req.message_id}"):
+            committed_files.append(ack_rel)
+    except (OSError, subprocess.CalledProcessError):
+        _logger.error("commit_file failed for ack log %s — data on disk but not in git", req.message_id, exc_info=True)
 
     audit(auth, "messages_ack", {"message_id": req.message_id, "status": req.status})
     result: dict[str, Any] = {
@@ -655,8 +664,11 @@ def replay_messages_service(
         record["replay_reason"] = req.reason
 
     state_path = _write_delivery_state(settings.repo_root, state)
-    if gm.commit_file(state_path, f"messages: replay {req.message_id} -> {new_message_id}"):
-        committed_files.append(DELIVERY_STATE_REL)
+    try:
+        if gm.commit_file(state_path, f"messages: replay {req.message_id} -> {new_message_id}"):
+            committed_files.append(DELIVERY_STATE_REL)
+    except (OSError, subprocess.CalledProcessError):
+        _logger.error("commit_file failed for delivery state replay %s — data on disk but not in git", req.message_id, exc_info=True)
 
     audit(auth, "messages_replay", {"message_id": req.message_id, "new_message_id": new_message_id, "reason": req.reason, "force": req.force})
     result: dict[str, Any] = {
