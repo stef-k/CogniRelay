@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
+from app.git_locking import repository_mutation_lock
 from app.git_manager import GitManager
 from app.models import (
     ContinuityArchiveRequest,
@@ -431,23 +432,24 @@ def _persist_active_capsule(
     """Persist an active capsule safely, restoring the prior durable file on commit failure."""
     old_bytes = path.read_bytes() if path.exists() else None
     write_text_file(path, canonical)
-    try:
-        committed = gm.commit_file(path, commit_message)
-        if not committed:
-            raise RuntimeError("git commit produced no changes")
-    except Exception as exc:
-        restore_error: Exception | None = None
+    with repository_mutation_lock(repo_root):
         try:
-            if old_bytes is None:
-                path.unlink(missing_ok=True)
-            else:
-                write_bytes_file(path, old_bytes)
-        except Exception as restore_exc:
-            restore_error = restore_exc
-        detail = f"Failed to persist continuity capsule: {exc}"
-        if restore_error is not None:
-            detail = f"{detail}; rollback failed: {restore_error}"
-        raise HTTPException(status_code=500, detail=detail) from exc
+            committed = gm.commit_file(path, commit_message)
+            if not committed:
+                raise RuntimeError("git commit produced no changes")
+        except Exception as exc:
+            restore_error: Exception | None = None
+            try:
+                if old_bytes is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    write_bytes_file(path, old_bytes)
+            except Exception as restore_exc:
+                restore_error = restore_exc
+            detail = f"Failed to persist continuity capsule: {exc}"
+            if restore_error is not None:
+                detail = f"{detail}; rollback failed: {restore_error}"
+            raise HTTPException(status_code=500, detail=detail) from exc
 
 
 def _fallback_snapshot_payload(*, capsule: dict[str, Any], active_rel: str, captured_at: str) -> dict[str, Any]:
@@ -544,9 +546,10 @@ def _persist_fallback_snapshot(
         if old_bytes == new_bytes:
             return fallback_rel, "unchanged", None
         write_text_file(path, canonical)
-        committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
-        if not committed:
-            raise RuntimeError("git commit produced no changes")
+        with repository_mutation_lock(repo_root):
+            committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
+            if not committed:
+                raise RuntimeError("git commit produced no changes")
     except Exception as exc:
         if path is not None:
             return fallback_rel, "failed", _restore_failed_fallback_snapshot(path, old_bytes, exc)
@@ -1429,25 +1432,29 @@ def continuity_delete_service(
                 "latest_commit": gm.latest_commit(),
             }
 
-        try:
-            for path in paths_to_stage:
-                path.unlink()
-            committed = gm.commit_paths(paths_to_stage, _delete_commit_message(req.subject_kind, req.subject_id, req.reason))
-            if not committed:
-                raise RuntimeError("Continuity delete commit produced no changes")
-        except Exception as exc:
-            restore_errors: list[str] = []
-            for path, data in original_bytes.items():
-                try:
-                    write_bytes_file(path, data)
-                except Exception as restore_exc:
-                    restore_errors.append(f"{path}: {restore_exc}")
-            if restore_errors:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Continuity delete failed: {exc}; rollback failed for {', '.join(restore_errors)}",
-                ) from exc
-            raise HTTPException(status_code=500, detail=f"Continuity delete failed: {exc}") from exc
+        with repository_mutation_lock(repo_root):
+            try:
+                for path in paths_to_stage:
+                    path.unlink()
+                committed = gm.commit_paths(
+                    paths_to_stage,
+                    _delete_commit_message(req.subject_kind, req.subject_id, req.reason),
+                )
+                if not committed:
+                    raise RuntimeError("Continuity delete commit produced no changes")
+            except Exception as exc:
+                restore_errors: list[str] = []
+                for path, data in original_bytes.items():
+                    try:
+                        write_bytes_file(path, data)
+                    except Exception as restore_exc:
+                        restore_errors.append(f"{path}: {restore_exc}")
+                if restore_errors:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Continuity delete failed: {exc}; rollback failed for {', '.join(restore_errors)}",
+                    ) from exc
+                raise HTTPException(status_code=500, detail=f"Continuity delete failed: {exc}") from exc
     audit(
         auth,
         "continuity_delete",
@@ -1613,10 +1620,11 @@ def continuity_refresh_plan_service(
     if old_bytes != new_bytes:
         try:
             write_text_file(refresh_path, canonical)
-            committed = gm.commit_file(refresh_path, "continuity: refresh plan")
-            if not committed:
-                raise RuntimeError("git commit produced no changes")
-            latest_commit = gm.latest_commit()
+            with repository_mutation_lock(repo_root):
+                committed = gm.commit_file(refresh_path, "continuity: refresh plan")
+                if not committed:
+                    raise RuntimeError("git commit produced no changes")
+                latest_commit = gm.latest_commit()
         except Exception as exc:
             raise _restore_failed_refresh_state(refresh_path, old_bytes, exc) from exc
 
@@ -1858,24 +1866,28 @@ def continuity_archive_service(
         # record the archive write plus active-file removal. If the commit step fails,
         # restore the active capsule and discard the archive envelope immediately.
         active_path.unlink()
-        try:
-            committed = gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
-        except Exception as exc:
+        with repository_mutation_lock(repo_root):
             try:
-                _restore_failed_archive(active_path, archive_path, active_bytes)
-            except Exception as restore_exc:
-                raise RuntimeError(
-                    f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}"
-                ) from exc
-            raise
-        if not committed:
-            try:
-                _restore_failed_archive(active_path, archive_path, active_bytes)
-            except Exception as restore_exc:
-                raise RuntimeError(
-                    f"Continuity archive commit produced no changes; rollback failed: {restore_exc}"
-                ) from restore_exc
-            raise RuntimeError("Continuity archive commit produced no changes")
+                committed = gm.commit_paths(
+                    [archive_path, active_path],
+                    f"continuity: archive {req.subject_kind} {req.subject_id}",
+                )
+            except Exception as exc:
+                try:
+                    _restore_failed_archive(active_path, archive_path, active_bytes)
+                except Exception as restore_exc:
+                    raise RuntimeError(
+                        f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}"
+                    ) from exc
+                raise
+            if not committed:
+                try:
+                    _restore_failed_archive(active_path, archive_path, active_bytes)
+                except Exception as restore_exc:
+                    raise RuntimeError(
+                        f"Continuity archive commit produced no changes; rollback failed: {restore_exc}"
+                    ) from restore_exc
+                raise RuntimeError("Continuity archive commit produced no changes")
 
     audit(
         auth,

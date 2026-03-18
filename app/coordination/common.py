@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.git_locking import repository_mutation_lock
 from app.storage import canonical_json, write_text_file
 
 _log = logging.getLogger(__name__)
@@ -57,17 +58,18 @@ def persist_new_artifact(
 ) -> str:
     """Persist a newly created coordination artifact and delete it on commit failure."""
     write_text_file(path, canonical_json(artifact))
-    try:
-        committed = gm.commit_file(path, commit_message)
-        if not committed:
-            raise RuntimeError("git commit produced no changes")
-    except Exception as exc:
+    with repository_mutation_lock(gm.repo_root):
         try:
-            if path.exists():
-                path.unlink()
-        except Exception:
-            _log.exception("Rollback failed for %s", path)
-        raise HTTPException(status_code=500, detail=error_detail) from exc
+            committed = gm.commit_file(path, commit_message)
+            if not committed:
+                raise RuntimeError("git commit produced no changes")
+        except Exception as exc:
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                _log.exception("Rollback failed for %s", path)
+            raise HTTPException(status_code=500, detail=error_detail) from exc
     return rel
 
 
@@ -83,18 +85,19 @@ def persist_updated_artifact(
     """Persist an updated coordination artifact and restore prior bytes on failure."""
     old_bytes = path.read_bytes() if path.exists() else None
     write_text_file(path, canonical_json(artifact))
-    try:
-        committed = gm.commit_file(path, commit_message)
-        if not committed:
-            raise RuntimeError("git commit produced no changes")
-    except Exception as exc:
+    with repository_mutation_lock(gm.repo_root):
         try:
-            if old_bytes is None:
-                if path.exists():
-                    path.unlink()
-            else:
-                path.write_bytes(old_bytes)
-        except Exception:
-            _log.exception("Rollback failed for %s", path)
-        raise HTTPException(status_code=500, detail=error_detail) from exc
+            committed = gm.commit_file(path, commit_message)
+            if not committed:
+                raise RuntimeError("git commit produced no changes")
+        except Exception as exc:
+            try:
+                if old_bytes is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    path.write_bytes(old_bytes)
+            except Exception:
+                _log.exception("Rollback failed for %s", path)
+            raise HTTPException(status_code=500, detail=error_detail) from exc
     return rel
