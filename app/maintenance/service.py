@@ -29,9 +29,9 @@ from app.continuity.service import (
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-from app.git_safety import try_commit_file
+from app.git_safety import safe_commit_paths, try_commit_file
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
-from app.storage import canonical_json, read_text_file, safe_path, write_text_file
+from app.storage import canonical_json, read_text_file, safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
 
@@ -39,6 +39,27 @@ REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
 REPLICATION_TOMBSTONES_REL = "peers/replication_tombstones.json"
 BACKUPS_DIR_REL = "backups"
+
+
+def _capture_path_state(path: Path, rollback_plan: list[tuple[Path, bytes | None]], seen: set[Path]) -> None:
+    """Record a path's prior bytes once for fail-hard rollback flows."""
+    resolved = path.resolve()
+    if resolved in seen:
+        return
+    seen.add(resolved)
+    rollback_plan.append((path, path.read_bytes() if path.exists() else None))
+
+
+def _restore_rollback_plan(rollback_plan: list[tuple[Path, bytes | None]]) -> None:
+    """Best-effort restore of files mutated before a local write failure."""
+    for path, old_bytes in rollback_plan:
+        try:
+            if old_bytes is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_bytes_file(path, old_bytes)
+        except Exception:  # noqa: BLE001 - preserve the original failure
+            _logger.exception("Rollback restore failed for %s", path)
 
 
 def _continuity_included(include_prefixes: list[str]) -> bool:
@@ -546,6 +567,10 @@ def replication_pull_service(
             }
 
     committed_files: list[str] = []
+    rollback_plan: list[tuple[Path, bytes | None]] = []
+    seen_paths: set[Path] = set()
+    changed_paths: list[Path] = []
+    changed_rels: list[str] = []
     changed = 0
     deleted = 0
     skipped = 0
@@ -556,106 +581,125 @@ def replication_pull_service(
         tomb_entries = {}
         tombstones["entries"] = tomb_entries
 
+    def track_change(path: Path, rel: str) -> None:
+        _capture_path_state(path, rollback_plan, seen_paths)
+        if path not in changed_paths:
+            changed_paths.append(path)
+            changed_rels.append(rel)
+
     now = datetime.now(timezone.utc)
-    for file_row in req.files:
-        top = Path(file_row.path).parts[0] if Path(file_row.path).parts else ""
-        if top not in REPLICATION_ALLOWED_PREFIXES:
-            raise HTTPException(status_code=400, detail=f"Replication path namespace not allowed: {file_row.path}")
-        auth.require_write_path(file_row.path)
+    try:
+        for file_row in req.files:
+            top = Path(file_row.path).parts[0] if Path(file_row.path).parts else ""
+            if top not in REPLICATION_ALLOWED_PREFIXES:
+                raise HTTPException(status_code=400, detail=f"Replication path namespace not allowed: {file_row.path}")
+            auth.require_write_path(file_row.path)
 
-        path = safe_path(settings.repo_root, file_row.path)
-        local_exists = path.exists() and path.is_file()
-        local_content = read_text_file(path) if local_exists else None
-        local_epoch = path.stat().st_mtime if local_exists else 0.0
-        remote_epoch = _parse_dt_or_epoch(file_row.modified_at, now.timestamp(), parse_iso=parse_iso)
+            path = safe_path(settings.repo_root, file_row.path)
+            local_exists = path.exists() and path.is_file()
+            local_content = read_text_file(path) if local_exists else None
+            local_epoch = path.stat().st_mtime if local_exists else 0.0
+            remote_epoch = _parse_dt_or_epoch(file_row.modified_at, now.timestamp(), parse_iso=parse_iso)
 
-        if file_row.deleted:
-            if req.conflict_policy == "target_wins" and local_exists:
-                conflicts += 1
+            if file_row.deleted:
+                if req.conflict_policy == "target_wins" and local_exists:
+                    conflicts += 1
+                    skipped += 1
+                    continue
+                if req.conflict_policy == "error" and local_exists:
+                    raise HTTPException(status_code=409, detail=f"Replication conflict on delete: {file_row.path}")
+
+                if local_exists:
+                    track_change(path, file_row.path)
+                    try:
+                        path.unlink()
+                        deleted += 1
+                        changed += 1
+                    except Exception as e:
+                        raise HTTPException(status_code=500, detail=f"Failed to delete replicated path {file_row.path}: {e}") from e
+                else:
+                    skipped += 1
+
+                tomb_entries[file_row.path] = {
+                    "tombstone_at": file_row.tombstone_at or now.isoformat(),
+                    "source_peer": req.source_peer,
+                    "idempotency_key": idempotency_key,
+                }
+                continue
+
+            if file_row.content is None or file_row.sha256 is None:
+                raise HTTPException(status_code=400, detail=f"Replication file payload requires content+sha256 for upsert: {file_row.path}")
+            if _sha256_text(file_row.content) != file_row.sha256:
+                raise HTTPException(status_code=400, detail=f"Replication sha256 mismatch for {file_row.path}")
+
+            if req.mode == "upsert" and local_exists and local_content == file_row.content:
                 skipped += 1
                 continue
-            if req.conflict_policy == "error" and local_exists:
-                raise HTTPException(status_code=409, detail=f"Replication conflict on delete: {file_row.path}")
 
-            if local_exists:
-                try:
-                    path.unlink()
-                    deleted += 1
-                    changed += 1
-                except Exception as e:
-                    raise HTTPException(status_code=500, detail=f"Failed to delete replicated path {file_row.path}: {e}") from e
-            else:
+            should_write = True
+            if local_exists and local_content != file_row.content:
+                if req.conflict_policy == "target_wins":
+                    should_write = False
+                    conflicts += 1
+                elif req.conflict_policy == "error":
+                    raise HTTPException(status_code=409, detail=f"Replication conflict on path: {file_row.path}")
+                elif req.conflict_policy == "last_write_wins" and remote_epoch < local_epoch:
+                    should_write = False
+                    conflicts += 1
+
+            if not should_write:
                 skipped += 1
+                continue
 
-            tomb_entries[file_row.path] = {
-                "tombstone_at": file_row.tombstone_at or now.isoformat(),
-                "source_peer": req.source_peer,
-                "idempotency_key": idempotency_key,
-            }
-            continue
+            track_change(path, file_row.path)
+            write_text_file(path, file_row.content)
+            changed += 1
+            tomb_entries.pop(file_row.path, None)
 
-        if file_row.content is None or file_row.sha256 is None:
-            raise HTTPException(status_code=400, detail=f"Replication file payload requires content+sha256 for upsert: {file_row.path}")
-        if _sha256_text(file_row.content) != file_row.sha256:
-            raise HTTPException(status_code=400, detail=f"Replication sha256 mismatch for {file_row.path}")
-
-        if req.mode == "upsert" and local_exists and local_content == file_row.content:
-            skipped += 1
-            continue
-
-        should_write = True
-        if local_exists and local_content != file_row.content:
-            if req.conflict_policy == "target_wins":
-                should_write = False
-                conflicts += 1
-            elif req.conflict_policy == "error":
-                raise HTTPException(status_code=409, detail=f"Replication conflict on path: {file_row.path}")
-            elif req.conflict_policy == "last_write_wins" and remote_epoch < local_epoch:
-                should_write = False
-                conflicts += 1
-
-        if not should_write:
-            skipped += 1
-            continue
-
-        write_text_file(path, file_row.content)
-        changed += 1
-        tomb_entries.pop(file_row.path, None)
-        msg = req.commit_message or f"replication: pull {req.source_peer} {file_row.path}"
-        if gm.commit_file(path, msg):
-            committed_files.append(file_row.path)
-
-    tomb_path = _write_replication_tombstones(settings.repo_root, tombstones)
-    if gm.commit_file(tomb_path, f"replication: update tombstones {req.source_peer}"):
-        committed_files.append(REPLICATION_TOMBSTONES_REL)
-
-    state.setdefault("last_pull_by_source", {})[req.source_peer] = {
-        "pulled_at": now.isoformat(),
-        "received_count": len(req.files),
-        "changed_count": changed,
-        "deleted_count": deleted,
-        "conflict_count": conflicts,
-        "mode": req.mode,
-        "conflict_policy": req.conflict_policy,
-        "idempotency_key": idempotency_key,
-    }
-    if idem_ref:
-        pull_map = state.setdefault("pull_idempotency", {})
-        if not isinstance(pull_map, dict):
-            pull_map = {}
-            state["pull_idempotency"] = pull_map
-        pull_map[idem_ref] = {
-            "at": now.isoformat(),
+        state.setdefault("last_pull_by_source", {})[req.source_peer] = {
+            "pulled_at": now.isoformat(),
             "received_count": len(req.files),
             "changed_count": changed,
             "deleted_count": deleted,
             "conflict_count": conflicts,
-            "skipped_count": skipped,
+            "mode": req.mode,
+            "conflict_policy": req.conflict_policy,
+            "idempotency_key": idempotency_key,
         }
+        if idem_ref:
+            pull_map = state.setdefault("pull_idempotency", {})
+            if not isinstance(pull_map, dict):
+                pull_map = {}
+                state["pull_idempotency"] = pull_map
+            pull_map[idem_ref] = {
+                "at": now.isoformat(),
+                "received_count": len(req.files),
+                "changed_count": changed,
+                "deleted_count": deleted,
+                "conflict_count": conflicts,
+                "skipped_count": skipped,
+            }
 
-    state_path = _write_replication_state(settings.repo_root, state)
-    if gm.commit_file(state_path, f"replication: update pull state {req.source_peer}"):
-        committed_files.append(REPLICATION_STATE_REL)
+        tomb_path = safe_path(settings.repo_root, REPLICATION_TOMBSTONES_REL)
+        track_change(tomb_path, REPLICATION_TOMBSTONES_REL)
+        _write_replication_tombstones(settings.repo_root, tombstones)
+
+        state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
+        track_change(state_path, REPLICATION_STATE_REL)
+        _write_replication_state(settings.repo_root, state)
+    except Exception as exc:
+        _restore_rollback_plan(rollback_plan)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Failed replication pull write for {req.source_peer}: {exc}") from exc
+
+    if safe_commit_paths(
+        rollback_plan=rollback_plan,
+        gm=gm,
+        commit_message=req.commit_message or f"replication: pull {req.source_peer}",
+        error_detail=f"Failed to durably commit replication pull for {req.source_peer}",
+    ):
+        committed_files.extend(changed_rels)
 
     audit(
         auth,
@@ -784,8 +828,11 @@ def replication_push_service(
     }
     committed_files = []
     state_path = _write_replication_state(settings.repo_root, state)
-    if gm.commit_file(state_path, "replication: update push state"):
+    warnings: list[str] = []
+    if try_commit_file(path=state_path, gm=gm, commit_message="replication: update push state"):
         committed_files.append(REPLICATION_STATE_REL)
+    else:
+        warnings.append("replication_push_not_durable: state is on disk but not durably committed to git")
 
     audit(
         auth,
@@ -798,7 +845,7 @@ def replication_push_service(
             "include_deleted": req.include_deleted,
         },
     )
-    return {
+    result = {
         "ok": True,
         "dry_run": False,
         "idempotency_key": push_id,
@@ -809,6 +856,9 @@ def replication_push_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def backup_create_service(
@@ -847,32 +897,40 @@ def backup_create_service(
     backup_path.parent.mkdir(parents=True, exist_ok=True)
 
     included_paths: list[str] = []
-    with tarfile.open(backup_path, mode="w:gz") as tf:
-        for prefix in include:
-            path = safe_path(settings.repo_root, prefix)
-            if not path.exists():
-                continue
-            tf.add(path, arcname=prefix)
-            included_paths.append(prefix)
+    rollback_plan = [(backup_path, None), (manifest_path, None)]
+    try:
+        with tarfile.open(backup_path, mode="w:gz") as tf:
+            for prefix in include:
+                path = safe_path(settings.repo_root, prefix)
+                if not path.exists():
+                    continue
+                tf.add(path, arcname=prefix)
+                included_paths.append(prefix)
 
-    manifest_payload = {
-        "schema_version": "1.0",
-        "backup_id": backup_id,
-        "created_at": now.isoformat(),
-        "created_by": auth.peer_id,
-        "include_prefixes": included_paths,
-        "note": req.note,
-        "contract_version": settings.contract_version,
-    }
-    if _continuity_included(included_paths):
-        manifest_payload["continuity_counts"] = _continuity_counts(settings.repo_root)
-    write_text_file(manifest_path, json.dumps(manifest_payload, ensure_ascii=False, indent=2))
+        manifest_payload = {
+            "schema_version": "1.0",
+            "backup_id": backup_id,
+            "created_at": now.isoformat(),
+            "created_by": auth.peer_id,
+            "include_prefixes": included_paths,
+            "note": req.note,
+            "contract_version": settings.contract_version,
+        }
+        if _continuity_included(included_paths):
+            manifest_payload["continuity_counts"] = _continuity_counts(settings.repo_root)
+        write_text_file(manifest_path, json.dumps(manifest_payload, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _restore_rollback_plan(rollback_plan)
+        raise HTTPException(status_code=500, detail=f"Failed to create backup {backup_id}: {exc}") from exc
 
     committed_files = []
-    if gm.commit_file(backup_path, f"backup: create {backup_id}"):
-        committed_files.append(backup_rel)
-    if gm.commit_file(manifest_path, f"backup: manifest {backup_id}"):
-        committed_files.append(manifest_rel)
+    if safe_commit_paths(
+        rollback_plan=rollback_plan,
+        gm=gm,
+        commit_message=f"backup: create {backup_id}",
+        error_detail=f"Failed to durably commit backup {backup_id}",
+    ):
+        committed_files.extend([backup_rel, manifest_rel])
 
     audit(auth, "backup_create", {"backup_id": backup_id, "include_prefixes": included_paths})
     return {

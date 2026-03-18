@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from app.git_safety import safe_commit_new_file, safe_commit_paths, safe_commit_updated_file, try_commit_file
+from app.git_safety import safe_commit_new_file, safe_commit_paths, safe_commit_updated_file, try_commit_file, try_commit_paths
 
 
 def _make_gm(tmp_dir: Path) -> MagicMock:
@@ -301,6 +301,40 @@ class TestTryCommitFile(unittest.TestCase):
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         self.assertEqual(cmd[:4], ["git", "reset", "HEAD", "--"])
+
+
+class TestTryCommitPaths(unittest.TestCase):
+    """Tests for try_commit_paths."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.gm = _make_gm(self.dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_success_returns_true(self):
+        """Successful multi-path commit returns True."""
+        self.gm.commit_paths.return_value = True
+        result = try_commit_paths(
+            paths=[self.dir / "a.json", self.dir / "b.json"],
+            gm=self.gm,
+            commit_message="messages send",
+        )
+        self.assertTrue(result)
+
+    def test_failure_returns_false_and_logs(self):
+        """On failure, returns False and logs the suppressed git error."""
+        self.gm.commit_paths.side_effect = RuntimeError("git broke")
+        with self.assertLogs("app.git_safety", level="ERROR") as cm:
+            result = try_commit_paths(
+                paths=[self.dir / "a.json", self.dir / "b.json"],
+                gm=self.gm,
+                commit_message="messages send",
+            )
+        self.assertFalse(result)
+        self.assertTrue(any("Git commit failed (non-fatal)" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":

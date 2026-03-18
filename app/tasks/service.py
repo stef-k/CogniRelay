@@ -32,6 +32,21 @@ PATCH_PROPOSALS_DIR_REL = "patches/proposals"
 PATCH_APPLIED_DIR_REL = "patches/applied"
 RUN_CHECKS_DIR_REL = "runs/checks"
 
+
+def _is_repo_root_lock_status_line(line: str) -> bool:
+    """Return whether one porcelain status line refers only to repo-root .locks artifacts."""
+    if not line.strip():
+        return False
+    path_text = line[3:]
+    candidates = [part.strip() for part in path_text.split("->")]
+    for candidate in candidates:
+        if not candidate:
+            return False
+        path = Path(candidate)
+        if not path.parts or path.parts[0] != ".locks":
+            return False
+    return True
+
 TASK_STATUS_TRANSITIONS = {
     "open": {"open", "in_progress", "blocked", "done"},
     "in_progress": {"in_progress", "open", "blocked", "done"},
@@ -402,7 +417,8 @@ def docs_patch_apply_service(
             raise HTTPException(status_code=409, detail=f"Patch base_ref mismatch: expected {expected_ref}, current {head}")
 
     status_cp = run_git(repo_root, "status", "--porcelain")
-    if status_cp.stdout.strip():
+    dirty_lines = [line for line in status_cp.stdout.splitlines() if line.strip() and not _is_repo_root_lock_status_line(line)]
+    if dirty_lines:
         raise HTTPException(status_code=409, detail="Working tree must be clean before applying patch")
 
     diff_text = str(proposal.get("diff") or "")
@@ -544,7 +560,8 @@ def code_merge_service(
         raise HTTPException(status_code=409, detail=f"Required checks not passed for {source_resolved}: {missing}")
 
     status_cp = run_git(repo_root, "status", "--porcelain")
-    if status_cp.stdout.strip():
+    dirty_lines = [line for line in status_cp.stdout.splitlines() if line.strip() and not _is_repo_root_lock_status_line(line)]
+    if dirty_lines:
         raise HTTPException(status_code=409, detail="Working tree must be clean before merge")
 
     head_before = _resolve_commit_ref(repo_root, "HEAD", run_git)

@@ -165,3 +165,23 @@ def try_commit_file(
             _unstage(gm, [path])
             _log.exception("Git commit failed (non-fatal) for %s", path)
             return False
+
+
+def try_commit_paths(
+    *,
+    paths: list[Path],
+    gm: GitCommitter,
+    commit_message: str,
+) -> bool:
+    """Attempt to commit multiple paths, logging and suppressing git failures.
+
+    Use this when the caller intentionally keeps on-disk state even when the
+    git durability step fails, but still wants the shared index cleaned up.
+    """
+    with repository_mutation_lock(gm.repo_root):
+        try:
+            return gm.commit_paths(paths, commit_message)
+        except Exception:
+            _unstage(gm, paths)
+            _log.exception("Git commit failed (non-fatal) for %s path(s)", len(paths))
+            return False

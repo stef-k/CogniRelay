@@ -13,11 +13,24 @@ from urllib.request import Request as UrlRequest, urlopen
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.git_safety import safe_commit_paths, safe_commit_updated_file
 from app.models import PeerRegisterRequest, PeerTrustTransitionRequest
-from app.storage import safe_path, write_text_file
+from app.storage import safe_path, write_bytes_file, write_text_file
 
 PEERS_REGISTRY_REL = "peers/registry.json"
 TRUST_POLICIES_REL = "peers/trust_policies.json"
+
+
+def _restore_paths(rollback_plan: list[tuple[Path, bytes | None]]) -> None:
+    """Best-effort restore for multi-file peer mutations before commit."""
+    for path, old_bytes in rollback_plan:
+        try:
+            if old_bytes is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_bytes_file(path, old_bytes)
+        except Exception:
+            continue
 
 
 def load_peers_registry(repo_root: Path) -> dict[str, Any]:
@@ -198,11 +211,25 @@ def peers_register_service(
     }
     peers[req.peer_id] = record
     registry["updated_at"] = now
-    path = _write_peers_registry(repo_root, registry)
-    committed = gm.commit_file(path, f"peers: register {req.peer_id}")
+    path = safe_path(repo_root, PEERS_REGISTRY_REL)
+    policy_path = safe_path(repo_root, trust_policies_rel)
+    rollback_plan = [
+        (path, path.read_bytes() if path.exists() else None),
+        (policy_path, policy_path.read_bytes() if policy_path.exists() else None),
+    ]
+    try:
+        _write_peers_registry(repo_root, registry)
+        _write_trust_policies(repo_root, trust_policies_rel, policies)
+    except Exception as exc:
+        _restore_paths(rollback_plan)
+        raise HTTPException(status_code=500, detail=f"Failed to write peer registration for {req.peer_id}: {exc}") from exc
 
-    policy_path = _write_trust_policies(repo_root, trust_policies_rel, policies)
-    gm.commit_file(policy_path, "peers: ensure trust policies")
+    committed = safe_commit_paths(
+        rollback_plan=rollback_plan,
+        gm=gm,
+        commit_message=f"peers: register {req.peer_id}",
+        error_detail=f"Failed to durably commit peer registration for {req.peer_id}",
+    )
 
     audit(
         auth,
@@ -264,8 +291,19 @@ def peers_trust_transition_service(
     peers[peer_id] = row
     registry["updated_at"] = now
 
-    path = _write_peers_registry(repo_root, registry)
-    committed = gm.commit_file(path, f"peers: trust transition {peer_id} {current}->{target}")
+    path = safe_path(repo_root, PEERS_REGISTRY_REL)
+    old_bytes = path.read_bytes() if path.exists() else None
+    try:
+        _write_peers_registry(repo_root, registry)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write peer trust transition for {peer_id}: {exc}") from exc
+    committed = safe_commit_updated_file(
+        path=path,
+        gm=gm,
+        commit_message=f"peers: trust transition {peer_id} {current}->{target}",
+        error_detail=f"Failed to durably commit peer trust transition for {peer_id}",
+        old_bytes=old_bytes,
+    )
     audit(auth, "peers_trust_transition", {"peer_id": peer_id, "from": current, "to": target, "reason": req.reason})
     return {"ok": True, "peer": {"peer_id": peer_id, **row}, "committed": committed, "latest_commit": gm.latest_commit()}
 

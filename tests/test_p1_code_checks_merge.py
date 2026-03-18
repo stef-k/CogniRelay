@@ -152,6 +152,53 @@ class TestP1CodeChecksAndMerge(unittest.TestCase):
             self.assertEqual(out["source_ref"], head)
             self.assertEqual(out["target_ref"], "HEAD")
 
+    def test_code_merge_blocks_nested_locks_dir_changes(self) -> None:
+        """Merge should still block dirty trees with nested .locks paths outside repo root."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._init_git_repo(repo_root)
+            self._seed_repo(repo_root)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            checks_dir = repo_root / "runs" / "checks"
+            checks_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = checks_dir / "run-ok.json"
+            artifact_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "run_id": "run-ok",
+                        "profile": "test",
+                        "ref_resolved": head,
+                        "status": "passed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "add check artifact"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+            nested_lock = repo_root / "projects" / "seed_dir" / ".locks" / "state.json"
+            nested_lock.parent.mkdir(parents=True, exist_ok=True)
+            nested_lock.write_text("dirty\n", encoding="utf-8")
+
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                with self.assertRaises(HTTPException) as err:
+                    code_merge(
+                        req=CodeMergeRequest(source_ref=head, target_ref="HEAD", required_checks=["test"]),
+                        auth=_AuthStub(),
+                    )
+
+            self.assertEqual(err.exception.status_code, 409)
+            self.assertIn("Working tree must be clean", str(err.exception.detail))
+
 
 if __name__ == "__main__":
     unittest.main()

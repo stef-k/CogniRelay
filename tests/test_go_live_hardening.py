@@ -56,6 +56,9 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub that pretends every file commit succeeds."""
 
+    def __init__(self, repo_root: Path | None = None) -> None:
+        self.repo_root = repo_root or Path(".")
+
     def commit_file(self, _path: Path, _message: str) -> bool:
         """Report a successful single-file commit without touching git."""
         return True
