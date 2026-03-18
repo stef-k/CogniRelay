@@ -365,37 +365,34 @@ def metrics_service(
     event_counts: dict[str, int] = {}
     peer_counts: dict[str, int] = {}
     metrics_warnings: list[str] = []
+    audit_raw: str | None = None
     audit_path = settings.repo_root / "logs" / "api_audit.jsonl"
-    _skip_audit_read = False
     if audit_path.exists():
         try:
             audit_file_size = audit_path.stat().st_size
         except OSError:
             _logger.warning("stat() failed on audit log %s; skipping audit metrics", audit_path, exc_info=True)
-            audit_file_size = 0
-            _skip_audit_read = True
             metrics_warnings.append("audit_stat_failed: unable to determine audit log size; audit metrics unavailable")
-        if not _skip_audit_read and audit_file_size > max_jsonl_read_bytes:
-            _logger.warning(
-                "Audit log %s is %d bytes (limit %d); skipping audit metrics",
-                audit_path, audit_file_size, max_jsonl_read_bytes,
-            )
-            _skip_audit_read = True
-            metrics_warnings.append(
-                f"audit_too_large: file is {audit_file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
-                "audit metrics unavailable until file is compacted or truncated"
-            )
-    else:
-        _skip_audit_read = True
-    if not _skip_audit_read:
-        try:
-            audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
-        except MemoryError:
-            _logger.critical("OOM while reading audit log %s", audit_path, exc_info=True)
-            raise
-        except Exception:  # noqa: BLE001 — mission-critical degradation
-            _logger.warning("Failed to read audit log %s for metrics", audit_path, exc_info=True)
-            audit_raw = ""
+        else:
+            if audit_file_size > max_jsonl_read_bytes:
+                _logger.warning(
+                    "Audit log %s is %d bytes (limit %d); skipping audit metrics",
+                    audit_path, audit_file_size, max_jsonl_read_bytes,
+                )
+                metrics_warnings.append(
+                    f"audit_too_large: file is {audit_file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                    "audit metrics unavailable until file is compacted or truncated"
+                )
+            else:
+                try:
+                    audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+                except MemoryError:
+                    _logger.critical("OOM while reading audit log %s", audit_path, exc_info=True)
+                    raise
+                except Exception:  # noqa: BLE001 — mission-critical degradation
+                    _logger.warning("Failed to read audit log %s for metrics", audit_path, exc_info=True)
+                    metrics_warnings.append("audit_read_failed: I/O error reading audit log; audit metrics unavailable")
+    if audit_raw:
         if "\ufffd" in audit_raw:
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", audit_path)
         for line in audit_raw.splitlines()[-10000:]:
@@ -508,6 +505,8 @@ def metrics_service(
     all_warnings = list(state.get("warnings") or []) + metrics_warnings
     if all_warnings:
         result["warnings"] = all_warnings
+    if metrics_warnings:
+        result["degraded"] = True
     return result
 
 

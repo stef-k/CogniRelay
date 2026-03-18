@@ -65,7 +65,7 @@ class Settings:
     replication_drift_max_age_seconds: int = 3_600
     contract_version: str = "2026-02-25"
     coordination_query_scan_threshold: int = 5000
-    max_jsonl_read_bytes: int = 10 * 1024 * 1024  # 10 MB
+    max_jsonl_read_bytes: int = 10_485_760  # populated by get_settings(); see DEFAULT_MAX_JSONL_READ_BYTES
 
 
 # Default maximum JSONL file size (bytes) that will be fully loaded into
@@ -73,8 +73,9 @@ class Settings:
 # provided (e.g. in direct test calls).  See issue #75.
 #
 # NOTE: There is a small TOCTOU window between stat() and read_text() — a
-# file can grow past the threshold after the check.  This is an accepted
-# trade-off; the guard is best-effort protection, not a hard guarantee.
+# file can grow past the threshold after the check (risking OOM), or shrink
+# below it (e.g. log rotation), causing a false-positive degraded response.
+# This is an accepted trade-off; the guard is best-effort, not a guarantee.
 DEFAULT_MAX_JSONL_READ_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
 _cached: Settings | None = None
@@ -218,7 +219,7 @@ def get_settings(force_reload: bool = False) -> Settings:
             _env_first("COGNIRELAY_COORDINATION_QUERY_SCAN_THRESHOLD"), 5000, minimum=100,
         ),
         max_jsonl_read_bytes=_parse_int(
-            _env_first("COGNIRELAY_MAX_JSONL_READ_BYTES"), 10 * 1024 * 1024, minimum=1024,
+            _env_first("COGNIRELAY_MAX_JSONL_READ_BYTES"), DEFAULT_MAX_JSONL_READ_BYTES, minimum=1024,
         ),
     )
     return _cached

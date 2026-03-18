@@ -468,6 +468,9 @@ def messages_inbox_service(
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
             utf8_corrupted = True
         all_lines = raw.splitlines()
+    except MemoryError:
+        _logger.critical("OOM while reading inbox file for %s", recipient, exc_info=True)
+        raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read inbox file for %s", recipient, exc_info=True)
         result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
@@ -559,6 +562,9 @@ def messages_thread_service(
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
             utf8_corrupted = True
         all_lines = raw.splitlines()
+    except MemoryError:
+        _logger.critical("OOM while reading thread file for %s", thread_id, exc_info=True)
+        raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read thread file for %s", thread_id, exc_info=True)
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
@@ -593,6 +599,8 @@ def messages_thread_service(
         warnings.append(f"thread_partial_corrupt: {', '.join(parts)} line(s) skipped")
     if utf8_corrupted:
         warnings.append("thread_utf8_corrupted: file contains invalid UTF-8 bytes replaced with U+FFFD")
+    if audit:
+        audit(auth, "messages_thread", {"thread_id": thread_id, "count": len(messages)})
     if warnings:
         result["warnings"] = warnings
     return result

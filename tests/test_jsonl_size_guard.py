@@ -33,29 +33,37 @@ def _make_large_jsonl(path: Path, target_bytes: int) -> None:
     assert path.stat().st_size > target_bytes
 
 
-def _stat_fails_on_target(target_path: Path):
+def _stat_fails_on_target(target_path: Path, *, allow_calls: int = 2):
     """Return a replacement for Path.stat that raises OSError only for target_path.
 
-    The code under test calls ``path.exists()`` (which internally calls
-    ``stat()``) before the explicit ``path.stat()`` in the size guard.
-    We let the first ``stat()`` call on the target succeed so
-    ``exists()`` returns True, then raise on the second call.
+    The code under test may call ``stat()`` multiple times on the target path
+    before the explicit size-guard call (e.g. via ``safe_path().resolve()`` +
+    ``path.exists()``).  We allow the first *allow_calls* calls to succeed,
+    then raise on the next one.
+
+    Args:
+        allow_calls: Number of stat() calls to let through before raising.
+            Use 2 for service functions that go through ``safe_path`` (resolve
+            + exists), and 1 for code that uses ``path.exists()`` directly.
+
+    The ``state["raised"]`` flag can be asserted after the test to confirm
+    the error path was actually triggered.
     """
     _real_stat = Path.stat
     # Resolve once before patching so we can compare by string
     target_str = str(target_path.resolve())
-    state = {"calls": 0}
+    state = {"calls": 0, "raised": False}
 
     def _replacement(self, *args, **kwargs):
         if str(self) == target_str:
             state["calls"] += 1
-            # Allow calls from safe_path resolve() and exists() to succeed;
-            # fail only on the explicit stat() in the size guard.
-            if state["calls"] <= 2:
+            if state["calls"] <= allow_calls:
                 return _real_stat(self, *args, **kwargs)
+            state["raised"] = True
             raise OSError("permission denied")
         return _real_stat(self, *args, **kwargs)
 
+    _replacement.state = state  # type: ignore[attr-defined]
     return _replacement
 
 
@@ -126,7 +134,8 @@ class TestInboxSizeGuard(unittest.TestCase):
             inbox_file = inbox_dir / "agent-a.jsonl"
             inbox_file.write_text(json.dumps({"body": "x"}) + "\n", encoding="utf-8")
 
-            with patch.object(Path, "stat", _stat_fails_on_target(inbox_file)):
+            replacement = _stat_fails_on_target(inbox_file)
+            with patch.object(Path, "stat", replacement):
                 with self.assertLogs("app.messages.service", level=logging.WARNING):
                     result = messages_inbox_service(
                         repo_root=repo,
@@ -136,6 +145,7 @@ class TestInboxSizeGuard(unittest.TestCase):
                         audit=_noop_audit,
                     )
 
+            self.assertTrue(replacement.state["raised"], "OSError was never raised by stat() mock")
             self.assertTrue(result["ok"])
             self.assertTrue(result["degraded"])
             self.assertEqual(result["count"], 0)
@@ -229,7 +239,8 @@ class TestThreadSizeGuard(unittest.TestCase):
             thread_file = thread_dir / "thread-xyz.jsonl"
             thread_file.write_text(json.dumps({"body": "x"}) + "\n", encoding="utf-8")
 
-            with patch.object(Path, "stat", _stat_fails_on_target(thread_file)):
+            replacement = _stat_fails_on_target(thread_file)
+            with patch.object(Path, "stat", replacement):
                 with self.assertLogs("app.messages.service", level=logging.WARNING):
                     result = messages_thread_service(
                         repo_root=repo,
@@ -238,6 +249,7 @@ class TestThreadSizeGuard(unittest.TestCase):
                         limit=100,
                     )
 
+            self.assertTrue(replacement.state["raised"], "OSError was never raised by stat() mock")
             self.assertTrue(result["ok"])
             self.assertTrue(result["degraded"])
             self.assertEqual(result["count"], 0)
@@ -291,10 +303,12 @@ class TestOpsRunsSizeGuard(unittest.TestCase):
             ops_file = logs_dir / "ops_runs.jsonl"
             ops_file.write_text(json.dumps({"job_id": "x"}) + "\n", encoding="utf-8")
 
-            with patch.object(Path, "stat", _stat_fails_on_target(ops_file)):
+            replacement = _stat_fails_on_target(ops_file)
+            with patch.object(Path, "stat", replacement):
                 with self.assertLogs("app.ops.service", level=logging.WARNING):
                     runs, warnings = _load_ops_runs(repo)
 
+            self.assertTrue(replacement.state["raised"], "OSError was never raised by stat() mock")
             self.assertEqual(runs, [])
             self.assertTrue(any("ops_runs_stat_failed" in w for w in warnings))
 
@@ -339,6 +353,143 @@ class TestConfigEnvParsing(unittest.TestCase):
             settings = get_settings(force_reload=True)
             self.assertGreaterEqual(settings.max_jsonl_read_bytes, 1024)
         get_settings(force_reload=True)
+
+
+# ---------------------------------------------------------------------------
+# Maintenance service size guards (metrics + access stats)
+# ---------------------------------------------------------------------------
+class _FakeSettings:
+    """Minimal settings stub for metrics_service."""
+
+    def __init__(self, repo_root: Path, max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES) -> None:
+        self.repo_root = repo_root
+        self.max_jsonl_read_bytes = max_jsonl_read_bytes
+        self.verify_failure_window_seconds = 600
+        self.replication_drift_max_age_seconds = 3600
+        self.backlog_alarm_threshold = 100
+        self.verification_alarm_threshold = 20
+
+
+def _stub_delivery_state(_repo_root):
+    return {"version": "1", "records": {}, "idempotency": {}}
+
+
+def _stub_delivery_view(row, _now):
+    return dict(row, effective_status="pending_ack")
+
+
+def _stub_check_artifacts(_repo_root):
+    return []
+
+
+def _stub_rate_limit_state(_repo_root):
+    return {"schema_version": "1.0", "entries": {}}
+
+
+def _stub_parse_iso(_v):
+    return None
+
+
+class TestMetricsSizeGuard(unittest.TestCase):
+    """metrics_service handles oversized audit log gracefully."""
+
+    def test_oversized_audit_returns_degraded_with_warning(self) -> None:
+        """Metrics returns degraded flag and warning when audit log exceeds threshold."""
+        from app.maintenance.service import metrics_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            audit_file = logs_dir / "api_audit.jsonl"
+            threshold = 512
+            _make_large_jsonl(audit_file, threshold)
+
+            with self.assertLogs("app.maintenance.service", level=logging.WARNING):
+                result = metrics_service(
+                    settings=_FakeSettings(repo, max_jsonl_read_bytes=threshold),
+                    auth=AllowAllAuthStub(),
+                    load_delivery_state=_stub_delivery_state,
+                    delivery_record_view=_stub_delivery_view,
+                    load_check_artifacts=_stub_check_artifacts,
+                    load_rate_limit_state=_stub_rate_limit_state,
+                    parse_iso=_stub_parse_iso,
+                    max_jsonl_read_bytes=threshold,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result.get("degraded"))
+            self.assertIn("warnings", result)
+            self.assertTrue(any("audit_too_large" in w for w in result["warnings"]))
+
+    def test_audit_stat_failure_returns_degraded_with_warning(self) -> None:
+        """Metrics returns degraded flag and warning when audit log stat() fails."""
+        from app.maintenance.service import metrics_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            audit_file = logs_dir / "api_audit.jsonl"
+            audit_file.write_text(json.dumps({"event": "test"}) + "\n", encoding="utf-8")
+
+            replacement = _stat_fails_on_target(audit_file, allow_calls=1)
+            with patch.object(Path, "stat", replacement):
+                with self.assertLogs("app.maintenance.service", level=logging.WARNING):
+                    result = metrics_service(
+                        settings=_FakeSettings(repo),
+                        auth=AllowAllAuthStub(),
+                        load_delivery_state=_stub_delivery_state,
+                        delivery_record_view=_stub_delivery_view,
+                        load_check_artifacts=_stub_check_artifacts,
+                        load_rate_limit_state=_stub_rate_limit_state,
+                        parse_iso=_stub_parse_iso,
+                    )
+
+            self.assertTrue(replacement.state["raised"], "OSError was never raised by stat() mock")
+            self.assertTrue(result["ok"])
+            self.assertTrue(result.get("degraded"))
+            self.assertTrue(any("audit_stat_failed" in w for w in result["warnings"]))
+
+
+class TestAccessStatsSizeGuard(unittest.TestCase):
+    """_load_access_stats handles oversized audit log gracefully."""
+
+    def test_oversized_audit_returns_empty(self) -> None:
+        """Access stats returns empty dict when audit log exceeds threshold."""
+        from app.maintenance.service import _load_access_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            audit_file = logs_dir / "api_audit.jsonl"
+            threshold = 512
+            _make_large_jsonl(audit_file, threshold)
+
+            with self.assertLogs("app.maintenance.service", level=logging.WARNING):
+                result = _load_access_stats(repo, max_jsonl_read_bytes=threshold)
+
+            self.assertEqual(result, {})
+
+    def test_access_stats_stat_failure_returns_empty(self) -> None:
+        """Access stats returns empty dict when stat() fails."""
+        from app.maintenance.service import _load_access_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            audit_file = logs_dir / "api_audit.jsonl"
+            audit_file.write_text(json.dumps({"event": "read"}) + "\n", encoding="utf-8")
+
+            replacement = _stat_fails_on_target(audit_file, allow_calls=1)
+            with patch.object(Path, "stat", replacement):
+                with self.assertLogs("app.maintenance.service", level=logging.WARNING):
+                    result = _load_access_stats(repo)
+
+            self.assertTrue(replacement.state["raised"], "OSError was never raised by stat() mock")
+            self.assertEqual(result, {})
 
 
 if __name__ == "__main__":
