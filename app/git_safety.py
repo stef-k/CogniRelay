@@ -16,6 +16,8 @@ from typing import Protocol, runtime_checkable
 
 from fastapi import HTTPException
 
+from app.git_locking import repository_mutation_lock
+
 _log = logging.getLogger(__name__)
 
 
@@ -30,11 +32,18 @@ class GitCommitter(Protocol):
     def commit_paths(self, paths: list[Path], message: str) -> bool: ...
 
 
-def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
+def unstage_paths(gm: GitCommitter, paths: list[Path]) -> None:
     """Best-effort unstage paths from the git index after a failed commit."""
     try:
         resolved_root = gm.repo_root.resolve()
-        rels = [str(p.resolve().relative_to(resolved_root)) for p in paths]
+        rels: list[str] = []
+        for path in paths:
+            try:
+                rels.append(str(path.resolve().relative_to(resolved_root)))
+            except ValueError:
+                continue
+        if not rels:
+            return
         subprocess.run(
             ["git", "reset", "HEAD", "--", *rels],
             cwd=gm.repo_root,
@@ -44,6 +53,11 @@ def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
         )
     except Exception:
         _log.exception("Failed to unstage paths after rollback")
+
+
+def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
+    """Backward-compatible alias for tests and existing internal callers."""
+    unstage_paths(gm, paths)
 
 
 def _restore_files(rollback_plan: list[tuple[Path, bytes | None]]) -> None:
@@ -72,12 +86,13 @@ def safe_commit_new_file(
     Raises :class:`~fastapi.HTTPException` with *error_detail* on failure
     after removing the orphaned file from disk and unstaging from the index.
     """
-    try:
-        return gm.commit_file(path, commit_message)
-    except Exception as exc:
-        _unstage(gm, [path])
-        _restore_files([(path, None)])
-        raise HTTPException(status_code=500, detail=error_detail) from exc
+    with repository_mutation_lock(gm.repo_root):
+        try:
+            return gm.commit_file(path, commit_message)
+        except Exception as exc:
+            _unstage(gm, [path])
+            _restore_files([(path, None)])
+            raise HTTPException(status_code=500, detail=error_detail) from exc
 
 
 def safe_commit_updated_file(
@@ -98,12 +113,13 @@ def safe_commit_updated_file(
     Raises :class:`~fastapi.HTTPException` with *error_detail* on failure
     after restoring the file and unstaging from the index.
     """
-    try:
-        return gm.commit_file(path, commit_message)
-    except Exception as exc:
-        _unstage(gm, [path])
-        _restore_files([(path, old_bytes)])
-        raise HTTPException(status_code=500, detail=error_detail) from exc
+    with repository_mutation_lock(gm.repo_root):
+        try:
+            return gm.commit_file(path, commit_message)
+        except Exception as exc:
+            _unstage(gm, [path])
+            _restore_files([(path, old_bytes)])
+            raise HTTPException(status_code=500, detail=error_detail) from exc
 
 
 def safe_commit_paths(
@@ -122,12 +138,13 @@ def safe_commit_paths(
     Raises :class:`~fastapi.HTTPException` with *error_detail* on failure.
     """
     paths = [path for path, _ in rollback_plan]
-    try:
-        return gm.commit_paths(paths, commit_message)
-    except Exception as exc:
-        _unstage(gm, paths)
-        _restore_files(rollback_plan)
-        raise HTTPException(status_code=500, detail=error_detail) from exc
+    with repository_mutation_lock(gm.repo_root):
+        try:
+            return gm.commit_paths(paths, commit_message)
+        except Exception as exc:
+            _unstage(gm, paths)
+            _restore_files(rollback_plan)
+            raise HTTPException(status_code=500, detail=error_detail) from exc
 
 
 def try_commit_file(
@@ -141,9 +158,10 @@ def try_commit_file(
     Use this for artifacts that are regenerable and whose commit failure
     should not abort the request (e.g. derived index files, nonce indexes).
     """
-    try:
-        return gm.commit_file(path, commit_message)
-    except Exception:
-        _unstage(gm, [path])
-        _log.exception("Git commit failed (non-fatal) for %s", path)
-        return False
+    with repository_mutation_lock(gm.repo_root):
+        try:
+            return gm.commit_file(path, commit_message)
+        except Exception:
+            _unstage(gm, [path])
+            _log.exception("Git commit failed (non-fatal) for %s", path)
+            return False

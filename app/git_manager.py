@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from app.git_locking import repository_mutation_lock
+
 
 class GitManager:
     """Manage git operations for the configured repository root."""
@@ -50,40 +52,41 @@ class GitManager:
 
     def commit_paths(self, paths: list[Path], message: str) -> bool:
         """Commit one or more repository-relative paths if any have staged changes."""
-        resolved_root = self.repo_root.resolve()
-        rels: list[str] = []
-        for path in paths:
-            resolved = path.resolve()
-            try:
-                rels.append(str(resolved.relative_to(resolved_root)))
-            except ValueError as exc:
-                raise ValueError(
-                    f"commit_paths: path {path} (resolved: {resolved}) "
-                    f"is not under repo root {self.repo_root}"
-                ) from exc
-        if not rels:
-            return False
-        self._run("add", *rels)
+        with repository_mutation_lock(self.repo_root):
+            resolved_root = self.repo_root.resolve()
+            rels: list[str] = []
+            for path in paths:
+                resolved = path.resolve()
+                try:
+                    rels.append(str(resolved.relative_to(resolved_root)))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"commit_paths: path {path} (resolved: {resolved}) "
+                        f"is not under repo root {self.repo_root}"
+                    ) from exc
+            if not rels:
+                return False
+            self._run("add", *rels)
 
-        status = self._run("status", "--porcelain", "--", *rels)
-        if not status.stdout.strip():
-            return False
+            status = self._run("status", "--porcelain", "--", *rels)
+            if not status.stdout.strip():
+                return False
 
-        env = {
-            "GIT_AUTHOR_NAME": self.author_name,
-            "GIT_AUTHOR_EMAIL": self.author_email,
-            "GIT_COMMITTER_NAME": self.author_name,
-            "GIT_COMMITTER_EMAIL": self.author_email,
-        }
-        subprocess.run(
-            ["git", "commit", "-m", message, "--", *rels],
-            cwd=self.repo_root,
-            check=True,
-            text=True,
-            capture_output=True,
-            env={**os.environ, **env},
-        )
-        return True
+            env = {
+                "GIT_AUTHOR_NAME": self.author_name,
+                "GIT_AUTHOR_EMAIL": self.author_email,
+                "GIT_COMMITTER_NAME": self.author_name,
+                "GIT_COMMITTER_EMAIL": self.author_email,
+            }
+            subprocess.run(
+                ["git", "commit", "-m", message, "--", *rels],
+                cwd=self.repo_root,
+                check=True,
+                text=True,
+                capture_output=True,
+                env={**os.environ, **env},
+            )
+            return True
 
     def commit_file(self, path: Path, message: str) -> bool:
         """Commit a single file if it has staged changes."""
