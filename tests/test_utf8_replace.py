@@ -9,6 +9,7 @@ import json
 import logging
 import tempfile
 import unittest
+from builtins import float as real_float
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -252,6 +253,65 @@ class TestUtf8ReplacementMaintenance(unittest.TestCase):
                 self.assertIsNotNone(result)
             finally:
                 test_file.chmod(0o644)
+
+    def test_candidate_policy_logs_debug_on_stat_failure(self) -> None:
+        """_candidate_policy logs stat failures at DEBUG and skips the file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            test_file = repo / "journal" / "note.md"
+            test_file.parent.mkdir(parents=True)
+            test_file.write_text("# OK\n")
+
+            with patch.object(Path, "stat", side_effect=OSError("stat failed")):
+                with self.assertLogs("app.maintenance.service", level=logging.DEBUG) as cm:
+                    result = _candidate_policy(repo, test_file, {}, parse_iso=_parse_iso_stub)
+
+            self.assertIsNone(result)
+            self.assertTrue(any("stat() failed" in msg for msg in cm.output))
+
+    def test_candidate_policy_reraises_memory_error_on_stat_failure(self) -> None:
+        """_candidate_policy must not swallow MemoryError from stat()."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            test_file = repo / "journal" / "note.md"
+            test_file.parent.mkdir(parents=True)
+            test_file.write_text("# OK\n")
+
+            with patch.object(Path, "stat", side_effect=MemoryError("oom during stat")):
+                with self.assertRaises(MemoryError):
+                    _candidate_policy(repo, test_file, {}, parse_iso=_parse_iso_stub)
+
+    def test_candidate_policy_logs_debug_on_malformed_importance(self) -> None:
+        """Malformed importance values are ignored with a DEBUG log."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            test_file = repo / "journal" / "note.md"
+            test_file.parent.mkdir(parents=True)
+            test_file.write_text("---\nimportance:\n---\n# Note\n", encoding="utf-8")
+
+            with self.assertLogs("app.maintenance.service", level=logging.DEBUG) as cm:
+                result = _candidate_policy(repo, test_file, {}, parse_iso=_parse_iso_stub)
+
+            self.assertIsNotNone(result)
+            self.assertIsNone(result["importance"])
+            self.assertTrue(any("Ignoring malformed importance value" in msg for msg in cm.output))
+
+    def test_candidate_policy_reraises_memory_error_on_importance_parse(self) -> None:
+        """_candidate_policy must not swallow MemoryError during importance parsing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            test_file = repo / "journal" / "note.md"
+            test_file.parent.mkdir(parents=True)
+            test_file.write_text("---\nimportance: 0.8\n---\n# Note\n", encoding="utf-8")
+
+            def _memory_error_float(value):
+                if value == "0.8":
+                    raise MemoryError("oom during importance parse")
+                return real_float(value)
+
+            with patch("builtins.float", side_effect=_memory_error_float):
+                with self.assertRaises(MemoryError):
+                    _candidate_policy(repo, test_file, {}, parse_iso=_parse_iso_stub)
 
 
     def test_load_access_stats_graceful_on_unreadable_file(self) -> None:
