@@ -52,7 +52,8 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 
 ## Continuity Resilience
 
-- CogniRelay is a mission-critical system. Agents may depend on it continuously as 24/7 orientation and memory infrastructure.
+- CogniRelay is a mission-critical system supporting autonomous agents running 24/7 as orientation and memory infrastructure.
+- **No crashes or breakage under any circumstance.** The only acceptable outcome when an error occurs is graceful degraded performance and recovery. The system must never crash, return unhandled exceptions, or leave agents without a working path forward.
 - Treat any change that could break continuity retrieval, corrupt stored state, or weaken durability guarantees as a production risk requiring extra verification.
 - Treat continuity features as mission-critical agent-orientation infrastructure.
 - Reads must never fail with an HTTP error. If a capsule is corrupted or missing, return a degraded response with warnings rather than a 4xx/5xx whenever the current API contract allows that behavior.
@@ -62,3 +63,9 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 - At no point should a refactor, feature addition, or tooling change knowingly leave the system in a state where a running agent could lose its continuity data without a recovery path.
 - Surface continuity failures as warnings in the response body rather than HTTP status codes whenever the current endpoint contract permits that behavior; the agent decides how to react.
 - Do not silently change established continuity API semantics in implementation code. If stronger resilience requires a contract change, record it in the appropriate roadmap/spec issue first.
+
+## Review and Quality Standards
+
+- Because CogniRelay is mission-critical, **all review findings must be reported and addressed regardless of severity** — from informational up to and including critical.
+- No finding is too low-severity to skip. The cost of fixing a low-severity issue is far lower than the cost of it escalating in production against 24/7 agents.
+- Code reviews, security audits, and automated checks must surface every finding. Each must be resolved before merging.
