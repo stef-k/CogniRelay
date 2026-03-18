@@ -11,9 +11,11 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CalledProcessError, run
 from unittest.mock import patch
 
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
+from app.git_manager import GitManager
 from app.models import CompactRequest
 from app.messages.service import messages_inbox_service, messages_thread_service
 from app.ops.service import _load_ops_runs, ops_status_service
@@ -740,6 +742,105 @@ class TestCompactServiceAccessWarnings(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertTrue(result["degraded"])
             self.assertTrue(any("access_stats_too_large" in w for w in result["warnings"]))
+
+
+class _FailingCompactionGitManager(GitManager):
+    """Git manager that stages report files and then fails the Markdown commit once."""
+
+    def __init__(self, repo_root: Path, *, exc_factory) -> None:
+        super().__init__(repo_root, "n/a", "n/a")
+        self._exc_factory = exc_factory
+        self.calls: list[str] = []
+
+    def commit_file(self, path: Path, _message: str) -> bool:
+        rel = str(path.relative_to(self.repo_root))
+        self.calls.append(rel)
+        if rel.endswith(".md"):
+            self._run("add", rel)
+            raise self._exc_factory()
+        return super().commit_file(path, _message)
+
+
+class TestCompactServiceCommitFailureDegradation(unittest.TestCase):
+    """compact_run_service degrades gracefully when git commits fail."""
+
+    def _init_git_repo(self, repo: Path) -> None:
+        run(["git", "init"], cwd=repo, check=True, text=True, capture_output=True)
+        run(["git", "config", "user.name", "test"], cwd=repo, check=True, text=True, capture_output=True)
+        run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, text=True, capture_output=True)
+
+    def _assert_clean_index(self, repo: Path) -> None:
+        status = run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=repo,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(status.stdout.strip(), "")
+
+    def test_compact_service_oserror_commit_failure_unstages_orphaned_report(self) -> None:
+        """Compaction should keep the index clean after an OSError during report commit."""
+        from app.maintenance.service import compact_run_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_git_repo(repo)
+            gm = _FailingCompactionGitManager(repo, exc_factory=lambda: OSError("git commit failed"))
+
+            with self.assertLogs("app.git_safety", level=logging.ERROR) as cm:
+                result = compact_run_service(
+                    settings=_FakeSettings(repo),
+                    gm=gm,
+                    auth=AllowAllAuthStub(),
+                    req=CompactRequest(),
+                    parse_iso=_stub_parse_iso,
+                    audit=_noop_audit,
+                )
+
+            report_id = result["report_id"]
+            md_rel = f"memory/summaries/weekly/{report_id}.md"
+            json_rel = f"memory/summaries/weekly/{report_id}.json"
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["committed_files"], [json_rel])
+            self.assertEqual(gm.calls, [md_rel, json_rel])
+            self.assertTrue((repo / md_rel).exists())
+            self.assertTrue((repo / json_rel).exists())
+            self._assert_clean_index(repo)
+            self.assertTrue(any("Git commit failed (non-fatal)" in msg for msg in cm.output))
+
+    def test_compact_service_called_process_error_commit_failure_unstages_orphaned_report(self) -> None:
+        """Compaction should keep the index clean after a CalledProcessError during report commit."""
+        from app.maintenance.service import compact_run_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_git_repo(repo)
+            gm = _FailingCompactionGitManager(
+                repo,
+                exc_factory=lambda: CalledProcessError(1, ["git", "commit"]),
+            )
+
+            with self.assertLogs("app.git_safety", level=logging.ERROR) as cm:
+                result = compact_run_service(
+                    settings=_FakeSettings(repo),
+                    gm=gm,
+                    auth=AllowAllAuthStub(),
+                    req=CompactRequest(),
+                    parse_iso=_stub_parse_iso,
+                    audit=_noop_audit,
+                )
+
+            report_id = result["report_id"]
+            md_rel = f"memory/summaries/weekly/{report_id}.md"
+            json_rel = f"memory/summaries/weekly/{report_id}.json"
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["committed_files"], [json_rel])
+            self.assertEqual(gm.calls, [md_rel, json_rel])
+            self.assertTrue((repo / md_rel).exists())
+            self.assertTrue((repo / json_rel).exists())
+            self._assert_clean_index(repo)
+            self.assertTrue(any("Git commit failed (non-fatal)" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":
