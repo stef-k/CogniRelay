@@ -19,6 +19,10 @@ from app.storage import append_jsonl, safe_path
 
 _log = logging.getLogger(__name__)
 
+# Maximum JSONL file size (bytes) that will be fully loaded into memory.
+# Files exceeding this threshold are skipped to avoid OOM.  (See issue #75.)
+_MAX_JSONL_READ_BYTES: int = 10 * 1024 * 1024  # 10 MB
+
 OPS_RUNS_REL = "logs/ops_runs.jsonl"
 OPS_LOCKS_DIR_REL = "logs/ops_locks"
 OPS_JOBS = {
@@ -68,10 +72,20 @@ def _ops_lock_path(repo_root: Path, job_id: str) -> Path:
     return safe_path(repo_root, f"{OPS_LOCKS_DIR_REL}/{safe_job}.lock")
 
 
-def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
+def _load_ops_runs(repo_root: Path, limit: int = 200, *, max_jsonl_read_bytes: int = _MAX_JSONL_READ_BYTES) -> list[dict[str, Any]]:
     """Load recent ops run history entries."""
     path = _ops_runs_path(repo_root)
     if not path.exists():
+        return []
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        file_size = 0
+    if file_size > max_jsonl_read_bytes:
+        _log.warning(
+            "Ops runs file %s is %d bytes (limit %d); returning empty to avoid OOM",
+            path, file_size, max_jsonl_read_bytes,
+        )
         return []
     out: list[dict[str, Any]] = []
     try:
@@ -427,10 +441,11 @@ def ops_status_service(
     auth: AuthContext,
     limit: int,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
+    max_jsonl_read_bytes: int = _MAX_JSONL_READ_BYTES,
 ) -> dict[str, Any]:
     """Return the current ops lock and recent run status summary."""
     ip = _require_local_ops_access(auth)
-    runs = _load_ops_runs(repo_root, limit=limit)
+    runs = _load_ops_runs(repo_root, limit=limit, max_jsonl_read_bytes=max_jsonl_read_bytes)
     locks = _list_ops_locks(repo_root)
 
     by_job: dict[str, dict[str, Any]] = {}

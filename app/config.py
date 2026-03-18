@@ -65,6 +65,7 @@ class Settings:
     replication_drift_max_age_seconds: int = 3_600
     contract_version: str = "2026-02-25"
     coordination_query_scan_threshold: int = 5000
+    max_jsonl_read_bytes: int = 10 * 1024 * 1024  # 10 MB
 
 
 _cached: Settings | None = None
@@ -206,6 +207,9 @@ def get_settings(force_reload: bool = False) -> Settings:
         contract_version=_env_first("COGNIRELAY_CONTRACT_VERSION", "AMR_CONTRACT_VERSION", default="2026-02-25") or "2026-02-25",
         coordination_query_scan_threshold=_parse_int(
             _env_first("COGNIRELAY_COORDINATION_QUERY_SCAN_THRESHOLD"), 5000, minimum=100,
+        ),
+        max_jsonl_read_bytes=_parse_int(
+            _env_first("COGNIRELAY_MAX_JSONL_READ_BYTES"), 10 * 1024 * 1024, minimum=1024,
         ),
     )
     return _cached

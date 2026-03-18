@@ -20,6 +20,11 @@ DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
 _logger = logging.getLogger(__name__)
 
+# Maximum JSONL file size (bytes) that will be fully loaded into memory.
+# Files exceeding this threshold trigger a degraded response with a warning
+# instead of risking OOM on very large append-only files.  (See issue #75.)
+_MAX_JSONL_READ_BYTES: int = 10 * 1024 * 1024  # 10 MB
+
 
 def _empty_state() -> dict[str, Any]:
     """Return a fresh empty delivery state dict."""
@@ -421,13 +426,38 @@ def messages_pending_service(
     return result
 
 
-def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str, limit: int, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict:
+def messages_inbox_service(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    recipient: str,
+    limit: int,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+    max_jsonl_read_bytes: int = _MAX_JSONL_READ_BYTES,
+) -> dict:
     """Return recent inbox messages for a recipient."""
     auth.require("read:files")
     auth.require_read_path(f"messages/inbox/{recipient}.jsonl")
     path = safe_path(repo_root, f"messages/inbox/{recipient}.jsonl")
     if not path.exists():
         return {"ok": True, "recipient": recipient, "count": 0, "messages": []}
+
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        file_size = 0
+    if file_size > max_jsonl_read_bytes:
+        _logger.warning(
+            "Inbox file for %s is %d bytes (limit %d); returning degraded response",
+            recipient, file_size, max_jsonl_read_bytes,
+        )
+        result_deg: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
+        result_deg["warnings"] = [
+            f"inbox_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+            "recent messages unavailable"
+        ]
+        audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
+        return result_deg
 
     utf8_corrupted = False
     try:
@@ -478,7 +508,7 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
     return result
 
 
-def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int) -> dict:
+def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int, max_jsonl_read_bytes: int = _MAX_JSONL_READ_BYTES) -> dict:
     """Return recent messages for a thread."""
     auth.require("read:files")
     rel = f"messages/threads/{thread_id}.jsonl"
@@ -486,6 +516,22 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
     path = safe_path(repo_root, rel)
     if not path.exists():
         return {"ok": True, "thread_id": thread_id, "count": 0, "messages": []}
+
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        file_size = 0
+    if file_size > max_jsonl_read_bytes:
+        _logger.warning(
+            "Thread file for %s is %d bytes (limit %d); returning degraded response",
+            thread_id, file_size, max_jsonl_read_bytes,
+        )
+        return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
+                "warnings": [
+                    f"thread_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                    "recent messages unavailable"
+                ]}
+
     utf8_corrupted = False
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
