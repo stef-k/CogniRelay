@@ -139,9 +139,10 @@ def append_jsonl(path: Path, record: Any) -> None:
     (the record may have been partially written but is not guaranteed durable).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False) + "\n"
     with path.open("a", encoding="utf-8") as f:
         try:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.write(line)
             f.flush()
             os.fsync(f.fileno())
         except OSError:
