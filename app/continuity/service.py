@@ -31,7 +31,7 @@ from app.models import (
     ContinuityVerificationSignal,
     ContextRetrieveRequest,
 )
-from app.storage import StorageError, canonical_json, safe_path, write_text_file
+from app.storage import StorageError, canonical_json, safe_path, write_bytes_file, write_text_file
 
 CONTINUITY_DIR_REL = "memory/continuity"
 CONTINUITY_SUBJECT_RE = re.compile(r"^(task|thread):(.+)$")
@@ -422,7 +422,7 @@ def _persist_active_capsule(
                 if path.exists():
                     path.unlink()
             else:
-                path.write_bytes(old_bytes)
+                write_bytes_file(path, old_bytes)
         except Exception as restore_exc:
             restore_error = restore_exc
         detail = f"Failed to persist continuity capsule: {exc}"
@@ -453,8 +453,7 @@ def _restore_failed_fallback_snapshot(path: Path, old_bytes: bytes | None, exc: 
             if path.exists():
                 path.unlink()
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(old_bytes)
+            write_bytes_file(path, old_bytes)
     except Exception as restore_exc:
         restore_error = restore_exc
     detail = f"Failed to persist continuity fallback snapshot: {exc}"
@@ -471,8 +470,7 @@ def _restore_failed_refresh_state(path: Path, old_bytes: bytes | None, exc: Exce
             if path.exists():
                 path.unlink()
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(old_bytes)
+            write_bytes_file(path, old_bytes)
     except Exception as restore_exc:
         restore_error = restore_exc
     detail = f"Failed to persist continuity refresh state: {exc}"
@@ -625,8 +623,7 @@ def _restore_failed_archive(active_path: Path, archive_path: Path, active_bytes:
     """Restore the active capsule and discard the archive envelope after a failed archive commit."""
     restore_error: Exception | None = None
     try:
-        active_path.parent.mkdir(parents=True, exist_ok=True)
-        active_path.write_bytes(active_bytes)
+        write_bytes_file(active_path, active_bytes)
     except Exception as exc:
         restore_error = exc
     try:
@@ -1417,8 +1414,7 @@ def continuity_delete_service(
         restore_errors: list[str] = []
         for path, data in original_bytes.items():
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
+                write_bytes_file(path, data)
             except Exception as restore_exc:
                 restore_errors.append(f"{path}: {restore_exc}")
         if restore_errors:

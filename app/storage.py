@@ -79,6 +79,32 @@ def write_text_file(path: Path, content: str) -> None:
         raise
 
 
+def write_bytes_file(path: Path, data: bytes) -> None:
+    """Write binary content atomically using write-to-temp-then-rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def canonical_json(data: Any) -> str:
     """Serialize JSON deterministically for hashing and idempotency checks."""
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
