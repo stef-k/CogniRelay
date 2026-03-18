@@ -574,8 +574,10 @@ def ops_run_service(
                 "keys": sorted(list(job_result.keys()))[:20] if isinstance(job_result, dict) else [],
             },
         }
-        _append_ops_run(settings.repo_root, run_row)
-        _release_ops_lock(lock_path)
+        try:
+            _append_ops_run(settings.repo_root, run_row)
+        finally:
+            _release_ops_lock(lock_path)
         audit(auth, "ops_run", {"run_id": run_id, "job_id": req.job_id, "status": status, "client_ip": ip})
 
     return {"ok": True, "run_id": run_id, "job_id": req.job_id, "status": status, "local_only": True, "job_result": job_result}

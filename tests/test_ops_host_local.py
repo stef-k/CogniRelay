@@ -134,6 +134,48 @@ class TestOpsHostLocal(unittest.TestCase):
         self.assertIn('{"job_id":"index.rebuild_incremental"}', cron["examples"]["cron_examples"][0])
 
 
+class TestOpsLockReleasedOnAppendFailure(unittest.TestCase):
+    """Lock must be released even when _append_ops_run raises."""
+
+    def _settings(self, repo_root: Path) -> Settings:
+        """Build a settings object rooted at the temporary repository."""
+        return Settings(
+            repo_root=repo_root,
+            auto_init_git=False,
+            git_author_name="n/a",
+            git_author_email="n/a",
+            tokens={},
+            audit_log_enabled=False,
+        )
+
+    def test_lock_released_when_append_ops_run_raises(self) -> None:
+        """If _append_ops_run raises OSError, the lock file must still be removed."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            lock_dir = repo_root / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+
+            with (
+                patch("app.main._services", return_value=(settings, _GitManagerStub())),
+                patch(
+                    "app.ops.service._append_ops_run",
+                    side_effect=OSError("disk full"),
+                ),
+            ):
+                with self.assertRaises(OSError):
+                    ops_run(
+                        req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
+                        auth=_AuthStub(client_ip="127.0.0.1"),
+                    )
+
+            lock_file = lock_dir / "metrics.poll_and_alarm_eval.lock"
+            self.assertFalse(
+                lock_file.exists(),
+                "Lock file must be removed even when _append_ops_run raises",
+            )
+
+
 class TestReleaseOpsLock(unittest.TestCase):
     """Tests for _release_ops_lock error handling."""
 
