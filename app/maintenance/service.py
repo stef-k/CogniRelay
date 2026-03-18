@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import subprocess
 import tarfile
 import tempfile
 from datetime import datetime, timezone, timedelta
@@ -1296,8 +1297,11 @@ This endpoint is an **orchestrator/planner**, not an LLM summarizer. It proposes
     committed = []
     for rel in [report_md_rel, report_json_rel]:
         path = safe_path(settings.repo_root, rel)
-        if gm.commit_file(path, f"memory: add compaction {report_id}"):
-            committed.append(rel)
+        try:
+            if gm.commit_file(path, f"memory: add compaction {report_id}"):
+                committed.append(rel)
+        except (OSError, subprocess.CalledProcessError):
+            _logger.error("commit_file failed for compaction report %s — data on disk but not in git", rel, exc_info=True)
 
     audit(auth, "compact_run", {"report_id": report_id, "source": source_rel, "candidates": len(candidates)})
     result = {

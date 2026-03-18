@@ -8,6 +8,7 @@ or unreadable JSONL files without risking an unbounded read.
 import json
 import logging
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -740,6 +741,95 @@ class TestCompactServiceAccessWarnings(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertTrue(result["degraded"])
             self.assertTrue(any("access_stats_too_large" in w for w in result["warnings"]))
+
+
+class _FailingCompactCommitGitManager:
+    """Git manager stub that fails the first compaction report commit only."""
+
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+        self.calls: list[str] = []
+
+    def commit_file(self, path: Path, _message: str) -> bool:
+        rel = str(path.relative_to(self.repo_root))
+        self.calls.append(rel)
+        if rel.endswith(".md"):
+            raise OSError("git commit failed")
+        return True
+
+    def latest_commit(self) -> str:
+        return "test-sha"
+
+
+class _CalledProcessErrorCompactCommitGitManager(_FailingCompactCommitGitManager):
+    """Git manager stub that raises CalledProcessError for the first report commit."""
+
+    def commit_file(self, path: Path, _message: str) -> bool:
+        rel = str(path.relative_to(self.repo_root))
+        self.calls.append(rel)
+        if rel.endswith(".md"):
+            raise subprocess.CalledProcessError(1, "git commit")
+        return True
+
+
+class TestCompactServiceCommitFailureDegradation(unittest.TestCase):
+    """compact_run_service degrades gracefully when git commits fail."""
+
+    def test_compact_service_oserror_commit_failure_returns_partial_success(self) -> None:
+        """Compaction should still return ok when one report commit raises OSError."""
+        from app.maintenance.service import compact_run_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            gm = _FailingCompactCommitGitManager(repo)
+
+            with self.assertLogs("app.maintenance.service", level=logging.ERROR) as cm:
+                result = compact_run_service(
+                    settings=_FakeSettings(repo),
+                    gm=gm,
+                    auth=AllowAllAuthStub(),
+                    req=CompactRequest(),
+                    parse_iso=_stub_parse_iso,
+                    audit=_noop_audit,
+                )
+
+            report_id = result["report_id"]
+            md_rel = f"memory/summaries/weekly/{report_id}.md"
+            json_rel = f"memory/summaries/weekly/{report_id}.json"
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["committed_files"], [json_rel])
+            self.assertEqual(gm.calls, [md_rel, json_rel])
+            self.assertTrue((repo / md_rel).exists())
+            self.assertTrue((repo / json_rel).exists())
+            self.assertTrue(any("commit_file failed for compaction report" in msg for msg in cm.output))
+
+    def test_compact_service_called_process_error_commit_failure_returns_partial_success(self) -> None:
+        """Compaction should still return ok when one report commit raises CalledProcessError."""
+        from app.maintenance.service import compact_run_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            gm = _CalledProcessErrorCompactCommitGitManager(repo)
+
+            with self.assertLogs("app.maintenance.service", level=logging.ERROR) as cm:
+                result = compact_run_service(
+                    settings=_FakeSettings(repo),
+                    gm=gm,
+                    auth=AllowAllAuthStub(),
+                    req=CompactRequest(),
+                    parse_iso=_stub_parse_iso,
+                    audit=_noop_audit,
+                )
+
+            report_id = result["report_id"]
+            md_rel = f"memory/summaries/weekly/{report_id}.md"
+            json_rel = f"memory/summaries/weekly/{report_id}.json"
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["committed_files"], [json_rel])
+            self.assertEqual(gm.calls, [md_rel, json_rel])
+            self.assertTrue((repo / md_rel).exists())
+            self.assertTrue((repo / json_rel).exists())
+            self.assertTrue(any("commit_file failed for compaction report" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":
