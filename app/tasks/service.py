@@ -402,7 +402,12 @@ def docs_patch_apply_service(
             raise HTTPException(status_code=409, detail=f"Patch base_ref mismatch: expected {expected_ref}, current {head}")
 
     status_cp = run_git(repo_root, "status", "--porcelain")
-    if status_cp.stdout.strip():
+    dirty_lines = [
+        line
+        for line in status_cp.stdout.splitlines()
+        if line.strip() and not line.endswith(".locks/") and ".locks/" not in line[3:]
+    ]
+    if dirty_lines:
         raise HTTPException(status_code=409, detail="Working tree must be clean before applying patch")
 
     diff_text = str(proposal.get("diff") or "")
@@ -544,7 +549,12 @@ def code_merge_service(
         raise HTTPException(status_code=409, detail=f"Required checks not passed for {source_resolved}: {missing}")
 
     status_cp = run_git(repo_root, "status", "--porcelain")
-    if status_cp.stdout.strip():
+    dirty_lines = [
+        line
+        for line in status_cp.stdout.splitlines()
+        if line.strip() and not line.endswith(".locks/") and ".locks/" not in line[3:]
+    ]
+    if dirty_lines:
         raise HTTPException(status_code=409, detail="Working tree must be clean before merge")
 
     head_before = _resolve_commit_ref(repo_root, "HEAD", run_git)
