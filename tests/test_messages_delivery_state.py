@@ -267,7 +267,7 @@ class TestInboxThreadJsonlParsing(unittest.TestCase):
     """Verify inbox and thread services handle malformed JSONL gracefully."""
 
     def test_inbox_skips_malformed_lines_and_returns_valid(self) -> None:
-        """Malformed JSONL lines should be skipped; valid lines should be returned."""
+        """Malformed JSONL lines should be skipped with per-line logging."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             inbox_path = safe_path(root, "messages/inbox/agent-a.jsonl")
@@ -292,7 +292,9 @@ class TestInboxThreadJsonlParsing(unittest.TestCase):
         self.assertIn("warnings", result)
         self.assertIn("inbox_partial_corrupt", result["warnings"][0])
         self.assertIn("1 malformed", result["warnings"][0])
-        self.assertTrue(any("Skipped 1 malformed" in m for m in cm.output))
+        # Log includes file line number and truncated content
+        self.assertTrue(any("file line 2" in m for m in cm.output))
+        self.assertTrue(any("{corrupt line" in m for m in cm.output))
 
     def test_inbox_no_warnings_when_all_valid(self) -> None:
         """No warnings should appear when all JSONL lines are valid."""
@@ -314,7 +316,7 @@ class TestInboxThreadJsonlParsing(unittest.TestCase):
         self.assertNotIn("warnings", result)
 
     def test_thread_skips_malformed_lines_and_returns_valid(self) -> None:
-        """Malformed JSONL lines in thread files should be skipped with a warning."""
+        """Malformed JSONL lines in thread files should be skipped with per-line logging."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             thread_path = safe_path(root, "messages/threads/thread-1.jsonl")
@@ -337,7 +339,61 @@ class TestInboxThreadJsonlParsing(unittest.TestCase):
         self.assertEqual(result["count"], 2)
         self.assertIn("warnings", result)
         self.assertIn("thread_partial_corrupt", result["warnings"][0])
-        self.assertTrue(any("Skipped" in m for m in cm.output))
+        # Log includes file line numbers and content
+        self.assertTrue(any("file line 2" in m for m in cm.output))
+        self.assertTrue(any("not json" in m for m in cm.output))
+
+    def test_inbox_skips_non_dict_json(self) -> None:
+        """Non-dict JSON lines (e.g. arrays, strings) should be skipped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            inbox_path = safe_path(root, "messages/inbox/agent-c.jsonl")
+            inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [
+                json.dumps({"id": "msg1"}),
+                json.dumps([1, 2, 3]),
+                json.dumps("just a string"),
+                json.dumps({"id": "msg2"}),
+            ]
+            inbox_path.write_text("\n".join(lines), encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.DEBUG) as cm:
+                result = messages_inbox_service(
+                    repo_root=root,
+                    auth=_AuthStub(),  # type: ignore[arg-type]
+                    recipient="agent-c",
+                    limit=100,
+                    audit=_noop_audit,
+                )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["count"], 2)
+        self.assertIn("warnings", result)
+        self.assertIn("2 malformed", result["warnings"][0])
+        self.assertTrue(any("non-dict JSON" in m for m in cm.output))
+
+    def test_thread_skips_non_dict_json(self) -> None:
+        """Non-dict JSON lines in thread files should be skipped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            thread_path = safe_path(root, "messages/threads/thread-2.jsonl")
+            thread_path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [
+                json.dumps({"id": "msg1"}),
+                json.dumps(42),
+                json.dumps({"id": "msg2"}),
+            ]
+            thread_path.write_text("\n".join(lines), encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.DEBUG) as cm:
+                result = messages_thread_service(
+                    repo_root=root,
+                    auth=_AuthStub(),  # type: ignore[arg-type]
+                    thread_id="thread-2",
+                    limit=100,
+                )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["count"], 2)
+        self.assertIn("warnings", result)
+        self.assertIn("1 malformed", result["warnings"][0])
+        self.assertTrue(any("non-dict JSON" in m for m in cm.output))
 
 
 if __name__ == "__main__":
