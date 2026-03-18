@@ -12,7 +12,9 @@ from app.messages.service import (
     DELIVERY_STATE_REL,
     _write_delivery_state,
     load_delivery_state,
+    messages_inbox_service,
     messages_pending_service,
+    messages_thread_service,
 )
 from app.storage import safe_path
 
@@ -92,6 +94,7 @@ class TestLoadDeliveryState(unittest.TestCase):
             with self.assertLogs("app.messages.service", level=logging.WARNING) as cm:
                 result = load_delivery_state(root)
         self.assertEqual(result["records"], {})
+        self.assertEqual(result["idempotency"], {})
         self.assertIn("delivery_state_corrupt", result["warnings"][0])
         self.assertTrue(any("Corrupt delivery state" in m for m in cm.output))
 
@@ -142,8 +145,22 @@ class TestLoadDeliveryState(unittest.TestCase):
         self.assertIn("idempotency", result["warnings"][0])
         self.assertTrue(any("non-dict 'idempotency'" in m for m in cm.output))
 
+    def test_both_records_and_idempotency_non_dict_returns_two_warnings(self) -> None:
+        """Both non-dict fields should each produce a warning."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = self._state_path(root)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            state = {"version": "1", "records": None, "idempotency": "bad"}
+            path.write_text(json.dumps(state), encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.WARNING):
+                result = load_delivery_state(root)
+        self.assertEqual(result["records"], {})
+        self.assertEqual(result["idempotency"], {})
+        self.assertEqual(len(result["warnings"]), 2)
+
     def test_permission_error_returns_empty_with_warning(self) -> None:
-        """A PermissionError should log at ERROR and return a warning."""
+        """An unexpected exception (e.g. PermissionError) should log at ERROR and return a warning via the catch-all handler."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             path = self._state_path(root)
@@ -222,6 +239,105 @@ class TestWarningPropagation(unittest.TestCase):
             )
         self.assertTrue(result["ok"])
         self.assertNotIn("warnings", result)
+
+    def test_pending_service_warns_on_non_dict_records(self) -> None:
+        """messages_pending_service should warn when individual records are non-dict."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = safe_path(root, DELIVERY_STATE_REL)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            state = {"version": "1", "records": {"m1": "not-a-dict", "m2": 42}, "idempotency": {}}
+            path.write_text(json.dumps(state), encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.WARNING):
+                result = messages_pending_service(
+                    repo_root=root,
+                    auth=_AuthStub(),  # type: ignore[arg-type]
+                    recipient=None,
+                    status=None,
+                    include_terminal=True,
+                    limit=100,
+                    parse_iso=_parse_iso,
+                    audit=_noop_audit,
+                )
+        self.assertIn("warnings", result)
+        self.assertTrue(any("non-dict record" in w for w in result["warnings"]))
+
+
+class TestInboxThreadJsonlParsing(unittest.TestCase):
+    """Verify inbox and thread services handle malformed JSONL gracefully."""
+
+    def test_inbox_skips_malformed_lines_and_returns_valid(self) -> None:
+        """Malformed JSONL lines should be skipped; valid lines should be returned."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            inbox_path = safe_path(root, "messages/inbox/agent-a.jsonl")
+            inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [
+                json.dumps({"id": "msg1", "body": "hello"}),
+                "{corrupt line",
+                json.dumps({"id": "msg2", "body": "world"}),
+            ]
+            inbox_path.write_text("\n".join(lines), encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.WARNING) as cm:
+                result = messages_inbox_service(
+                    repo_root=root,
+                    auth=_AuthStub(),  # type: ignore[arg-type]
+                    recipient="agent-a",
+                    limit=100,
+                    audit=_noop_audit,
+                )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(len(result["messages"]), 2)
+        self.assertIn("warnings", result)
+        self.assertIn("inbox_partial_corrupt", result["warnings"][0])
+        self.assertIn("1 malformed", result["warnings"][0])
+        self.assertTrue(any("Skipped 1 malformed" in m for m in cm.output))
+
+    def test_inbox_no_warnings_when_all_valid(self) -> None:
+        """No warnings should appear when all JSONL lines are valid."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            inbox_path = safe_path(root, "messages/inbox/agent-b.jsonl")
+            inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [json.dumps({"id": "msg1"}), json.dumps({"id": "msg2"})]
+            inbox_path.write_text("\n".join(lines), encoding="utf-8")
+            result = messages_inbox_service(
+                repo_root=root,
+                auth=_AuthStub(),  # type: ignore[arg-type]
+                recipient="agent-b",
+                limit=100,
+                audit=_noop_audit,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["count"], 2)
+        self.assertNotIn("warnings", result)
+
+    def test_thread_skips_malformed_lines_and_returns_valid(self) -> None:
+        """Malformed JSONL lines in thread files should be skipped with a warning."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            thread_path = safe_path(root, "messages/threads/thread-1.jsonl")
+            thread_path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [
+                json.dumps({"id": "msg1"}),
+                "not json",
+                "",
+                json.dumps({"id": "msg2"}),
+            ]
+            thread_path.write_text("\n".join(lines), encoding="utf-8")
+            with self.assertLogs("app.messages.service", level=logging.WARNING) as cm:
+                result = messages_thread_service(
+                    repo_root=root,
+                    auth=_AuthStub(),  # type: ignore[arg-type]
+                    thread_id="thread-1",
+                    limit=100,
+                )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["count"], 2)
+        self.assertIn("warnings", result)
+        self.assertIn("thread_partial_corrupt", result["warnings"][0])
+        self.assertTrue(any("Skipped" in m for m in cm.output))
 
 
 if __name__ == "__main__":

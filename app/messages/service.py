@@ -20,6 +20,7 @@ DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
 _logger = logging.getLogger(__name__)
 
+
 def _empty_state() -> dict[str, Any]:
     """Return a fresh empty delivery state dict."""
     return {"version": "1", "records": {}, "idempotency": {}}
@@ -35,6 +36,9 @@ def load_delivery_state(repo_root: Path) -> dict[str, Any]:
 
     Returns a dict with keys ``version``, ``records``, ``idempotency``, and
     optionally ``warnings`` when the on-disk state could not be loaded cleanly.
+
+    Logs at WARNING for parse/structural issues and at ERROR with traceback
+    for unexpected exceptions (e.g. PermissionError, OSError).
     """
     path = _delivery_state_path(repo_root)
     if not path.exists():
@@ -46,7 +50,7 @@ def load_delivery_state(repo_root: Path) -> dict[str, Any]:
         state = _empty_state()
         state["warnings"] = ["delivery_state_corrupt: parse error; state reset to empty"]
         return state
-    except Exception:
+    except Exception:  # noqa: BLE001 — intentionally broad for mission-critical degradation
         _logger.error("Unexpected error reading delivery state at %s", path, exc_info=True)
         state = _empty_state()
         state["warnings"] = ["delivery_state_unreadable: unexpected error; state reset to empty"]
@@ -74,8 +78,9 @@ def load_delivery_state(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_delivery_state(repo_root: Path, state: dict[str, Any]) -> Path:
-    """Persist the delivery-state file, stripping transient keys like warnings."""
+    """Persist the delivery-state file, including only durable keys (version, records, idempotency)."""
     path = _delivery_state_path(repo_root)
+    # Allowlist: update this tuple when adding new persistent keys to the schema.
     persist = {k: state[k] for k in ("version", "records", "idempotency") if k in state}
     write_text_file(path, json.dumps(persist, ensure_ascii=False, indent=2))
     return path
@@ -375,11 +380,14 @@ def messages_pending_service(
     auth.require_read_path(DELIVERY_STATE_REL)
 
     state = load_delivery_state(repo_root)
+    warnings: list[str] = list(state.get("warnings") or [])
     now = datetime.now(timezone.utc)
     rows = []
     summary: dict[str, int] = {}
+    skipped_records = 0
     for record in state.get("records", {}).values():
         if not isinstance(record, dict):
+            skipped_records += 1
             continue
         view = delivery_record_view(record, now, parse_iso=parse_iso)
         eff = str(view.get("effective_status"))
@@ -391,13 +399,16 @@ def messages_pending_service(
         if not include_terminal and eff in {"acked", "dead_letter", "delivered"}:
             continue
         rows.append(view)
+    if skipped_records:
+        _logger.warning("Skipped %d non-dict record(s) in delivery state", skipped_records)
+        warnings.append(f"delivery_state_partial_corrupt: {skipped_records} non-dict record(s) skipped")
 
     rows.sort(key=lambda x: str(x.get("sent_at", "")), reverse=True)
     out = rows[:limit]
     audit(auth, "messages_pending", {"count": len(out), "recipient": recipient, "status": status})
     result: dict[str, Any] = {"ok": True, "count": len(out), "summary": summary, "messages": out}
-    if state.get("warnings"):
-        result["warnings"] = state["warnings"]
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 
@@ -421,7 +432,10 @@ def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str
     if skipped:
         _logger.warning("Skipped %d malformed JSONL line(s) in inbox for %s", skipped, recipient)
     audit(auth, "messages_inbox", {"recipient": recipient, "count": len(messages)})
-    return {"ok": True, "recipient": recipient, "count": len(messages), "messages": messages}
+    result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": len(messages), "messages": messages}
+    if skipped:
+        result["warnings"] = [f"inbox_partial_corrupt: {skipped} malformed line(s) skipped"]
+    return result
 
 
 def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int) -> dict:
@@ -442,7 +456,10 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
             continue
     if skipped:
         _logger.warning("Skipped %d malformed JSONL line(s) in thread %s", skipped, thread_id)
-    return {"ok": True, "thread_id": thread_id, "count": len(messages), "messages": messages}
+    result: dict[str, Any] = {"ok": True, "thread_id": thread_id, "count": len(messages), "messages": messages}
+    if skipped:
+        result["warnings"] = [f"thread_partial_corrupt: {skipped} malformed line(s) skipped"]
+    return result
 
 
 def relay_forward_service(
