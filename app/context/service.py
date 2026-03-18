@@ -346,7 +346,8 @@ def _raw_scan_recent_relevant(
             continue
         text = raw.decode("utf-8", errors="replace")
         if "\ufffd" in text:
-            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
+            # Only the first 4096 bytes are read; corruption beyond that offset is not detected here.
+            _logger.warning("file %s contains invalid UTF-8 bytes in first 4096 bytes (replaced with U+FFFD)", path)
         record_type, importance = _record_type_importance(rel, text)
         if include_set and record_type.lower() not in include_set:
             continue

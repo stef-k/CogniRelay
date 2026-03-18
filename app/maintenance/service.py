@@ -364,10 +364,10 @@ def metrics_service(
     peer_counts: dict[str, int] = {}
     audit_path = settings.repo_root / "logs" / "api_audit.jsonl"
     if audit_path.exists():
-        _audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
-        if "\ufffd" in _audit_raw:
+        audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+        if "\ufffd" in audit_raw:
             _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", audit_path)
-        for line in _audit_raw.splitlines()[-10000:]:
+        for line in audit_raw.splitlines()[-10000:]:
             try:
                 item = json.loads(line)
             except Exception:
@@ -953,10 +953,10 @@ def _load_access_stats(repo_root: Path) -> dict[str, dict]:
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
         return out
-    _raw = path.read_text(encoding="utf-8", errors="replace")
-    if "\ufffd" in _raw:
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    if "\ufffd" in raw:
         _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
-    for line in _raw.splitlines()[-5000:]:
+    for line in raw.splitlines()[-5000:]:
         try:
             row = json.loads(line)
         except Exception:
@@ -1011,7 +1011,8 @@ def _candidate_policy(repo_root: Path, path: Path, access_stats: dict[str, dict]
             if "\ufffd" in text:
                 _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
             snippet = " ".join(text.split())[:240]
-        except Exception:
+        except Exception:  # noqa: BLE001 — mission-critical degradation
+            _logger.warning("Failed to read %s for compaction policy", path, exc_info=True)
             text = ""
         if path.suffix.lower() == ".md":
             m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)

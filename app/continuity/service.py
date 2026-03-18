@@ -746,7 +746,8 @@ def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, st
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             rows = list(deque(handle, maxlen=10000))
-    except Exception:
+    except Exception:  # noqa: BLE001 — mission-critical degradation
+        _logger.warning("Failed to read audit log %s for selector scan", path, exc_info=True)
         return set()
     if any("\ufffd" in line for line in rows):
         _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)

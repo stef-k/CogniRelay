@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,8 @@ from typing import Any, Dict, List
 
 
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".jsonl"}
+_logger = logging.getLogger(__name__)
+
 TAG_REGEX = re.compile(r"#([a-zA-Z0-9_\-]+)")
 WORD_REGEX = re.compile(r"[A-Za-z0-9_\-]{2,}")
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
@@ -69,7 +72,9 @@ def _record_for_file(repo_root: Path, path: Path) -> dict[str, Any] | None:
     """Build one index record for a file or return ``None`` on read failure."""
     rel = str(path.relative_to(repo_root))
     try:
-        content = path.read_text(encoding='utf-8', errors='ignore')
+        content = path.read_text(encoding='utf-8', errors='replace')
+        if "\ufffd" in content:
+            _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     except Exception:
         return None
 
