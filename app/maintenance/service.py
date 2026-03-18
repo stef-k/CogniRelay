@@ -1055,7 +1055,10 @@ def _candidate_policy(repo_root: Path, path: Path, access_stats: dict[str, dict]
         return None
     try:
         st = path.stat()
+    except MemoryError:
+        raise
     except Exception:
+        _logger.debug("Skipping compaction candidate %s because stat() failed", path, exc_info=True)
         return None
     now = datetime.now(timezone.utc)
     age_days = max(0.0, (now - datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)).total_seconds() / 86400.0)
@@ -1081,8 +1084,10 @@ def _candidate_policy(repo_root: Path, path: Path, access_stats: dict[str, dict]
                     if line.strip().startswith("importance:"):
                         try:
                             importance = float(line.split(":", 1)[1].strip())
-                        except Exception:
-                            pass
+                        except MemoryError:
+                            raise
+                        except (ValueError, IndexError):
+                            _logger.debug("Ignoring malformed importance value in %s: %r", path, line, exc_info=True)
     a = access_stats.get(rel, {})
     access_count = int(a.get("access_count") or 0)
     last_access_dt = parse_iso(a.get("last_access_at"))
