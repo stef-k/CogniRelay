@@ -978,23 +978,33 @@ def backup_restore_test_service(
     }
 
 
-def _load_access_stats(repo_root: Path, *, max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES) -> dict[str, dict]:
+def _load_access_stats(
+    repo_root: Path,
+    *,
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
+) -> tuple[dict[str, dict], list[str]]:
     """Load normalized access statistics used by compaction planning."""
     out: dict[str, dict] = {}
+    warnings: list[str] = []
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
-        return out
+        return out, warnings
     try:
         file_size = path.stat().st_size
     except OSError:
         _logger.warning("stat() failed on audit log %s; skipping access stats", path, exc_info=True)
-        return out
+        warnings.append("access_stats_stat_failed: unable to determine audit log size; compaction planning ignores access recency")
+        return out, warnings
     if file_size > max_jsonl_read_bytes:
         _logger.warning(
             "Audit log %s is %d bytes (limit %d); skipping access stats to avoid OOM",
             path, file_size, max_jsonl_read_bytes,
         )
-        return out
+        warnings.append(
+            f"access_stats_too_large: audit log is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+            "compaction planning ignores access recency until the log is compacted or truncated"
+        )
+        return out, warnings
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except MemoryError:
@@ -1002,7 +1012,8 @@ def _load_access_stats(repo_root: Path, *, max_jsonl_read_bytes: int = DEFAULT_M
         raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.warning("Failed to read audit log %s for access stats", path, exc_info=True)
-        return out
+        warnings.append("access_stats_read_failed: I/O error reading audit log; compaction planning ignores access recency")
+        return out, warnings
     if "\ufffd" in raw:
         _logger.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     for line in raw.splitlines()[-5000:]:
@@ -1021,7 +1032,7 @@ def _load_access_stats(repo_root: Path, *, max_jsonl_read_bytes: int = DEFAULT_M
         ts = row.get("ts")
         if ts and (stat["last_access_at"] is None or ts > stat["last_access_at"]):
             stat["last_access_at"] = ts
-    return out
+    return out, warnings
 
 
 def _memory_class_for_path(rel: str) -> str:
@@ -1131,7 +1142,10 @@ def compact_run_service(
     report_id = f"compact_{now.strftime('%Y%m%dT%H%M%SZ')}"
     source_rel = req.source_path or "(policy-scan)"
 
-    access_stats = _load_access_stats(settings.repo_root, max_jsonl_read_bytes=settings.max_jsonl_read_bytes)
+    access_stats, access_warnings = _load_access_stats(
+        settings.repo_root,
+        max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
+    )
     candidates = []
     for path in settings.repo_root.rglob("*"):
         if not path.is_file():
@@ -1295,4 +1309,5 @@ This endpoint is an **orchestrator/planner**, not an LLM summarizer. It proposes
         "latest_commit": gm.latest_commit(),
         "planner_only": True,
         "summary_counts": payload["summary_counts"],
+        **({"degraded": True, "warnings": access_warnings} if access_warnings else {}),
     }

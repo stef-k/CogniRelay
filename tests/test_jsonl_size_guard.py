@@ -14,9 +14,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
+from app.models import CompactRequest
 from app.messages.service import messages_inbox_service, messages_thread_service
 from app.ops.service import _load_ops_runs
-from tests.helpers import AllowAllAuthStub
+from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
 def _noop_audit(*_args, **_kwargs):
@@ -533,8 +534,8 @@ class TestMetricsSizeGuard(unittest.TestCase):
 class TestAccessStatsSizeGuard(unittest.TestCase):
     """_load_access_stats handles oversized audit log gracefully."""
 
-    def test_oversized_audit_returns_empty(self) -> None:
-        """Access stats returns empty dict when audit log exceeds threshold."""
+    def test_oversized_audit_returns_empty_with_warning(self) -> None:
+        """Access stats returns empty dict with warning when audit log exceeds threshold."""
         from app.maintenance.service import _load_access_stats
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -546,12 +547,13 @@ class TestAccessStatsSizeGuard(unittest.TestCase):
             _make_large_jsonl(audit_file, threshold)
 
             with self.assertLogs("app.maintenance.service", level=logging.WARNING):
-                result = _load_access_stats(repo, max_jsonl_read_bytes=threshold)
+                result, warnings = _load_access_stats(repo, max_jsonl_read_bytes=threshold)
 
             self.assertEqual(result, {})
+            self.assertTrue(any("access_stats_too_large" in w for w in warnings))
 
-    def test_access_stats_stat_failure_returns_empty(self) -> None:
-        """Access stats returns empty dict when stat() fails."""
+    def test_access_stats_stat_failure_returns_empty_with_warning(self) -> None:
+        """Access stats returns empty dict with warning when stat() fails."""
         from app.maintenance.service import _load_access_stats
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -564,10 +566,40 @@ class TestAccessStatsSizeGuard(unittest.TestCase):
             replacement = _stat_fails_on_target(audit_file, allow_calls=1)
             with patch.object(Path, "stat", replacement):
                 with self.assertLogs("app.maintenance.service", level=logging.WARNING):
-                    result = _load_access_stats(repo)
+                    result, warnings = _load_access_stats(repo)
 
             self.assertTrue(replacement.state["raised"], "OSError was never raised by stat() mock")
             self.assertEqual(result, {})
+            self.assertTrue(any("access_stats_stat_failed" in w for w in warnings))
+
+
+class TestCompactServiceAccessWarnings(unittest.TestCase):
+    """compact_service surfaces degraded warnings when access stats are unavailable."""
+
+    def test_compact_service_surfaces_access_stats_warning(self) -> None:
+        """Compaction response should include warnings when access stats are suppressed."""
+        from app.maintenance.service import compact_run_service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            audit_file = logs_dir / "api_audit.jsonl"
+            threshold = 512
+            _make_large_jsonl(audit_file, threshold)
+
+            result = compact_run_service(
+                settings=_FakeSettings(repo, max_jsonl_read_bytes=threshold),
+                gm=SimpleGitManagerStub(repo),
+                auth=AllowAllAuthStub(),
+                req=CompactRequest(),
+                parse_iso=_stub_parse_iso,
+                audit=_noop_audit,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertTrue(any("access_stats_too_large" in w for w in result["warnings"]))
 
 
 if __name__ == "__main__":

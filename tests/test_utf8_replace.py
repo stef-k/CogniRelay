@@ -265,8 +265,9 @@ class TestUtf8ReplacementMaintenance(unittest.TestCase):
             path.chmod(0o000)
             try:
                 with self.assertLogs("app.maintenance.service", level=logging.WARNING):
-                    result = _load_access_stats(repo)
+                    result, warnings = _load_access_stats(repo)
                 self.assertEqual(result, {})
+                self.assertTrue(any("access_stats_read_failed" in w for w in warnings))
             finally:
                 path.chmod(0o644)
 
