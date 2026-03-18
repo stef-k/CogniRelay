@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from app.config import Settings
 from app.main import ops_catalog, ops_run, ops_schedule_export, ops_status
 from app.models import OpsRunRequest
-from app.ops.service import _load_ops_runs, _release_ops_lock
+from app.ops.service import _list_ops_locks, _load_ops_runs, _release_ops_lock
 
 
 class _AuthStub:
@@ -341,6 +341,49 @@ class TestReleaseOpsLock(unittest.TestCase):
             lock.touch()
             _release_ops_lock(lock)
             self.assertFalse(lock.exists())
+
+
+class TestListOpsLocks(unittest.TestCase):
+    """Tests for _list_ops_locks degraded lockfile handling."""
+
+    def test_list_ops_locks_logs_warning_and_falls_back_on_invalid_json(self) -> None:
+        """Malformed lockfile JSON should log a warning and return a minimal fallback row."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            lock_dir = repo / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / "example.job.lock"
+            lock_path.write_text("{not-json}", encoding="utf-8")
+
+            with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                result = _list_ops_locks(repo)
+
+        self.assertEqual(
+            result,
+            [{"job_id": "example.job", "path": "logs/ops_locks/example.job.lock"}],
+        )
+        self.assertTrue(any("could not read lock file" in msg for msg in cm.output))
+        self.assertTrue(any("example.job.lock" in msg for msg in cm.output))
+
+    def test_list_ops_locks_logs_warning_and_falls_back_on_read_error(self) -> None:
+        """Lockfile read errors should be logged and degraded to a minimal fallback row."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            lock_dir = repo / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / "example.job.lock"
+            lock_path.write_text('{"job_id":"example.job"}', encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+                with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                    result = _list_ops_locks(repo)
+
+        self.assertEqual(
+            result,
+            [{"job_id": "example.job", "path": "logs/ops_locks/example.job.lock"}],
+        )
+        self.assertTrue(any("could not read lock file" in msg for msg in cm.output))
+        self.assertTrue(any("denied" in msg for msg in cm.output))
 
 
 class TestLoadOpsRunsMalformed(unittest.TestCase):

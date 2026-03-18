@@ -173,7 +173,8 @@ def _list_ops_locks(repo_root: Path) -> list[dict[str, Any]]:
     for path in sorted(directory.glob("*.lock")):
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            _log.warning("could not read lock file %s, using fallback: %s", path, exc)
             row = {"job_id": path.stem}
         if not isinstance(row, dict):
             row = {"job_id": path.stem}
