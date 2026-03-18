@@ -967,7 +967,7 @@ def _load_access_stats(repo_root: Path) -> dict[str, dict]:
     for line in raw.splitlines()[-5000:]:
         try:
             row = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             continue
         if row.get("event") not in {"read", "messages_inbox", "search", "context_retrieve"}:
             continue

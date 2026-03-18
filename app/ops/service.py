@@ -77,7 +77,7 @@ def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001 — mission-critical degradation
-        _log.error("Failed to read ops runs file %s", path, exc_info=True)
+        _log.warning("Failed to read ops runs file %s", path, exc_info=True)
         return out
     if "\ufffd" in raw:
         _log.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)

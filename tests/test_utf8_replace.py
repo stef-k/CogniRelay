@@ -13,15 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import AllowAllAuthStub
-
 from app.context.service import _raw_scan_recent_relevant
 from app.continuity.service import _audit_recent_selectors
 from app.indexer import _record_for_file
-from app.maintenance.service import _candidate_policy, _load_access_stats
+from app.config import Settings
+from app.maintenance.service import _candidate_policy, _load_access_stats, metrics_service
 from app.messages.service import messages_inbox_service, messages_thread_service
 from app.models import ContextRetrieveRequest
 from app.ops.service import _load_ops_runs
+from tests.helpers import AllowAllAuthStub
 
 
 def _noop_audit(*_args, **_kwargs):
@@ -159,7 +159,7 @@ class TestUtf8ReplacementOps(unittest.TestCase):
             path.write_text("{}\n")
             path.chmod(0o000)
             try:
-                with self.assertLogs("app.ops.service", level=logging.ERROR):
+                with self.assertLogs("app.ops.service", level=logging.WARNING):
                     result = _load_ops_runs(repo)
                 self.assertEqual(result, [])
             finally:
@@ -252,6 +252,83 @@ class TestUtf8ReplacementMaintenance(unittest.TestCase):
                 self.assertIsNotNone(result)
             finally:
                 test_file.chmod(0o644)
+
+
+    def test_load_access_stats_graceful_on_unreadable_file(self) -> None:
+        """_load_access_stats returns empty dict on I/O error instead of crashing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            path = logs_dir / "api_audit.jsonl"
+            path.write_text("{}\n")
+            path.chmod(0o000)
+            try:
+                with self.assertLogs("app.maintenance.service", level=logging.WARNING):
+                    result = _load_access_stats(repo)
+                self.assertEqual(result, {})
+            finally:
+                path.chmod(0o644)
+
+    def test_metrics_service_warns_on_corrupt_utf8(self) -> None:
+        """metrics_service logs warning when audit log has invalid UTF-8."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            good = json.dumps({"event": "read", "peer_id": "p1"}).encode("utf-8") + b"\n"
+            bad = b'{"event": "write\xfe", "peer_id": "p2"}\n'
+            (logs_dir / "api_audit.jsonl").write_bytes(good + bad)
+
+            settings = Settings(
+                repo_root=repo, auto_init_git=False,
+                git_author_name="n/a", git_author_email="n/a",
+                tokens={}, audit_log_enabled=False,
+            )
+
+            with self.assertLogs("app.maintenance.service", level=logging.WARNING) as cm:
+                result = metrics_service(
+                    settings=settings, auth=AllowAllAuthStub(),
+                    load_delivery_state=lambda _r: {"records": {}},
+                    delivery_record_view=lambda _r, _n: {},
+                    load_check_artifacts=lambda _r: [],
+                    load_rate_limit_state=lambda _r: {},
+                    parse_iso=_parse_iso_stub,
+                )
+
+            self.assertTrue(result.get("ok", False) or "event_counts" in result)
+            self.assertTrue(any("U+FFFD" in msg for msg in cm.output))
+
+    def test_metrics_service_graceful_on_unreadable_audit(self) -> None:
+        """metrics_service degrades gracefully when audit log is unreadable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            path = logs_dir / "api_audit.jsonl"
+            path.write_text("{}\n")
+            path.chmod(0o000)
+
+            settings = Settings(
+                repo_root=repo, auto_init_git=False,
+                git_author_name="n/a", git_author_email="n/a",
+                tokens={}, audit_log_enabled=False,
+            )
+
+            try:
+                with self.assertLogs("app.maintenance.service", level=logging.WARNING):
+                    result = metrics_service(
+                        settings=settings, auth=AllowAllAuthStub(),
+                        load_delivery_state=lambda _r: {"records": {}},
+                        delivery_record_view=lambda _r, _n: {},
+                        load_check_artifacts=lambda _r: [],
+                        load_rate_limit_state=lambda _r: {},
+                        parse_iso=_parse_iso_stub,
+                    )
+                # Should not crash; event/peer counts should be empty
+                self.assertEqual(result.get("event_counts", {}), {})
+            finally:
+                path.chmod(0o644)
 
 
 class TestUtf8ReplacementContext(unittest.TestCase):
