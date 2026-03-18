@@ -55,7 +55,7 @@ def read_text_file(path: Path) -> str:
 
 
 def write_text_file(path: Path, content: str) -> None:
-    """Write UTF-8 text content atomically for new capsule writes (JSON).
+    """Write UTF-8 text content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
     atomically renames. On failure the original file is untouched and
@@ -80,7 +80,7 @@ def write_text_file(path: Path, content: str) -> None:
             try:
                 os.close(fd)
             except OSError:
-                pass
+                logging.warning("Failed to close fd %d during cleanup", fd)
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -89,11 +89,14 @@ def write_text_file(path: Path, content: str) -> None:
 
 
 def write_bytes_file(path: Path, data: bytes) -> None:
-    """Write binary content atomically for restoring raw snapshots.
+    """Write binary content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
     atomically renames. On failure the original file is untouched and
     the temp file is cleaned up. Re-raises the original exception.
+
+    Currently used for restoring raw snapshots during rollback paths
+    in continuity services.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -114,7 +117,7 @@ def write_bytes_file(path: Path, data: bytes) -> None:
             try:
                 os.close(fd)
             except OSError:
-                pass
+                logging.warning("Failed to close fd %d during cleanup", fd)
         try:
             os.unlink(tmp_path)
         except OSError:

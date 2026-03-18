@@ -619,16 +619,22 @@ def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_
 def _restore_failed_archive(active_path: Path, archive_path: Path, active_bytes: bytes) -> None:
     """Restore the active capsule and discard the archive envelope after a failed archive commit."""
     errors: list[str] = []
+    first_exc: Exception | None = None
     try:
         write_bytes_file(active_path, active_bytes)
     except Exception as exc:
+        first_exc = exc
         errors.append(f"restore active: {exc}")
     try:
         archive_path.unlink(missing_ok=True)
     except Exception as exc:
+        if first_exc is None:
+            first_exc = exc
         errors.append(f"remove archive: {exc}")
     if errors:
-        raise RuntimeError(f"Failed to restore archived continuity capsule: {'; '.join(errors)}")
+        raise RuntimeError(
+            f"Failed to restore archived continuity capsule: {'; '.join(errors)}"
+        ) from first_exc
 
 
 def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str], list[str]]:
