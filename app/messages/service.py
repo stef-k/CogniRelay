@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -209,7 +210,7 @@ def messages_send_service(
     try:
         if gm.commit_paths(paths, f"messages: send {msg['id']}"):
             committed_files.extend(rels)
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         logging.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
 
     should_track_delivery = bool(req.idempotency_key or req.delivery.requires_ack)
@@ -472,7 +473,7 @@ def relay_forward_service(
     try:
         if gm.commit_paths(paths, f"relay: forward {msg['id']}"):
             committed_files.extend(rels)
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         logging.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
     audit(auth, "relay_forward", {"relay_id": req.relay_id, "to": req.target_recipient, "thread_id": req.thread_id})
     return {
@@ -550,7 +551,7 @@ def replay_messages_service(
     try:
         if gm.commit_paths(paths, f"messages: replay {req.message_id}"):
             committed_files.extend(rels)
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         logging.error("commit_paths failed for %s — data on disk but not in git", req.message_id, exc_info=True)
 
     if req.requires_ack:

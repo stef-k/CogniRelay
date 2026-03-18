@@ -228,18 +228,24 @@ def _rollback_appends(targets: list[_AppendTarget]) -> None:
 
 
 def append_jsonl_multi(paths: list[Path], record: dict[str, Any]) -> None:
-    """Append one JSON line record to multiple files atomically.
+    """Append one JSON line record to multiple files with best-effort rollback on failure.
 
     Serializes the record once, then appends to each unique path in
     sequence with fsync.  On ``OSError`` at file N, files 0..N-1 are
     truncated back to their prior size (or deleted if newly created),
     and the original exception is re-raised.
 
+    Not truly atomic — a process crash mid-operation can leave a
+    partial append across files.  On a process crash, some files may
+    contain the appended record while others do not.  Consumers should
+    tolerate both partial multi-file application and truncated trailing
+    lines.
+
     Duplicate paths (after resolution) are collapsed so the record is
     appended only once per physical file.
 
-    Raises ``TypeError`` if the record is not JSON-serializable (before
-    any I/O occurs).
+    Raises ``TypeError`` or ``ValueError`` if the record is not
+    JSON-serializable (before any I/O occurs).
     """
     if not paths:
         return
@@ -265,6 +271,9 @@ def append_jsonl_multi(paths: list[Path], record: dict[str, Any]) -> None:
         is_new = False
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
+            # Micro-TOCTOU: another process could create the file between
+            # exists() and open().  Acceptable for the deployment context;
+            # the window is microseconds and requires concurrent writers.
             is_new = not p.exists()
             with p.open("a", encoding="utf-8") as f:
                 prior_size = f.tell()

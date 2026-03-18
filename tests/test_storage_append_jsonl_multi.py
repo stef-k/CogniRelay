@@ -1,4 +1,4 @@
-"""Tests for append_jsonl_multi atomic multi-file append with rollback."""
+"""Tests for append_jsonl_multi multi-file append with rollback."""
 
 import json
 import os
@@ -11,7 +11,7 @@ from app.storage import _AppendTarget, _rollback_appends, append_jsonl_multi
 
 
 class TestAppendJsonlMulti(unittest.TestCase):
-    """Validate atomic multi-file append and rollback behavior."""
+    """Validate multi-file append and rollback behavior."""
 
     def test_happy_path_all_files_written(self) -> None:
         """All files receive the record when no I/O error occurs."""
@@ -160,8 +160,6 @@ class TestAppendJsonlMulti(unittest.TestCase):
                 self.assertEqual(json.loads(lines[0])["n"], 1)
                 self.assertEqual(json.loads(lines[1])["n"], 2)
 
-    # --- Gap 1: rollback own failure path ---
-
     def test_rollback_failure_logs_error_and_continues(self) -> None:
         """When rollback itself fails, errors are logged and the original OSError still propagates."""
         with tempfile.TemporaryDirectory() as td:
@@ -197,8 +195,6 @@ class TestAppendJsonlMulti(unittest.TestCase):
             rollback_logs = [m for m in cm.output if "rollback failed" in m]
             self.assertTrue(rollback_logs, "Expected 'rollback failed' error log")
 
-    # --- Gap 3: failure on last of 3 with pre-existing content ---
-
     def test_failure_on_third_file_preserves_existing_content(self) -> None:
         """When file 3 fails, files 1-2 with pre-existing content are restored."""
         with tempfile.TemporaryDirectory() as td:
@@ -227,8 +223,6 @@ class TestAppendJsonlMulti(unittest.TestCase):
             self.assertEqual(p2.read_text(encoding="utf-8"), line2)
             self.assertFalse(p3.exists())
 
-    # --- Gap 5: duplicate/overlapping paths ---
-
     def test_duplicate_paths_deduplicated(self) -> None:
         """When paths resolve to the same file, the record is appended only once."""
         with tempfile.TemporaryDirectory() as td:
@@ -254,8 +248,6 @@ class TestAppendJsonlMulti(unittest.TestCase):
 
             lines = real.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
-
-    # --- Gap 8: subdirectory creation ---
 
     def test_subdirectories_created_automatically(self) -> None:
         """Parent directories are created for paths in subdirectories."""

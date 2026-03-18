@@ -43,7 +43,7 @@ class _FailingCommitGitManagerStub(_GitManagerStub):
     """Git manager stub where commit_paths raises an exception."""
 
     def commit_paths(self, _paths: list[Path], _message: str) -> bool:
-        raise RuntimeError("git commit failed")
+        raise OSError("git commit failed")
 
 
 class _FalseCommitGitManagerStub(_GitManagerStub):
@@ -92,8 +92,6 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
             for p in (inbox, outbox, thread):
                 self.assertFalse(p.exists(), f"Expected {p.name} to not exist after OSError")
 
-    # --- Gap 2: real rollback exercised (not mocked) ---
-
     def test_send_real_rollback_on_io_failure(self) -> None:
         """Exercise real rollback logic by failing the third file during append."""
         with tempfile.TemporaryDirectory() as td:
@@ -131,8 +129,6 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
             self.assertFalse(inbox.exists(), "inbox should be deleted by rollback")
             self.assertFalse(outbox.exists(), "outbox should be deleted by rollback")
 
-    # --- Gap 7: commit_paths returning False ---
-
     def test_send_commit_paths_returns_false(self) -> None:
         """When commit_paths returns False, committed_files is empty but data is on disk."""
         with tempfile.TemporaryDirectory() as td:
@@ -162,8 +158,6 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
             for rel in msg_rels:
                 self.assertNotIn(rel, result["committed_files"])
 
-    # --- C3: commit_paths exception degrades gracefully ---
-
     def test_send_commit_paths_exception_degrades_gracefully(self) -> None:
         """When commit_paths raises, the service still returns a result (data on disk)."""
         with tempfile.TemporaryDirectory() as td:
@@ -192,8 +186,6 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
 
 class TestRelayForwardPartialFailure(unittest.TestCase):
     """Verify partial-failure handling in relay_forward."""
-
-    # --- Gap 4: relay_forward failure path ---
 
     def test_relay_oserror_propagates(self) -> None:
         """When append_jsonl_multi raises OSError in relay_forward, it propagates."""
@@ -279,8 +271,6 @@ class TestReplayPartialFailure(unittest.TestCase):
             json.dumps(state), encoding="utf-8"
         )
         return "msg_dead"
-
-    # --- Gap 4: replay failure path ---
 
     def test_replay_oserror_propagates(self) -> None:
         """When append_jsonl_multi raises OSError in replay, it propagates."""
