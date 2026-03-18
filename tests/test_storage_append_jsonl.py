@@ -1,7 +1,6 @@
 """Tests for append_jsonl crash safety (issue #52)."""
 
 import json
-import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -44,20 +43,39 @@ class TestAppendJsonl(unittest.TestCase):
         self.assertTrue(target.exists())
         self.assertEqual(json.loads(target.read_text(encoding="utf-8").strip()), {"ok": True})
 
-    def test_fsync_called_after_write(self):
-        """os.fsync must be called to ensure durability."""
+    def test_append_to_existing_file_preserves_content(self):
+        """Appending to a pre-existing file must not truncate prior content."""
         target = self.tmpdir / "log.jsonl"
-        fsync_calls = []
-        original_fsync = os.fsync
+        target.write_text('{"existing": true}\n', encoding="utf-8")
+        append_jsonl(target, {"new": True})
+        lines = target.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[0]), {"existing": True})
+        self.assertEqual(json.loads(lines[1]), {"new": True})
 
-        def tracking_fsync(fd):
-            fsync_calls.append(fd)
-            return original_fsync(fd)
+    def test_unicode_content_roundtrips(self):
+        """Non-ASCII content must survive the encode/decode pipeline."""
+        target = self.tmpdir / "log.jsonl"
+        record = {"emoji": "\U0001f525", "text": "\u65e5\u672c\u8a9e"}
+        append_jsonl(target, record)
+        line = target.read_text(encoding="utf-8").strip()
+        self.assertEqual(json.loads(line), record)
 
-        with patch("app.storage.os.fsync", side_effect=tracking_fsync):
-            append_jsonl(target, {"durable": True})
+    def test_flush_precedes_fsync_in_source(self):
+        """Implementation must call flush() before fsync() for durability."""
+        import inspect
 
-        self.assertEqual(len(fsync_calls), 1)
+        source = inspect.getsource(append_jsonl)
+        flush_pos = source.index("f.flush()")
+        fsync_pos = source.index("os.fsync(")
+        self.assertLess(flush_pos, fsync_pos, "flush() must appear before fsync()")
+
+    def test_fsync_oserror_propagates(self):
+        """An OSError from fsync must propagate to the caller."""
+        target = self.tmpdir / "log.jsonl"
+        with patch("app.storage.os.fsync", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                append_jsonl(target, {"fragile": True})
 
 
 if __name__ == "__main__":
