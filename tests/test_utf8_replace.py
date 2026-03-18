@@ -144,7 +144,7 @@ class TestUtf8ReplacementOps(unittest.TestCase):
             (runs_dir / "ops_runs.jsonl").write_bytes(good + bad)
 
             with self.assertLogs("app.ops.service", level=logging.WARNING) as cm:
-                result = _load_ops_runs(repo)
+                result, _warnings = _load_ops_runs(repo)
 
             self.assertGreaterEqual(len(result), 1)
             self.assertTrue(any("U+FFFD" in msg for msg in cm.output))
@@ -160,7 +160,7 @@ class TestUtf8ReplacementOps(unittest.TestCase):
             path.chmod(0o000)
             try:
                 with self.assertLogs("app.ops.service", level=logging.WARNING):
-                    result = _load_ops_runs(repo)
+                    result, _warnings = _load_ops_runs(repo)
                 self.assertEqual(result, [])
             finally:
                 path.chmod(0o644)

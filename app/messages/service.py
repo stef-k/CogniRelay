@@ -13,17 +13,13 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
 from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_text_file
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
 _logger = logging.getLogger(__name__)
-
-# Maximum JSONL file size (bytes) that will be fully loaded into memory.
-# Files exceeding this threshold trigger a degraded response with a warning
-# instead of risking OOM on very large append-only files.  (See issue #75.)
-_MAX_JSONL_READ_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
 
 def _empty_state() -> dict[str, Any]:
@@ -433,7 +429,7 @@ def messages_inbox_service(
     recipient: str,
     limit: int,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
-    max_jsonl_read_bytes: int = _MAX_JSONL_READ_BYTES,
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
 ) -> dict:
     """Return recent inbox messages for a recipient."""
     auth.require("read:files")
@@ -445,19 +441,25 @@ def messages_inbox_service(
     try:
         file_size = path.stat().st_size
     except OSError:
-        file_size = 0
+        _logger.warning("stat() failed on inbox file for %s; returning degraded response", recipient, exc_info=True)
+        audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
+        return {
+            "ok": True, "degraded": True, "recipient": recipient, "count": 0, "messages": [],
+            "warnings": ["inbox_stat_failed: unable to determine file size; returning empty to avoid unbounded read"],
+        }
     if file_size > max_jsonl_read_bytes:
         _logger.warning(
             "Inbox file for %s is %d bytes (limit %d); returning degraded response",
             recipient, file_size, max_jsonl_read_bytes,
         )
-        result_deg: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
-        result_deg["warnings"] = [
-            f"inbox_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
-            "recent messages unavailable"
-        ]
         audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
-        return result_deg
+        return {
+            "ok": True, "degraded": True, "recipient": recipient, "count": 0, "messages": [],
+            "warnings": [
+                f"inbox_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                "all messages unavailable until file is compacted or truncated"
+            ],
+        }
 
     utf8_corrupted = False
     try:
@@ -508,7 +510,15 @@ def messages_inbox_service(
     return result
 
 
-def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: str, limit: int, max_jsonl_read_bytes: int = _MAX_JSONL_READ_BYTES) -> dict:
+def messages_thread_service(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    thread_id: str,
+    limit: int,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None] | None = None,
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
+) -> dict:
     """Return recent messages for a thread."""
     auth.require("read:files")
     rel = f"messages/threads/{thread_id}.jsonl"
@@ -520,17 +530,27 @@ def messages_thread_service(*, repo_root: Path, auth: AuthContext, thread_id: st
     try:
         file_size = path.stat().st_size
     except OSError:
-        file_size = 0
+        _logger.warning("stat() failed on thread file for %s; returning degraded response", thread_id, exc_info=True)
+        if audit:
+            audit(auth, "messages_thread", {"thread_id": thread_id, "count": 0})
+        return {
+            "ok": True, "degraded": True, "thread_id": thread_id, "count": 0, "messages": [],
+            "warnings": ["thread_stat_failed: unable to determine file size; returning empty to avoid unbounded read"],
+        }
     if file_size > max_jsonl_read_bytes:
         _logger.warning(
             "Thread file for %s is %d bytes (limit %d); returning degraded response",
             thread_id, file_size, max_jsonl_read_bytes,
         )
-        return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
-                "warnings": [
-                    f"thread_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
-                    "recent messages unavailable"
-                ]}
+        if audit:
+            audit(auth, "messages_thread", {"thread_id": thread_id, "count": 0})
+        return {
+            "ok": True, "degraded": True, "thread_id": thread_id, "count": 0, "messages": [],
+            "warnings": [
+                f"thread_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                "all messages unavailable until file is compacted or truncated"
+            ],
+        }
 
     utf8_corrupted = False
     try:

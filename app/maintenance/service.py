@@ -19,6 +19,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.continuity.service import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
@@ -329,6 +330,7 @@ def metrics_service(
     load_check_artifacts: Callable[[Path], list[dict[str, Any]]],
     load_rate_limit_state: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
+    max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES,
 ) -> dict:
     """Assemble operational metrics, summaries, and alarm conditions."""
     auth.require("read:index")
@@ -362,10 +364,35 @@ def metrics_service(
 
     event_counts: dict[str, int] = {}
     peer_counts: dict[str, int] = {}
+    metrics_warnings: list[str] = []
     audit_path = settings.repo_root / "logs" / "api_audit.jsonl"
+    _skip_audit_read = False
     if audit_path.exists():
         try:
+            audit_file_size = audit_path.stat().st_size
+        except OSError:
+            _logger.warning("stat() failed on audit log %s; skipping audit metrics", audit_path, exc_info=True)
+            audit_file_size = 0
+            _skip_audit_read = True
+            metrics_warnings.append("audit_stat_failed: unable to determine audit log size; audit metrics unavailable")
+        if not _skip_audit_read and audit_file_size > max_jsonl_read_bytes:
+            _logger.warning(
+                "Audit log %s is %d bytes (limit %d); skipping audit metrics",
+                audit_path, audit_file_size, max_jsonl_read_bytes,
+            )
+            _skip_audit_read = True
+            metrics_warnings.append(
+                f"audit_too_large: file is {audit_file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
+                "audit metrics unavailable until file is compacted or truncated"
+            )
+    else:
+        _skip_audit_read = True
+    if not _skip_audit_read:
+        try:
             audit_raw = audit_path.read_text(encoding="utf-8", errors="replace")
+        except MemoryError:
+            _logger.critical("OOM while reading audit log %s", audit_path, exc_info=True)
+            raise
         except Exception:  # noqa: BLE001 — mission-critical degradation
             _logger.warning("Failed to read audit log %s for metrics", audit_path, exc_info=True)
             audit_raw = ""
@@ -478,8 +505,9 @@ def metrics_service(
         },
         "alarms": alarms,
     }
-    if state.get("warnings"):
-        result["warnings"] = state["warnings"]
+    all_warnings = list(state.get("warnings") or []) + metrics_warnings
+    if all_warnings:
+        result["warnings"] = all_warnings
     return result
 
 
@@ -951,14 +979,28 @@ def backup_restore_test_service(
     }
 
 
-def _load_access_stats(repo_root: Path) -> dict[str, dict]:
+def _load_access_stats(repo_root: Path, *, max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES) -> dict[str, dict]:
     """Load normalized access statistics used by compaction planning."""
     out: dict[str, dict] = {}
     path = repo_root / "logs" / "api_audit.jsonl"
     if not path.exists():
         return out
     try:
+        file_size = path.stat().st_size
+    except OSError:
+        _logger.warning("stat() failed on audit log %s; skipping access stats", path, exc_info=True)
+        return out
+    if file_size > max_jsonl_read_bytes:
+        _logger.warning(
+            "Audit log %s is %d bytes (limit %d); skipping access stats to avoid OOM",
+            path, file_size, max_jsonl_read_bytes,
+        )
+        return out
+    try:
         raw = path.read_text(encoding="utf-8", errors="replace")
+    except MemoryError:
+        _logger.critical("OOM while reading audit log %s", path, exc_info=True)
+        raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.warning("Failed to read audit log %s for access stats", path, exc_info=True)
         return out
@@ -1090,7 +1132,7 @@ def compact_run_service(
     report_id = f"compact_{now.strftime('%Y%m%dT%H%M%SZ')}"
     source_rel = req.source_path or "(policy-scan)"
 
-    access_stats = _load_access_stats(settings.repo_root)
+    access_stats = _load_access_stats(settings.repo_root, max_jsonl_read_bytes=settings.max_jsonl_read_bytes)
     candidates = []
     for path in settings.repo_root.rglob("*"):
         if not path.is_file():

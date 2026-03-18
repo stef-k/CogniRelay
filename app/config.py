@@ -68,6 +68,15 @@ class Settings:
     max_jsonl_read_bytes: int = 10 * 1024 * 1024  # 10 MB
 
 
+# Default maximum JSONL file size (bytes) that will be fully loaded into
+# memory.  Used as the fallback when Settings.max_jsonl_read_bytes is not
+# provided (e.g. in direct test calls).  See issue #75.
+#
+# NOTE: There is a small TOCTOU window between stat() and read_text() — a
+# file can grow past the threshold after the check.  This is an accepted
+# trade-off; the guard is best-effort protection, not a hard guarantee.
+DEFAULT_MAX_JSONL_READ_BYTES: int = 10 * 1024 * 1024  # 10 MB
+
 _cached: Settings | None = None
 
 

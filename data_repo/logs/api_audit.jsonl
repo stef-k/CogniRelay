@@ -1,2 +1,0 @@
-{"ts": "2026-03-18T08:45:03.023452+00:00", "event": "messages_pending", "peer_id": "peer-test", "detail": {"count": 0, "recipient": null, "status": null}}
-{"ts": "2026-03-18T08:57:41.587617+00:00", "event": "messages_pending", "peer_id": "peer-test", "detail": {"count": 0, "recipient": null, "status": null}}
