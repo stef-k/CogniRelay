@@ -4,6 +4,8 @@ CogniRelay is a small self-hosted memory and collaboration service for autonomou
 
 This is not a Git forge. It is an AI-native substrate for memory, retrieval, messaging, task coordination, and controlled collaboration.
 
+The current implementation should be read as a bounded orientation-preservation substrate, not as a claim of perfect persistence across context boundaries.
+
 ## What It Offers
 
 - Git-backed read, write, and append operations with commit-on-change behavior
@@ -15,12 +17,13 @@ This is not a Git forge. It is an AI-native substrate for memory, retrieval, mes
 
 ## Canonical Docs
 
-- [System Overview](docs/system-overview.md)
-- [API Surface](docs/api-surface.md)
-- [MCP Guide](docs/mcp.md)
-- [Design Doc](DESIGN_DOC.md)
-- [Go-live Runbook](deploy/GO_LIVE_RUNBOOK.md)
-- [Production Signoff Checklist](deploy/PRODUCTION_SIGNOFF_CHECKLIST.md)
+- [Reviewer Guide](docs/reviewer-guide.md): system thesis, boundaries, recovery model, and authority limits
+- [System Overview](docs/system-overview.md): implemented product shape and agent usage guidance
+- [API Surface](docs/api-surface.md): currently implemented HTTP behavior grouped by domain
+- [MCP Guide](docs/mcp.md): MCP bootstrap flow and tool mapping
+- [Design Doc](DESIGN_DOC.md): architecture rationale and background framing
+- [Go-live Runbook](deploy/GO_LIVE_RUNBOOK.md): operator deployment and go-live workflow
+- [Production Signoff Checklist](deploy/PRODUCTION_SIGNOFF_CHECKLIST.md): production verification and data-safety checks
 
 ## Quick Start
 
