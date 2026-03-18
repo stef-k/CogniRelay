@@ -159,5 +159,53 @@ class TestReleaseOpsLock(unittest.TestCase):
             self.assertFalse(lock.exists())
 
 
+class TestLoadOpsRunsMalformed(unittest.TestCase):
+    """Tests for _load_ops_runs handling of malformed JSONL lines."""
+
+    def test_load_ops_runs_logs_malformed_lines(self) -> None:
+        """Malformed JSONL lines must be skipped and logged as warnings."""
+        from app.ops.service import _load_ops_runs
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            runs_path = repo / "logs" / "ops_runs.jsonl"
+            runs_path.parent.mkdir(parents=True, exist_ok=True)
+            runs_path.write_text(
+                '{"job_id":"a","status":"ok"}\n'
+                "not-valid-json\n"
+                '{"job_id":"b","status":"ok"}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                result = _load_ops_runs(repo)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["job_id"], "a")
+        self.assertEqual(result[1]["job_id"], "b")
+        self.assertTrue(any("malformed JSONL" in msg for msg in cm.output))
+        self.assertTrue(any("not-valid-json" in msg for msg in cm.output))
+
+    def test_load_ops_runs_skips_non_dict_lines(self) -> None:
+        """Valid JSON that is not a dict should be silently skipped."""
+        from app.ops.service import _load_ops_runs
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            runs_path = repo / "logs" / "ops_runs.jsonl"
+            runs_path.parent.mkdir(parents=True, exist_ok=True)
+            runs_path.write_text(
+                '[1,2,3]\n'
+                '"just a string"\n'
+                '{"job_id":"valid","status":"ok"}\n',
+                encoding="utf-8",
+            )
+
+            result = _load_ops_runs(repo)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["job_id"], "valid")
+
+
 if __name__ == "__main__":
     unittest.main()

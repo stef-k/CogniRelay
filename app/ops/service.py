@@ -74,10 +74,12 @@ def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-max(1, int(limit)):]:
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-max(1, int(limit)):]
+    for idx, line in enumerate(lines):
         try:
             row = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
+            _log.warning("malformed JSONL in ops runs (line %d): %s", idx + 1, line[:200])
             continue
         if isinstance(row, dict):
             out.append(row)
