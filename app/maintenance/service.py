@@ -467,6 +467,7 @@ def metrics_service(
             "last_pull_by_source": replication_state.get("last_pull_by_source", {}),
         },
         "alarms": alarms,
+        "warnings": state.get("warnings", []),
     }
 
 

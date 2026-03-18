@@ -18,6 +18,10 @@ from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_text_
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
+_logger = logging.getLogger(__name__)
+
+_EMPTY_STATE: dict[str, Any] = {"version": "1", "records": {}, "idempotency": {}}
+
 
 def _delivery_state_path(repo_root: Path) -> Path:
     """Return the repository path for delivery-state persistence."""
@@ -25,16 +29,28 @@ def _delivery_state_path(repo_root: Path) -> Path:
 
 
 def load_delivery_state(repo_root: Path) -> dict[str, Any]:
-    """Load normalized delivery state from disk."""
+    """Load normalized delivery state from disk.
+
+    Returns a dict with keys ``version``, ``records``, ``idempotency``, and
+    optionally ``warnings`` when the on-disk state could not be loaded cleanly.
+    """
     path = _delivery_state_path(repo_root)
     if not path.exists():
-        return {"version": "1", "records": {}, "idempotency": {}}
+        return {**_EMPTY_STATE, "records": {}, "idempotency": {}}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        _logger.warning("Corrupt delivery state at %s; returning empty state", path)
+        return {**_EMPTY_STATE, "records": {}, "idempotency": {},
+                "warnings": ["delivery_state_corrupt: parse error; state reset to empty"]}
     except Exception:
-        return {"version": "1", "records": {}, "idempotency": {}}
+        _logger.error("Unexpected error reading delivery state at %s", path, exc_info=True)
+        return {**_EMPTY_STATE, "records": {}, "idempotency": {},
+                "warnings": ["delivery_state_unreadable: unexpected error; state reset to empty"]}
     if not isinstance(data, dict):
-        return {"version": "1", "records": {}, "idempotency": {}}
+        _logger.warning("Delivery state at %s is not a JSON object; returning empty state", path)
+        return {**_EMPTY_STATE, "records": {}, "idempotency": {},
+                "warnings": ["delivery_state_corrupt: expected JSON object; state reset to empty"]}
     records = data.get("records")
     idempotency = data.get("idempotency")
     if not isinstance(records, dict):
@@ -45,9 +61,10 @@ def load_delivery_state(repo_root: Path) -> dict[str, Any]:
 
 
 def _write_delivery_state(repo_root: Path, state: dict[str, Any]) -> Path:
-    """Persist the delivery-state file."""
+    """Persist the delivery-state file, stripping transient keys like warnings."""
     path = _delivery_state_path(repo_root)
-    write_text_file(path, json.dumps(state, ensure_ascii=False, indent=2))
+    persist = {k: v for k, v in state.items() if k != "warnings"}
+    write_text_file(path, json.dumps(persist, ensure_ascii=False, indent=2))
     return path
 
 
@@ -248,7 +265,7 @@ def messages_send_service(
         delivery_state = delivery_record_view(record, now, parse_iso=parse_iso)
 
     audit(auth, "message_send", {"thread_id": req.thread_id, "to": req.recipient})
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "idempotent_replay": False,
         "message": msg,
@@ -257,6 +274,9 @@ def messages_send_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
 
 
 def messages_ack_service(
@@ -310,7 +330,7 @@ def messages_ack_service(
         committed_files.append(ack_rel)
 
     audit(auth, "messages_ack", {"message_id": req.message_id, "status": req.status})
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "message_id": req.message_id,
         "ack": ack_row,
@@ -318,6 +338,9 @@ def messages_ack_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
 
 
 def messages_pending_service(
@@ -356,7 +379,10 @@ def messages_pending_service(
     rows.sort(key=lambda x: str(x.get("sent_at", "")), reverse=True)
     out = rows[:limit]
     audit(auth, "messages_pending", {"count": len(out), "recipient": recipient, "status": status})
-    return {"ok": True, "count": len(out), "summary": summary, "messages": out}
+    result: dict[str, Any] = {"ok": True, "count": len(out), "summary": summary, "messages": out}
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
 
 
 def messages_inbox_service(*, repo_root: Path, auth: AuthContext, recipient: str, limit: int, audit: Callable[[AuthContext, str, dict[str, Any]], None]) -> dict:
@@ -592,7 +618,7 @@ def replay_messages_service(
         committed_files.append(DELIVERY_STATE_REL)
 
     audit(auth, "messages_replay", {"message_id": req.message_id, "new_message_id": new_message_id, "reason": req.reason, "force": req.force})
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "message_id": req.message_id,
         "replayed_message_id": new_message_id,
@@ -600,3 +626,6 @@ def replay_messages_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if state.get("warnings"):
+        result["warnings"] = state["warnings"]
+    return result
