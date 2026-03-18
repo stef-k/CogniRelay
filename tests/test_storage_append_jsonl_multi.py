@@ -1,12 +1,13 @@
 """Tests for append_jsonl_multi atomic multi-file append with rollback."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.storage import append_jsonl_multi
+from app.storage import _AppendTarget, _rollback_appends, append_jsonl_multi
 
 
 class TestAppendJsonlMulti(unittest.TestCase):
@@ -76,7 +77,6 @@ class TestAppendJsonlMulti(unittest.TestCase):
             p1 = root / "a.jsonl"
             p2 = root / "b.jsonl"
 
-            # Write pre-existing content to p1
             existing_line = json.dumps({"old": True}) + "\n"
             p1.write_text(existing_line, encoding="utf-8")
 
@@ -91,7 +91,6 @@ class TestAppendJsonlMulti(unittest.TestCase):
                 with self.assertRaises(OSError):
                     append_jsonl_multi([p1, p2], {"new": True})
 
-            # p1 should still have only the original line
             content = p1.read_text(encoding="utf-8")
             self.assertEqual(content, existing_line)
 
@@ -131,7 +130,6 @@ class TestAppendJsonlMulti(unittest.TestCase):
 
     def test_empty_paths_is_noop(self) -> None:
         """Calling with an empty paths list does nothing."""
-        # Should not raise
         append_jsonl_multi([], {"key": "value"})
 
     def test_single_path_equivalent_to_append_jsonl(self) -> None:
@@ -161,6 +159,157 @@ class TestAppendJsonlMulti(unittest.TestCase):
                 self.assertEqual(len(lines), 2)
                 self.assertEqual(json.loads(lines[0])["n"], 1)
                 self.assertEqual(json.loads(lines[1])["n"], 2)
+
+    # --- Gap 1: rollback own failure path ---
+
+    def test_rollback_failure_logs_error_and_continues(self) -> None:
+        """When rollback itself fails, errors are logged and the original OSError still propagates."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p1 = root / "a.jsonl"
+            p2 = root / "b.jsonl"
+
+            # Pre-populate p1 so rollback will attempt truncation
+            existing = json.dumps({"old": True}) + "\n"
+            p1.write_text(existing, encoding="utf-8")
+
+            original_open = Path.open
+            call_count = {"rollback_open": 0}
+
+            def failing_open(self_path, *args, **kwargs):
+                # Fail when p2 is opened for append (trigger rollback)
+                if self_path == p2 and "a" in args:
+                    raise OSError("disk full")
+                # Fail when p1 is opened for rollback (r+b mode)
+                if self_path == p1 and "r+b" in args:
+                    call_count["rollback_open"] += 1
+                    raise OSError("permission denied during rollback")
+                return original_open(self_path, *args, **kwargs)
+
+            with patch.object(Path, "open", failing_open):
+                with self.assertLogs("root", level="ERROR") as cm:
+                    with self.assertRaises(OSError, msg="disk full"):
+                        append_jsonl_multi([p1, p2], {"new": True})
+
+            # Rollback was attempted
+            self.assertGreaterEqual(call_count["rollback_open"], 1)
+            # Rollback failure was logged at ERROR level
+            rollback_logs = [m for m in cm.output if "rollback failed" in m]
+            self.assertTrue(rollback_logs, "Expected 'rollback failed' error log")
+
+    # --- Gap 3: failure on last of 3 with pre-existing content ---
+
+    def test_failure_on_third_file_preserves_existing_content(self) -> None:
+        """When file 3 fails, files 1-2 with pre-existing content are restored."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p1 = root / "a.jsonl"
+            p2 = root / "b.jsonl"
+            p3 = root / "c.jsonl"
+
+            line1 = json.dumps({"file": 1}) + "\n"
+            line2 = json.dumps({"file": 2}) + "\n"
+            p1.write_text(line1, encoding="utf-8")
+            p2.write_text(line2, encoding="utf-8")
+
+            original_open = Path.open
+
+            def failing_open(self_path, *args, **kwargs):
+                if self_path == p3 and "a" in args:
+                    raise OSError("disk full")
+                return original_open(self_path, *args, **kwargs)
+
+            with patch.object(Path, "open", failing_open):
+                with self.assertRaises(OSError):
+                    append_jsonl_multi([p1, p2, p3], {"new": True})
+
+            self.assertEqual(p1.read_text(encoding="utf-8"), line1)
+            self.assertEqual(p2.read_text(encoding="utf-8"), line2)
+            self.assertFalse(p3.exists())
+
+    # --- Gap 5: duplicate/overlapping paths ---
+
+    def test_duplicate_paths_deduplicated(self) -> None:
+        """When paths resolve to the same file, the record is appended only once."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / "same.jsonl"
+
+            append_jsonl_multi([p, p, p], {"x": 1})
+
+            lines = p.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1, "Record should be appended only once for duplicate paths")
+
+    def test_duplicate_paths_via_symlink_deduplicated(self) -> None:
+        """Paths that resolve to the same file via symlinks are deduplicated."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real = root / "real.jsonl"
+            link = root / "link.jsonl"
+            # Create the real file so the symlink target exists for resolve()
+            real.touch()
+            os.symlink(real, link)
+
+            append_jsonl_multi([real, link], {"x": 1})
+
+            lines = real.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+
+    # --- Gap 8: subdirectory creation ---
+
+    def test_subdirectories_created_automatically(self) -> None:
+        """Parent directories are created for paths in subdirectories."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p1 = root / "sub" / "dir1" / "a.jsonl"
+            p2 = root / "sub" / "dir2" / "b.jsonl"
+
+            append_jsonl_multi([p1, p2], {"nested": True})
+
+            for p in [p1, p2]:
+                lines = p.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(json.loads(lines[0]), {"nested": True})
+
+
+class TestRollbackAppendsDirect(unittest.TestCase):
+    """Direct tests for _rollback_appends helper."""
+
+    def test_rollback_truncates_existing_and_deletes_new(self) -> None:
+        """Rollback truncates existing files and deletes new ones."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            existing = root / "existing.jsonl"
+            new_file = root / "new.jsonl"
+
+            original_content = '{"old":true}\n'
+            existing.write_text(original_content + '{"appended":true}\n', encoding="utf-8")
+            new_file.write_text('{"new":true}\n', encoding="utf-8")
+
+            targets = [
+                _AppendTarget(path=existing, prior_size=len(original_content.encode()), is_new=False),
+                _AppendTarget(path=new_file, prior_size=0, is_new=True),
+            ]
+
+            _rollback_appends(targets)
+
+            self.assertEqual(existing.read_text(encoding="utf-8"), original_content)
+            self.assertFalse(new_file.exists())
+
+    def test_rollback_logs_error_on_failure(self) -> None:
+        """Rollback logs at ERROR level when truncation fails."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / "nonexistent_for_truncate.jsonl"
+            # Don't create the file — truncation will fail
+
+            targets = [_AppendTarget(path=p, prior_size=0, is_new=False)]
+
+            with self.assertLogs("root", level="ERROR") as cm:
+                _rollback_appends(targets)
+
+            error_logs = [m for m in cm.output if "rollback failed" in m]
+            self.assertTrue(error_logs)
 
 
 if __name__ == "__main__":

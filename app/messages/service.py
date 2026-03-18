@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -205,8 +206,11 @@ def messages_send_service(
     rels = [inbox_path_rel, outbox_path_rel, thread_path_rel]
     paths = [safe_path(settings.repo_root, r) for r in rels]
     append_jsonl_multi(paths, msg)
-    if gm.commit_paths(paths, f"messages: send {msg['id']}"):
-        committed_files.extend(rels)
+    try:
+        if gm.commit_paths(paths, f"messages: send {msg['id']}"):
+            committed_files.extend(rels)
+    except Exception:
+        logging.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
 
     should_track_delivery = bool(req.idempotency_key or req.delivery.requires_ack)
     delivery_state = None
@@ -465,8 +469,11 @@ def relay_forward_service(
     rels = [relay_rel, inbox_rel, thread_rel]
     paths = [safe_path(settings.repo_root, r) for r in rels]
     append_jsonl_multi(paths, msg)
-    if gm.commit_paths(paths, f"relay: forward {msg['id']}"):
-        committed_files.extend(rels)
+    try:
+        if gm.commit_paths(paths, f"relay: forward {msg['id']}"):
+            committed_files.extend(rels)
+    except Exception:
+        logging.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
     audit(auth, "relay_forward", {"relay_id": req.relay_id, "to": req.target_recipient, "thread_id": req.thread_id})
     return {
         "ok": True,
@@ -540,8 +547,11 @@ def replay_messages_service(
     paths = [safe_path(settings.repo_root, r) for r in rels]
     append_jsonl_multi(paths, replay_msg)
     committed_files = []
-    if gm.commit_paths(paths, f"messages: replay {req.message_id}"):
-        committed_files.extend(rels)
+    try:
+        if gm.commit_paths(paths, f"messages: replay {req.message_id}"):
+            committed_files.extend(rels)
+    except Exception:
+        logging.error("commit_paths failed for %s — data on disk but not in git", req.message_id, exc_info=True)
 
     if req.requires_ack:
         ack_deadline = (now + timedelta(seconds=req.ack_timeout_seconds)).isoformat()
