@@ -10,6 +10,39 @@ from pathlib import Path
 from typing import Any
 
 
+def _try_fsync_directory(dir_path: Path) -> None:
+    """Best-effort directory fsync after a successful rename.
+
+    Logs a warning on failure rather than raising, because the atomic
+    rename has already succeeded at the call site.
+    """
+    try:
+        _fsync_directory(dir_path)
+    except OSError:
+        logging.warning(
+            "Directory fsync failed for %s — file is written but directory "
+            "entry may not be durable until the kernel flushes it to disk",
+            dir_path,
+            exc_info=True,
+        )
+
+
+def _fsync_directory(dir_path: Path) -> None:
+    """Fsync a directory to make its entries durable after a rename.
+
+    Required for rename durability on ext4; the risk window is larger on
+    ``data=writeback`` mounts. On Windows this is a no-op because the
+    Windows API does not support opening a directory as a file descriptor.
+    """
+    if os.name == "nt":
+        return
+    fd = os.open(str(dir_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 ALLOWED_TOP_LEVEL = {
     "journal",
     "essays",
@@ -58,8 +91,12 @@ def write_text_file(path: Path, content: str) -> None:
     """Write UTF-8 text content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
-    atomically renames. On failure the original file is untouched and
-    the temp file is cleaned up. Re-raises the original exception.
+    atomically renames and fsyncs the parent directory for rename
+    durability. On failure the original file is untouched and the temp
+    file is cleaned up. Re-raises the original exception.
+
+    Directory fsync failure is logged as a warning rather than raised
+    because the atomic rename has already succeeded at that point.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -86,14 +123,19 @@ def write_text_file(path: Path, content: str) -> None:
         except OSError:
             logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
+    _try_fsync_directory(path.parent)
 
 
 def write_bytes_file(path: Path, data: bytes) -> None:
     """Write binary content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
-    atomically renames. On failure the original file is untouched and
-    the temp file is cleaned up. Re-raises the original exception.
+    atomically renames and fsyncs the parent directory for rename
+    durability. On failure the original file is untouched and the temp
+    file is cleaned up. Re-raises the original exception.
+
+    Directory fsync failure is logged as a warning rather than raised
+    because the atomic rename has already succeeded at that point.
 
     Currently used for restoring raw snapshots during rollback paths
     in continuity services.
@@ -123,6 +165,7 @@ def write_bytes_file(path: Path, data: bytes) -> None:
         except OSError:
             logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
+    _try_fsync_directory(path.parent)
 
 
 def canonical_json(data: Any) -> str:
