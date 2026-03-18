@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -54,54 +55,70 @@ def read_text_file(path: Path) -> str:
 
 
 def write_text_file(path: Path, content: str) -> None:
-    """Write UTF-8 text content atomically using write-to-temp-then-rename."""
+    """Write UTF-8 text content atomically for new capsule writes (JSON).
+
+    Creates parent directories, writes to a temp file with fsync, then
+    atomically renames. On failure the original file is untouched and
+    the temp file is cleaned up. Re-raises the original exception.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent,
         prefix=f".{path.name}.",
         suffix=".tmp",
     )
+    fd_owned = True
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd_owned = False
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
     except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(tmp_path)
         except OSError:
-            pass
+            logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
 
 
 def write_bytes_file(path: Path, data: bytes) -> None:
-    """Write binary content atomically using write-to-temp-then-rename."""
+    """Write binary content atomically for restoring raw snapshots.
+
+    Creates parent directories, writes to a temp file with fsync, then
+    atomically renames. On failure the original file is untouched and
+    the temp file is cleaned up. Re-raises the original exception.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent,
         prefix=f".{path.name}.",
         suffix=".tmp",
     )
+    fd_owned = True
     try:
         with os.fdopen(fd, "wb") as f:
+            fd_owned = False
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
     except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(tmp_path)
         except OSError:
-            pass
+            logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
 
 

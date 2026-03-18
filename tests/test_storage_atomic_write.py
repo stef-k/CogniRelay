@@ -32,8 +32,8 @@ class TestAtomicWriteTextFile(unittest.TestCase):
         tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
         self.assertEqual(tmp_files, [])
 
-    def test_overwrite_preserves_atomicity(self):
-        """Overwriting an existing file should work correctly."""
+    def test_overwrite_produces_correct_content(self):
+        """Overwriting an existing file should produce the new content."""
         target = self.tmpdir / "file.json"
         write_text_file(target, "first")
         write_text_file(target, "second")
@@ -51,6 +51,19 @@ class TestAtomicWriteTextFile(unittest.TestCase):
         # Original content must survive
         self.assertEqual(target.read_text(encoding="utf-8"), "original")
         # No orphaned temp files
+        tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
+        self.assertEqual(tmp_files, [])
+
+    def test_replace_failure_cleans_temp_and_preserves_original(self):
+        """If os.replace fails after write+fsync, temp is cleaned and original is untouched."""
+        target = self.tmpdir / "file.json"
+        write_text_file(target, "original")
+
+        with patch("app.storage.os.replace", side_effect=OSError("cross-device")):
+            with self.assertRaises(OSError):
+                write_text_file(target, "new content")
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "original")
         tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
         self.assertEqual(tmp_files, [])
 
@@ -140,8 +153,8 @@ class TestAtomicWriteBytesFile(unittest.TestCase):
         tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
         self.assertEqual(tmp_files, [])
 
-    def test_overwrite_preserves_atomicity(self):
-        """Overwriting an existing file should work correctly."""
+    def test_overwrite_produces_correct_content(self):
+        """Overwriting an existing file should produce the new content."""
         target = self.tmpdir / "file.bin"
         write_bytes_file(target, b"first")
         write_bytes_file(target, b"second")
@@ -155,6 +168,42 @@ class TestAtomicWriteBytesFile(unittest.TestCase):
         with patch("app.storage.os.fdopen", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 write_bytes_file(target, b"should not appear")
+
+        self.assertEqual(target.read_bytes(), b"original")
+        tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
+        self.assertEqual(tmp_files, [])
+
+    def test_no_partial_file_on_simulated_crash(self):
+        """Simulate a crash during write — target must not contain partial content."""
+        target = self.tmpdir / "file.bin"
+        write_bytes_file(target, b"safe content")
+
+        original_fdopen = os.fdopen
+
+        def crashing_fdopen(fd, *args, **kwargs):
+            f = original_fdopen(fd, *args, **kwargs)
+            f.write(b"PARTIAL")
+            f.close()
+            raise OSError("simulated crash")
+
+        with patch("app.storage.os.fdopen", side_effect=crashing_fdopen):
+            with self.assertRaises(OSError):
+                write_bytes_file(target, b"new content")
+
+        # Original must be intact — never partially overwritten
+        self.assertEqual(target.read_bytes(), b"safe content")
+        # No orphaned temp files
+        tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
+        self.assertEqual(tmp_files, [])
+
+    def test_replace_failure_cleans_temp_and_preserves_original(self):
+        """If os.replace fails after write+fsync, temp is cleaned and original is untouched."""
+        target = self.tmpdir / "file.bin"
+        write_bytes_file(target, b"original")
+
+        with patch("app.storage.os.replace", side_effect=OSError("cross-device")):
+            with self.assertRaises(OSError):
+                write_bytes_file(target, b"new content")
 
         self.assertEqual(target.read_bytes(), b"original")
         tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]

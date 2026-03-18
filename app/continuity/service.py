@@ -419,8 +419,7 @@ def _persist_active_capsule(
         restore_error: Exception | None = None
         try:
             if old_bytes is None:
-                if path.exists():
-                    path.unlink()
+                path.unlink(missing_ok=True)
             else:
                 write_bytes_file(path, old_bytes)
         except Exception as restore_exc:
@@ -450,8 +449,7 @@ def _restore_failed_fallback_snapshot(path: Path, old_bytes: bytes | None, exc: 
     restore_error: Exception | None = None
     try:
         if old_bytes is None:
-            if path.exists():
-                path.unlink()
+            path.unlink(missing_ok=True)
         else:
             write_bytes_file(path, old_bytes)
     except Exception as restore_exc:
@@ -467,8 +465,7 @@ def _restore_failed_refresh_state(path: Path, old_bytes: bytes | None, exc: Exce
     restore_error: Exception | None = None
     try:
         if old_bytes is None:
-            if path.exists():
-                path.unlink()
+            path.unlink(missing_ok=True)
         else:
             write_bytes_file(path, old_bytes)
     except Exception as restore_exc:
@@ -621,19 +618,17 @@ def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_
 
 def _restore_failed_archive(active_path: Path, archive_path: Path, active_bytes: bytes) -> None:
     """Restore the active capsule and discard the archive envelope after a failed archive commit."""
-    restore_error: Exception | None = None
+    errors: list[str] = []
     try:
         write_bytes_file(active_path, active_bytes)
     except Exception as exc:
-        restore_error = exc
+        errors.append(f"restore active: {exc}")
     try:
-        if archive_path.exists():
-            archive_path.unlink()
+        archive_path.unlink(missing_ok=True)
     except Exception as exc:
-        if restore_error is None:
-            restore_error = exc
-    if restore_error is not None:
-        raise RuntimeError(f"Failed to restore archived continuity capsule: {restore_error}") from restore_error
+        errors.append(f"remove archive: {exc}")
+    if errors:
+        raise RuntimeError(f"Failed to restore archived continuity capsule: {'; '.join(errors)}")
 
 
 def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str], list[str]]:
