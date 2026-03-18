@@ -1,5 +1,6 @@
 """Tests for atomic write_text_file and write_bytes_file (issues #44, #51, #53)."""
 
+import logging
 import os
 import unittest
 from pathlib import Path
@@ -90,8 +91,8 @@ class TestAtomicWriteTextFile(unittest.TestCase):
         tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
         self.assertEqual(tmp_files, [])
 
-    def test_fsync_called_before_replace(self):
-        """Verify os.fsync is called before os.replace for durability."""
+    def test_fsync_ordering(self):
+        """Verify file fsync before replace, then directory fsync after."""
         target = self.tmpdir / "file.json"
         call_order = []
 
@@ -210,8 +211,8 @@ class TestAtomicWriteBytesFile(unittest.TestCase):
         tmp_files = [f for f in self.tmpdir.iterdir() if f.suffix == ".tmp"]
         self.assertEqual(tmp_files, [])
 
-    def test_fsync_called_before_replace(self):
-        """Verify os.fsync is called before os.replace for durability."""
+    def test_fsync_ordering(self):
+        """Verify file fsync before replace, then directory fsync after."""
         target = self.tmpdir / "file.bin"
         call_order = []
 
@@ -261,16 +262,18 @@ class TestDirectoryFsync(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def test_dir_fsync_called_after_replace_text(self):
-        """write_text_file fsyncs the parent directory after os.replace."""
-        target = self.tmpdir / "file.json"
+    # -- shared helper (I5: dedup text/bytes ordering tests) --------
+
+    def _assert_dir_fsync_order(self, write_fn, target, content):
+        """Verify: file fsync → replace → dir open → dir fsync → dir close."""
         call_order = []
+        dir_fd = None
 
         original_fsync = os.fsync
         original_replace = os.replace
         original_open = os.open
         original_close = os.close
-        dir_path_str = str(self.tmpdir)
+        dir_path_str = str(target.parent)
 
         def tracking_fsync(fd):
             call_order.append("fsync")
@@ -281,14 +284,15 @@ class TestDirectoryFsync(unittest.TestCase):
             return original_replace(src, dst)
 
         def tracking_open(path, flags, *args, **kwargs):
+            nonlocal dir_fd
             fd = original_open(path, flags, *args, **kwargs)
             if path == dir_path_str:
+                dir_fd = fd
                 call_order.append("open_dir")
             return fd
 
         def tracking_close(fd):
-            # Only track the close that follows open_dir
-            if "open_dir" in call_order and call_order[-1] in ("open_dir", "fsync"):
+            if fd == dir_fd:
                 call_order.append("close_dir")
             return original_close(fd)
 
@@ -296,53 +300,28 @@ class TestDirectoryFsync(unittest.TestCase):
              patch("app.storage.os.replace", side_effect=tracking_replace), \
              patch("app.storage.os.open", side_effect=tracking_open), \
              patch("app.storage.os.close", side_effect=tracking_close):
-            write_text_file(target, "durable content")
+            write_fn(target, content)
 
         self.assertEqual(
             call_order,
             ["fsync", "replace", "open_dir", "fsync", "close_dir"],
+        )
+
+    # -- ordering tests ---------------------------------------------
+
+    def test_dir_fsync_called_after_replace_text(self):
+        """write_text_file fsyncs the parent directory after os.replace."""
+        self._assert_dir_fsync_order(
+            write_text_file, self.tmpdir / "file.json", "durable content",
         )
 
     def test_dir_fsync_called_after_replace_bytes(self):
         """write_bytes_file fsyncs the parent directory after os.replace."""
-        target = self.tmpdir / "file.bin"
-        call_order = []
-
-        original_fsync = os.fsync
-        original_replace = os.replace
-        original_open = os.open
-        original_close = os.close
-        dir_path_str = str(self.tmpdir)
-
-        def tracking_fsync(fd):
-            call_order.append("fsync")
-            return original_fsync(fd)
-
-        def tracking_replace(src, dst):
-            call_order.append("replace")
-            return original_replace(src, dst)
-
-        def tracking_open(path, flags, *args, **kwargs):
-            fd = original_open(path, flags, *args, **kwargs)
-            if path == dir_path_str:
-                call_order.append("open_dir")
-            return fd
-
-        def tracking_close(fd):
-            if "open_dir" in call_order and call_order[-1] in ("open_dir", "fsync"):
-                call_order.append("close_dir")
-            return original_close(fd)
-
-        with patch("app.storage.os.fsync", side_effect=tracking_fsync), \
-             patch("app.storage.os.replace", side_effect=tracking_replace), \
-             patch("app.storage.os.open", side_effect=tracking_open), \
-             patch("app.storage.os.close", side_effect=tracking_close):
-            write_bytes_file(target, b"durable content")
-
-        self.assertEqual(
-            call_order,
-            ["fsync", "replace", "open_dir", "fsync", "close_dir"],
+        self._assert_dir_fsync_order(
+            write_bytes_file, self.tmpdir / "file.bin", b"durable content",
         )
+
+    # -- Windows skip -----------------------------------------------
 
     def test_dir_fsync_skipped_on_windows(self):
         """_fsync_directory is a no-op when os.name is 'nt'."""
@@ -351,11 +330,11 @@ class TestDirectoryFsync(unittest.TestCase):
             _fsync_directory(self.tmpdir)
             mock_open.assert_not_called()
 
-    def test_dir_fsync_failure_propagates(self):
-        """If directory fsync fails, the exception propagates but the file is written."""
-        target = self.tmpdir / "file.json"
-        original_fsync = os.fsync
+    # -- dir fsync failure is warning, not exception (C1/I1) --------
 
+    def _dir_fsync_failure_helper(self, write_fn, target, content, read_fn):
+        """Dir fsync failure logs a warning; file content survives."""
+        original_fsync = os.fsync
         call_count = 0
 
         def fsync_fail_on_dir(fd):
@@ -365,21 +344,83 @@ class TestDirectoryFsync(unittest.TestCase):
                 raise OSError("directory fsync failed")
             return original_fsync(fd)
 
-        with patch("app.storage.os.fsync", side_effect=fsync_fail_on_dir):
-            with self.assertRaises(OSError, msg="directory fsync failed"):
-                write_text_file(target, "content survives")
+        with self.assertLogs("root", level=logging.WARNING) as cm, \
+             patch("app.storage.os.fsync", side_effect=fsync_fail_on_dir):
+            write_fn(target, content)
 
-        # The file was already renamed before dir fsync, so content is present
-        self.assertEqual(target.read_text(encoding="utf-8"), "content survives")
+        self.assertTrue(
+            any("Directory fsync failed" in msg for msg in cm.output),
+            f"Expected warning about directory fsync failure, got: {cm.output}",
+        )
+        self.assertEqual(read_fn(target), content)
+
+    def test_dir_fsync_failure_warns_text(self):
+        """write_text_file: dir fsync failure logs warning, file content survives."""
+        self._dir_fsync_failure_helper(
+            write_text_file,
+            self.tmpdir / "file.json",
+            "content survives",
+            lambda p: p.read_text(encoding="utf-8"),
+        )
+
+    def test_dir_fsync_failure_warns_bytes(self):
+        """write_bytes_file: dir fsync failure logs warning, file content survives."""
+        self._dir_fsync_failure_helper(
+            write_bytes_file,
+            self.tmpdir / "file.bin",
+            b"content survives",
+            lambda p: p.read_bytes(),
+        )
+
+    # -- os.open failure on directory (L4) --------------------------
+
+    def test_dir_open_failure_warns_text(self):
+        """write_text_file: if os.open on dir fails, file survives and warning is logged."""
+        target = self.tmpdir / "file.json"
+        original_open = os.open
+
+        def open_fail_on_dir(path, flags, *args, **kwargs):
+            if os.O_DIRECTORY & flags:
+                raise PermissionError("dir open denied")
+            return original_open(path, flags, *args, **kwargs)
+
+        with self.assertLogs("root", level=logging.WARNING) as cm, \
+             patch("app.storage.os.open", side_effect=open_fail_on_dir):
+            write_text_file(target, "survives dir open fail")
+
+        self.assertTrue(
+            any("Directory fsync failed" in msg for msg in cm.output),
+        )
+        self.assertEqual(target.read_text(encoding="utf-8"), "survives dir open fail")
+
+    def test_dir_open_failure_warns_bytes(self):
+        """write_bytes_file: if os.open on dir fails, file survives and warning is logged."""
+        target = self.tmpdir / "file.bin"
+        original_open = os.open
+
+        def open_fail_on_dir(path, flags, *args, **kwargs):
+            if os.O_DIRECTORY & flags:
+                raise PermissionError("dir open denied")
+            return original_open(path, flags, *args, **kwargs)
+
+        with self.assertLogs("root", level=logging.WARNING) as cm, \
+             patch("app.storage.os.open", side_effect=open_fail_on_dir):
+            write_bytes_file(target, b"survives dir open fail")
+
+        self.assertTrue(
+            any("Directory fsync failed" in msg for msg in cm.output),
+        )
+        self.assertEqual(target.read_bytes(), b"survives dir open fail")
+
+    # -- fd cleanup on fsync failure --------------------------------
 
     def test_dir_fsync_fd_closed_on_fsync_failure(self):
         """If os.fsync fails on the directory fd, the fd is still closed."""
         dir_path = self.tmpdir
         closed_fds = []
+        dir_fd = None
         original_open = os.open
         original_close = os.close
-
-        dir_fd = None
 
         def tracking_open(path, flags, *args, **kwargs):
             nonlocal dir_fd
@@ -393,7 +434,6 @@ class TestDirectoryFsync(unittest.TestCase):
                 closed_fds.append(fd)
             return original_close(fd)
 
-        # Use _fsync_directory directly for a cleaner test
         with patch("app.storage.os.open", side_effect=tracking_open), \
              patch("app.storage.os.close", side_effect=tracking_close), \
              patch("app.storage.os.fsync", side_effect=OSError("dir fsync failed")):

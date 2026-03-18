@@ -11,15 +11,15 @@ from typing import Any
 
 
 def _fsync_directory(dir_path: Path) -> None:
-    """Fsync a directory to ensure its entries are durable (defense-in-depth).
+    """Fsync a directory to make its entries durable after a rename.
 
-    On non-Windows platforms, opens the directory read-only and calls
-    os.fsync(). On Windows this is a no-op because NTFS does not require
-    explicit directory fsync for rename durability.
+    Required for rename durability on ext4 (especially ``data=writeback``
+    mounts). On Windows this is a no-op because the Windows API does not
+    support opening a directory as a file descriptor.
     """
     if os.name == "nt":
         return
-    fd = os.open(str(dir_path), os.O_RDONLY)
+    fd = os.open(str(dir_path), os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
     finally:
@@ -74,9 +74,12 @@ def write_text_file(path: Path, content: str) -> None:
     """Write UTF-8 text content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
-    atomically renames and fsyncs the parent directory for full durability.
-    On failure the original file is untouched and the temp file is cleaned
-    up. Re-raises the original exception.
+    atomically renames and fsyncs the parent directory for rename
+    durability. On failure the original file is untouched and the temp
+    file is cleaned up. Re-raises the original exception.
+
+    Directory fsync failure is logged as a warning rather than raised
+    because the atomic rename has already succeeded at that point.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -92,7 +95,6 @@ def write_text_file(path: Path, content: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
-        _fsync_directory(path.parent)
     except BaseException:
         if fd_owned:
             try:
@@ -104,15 +106,27 @@ def write_text_file(path: Path, content: str) -> None:
         except OSError:
             logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
+    try:
+        _fsync_directory(path.parent)
+    except OSError:
+        logging.warning(
+            "Directory fsync failed for %s — file is written but directory "
+            "entry may not survive a power loss before kernel writeback",
+            path.parent,
+            exc_info=True,
+        )
 
 
 def write_bytes_file(path: Path, data: bytes) -> None:
     """Write binary content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
-    atomically renames and fsyncs the parent directory for full durability.
-    On failure the original file is untouched and the temp file is cleaned
-    up. Re-raises the original exception.
+    atomically renames and fsyncs the parent directory for rename
+    durability. On failure the original file is untouched and the temp
+    file is cleaned up. Re-raises the original exception.
+
+    Directory fsync failure is logged as a warning rather than raised
+    because the atomic rename has already succeeded at that point.
 
     Currently used for restoring raw snapshots during rollback paths
     in continuity services.
@@ -131,7 +145,6 @@ def write_bytes_file(path: Path, data: bytes) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
-        _fsync_directory(path.parent)
     except BaseException:
         if fd_owned:
             try:
@@ -143,6 +156,15 @@ def write_bytes_file(path: Path, data: bytes) -> None:
         except OSError:
             logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
+    try:
+        _fsync_directory(path.parent)
+    except OSError:
+        logging.warning(
+            "Directory fsync failed for %s — file is written but directory "
+            "entry may not survive a power loss before kernel writeback",
+            path.parent,
+            exc_info=True,
+        )
 
 
 def canonical_json(data: Any) -> str:
