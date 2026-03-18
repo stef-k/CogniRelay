@@ -30,6 +30,9 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub for partial-failure tests."""
 
+    def __init__(self, repo_root: Path | None = None) -> None:
+        self.repo_root = repo_root or Path(".")
+
     def commit_file(self, _path: Path, _message: str) -> bool:
         return True
 
@@ -48,16 +51,16 @@ class _FailingCommitGitManagerStub(_GitManagerStub):
 
 
 class _FailingCommitFileGitManagerStub(_GitManagerStub):
-    """Git manager stub where commit_file raises OSError."""
+    """Git manager stub where commit_paths raises OSError."""
 
-    def commit_file(self, _path: Path, _message: str) -> bool:
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
         raise OSError("git commit failed")
 
 
 class _FailingCommitFileCalledProcessErrorStub(_GitManagerStub):
-    """Git manager stub where commit_file raises CalledProcessError."""
+    """Git manager stub where commit_paths raises CalledProcessError."""
 
-    def commit_file(self, _path: Path, _message: str) -> bool:
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
         raise subprocess.CalledProcessError(1, "git commit")
 
 
@@ -145,11 +148,11 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
             self.assertFalse(outbox.exists(), "outbox should be deleted by rollback")
 
     def test_send_commit_paths_returns_false(self) -> None:
-        """When commit_paths returns False, committed_files is empty but data is on disk."""
+        """When commit_paths returns False, the response warns that durability degraded."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
-            gm = _FalseCommitGitManagerStub()
+            gm = _FalseCommitGitManagerStub(repo_root)
             req = MessageSendRequest(
                 thread_id="thread-1",
                 sender="peer-a",
@@ -172,13 +175,15 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
             ]
             for rel in msg_rels:
                 self.assertNotIn(rel, result["committed_files"])
+            self.assertIn("warnings", result)
+            self.assertTrue(any("messages_send_not_durable" in warning for warning in result["warnings"]))
 
     def test_send_commit_paths_exception_degrades_gracefully(self) -> None:
         """When commit_paths raises, the service still returns a result (data on disk)."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
-            gm = _FailingCommitGitManagerStub()
+            gm = _FailingCommitGitManagerStub(repo_root)
             req = MessageSendRequest(
                 thread_id="thread-1",
                 sender="peer-a",
@@ -197,6 +202,7 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
             self.assertTrue(inbox.exists())
             lines = inbox.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
+            self.assertTrue(any("messages_send_not_durable" in warning for warning in result["warnings"]))
 
 
 class TestRelayForwardPartialFailure(unittest.TestCase):
@@ -241,6 +247,7 @@ class TestRelayForwardPartialFailure(unittest.TestCase):
                 result = relay_forward(req=req, auth=_AuthStub())
 
             self.assertTrue(result["ok"])
+            self.assertTrue(any("relay_forward_not_durable" in warning for warning in result["warnings"]))
 
 
 class TestReplayPartialFailure(unittest.TestCase):
@@ -314,17 +321,18 @@ class TestReplayPartialFailure(unittest.TestCase):
                 result = replay_messages(req=req, auth=_AuthStub())
 
             self.assertTrue(result["ok"])
+            self.assertTrue(any("messages_replay_not_durable" in warning for warning in result["warnings"]))
 
 
-class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
-    """Verify that commit_file failures degrade gracefully instead of propagating as unhandled exceptions."""
+class TestCommitFailureGracefulDegradation(unittest.TestCase):
+    """Verify that grouped git commit failures degrade safely for message flows."""
 
-    def test_send_commit_file_exception_degrades_gracefully(self) -> None:
-        """When commit_file raises during delivery state commit, send still returns ok."""
+    def test_send_delivery_tracking_commit_exception_degrades_gracefully(self) -> None:
+        """Tracked send operations should preserve on-disk data and surface warnings."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
-            gm = _FailingCommitFileGitManagerStub()
+            gm = _FailingCommitGitManagerStub(repo_root)
             req = MessageSendRequest(
                 thread_id="thread-1",
                 sender="peer-a",
@@ -338,13 +346,10 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
                 result = messages_send(req=req, auth=_AuthStub())
 
             self.assertTrue(result["ok"])
-            self.assertNotIn(
-                "messages/state/delivery_index.json",
-                result["committed_files"],
-            )
-            # Delivery state file should still exist on disk
+            self.assertEqual(result["committed_files"], [])
             state_path = repo_root / "messages" / "state" / "delivery_index.json"
             self.assertTrue(state_path.exists())
+            self.assertTrue(any("messages_send_not_durable" in warning for warning in result["warnings"]))
 
     def _seed_pending_ack(self, repo_root: Path) -> str:
         """Create a pending_ack delivery record and return its message_id."""
@@ -387,12 +392,12 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
         )
         return "msg_pending"
 
-    def test_ack_commit_file_exception_degrades_gracefully(self) -> None:
-        """When commit_file raises during ack (both delivery state and ack log commits), service still returns ok."""
+    def test_ack_commit_exception_degrades_gracefully(self) -> None:
+        """Ack writes should stay on disk and report warnings when git durability fails."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
-            gm = _FailingCommitFileGitManagerStub()
+            gm = _FailingCommitGitManagerStub(repo_root)
             msg_id = self._seed_pending_ack(repo_root)
             req = MessageAckRequest(message_id=msg_id, status="accepted")
 
@@ -406,6 +411,7 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
             self.assertTrue(state_path.exists())
             ack_path = repo_root / "messages" / "acks" / f"{msg_id}.jsonl"
             self.assertTrue(ack_path.exists())
+            self.assertTrue(any("messages_ack_not_durable" in warning for warning in result["warnings"]))
 
     def _seed_dead_letter(self, repo_root: Path) -> str:
         """Create a dead-letter delivery record and return its message_id."""
@@ -448,12 +454,12 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
         )
         return "msg_dead"
 
-    def test_replay_commit_file_exception_degrades_gracefully(self) -> None:
-        """When commit_file raises during replay delivery state commit, service still returns ok."""
+    def test_replay_commit_exception_degrades_gracefully(self) -> None:
+        """Replay should preserve on-disk state and warn when the grouped commit fails."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
-            gm = _FailingCommitFileGitManagerStub()
+            gm = _FailingCommitGitManagerStub(repo_root)
             msg_id = self._seed_dead_letter(repo_root)
             req = MessageReplayRequest(message_id=msg_id)
 
@@ -461,21 +467,61 @@ class TestCommitFileFailureGracefulDegradation(unittest.TestCase):
                 result = replay_messages(req=req, auth=_AuthStub())
 
             self.assertTrue(result["ok"])
-            self.assertNotIn(
-                "messages/state/delivery_index.json",
-                result["committed_files"],
+            self.assertEqual(result["committed_files"], [])
+            self.assertTrue(any("messages_replay_not_durable" in warning for warning in result["warnings"]))
+
+    def test_send_rolls_back_message_files_when_state_write_fails(self) -> None:
+        """Tracked send should restore message files if writing delivery state fails."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            req = MessageSendRequest(
+                thread_id="thread-1",
+                sender="peer-a",
+                recipient="peer-b",
+                subject="hello",
+                body_md="content",
+                idempotency_key="idem-1",
             )
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with patch("app.messages.service._write_delivery_state", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        messages_send(req=req, auth=_AuthStub())
+
+            self.assertFalse((repo_root / "messages" / "inbox" / "peer-b.jsonl").exists())
+            self.assertFalse((repo_root / "messages" / "outbox" / "peer-a.jsonl").exists())
+            self.assertFalse((repo_root / "messages" / "threads" / "thread-1.jsonl").exists())
+
+    def test_ack_rolls_back_state_when_ack_append_fails(self) -> None:
+        """Ack should restore delivery state if the ack log append fails mid-operation."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            msg_id = self._seed_pending_ack(repo_root)
+            original_state = (repo_root / "messages" / "state" / "delivery_index.json").read_text(encoding="utf-8")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with patch("app.messages.service.append_jsonl", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        messages_ack(req=MessageAckRequest(message_id=msg_id, status="accepted"), auth=_AuthStub())
+
+            current_state = (repo_root / "messages" / "state" / "delivery_index.json").read_text(encoding="utf-8")
+            self.assertEqual(current_state, original_state)
+            self.assertFalse((repo_root / "messages" / "acks" / f"{msg_id}.jsonl").exists())
 
 
 class TestCommitFileCalledProcessErrorDegradation(unittest.TestCase):
     """Verify that CalledProcessError from commit_file also degrades gracefully."""
 
-    def test_send_commit_file_called_process_error_degrades(self) -> None:
-        """When commit_file raises CalledProcessError, send still returns ok."""
+    def test_send_commit_paths_called_process_error_degrades(self) -> None:
+        """When the grouped commit raises CalledProcessError, send still returns ok."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
-            gm = _FailingCommitFileCalledProcessErrorStub()
+            gm = _FailingCommitFileCalledProcessErrorStub(repo_root)
             req = MessageSendRequest(
                 thread_id="thread-1",
                 sender="peer-a",
@@ -489,12 +535,10 @@ class TestCommitFileCalledProcessErrorDegradation(unittest.TestCase):
                 result = messages_send(req=req, auth=_AuthStub())
 
             self.assertTrue(result["ok"])
-            self.assertNotIn(
-                "messages/state/delivery_index.json",
-                result["committed_files"],
-            )
+            self.assertEqual(result["committed_files"], [])
             state_path = repo_root / "messages" / "state" / "delivery_index.json"
             self.assertTrue(state_path.exists())
+            self.assertTrue(any("messages_send_not_durable" in warning for warning in result["warnings"]))
 
 
 if __name__ == "__main__":

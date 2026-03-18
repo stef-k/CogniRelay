@@ -21,8 +21,9 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub that records committed paths."""
 
-    def __init__(self) -> None:
+    def __init__(self, repo_root: Path | None = None) -> None:
         """Initialize the commit recorder."""
+        self.repo_root = repo_root or Path(".")
         self.committed: list[str] = []
 
     def commit_file(self, path: Path, _message: str) -> bool:

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from app.config import Settings
 from app.indexer import rebuild_index
 from app.main import (
@@ -40,13 +41,27 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub that pretends every file commit succeeds."""
 
+    def __init__(self, repo_root: Path | None = None) -> None:
+        self.repo_root = repo_root or Path(".")
+
     def commit_file(self, _path: Path, _message: str) -> bool:
         """Report a successful commit without touching git."""
+        return True
+
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
+        """Report a successful multi-path commit without touching git."""
         return True
 
     def latest_commit(self) -> str:
         """Return a stable fake commit hash."""
         return "test-sha"
+
+
+class _FailingCommitPathsGitManagerStub(_GitManagerStub):
+    """Git manager stub that fails grouped commits."""
+
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
+        raise OSError("git commit failed")
 
 
 class _FakeHTTPResponse:
@@ -118,6 +133,21 @@ class TestPeersAndSnapshots(unittest.TestCase):
 
             self.assertTrue(out["ok"])
             self.assertEqual(out["manifest"]["service"], "peer-beta")
+
+    def test_peer_register_rolls_back_on_commit_failure(self) -> None:
+        """Peer registration should restore both files when the grouped commit fails."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _FailingCommitPathsGitManagerStub(repo_root)
+            req = PeerRegisterRequest(peer_id="peer-beta", base_url="https://peer-beta.example.net")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException):
+                    peers_register(req=req, auth=_AuthStub())
+
+            self.assertFalse((repo_root / "peers" / "registry.json").exists())
+            self.assertFalse((repo_root / "peers" / "trust_policies.json").exists())
 
     def test_context_snapshot_working_tree_create_and_get(self) -> None:
         """Working-tree snapshots should be creatable and reloadable by id."""

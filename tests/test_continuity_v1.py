@@ -37,8 +37,9 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub that records committed files for continuity tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, repo_root: Path | None = None) -> None:
         """Initialize the fake commit ledger."""
+        self.repo_root = repo_root or Path(".")
         self.commits: list[tuple[str, str]] = []
 
     def latest_commit(self) -> str:

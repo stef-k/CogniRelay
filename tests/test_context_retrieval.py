@@ -30,6 +30,9 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub for retrieval tests."""
 
+    def __init__(self, repo_root: Path | None = None) -> None:
+        self.repo_root = repo_root or Path(".")
+
     def latest_commit(self) -> str:
         """Return a stable fake commit hash."""
         return "test-sha"

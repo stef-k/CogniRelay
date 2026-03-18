@@ -53,6 +53,9 @@ class _AuthStub:
 class _GitManagerStub:
     """Git manager stub that pretends every file commit succeeds."""
 
+    def __init__(self, repo_root: Path | None = None) -> None:
+        self.repo_root = repo_root or Path(".")
+
     def commit_file(self, _path: Path, _message: str) -> bool:
         """Report a successful single-file commit without touching git."""
         return True
@@ -64,6 +67,20 @@ class _GitManagerStub:
     def latest_commit(self) -> str:
         """Return a stable fake commit hash."""
         return "test-sha"
+
+
+class _FailingCommitPathsGitManagerStub(_GitManagerStub):
+    """Git manager stub that fails grouped commits."""
+
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
+        raise OSError("git commit failed")
+
+
+class _FailingCommitFileGitManagerStub(_GitManagerStub):
+    """Git manager stub that fails single-file commits."""
+
+    def commit_file(self, _path: Path, _message: str) -> bool:
+        raise OSError("git commit failed")
 
 
 class _FakeHTTPResponse:
@@ -449,6 +466,52 @@ class TestP2SecurityReplication(unittest.TestCase):
             self.assertTrue(pushed["ok"])
             self.assertFalse(pushed["dry_run"])
             self.assertTrue(pushed["remote"]["ok"])
+
+    def test_replication_pull_rolls_back_on_commit_failure(self) -> None:
+        """Replication pull should restore files when the grouped durability step fails."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _FailingCommitPathsGitManagerStub(repo_root)
+
+            content = "# identity\n"
+            file_row = ReplicationFilePayload(path="memory/core/identity.md", content=content, sha256=hashlib.sha256(content.encode("utf-8")).hexdigest())
+            with patch("app.main._services", return_value=(settings, gm)):
+                with self.assertRaises(HTTPException):
+                    replication_pull(
+                        req=ReplicationPullRequest(source_peer="peer-remote", files=[file_row]),
+                        auth=_AuthStub(),
+                    )
+
+            self.assertFalse((repo_root / "memory" / "core" / "identity.md").exists())
+            self.assertFalse((repo_root / "peers" / "replication_state.json").exists())
+            self.assertFalse((repo_root / "peers" / "replication_tombstones.json").exists())
+
+    def test_replication_push_warns_when_state_not_durable(self) -> None:
+        """Replication push should degrade safely after remote success if local state commit fails."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _FailingCommitFileGitManagerStub(repo_root)
+
+            (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory" / "core" / "identity.md").write_text("# identity\n", encoding="utf-8")
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with patch("app.maintenance.service.urlopen", return_value=_FakeHTTPResponse({"ok": True, "accepted": True})):
+                    pushed = replication_push(
+                        req=ReplicationPushRequest(
+                            dry_run=False,
+                            base_url="https://peer-remote.example.net",
+                            include_prefixes=["memory"],
+                            target_token="tok",
+                        ),
+                        auth=_AuthStub(),
+                    )
+
+            self.assertTrue(pushed["ok"])
+            self.assertEqual(pushed["committed_files"], [])
+            self.assertTrue(any("replication_push_not_durable" in warning for warning in pushed["warnings"]))
 
     def test_replication_push_resolves_target_base_from_peer_registry(self) -> None:
         """Replication push should resolve the target base URL from peer registry metadata."""

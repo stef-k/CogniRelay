@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -14,8 +13,9 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
+from app.git_safety import try_commit_paths
 from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
-from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_text_file
+from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_bytes_file, write_text_file
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
@@ -85,6 +85,36 @@ def _write_delivery_state(repo_root: Path, state: dict[str, Any]) -> Path:
     persist = {k: state[k] for k in ("version", "records", "idempotency") if k in state}
     write_text_file(path, json.dumps(persist, ensure_ascii=False, indent=2))
     return path
+
+
+def _capture_rollback_plan(paths: list[Path]) -> list[tuple[Path, bytes | None]]:
+    """Capture prior bytes for a set of paths in first-seen order."""
+    rollback_plan: list[tuple[Path, bytes | None]] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        rollback_plan.append((path, path.read_bytes() if path.exists() else None))
+    return rollback_plan
+
+
+def _restore_rollback_plan(rollback_plan: list[tuple[Path, bytes | None]]) -> None:
+    """Best-effort restore for multi-step message mutations before commit."""
+    for path, old_bytes in rollback_plan:
+        try:
+            if old_bytes is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_bytes_file(path, old_bytes)
+        except Exception:  # noqa: BLE001 - preserve the original write failure
+            _logger.exception("Failed to restore %s during message rollback", path)
+
+
+def _non_durable_warning(operation: str) -> str:
+    """Return the standard warning for degrade-safe git durability failures."""
+    return f"{operation}_not_durable: data is on disk but not durably committed to git"
 
 
 def effective_delivery_status(record: dict[str, Any], now: datetime, *, parse_iso: Callable[[str | None], datetime | None]) -> str:
@@ -245,15 +275,10 @@ def messages_send_service(
 
     rels = [inbox_path_rel, outbox_path_rel, thread_path_rel]
     paths = [safe_path(settings.repo_root, r) for r in rels]
-    append_jsonl_multi(paths, msg)
-    try:
-        if gm.commit_paths(paths, f"messages: send {msg['id']}"):
-            committed_files.extend(rels)
-    except (OSError, subprocess.CalledProcessError):
-        _logger.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
 
     should_track_delivery = bool(req.idempotency_key or req.delivery.requires_ack)
     delivery_state = None
+    warnings: list[str] = list(state.get("warnings") or [])
     if should_track_delivery:
         ack_deadline = None
         if req.delivery.requires_ack:
@@ -281,13 +306,25 @@ def messages_send_service(
         if req.idempotency_key:
             key = _idempotency_scope_key(req.sender, req.recipient, req.idempotency_key)
             state.setdefault("idempotency", {})[key] = msg["id"]
-        state_path = _write_delivery_state(settings.repo_root, state)
-        try:
-            if gm.commit_file(state_path, f"messages: update delivery state {msg['id']}"):
-                committed_files.append(DELIVERY_STATE_REL)
-        except (OSError, subprocess.CalledProcessError):
-            _logger.error("commit_file failed for delivery state %s — data on disk but not in git", msg["id"], exc_info=True)
         delivery_state = delivery_record_view(record, now, parse_iso=parse_iso)
+
+    commit_paths = list(paths)
+    commit_rels = list(rels)
+    rollback_plan = _capture_rollback_plan(paths + ([_delivery_state_path(settings.repo_root)] if should_track_delivery else []))
+    try:
+        append_jsonl_multi(paths, msg)
+        if should_track_delivery:
+            state_path = _write_delivery_state(settings.repo_root, state)
+            commit_paths.append(state_path)
+            commit_rels.append(DELIVERY_STATE_REL)
+    except Exception:
+        _restore_rollback_plan(rollback_plan)
+        raise
+
+    if try_commit_paths(paths=commit_paths, gm=gm, commit_message=f"messages: send {msg['id']}"):
+        committed_files.extend(commit_rels)
+    else:
+        warnings.append(_non_durable_warning("messages_send"))
 
     audit(auth, "message_send", {"thread_id": req.thread_id, "to": req.recipient})
     result: dict[str, Any] = {
@@ -299,8 +336,8 @@ def messages_send_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
-    if state.get("warnings"):
-        result["warnings"] = state["warnings"]
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 
@@ -343,22 +380,22 @@ def messages_ack_service(
         timeout = int(record.get("ack_timeout_seconds") or 300)
         record["ack_deadline"] = (now + timedelta(seconds=timeout)).isoformat()
 
-    state_path = _write_delivery_state(repo_root, state)
     committed_files = []
-    try:
-        if gm.commit_file(state_path, f"messages: ack {req.message_id}"):
-            committed_files.append(DELIVERY_STATE_REL)
-    except (OSError, subprocess.CalledProcessError):
-        _logger.error("commit_file failed for delivery state ack %s — data on disk but not in git", req.message_id, exc_info=True)
-
     ack_rel = f"messages/acks/{req.message_id}.jsonl"
+    state_path = _delivery_state_path(repo_root)
     ack_path = safe_path(repo_root, ack_rel)
-    append_jsonl(ack_path, ack_row)
+    rollback_plan = _capture_rollback_plan([state_path, ack_path])
     try:
-        if gm.commit_file(ack_path, f"messages: ack log {req.message_id}"):
-            committed_files.append(ack_rel)
-    except (OSError, subprocess.CalledProcessError):
-        _logger.error("commit_file failed for ack log %s — data on disk but not in git", req.message_id, exc_info=True)
+        _write_delivery_state(repo_root, state)
+        append_jsonl(ack_path, ack_row)
+    except Exception:
+        _restore_rollback_plan(rollback_plan)
+        raise
+    warnings: list[str] = list(state.get("warnings") or [])
+    if try_commit_paths(paths=[state_path, ack_path], gm=gm, commit_message=f"messages: ack {req.message_id}"):
+        committed_files.extend([DELIVERY_STATE_REL, ack_rel])
+    else:
+        warnings.append(_non_durable_warning("messages_ack"))
 
     audit(auth, "messages_ack", {"message_id": req.message_id, "status": req.status})
     result: dict[str, Any] = {
@@ -369,8 +406,8 @@ def messages_ack_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
-    if state.get("warnings"):
-        result["warnings"] = state["warnings"]
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 
@@ -689,19 +726,22 @@ def relay_forward_service(
     rels = [relay_rel, inbox_rel, thread_rel]
     paths = [safe_path(settings.repo_root, r) for r in rels]
     append_jsonl_multi(paths, msg)
-    try:
-        if gm.commit_paths(paths, f"relay: forward {msg['id']}"):
-            committed_files.extend(rels)
-    except (OSError, subprocess.CalledProcessError):
-        _logger.error("commit_paths failed for %s — data on disk but not in git", msg["id"], exc_info=True)
+    warnings: list[str] = []
+    if try_commit_paths(paths=paths, gm=gm, commit_message=f"relay: forward {msg['id']}"):
+        committed_files.extend(rels)
+    else:
+        warnings.append(_non_durable_warning("relay_forward"))
     audit(auth, "relay_forward", {"relay_id": req.relay_id, "to": req.target_recipient, "thread_id": req.thread_id})
-    return {
+    result = {
         "ok": True,
         "message": msg,
         "signature_verification": signature_verification,
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def replay_messages_service(
@@ -765,13 +805,7 @@ def replay_messages_service(
     for rel in rels:
         auth.require_write_path(rel)
     paths = [safe_path(settings.repo_root, r) for r in rels]
-    append_jsonl_multi(paths, replay_msg)
     committed_files = []
-    try:
-        if gm.commit_paths(paths, f"messages: replay {req.message_id}"):
-            committed_files.extend(rels)
-    except (OSError, subprocess.CalledProcessError):
-        _logger.error("commit_paths failed for %s — data on disk but not in git", req.message_id, exc_info=True)
 
     if req.requires_ack:
         ack_deadline = (now + timedelta(seconds=req.ack_timeout_seconds)).isoformat()
@@ -806,12 +840,25 @@ def replay_messages_service(
     if req.reason:
         record["replay_reason"] = req.reason
 
-    state_path = _write_delivery_state(settings.repo_root, state)
+    state_path = _delivery_state_path(settings.repo_root)
+    rollback_plan = _capture_rollback_plan(paths + [state_path])
     try:
-        if gm.commit_file(state_path, f"messages: replay {req.message_id} -> {new_message_id}"):
-            committed_files.append(DELIVERY_STATE_REL)
-    except (OSError, subprocess.CalledProcessError):
-        _logger.error("commit_file failed for delivery state during replay %s — data on disk but not in git", req.message_id, exc_info=True)
+        append_jsonl_multi(paths, replay_msg)
+        _write_delivery_state(settings.repo_root, state)
+    except Exception:
+        _restore_rollback_plan(rollback_plan)
+        raise
+    warnings: list[str] = list(state.get("warnings") or [])
+    commit_paths = paths + [state_path]
+    commit_rels = rels + [DELIVERY_STATE_REL]
+    if try_commit_paths(
+        paths=commit_paths,
+        gm=gm,
+        commit_message=f"messages: replay {req.message_id} -> {new_message_id}",
+    ):
+        committed_files.extend(commit_rels)
+    else:
+        warnings.append(_non_durable_warning("messages_replay"))
 
     audit(auth, "messages_replay", {"message_id": req.message_id, "new_message_id": new_message_id, "reason": req.reason, "force": req.force})
     result: dict[str, Any] = {
@@ -822,6 +869,6 @@ def replay_messages_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
-    if state.get("warnings"):
-        result["warnings"] = state["warnings"]
+    if warnings:
+        result["warnings"] = warnings
     return result
