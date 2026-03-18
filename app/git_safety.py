@@ -33,7 +33,8 @@ class GitCommitter(Protocol):
 def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
     """Best-effort unstage paths from the git index after a failed commit."""
     try:
-        rels = [str(p.relative_to(gm.repo_root)) for p in paths]
+        resolved_root = gm.repo_root.resolve()
+        rels = [str(p.resolve().relative_to(resolved_root)) for p in paths]
         subprocess.run(
             ["git", "reset", "HEAD", "--", *rels],
             cwd=gm.repo_root,

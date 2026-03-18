@@ -192,9 +192,25 @@ class TestCommitPathsScoped(unittest.TestCase):
         inside = self.repo / "ok.txt"
         inside.write_text("ok")
         outside = Path("/tmp/not-in-repo/file.txt")
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(ValueError):
             self.gm.commit_paths([inside, outside], "should fail")
-        self.assertIn(str(outside), str(ctx.exception))
+
+        # Verify no partial git side effects — nothing should be staged.
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(staged.stdout.strip(), "")
+
+    def test_commit_paths_rejects_traversal_via_dotdot(self) -> None:
+        """Paths that escape via .. must be rejected even if they textually start with repo root."""
+        sneaky = self.repo / "subdir" / ".." / ".." / "etc" / "passwd"
+        with self.assertRaises(ValueError) as ctx:
+            self.gm.commit_paths([sneaky], "should fail")
+        self.assertIn("not under repo root", str(ctx.exception))
 
 
 if __name__ == "__main__":
