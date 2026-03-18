@@ -5,11 +5,18 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from app.git_safety import safe_commit_new_file, safe_commit_updated_file, try_commit_file
+from app.git_safety import safe_commit_new_file, safe_commit_paths, safe_commit_updated_file, try_commit_file
+
+
+def _make_gm(tmp_dir: Path) -> MagicMock:
+    """Create a MagicMock GitCommitter with a real repo_root."""
+    gm = MagicMock()
+    gm.repo_root = tmp_dir
+    return gm
 
 
 class TestSafeCommitNewFile(unittest.TestCase):
@@ -18,7 +25,7 @@ class TestSafeCommitNewFile(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        self.gm = MagicMock()
+        self.gm = _make_gm(self.dir)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -75,6 +82,23 @@ class TestSafeCommitNewFile(unittest.TestCase):
                 error_detail="commit failed",
             )
 
+    @patch("app.git_safety.subprocess.run")
+    def test_failure_unstages_from_index(self, mock_run):
+        """On commit failure, git reset HEAD is called to unstage the file."""
+        path = self.dir / "staged.json"
+        path.write_text("{}")
+        self.gm.commit_file.side_effect = RuntimeError("git broke")
+        with self.assertRaises(HTTPException):
+            safe_commit_new_file(
+                path=path, gm=self.gm,
+                commit_message="test commit",
+                error_detail="commit failed",
+            )
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        cmd = call_args[0][0]
+        self.assertEqual(cmd[:4], ["git", "reset", "HEAD", "--"])
+
 
 class TestSafeCommitUpdatedFile(unittest.TestCase):
     """Tests for safe_commit_updated_file."""
@@ -82,7 +106,7 @@ class TestSafeCommitUpdatedFile(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        self.gm = MagicMock()
+        self.gm = _make_gm(self.dir)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -147,6 +171,73 @@ class TestSafeCommitUpdatedFile(unittest.TestCase):
         self.assertTrue(path.exists(), "Deleted file should be restored on failure")
         self.assertEqual(path.read_bytes(), old_content)
 
+    def test_rollback_failure_still_raises_original_error(self):
+        """When both commit and rollback fail, the original HTTPException is raised and rollback is logged."""
+        path = self.dir / "readonly.json"
+        path.write_text('{"new": true}')
+        self.gm.commit_file.side_effect = RuntimeError("git broke")
+        # Make the path a directory so write_bytes fails during rollback
+        path.unlink()
+        path.mkdir()
+        with self.assertLogs("app.git_safety", level="ERROR") as cm:
+            with self.assertRaises(HTTPException) as ctx:
+                safe_commit_updated_file(
+                    path=path, gm=self.gm,
+                    commit_message="update commit",
+                    error_detail="original error",
+                    old_bytes=b"old content",
+                )
+        self.assertEqual(ctx.exception.status_code, 500)
+        self.assertIn("original error", ctx.exception.detail)
+        self.assertTrue(any("Rollback (restore) failed" in msg for msg in cm.output))
+        path.rmdir()
+
+
+class TestSafeCommitPaths(unittest.TestCase):
+    """Tests for safe_commit_paths."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.gm = _make_gm(self.dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_success_commits_all_paths(self):
+        """On success, commit_paths is called with all paths."""
+        path_a = self.dir / "a.json"
+        path_b = self.dir / "b.json"
+        path_a.write_text("{}")
+        path_b.write_text("{}")
+        self.gm.commit_paths.return_value = True
+        result = safe_commit_paths(
+            rollback_plan=[(path_a, None), (path_b, b"old_b")],
+            gm=self.gm,
+            commit_message="atomic commit",
+            error_detail="should not see this",
+        )
+        self.assertTrue(result)
+        self.gm.commit_paths.assert_called_once_with([path_a, path_b], "atomic commit")
+
+    def test_failure_rolls_back_all_files(self):
+        """On failure, all files are restored according to rollback plan."""
+        path_a = self.dir / "a.json"
+        path_b = self.dir / "b.json"
+        path_a.write_text('{"new_a": true}')
+        path_b.write_text('{"new_b": true}')
+        old_b = b'{"old_b": true}'
+        self.gm.commit_paths.side_effect = RuntimeError("git broke")
+        with self.assertRaises(HTTPException):
+            safe_commit_paths(
+                rollback_plan=[(path_a, None), (path_b, old_b)],
+                gm=self.gm,
+                commit_message="atomic commit",
+                error_detail="commit failed",
+            )
+        self.assertFalse(path_a.exists(), "New file should be deleted on failure")
+        self.assertEqual(path_b.read_bytes(), old_b, "Updated file should be restored")
+
 
 class TestTryCommitFile(unittest.TestCase):
     """Tests for try_commit_file."""
@@ -180,6 +271,16 @@ class TestTryCommitFile(unittest.TestCase):
             commit_message="index update",
         )
         self.assertFalse(result)
+
+    def test_failure_logs_error(self):
+        """On failure, the error is logged."""
+        self.gm.commit_file.side_effect = RuntimeError("git broke")
+        with self.assertLogs("app.git_safety", level="ERROR") as cm:
+            try_commit_file(
+                path=Path("/fake/path.json"), gm=self.gm,
+                commit_message="index update",
+            )
+        self.assertTrue(any("Git commit failed (non-fatal)" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":

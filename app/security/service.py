@@ -22,7 +22,7 @@ from app.models import (
     SecurityTokenRevokeRequest,
     SecurityTokenRotateRequest,
 )
-from app.git_safety import safe_commit_updated_file
+from app.git_safety import safe_commit_updated_file, try_commit_file
 from app.storage import safe_path, write_text_file
 
 TOKEN_CONFIG_REL = "config/peer_tokens.json"
@@ -686,6 +686,8 @@ def security_keys_rotate_service(
     }
 
     storage_mode = "external" if settings.use_external_key_store else "repo"
+    # Prepare external key store payload but defer write until after repo commit
+    ext_key_store_payload: dict[str, Any] | None = None
     if settings.use_external_key_store:
         key_store = _load_external_key_store(settings)
         ext_keys = key_store.setdefault("keys", {})
@@ -693,7 +695,7 @@ def security_keys_rotate_service(
             ext_keys = {}
             key_store["keys"] = ext_keys
         ext_keys[key_id] = {"secret": secret, "updated_at": now}
-        _write_external_key_store(settings, key_store)
+        ext_key_store_payload = key_store
         row["secret_ref"] = f"external:{key_id}"
     else:
         row["secret"] = secret
@@ -711,6 +713,9 @@ def security_keys_rotate_service(
         error_detail=f"Failed to commit key rotation for {key_id}",
         old_bytes=keys_old_bytes,
     )
+    # Write external key store only after repo commit succeeds
+    if ext_key_store_payload is not None:
+        _write_external_key_store(settings, ext_key_store_payload)
     audit(auth, "security_keys_rotate", {"key_id": key_id, "activate": req.activate, "retire_previous": req.retire_previous, "storage_mode": storage_mode})
 
     key_view = {
@@ -787,6 +792,7 @@ def verify_signed_payload_service(
     signature_valid = hmac.compare_digest(expected_signature, signature.strip())
     replay_detected = False
     nonce_consumed = False
+    warnings: list[str] = []
     reason = "ok"
     committed_files: list[str] = []
 
@@ -804,23 +810,22 @@ def verify_signed_payload_service(
             reason = "replay_detected"
         else:
             entries[key] = {"key_id": key_id, "nonce": nonce, "first_seen_at": now.isoformat(), "expires_at": expires_at}
-            nonce_file_path = safe_path(settings.repo_root, NONCE_INDEX_REL)
-            nonce_old_bytes = nonce_file_path.read_bytes() if nonce_file_path.exists() else None
             nonce_path = _write_nonce_index(settings.repo_root, nonce_payload)
-            if safe_commit_updated_file(
+            nonce_committed = try_commit_file(
                 path=nonce_path, gm=gm,
                 commit_message=f"messages: consume nonce {key_id}:{nonce}",
-                error_detail=f"Failed to commit nonce consumption for {key_id}:{nonce}",
-                old_bytes=nonce_old_bytes,
-            ):
+            )
+            if nonce_committed:
                 committed_files.append(NONCE_INDEX_REL)
+            else:
+                warnings.append("nonce_commit_failed: nonce consumed on disk but not committed to git")
             nonce_consumed = True
 
     valid = reason == "ok"
     if not valid:
         record_verification_failure(settings, auth, reason)
 
-    detail = {
+    detail: dict[str, Any] = {
         "valid": valid,
         "reason": reason,
         "algorithm": algorithm,
@@ -835,6 +840,8 @@ def verify_signed_payload_service(
         "failure_count": verification_failure_count(settings, auth),
         "committed_files": committed_files,
     }
+    if warnings:
+        detail["warnings"] = warnings
     audit(auth, audit_event, detail)
     return detail
 
