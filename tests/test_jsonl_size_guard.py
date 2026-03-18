@@ -1,8 +1,8 @@
-"""Tests for JSONL file size guard to prevent OOM on large files (issue #75).
+"""Tests for JSONL file size guards on inbox, thread, ops, and audit readers.
 
-Verifies that messages_inbox_service, messages_thread_service, and
-_load_ops_runs return degraded responses when a JSONL file exceeds the
-configured size threshold, and that stat() failures are handled safely.
+Verifies that messages_inbox_service, messages_thread_service,
+_load_ops_runs, metrics_service, and _load_access_stats handle oversized
+or unreadable JSONL files without risking an unbounded read.
 """
 
 import json
@@ -23,6 +23,16 @@ def _noop_audit(*_args, **_kwargs):
     """No-op audit callable for service functions that require one."""
 
 
+class _AuditRecorder:
+    """Collect audit calls so tests can assert degraded paths are recorded."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, str, dict[str, object]]] = []
+
+    def __call__(self, auth, event: str, payload: dict[str, object]) -> None:
+        self.calls.append((auth, event, payload))
+
+
 def _make_large_jsonl(path: Path, target_bytes: int) -> None:
     """Write a JSONL file that exceeds the given byte threshold."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -37,8 +47,8 @@ def _stat_fails_on_target(target_path: Path, *, allow_calls: int = 2):
     """Return a replacement for Path.stat that raises OSError only for target_path.
 
     The code under test may call ``stat()`` multiple times on the target path
-    before the explicit size-guard call (e.g. via ``safe_path().resolve()`` +
-    ``path.exists()``).  We allow the first *allow_calls* calls to succeed,
+    before the explicit size-guard call (e.g. via internal path resolution
+    and ``path.exists()``). We allow the first *allow_calls* calls to succeed,
     then raise on the next one.
 
     Args:
@@ -174,6 +184,30 @@ class TestInboxSizeGuard(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["count"], 1)
 
+    def test_inbox_read_failure_returns_degraded(self) -> None:
+        """Inbox read I/O failures surface warnings and degraded state."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            inbox_dir = repo / "messages" / "inbox"
+            inbox_dir.mkdir(parents=True)
+            inbox_file = inbox_dir / "agent-a.jsonl"
+            inbox_file.write_text(json.dumps({"body": "hello"}) + "\n", encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=OSError("disk error")):
+                with self.assertLogs("app.messages.service", level=logging.ERROR):
+                    result = messages_inbox_service(
+                        repo_root=repo,
+                        auth=AllowAllAuthStub(),
+                        recipient="agent-a",
+                        limit=20,
+                        audit=_noop_audit,
+                    )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertEqual(result["count"], 0)
+            self.assertTrue(any("inbox_unreadable" in w for w in result["warnings"]))
+
 
 # ---------------------------------------------------------------------------
 # Thread size guard
@@ -255,6 +289,34 @@ class TestThreadSizeGuard(unittest.TestCase):
             self.assertEqual(result["count"], 0)
             self.assertTrue(any("thread_stat_failed" in w for w in result["warnings"]))
 
+    def test_thread_read_failure_returns_degraded_and_audited(self) -> None:
+        """Thread read I/O failures surface degraded state and still audit the access."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            thread_dir = repo / "messages" / "threads"
+            thread_dir.mkdir(parents=True)
+            thread_file = thread_dir / "thread-xyz.jsonl"
+            thread_file.write_text(json.dumps({"body": "hello"}) + "\n", encoding="utf-8")
+            audit = _AuditRecorder()
+
+            with patch.object(Path, "read_text", side_effect=OSError("disk error")):
+                with self.assertLogs("app.messages.service", level=logging.ERROR):
+                    result = messages_thread_service(
+                        repo_root=repo,
+                        auth=AllowAllAuthStub(),
+                        thread_id="thread-xyz",
+                        limit=100,
+                        audit=audit,
+                    )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertEqual(result["count"], 0)
+            self.assertTrue(any("thread_unreadable" in w for w in result["warnings"]))
+            self.assertEqual(len(audit.calls), 1)
+            self.assertEqual(audit.calls[0][1], "messages_thread")
+            self.assertEqual(audit.calls[0][2], {"thread_id": "thread-xyz", "count": 0})
+
 
 # ---------------------------------------------------------------------------
 # Ops runs size guard
@@ -319,6 +381,22 @@ class TestOpsRunsSizeGuard(unittest.TestCase):
             runs, warnings = _load_ops_runs(repo)
             self.assertEqual(runs, [])
             self.assertEqual(warnings, [])
+
+    def test_ops_runs_read_failure_returns_warning(self) -> None:
+        """Ops runs reader surfaces a warning when read_text() fails."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            logs_dir = repo / "logs"
+            logs_dir.mkdir(parents=True)
+            ops_file = logs_dir / "ops_runs.jsonl"
+            ops_file.write_text(json.dumps({"job_id": "test"}) + "\n", encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=OSError("disk error")):
+                with self.assertLogs("app.ops.service", level=logging.WARNING):
+                    runs, warnings = _load_ops_runs(repo)
+
+            self.assertEqual(runs, [])
+            self.assertTrue(any("ops_runs_read_failed" in w for w in warnings))
 
 
 # ---------------------------------------------------------------------------

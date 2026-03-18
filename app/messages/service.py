@@ -473,7 +473,7 @@ def messages_inbox_service(
         raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read inbox file for %s", recipient, exc_info=True)
-        result: dict[str, Any] = {"ok": True, "recipient": recipient, "count": 0, "messages": []}
+        result: dict[str, Any] = {"ok": True, "degraded": True, "recipient": recipient, "count": 0, "messages": []}
         result["warnings"] = ["inbox_unreadable: I/O error reading inbox file"]
         audit(auth, "messages_inbox", {"recipient": recipient, "count": 0})
         return result
@@ -567,8 +567,16 @@ def messages_thread_service(
         raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _logger.error("Failed to read thread file for %s", thread_id, exc_info=True)
-        return {"ok": True, "thread_id": thread_id, "count": 0, "messages": [],
-                "warnings": ["thread_unreadable: I/O error reading thread file"]}
+        if audit:
+            audit(auth, "messages_thread", {"thread_id": thread_id, "count": 0})
+        return {
+            "ok": True,
+            "degraded": True,
+            "thread_id": thread_id,
+            "count": 0,
+            "messages": [],
+            "warnings": ["thread_unreadable: I/O error reading thread file"],
+        }
     tail = all_lines[-limit:]
     file_offset = len(all_lines) - len(tail)
     messages: list[dict[str, Any]] = []

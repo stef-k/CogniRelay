@@ -106,6 +106,7 @@ def _load_ops_runs(
         raise
     except Exception:  # noqa: BLE001 — mission-critical degradation
         _log.warning("Failed to read ops runs file %s", path, exc_info=True)
+        warnings.append("ops_runs_read_failed: I/O error reading ops run history; returning empty")
         return out, warnings
     if "\ufffd" in raw:
         _log.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
