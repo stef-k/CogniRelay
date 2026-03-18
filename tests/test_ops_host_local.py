@@ -201,6 +201,92 @@ class TestOpsLockReleasedOnAppendFailure(unittest.TestCase):
             self.assertEqual(call_args[0][2], "ops_run")
             self.assertIn("run_id", call_args[0][3])
             self.assertEqual(call_args[0][3]["job_id"], "metrics.poll_and_alarm_eval")
+            self.assertEqual(call_args[0][3]["status"], "succeeded")
+
+    def test_audit_failure_does_not_break_ops_run(self) -> None:
+        """If audit raises, ops_run must still return ok and release the lock."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _make_settings(repo_root)
+            lock_dir = repo_root / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_file = lock_dir / "metrics.poll_and_alarm_eval.lock"
+
+            with (
+                patch("app.main._services", return_value=(settings, _GitManagerStub())),
+                patch("app.main._audit", side_effect=RuntimeError("audit boom")),
+            ):
+                with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                    result = ops_run(
+                        req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
+                        auth=_AuthStub(client_ip="127.0.0.1"),
+                    )
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(lock_file.exists())
+            self.assertTrue(any("audit event failed" in msg for msg in cm.output))
+
+    def test_triple_failure_preserves_original_exception(self) -> None:
+        """When job, append, and audit all fail, the original HTTPException must propagate."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _make_settings(repo_root)
+            lock_dir = repo_root / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_file = lock_dir / "metrics.poll_and_alarm_eval.lock"
+
+            with (
+                patch("app.main._services", return_value=(settings, _GitManagerStub())),
+                patch(
+                    "app.ops.service._ops_execute_job",
+                    side_effect=HTTPException(status_code=500, detail="job exploded"),
+                ),
+                patch(
+                    "app.ops.service._append_ops_run",
+                    side_effect=OSError("disk full"),
+                ),
+                patch("app.main._audit", side_effect=RuntimeError("audit boom")),
+            ):
+                with self.assertRaises(HTTPException) as ctx:
+                    with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                        ops_run(
+                            req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
+                            auth=_AuthStub(client_ip="127.0.0.1"),
+                        )
+
+            self.assertEqual(ctx.exception.status_code, 500)
+            self.assertIn("job exploded", str(ctx.exception.detail))
+            self.assertFalse(lock_file.exists())
+            self.assertTrue(any("failed to append ops run log" in msg for msg in cm.output))
+            self.assertTrue(any("audit event failed" in msg for msg in cm.output))
+
+    def test_lock_release_failure_in_ops_run_still_succeeds(self) -> None:
+        """If lock release fails inside ops_run, the run must still return ok."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _make_settings(repo_root)
+            lock_dir = repo_root / "logs" / "ops_locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+
+            original_unlink = Path.unlink
+
+            def _selective_unlink(self_path: Path, *, missing_ok: bool = False) -> None:
+                if self_path.suffix == ".lock":
+                    raise PermissionError("denied")
+                original_unlink(self_path, missing_ok=missing_ok)
+
+            with (
+                patch("app.main._services", return_value=(settings, _GitManagerStub())),
+                patch.object(Path, "unlink", _selective_unlink),
+            ):
+                with self.assertLogs("app.ops.service", level="ERROR") as cm:
+                    result = ops_run(
+                        req=OpsRunRequest(job_id="metrics.poll_and_alarm_eval"),
+                        auth=_AuthStub(client_ip="127.0.0.1"),
+                    )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(any("failed to release ops lock" in msg for msg in cm.output))
 
     def test_original_exception_preserved_on_double_failure(self) -> None:
         """When both job execution and _append_ops_run fail, the original job exception must propagate."""

@@ -560,33 +560,39 @@ def ops_run_service(
         raise
     finally:
         finished = datetime.now(timezone.utc)
-        run_row = {
-            "schema_version": "1.0",
-            "run_id": run_id,
-            "job_id": req.job_id,
-            "status": status,
-            "started_at": started.isoformat(),
-            "finished_at": finished.isoformat(),
-            "duration_seconds": round((finished - started).total_seconds(), 4),
-            "dry_run": req.dry_run,
-            "force": req.force,
-            "client_ip": ip,
-            "initiator": auth.peer_id,
-            "error": error_detail,
-            "result_summary": {
-                "ok": bool(job_result.get("ok")) if isinstance(job_result, dict) else None,
-                "keys": sorted(list(job_result.keys()))[:20] if isinstance(job_result, dict) else [],
-            },
-        }
         try:
-            _append_ops_run(settings.repo_root, run_row)
+            run_row: dict[str, Any] | None = {
+                "schema_version": "1.0",
+                "run_id": run_id,
+                "job_id": req.job_id,
+                "status": status,
+                "started_at": started.isoformat(),
+                "finished_at": finished.isoformat(),
+                "duration_seconds": round((finished - started).total_seconds(), 4),
+                "dry_run": req.dry_run,
+                "force": req.force,
+                "client_ip": ip,
+                "initiator": auth.peer_id,
+                "error": error_detail,
+                "result_summary": {
+                    "ok": bool(job_result.get("ok")) if isinstance(job_result, dict) else None,
+                    "keys": sorted(list(job_result.keys()))[:20] if isinstance(job_result, dict) else [],
+                },
+            }
         except Exception:
-            _log.warning("failed to append ops run log for %s", run_id, exc_info=True)
-        finally:
-            _release_ops_lock(lock_path)
+            _log.warning("failed to construct ops run row for %s", run_id, exc_info=True)
+            run_row = None
+
+        if run_row is not None:
             try:
-                audit(auth, "ops_run", {"run_id": run_id, "job_id": req.job_id, "status": status, "client_ip": ip})
+                _append_ops_run(settings.repo_root, run_row)
             except Exception:
-                _log.warning("audit event failed for ops run %s", run_id, exc_info=True)
+                _log.warning("failed to append ops run log for %s", run_id, exc_info=True)
+
+        _release_ops_lock(lock_path)
+        try:
+            audit(auth, "ops_run", {"run_id": run_id, "job_id": req.job_id, "status": status, "client_ip": ip})
+        except Exception:
+            _log.warning("audit event failed for ops run %s", run_id, exc_info=True)
 
     return {"ok": True, "run_id": run_id, "job_id": req.job_id, "status": status, "local_only": True, "job_result": job_result}
