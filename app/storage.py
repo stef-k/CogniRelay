@@ -10,6 +10,22 @@ from pathlib import Path
 from typing import Any
 
 
+def _fsync_directory(dir_path: Path) -> None:
+    """Fsync a directory to ensure its entries are durable (defense-in-depth).
+
+    On non-Windows platforms, opens the directory read-only and calls
+    os.fsync(). On Windows this is a no-op because NTFS does not require
+    explicit directory fsync for rename durability.
+    """
+    if os.name == "nt":
+        return
+    fd = os.open(str(dir_path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 ALLOWED_TOP_LEVEL = {
     "journal",
     "essays",
@@ -58,8 +74,9 @@ def write_text_file(path: Path, content: str) -> None:
     """Write UTF-8 text content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
-    atomically renames. On failure the original file is untouched and
-    the temp file is cleaned up. Re-raises the original exception.
+    atomically renames and fsyncs the parent directory for full durability.
+    On failure the original file is untouched and the temp file is cleaned
+    up. Re-raises the original exception.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -75,6 +92,7 @@ def write_text_file(path: Path, content: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
     except BaseException:
         if fd_owned:
             try:
@@ -92,8 +110,9 @@ def write_bytes_file(path: Path, data: bytes) -> None:
     """Write binary content atomically via write-to-temp-then-rename.
 
     Creates parent directories, writes to a temp file with fsync, then
-    atomically renames. On failure the original file is untouched and
-    the temp file is cleaned up. Re-raises the original exception.
+    atomically renames and fsyncs the parent directory for full durability.
+    On failure the original file is untouched and the temp file is cleaned
+    up. Re-raises the original exception.
 
     Currently used for restoring raw snapshots during rollback paths
     in continuity services.
@@ -112,6 +131,7 @@ def write_bytes_file(path: Path, data: bytes) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
     except BaseException:
         if fd_owned:
             try:
