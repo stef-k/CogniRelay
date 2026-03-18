@@ -11,7 +11,12 @@ from fastapi import HTTPException
 from app.config import Settings
 from app.main import ops_catalog, ops_run, ops_schedule_export, ops_status
 from app.models import OpsRunRequest
-from app.ops.service import _list_ops_locks, _load_ops_runs, _release_ops_lock
+from app.ops.service import (
+    _list_ops_locks,
+    _load_ops_runs,
+    _ops_replay_dead_letter_sweep,
+    _release_ops_lock,
+)
 
 
 class _AuthStub:
@@ -470,6 +475,53 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
         self.assertEqual(result[0]["job_id"], "a")
         self.assertEqual(result[1]["job_id"], "b")
         self.assertTrue(any("malformed JSONL" in msg for msg in cm.output))
+
+
+class TestOpsReplayDeadLetterSweep(unittest.TestCase):
+    """Tests for dead-letter replay sweep degradation behavior."""
+
+    def test_non_http_exception_is_reported_and_sweep_continues(self) -> None:
+        """Unexpected replay errors must be captured per message without aborting the sweep."""
+        settings = _make_settings(Path("/tmp/repo"))
+        auth = _AuthStub(client_ip="127.0.0.1")
+        state = {
+            "records": {
+                "msg-1": {"status": "dead_letter"},
+                "msg-2": {"status": "dead_letter"},
+                "msg-3": {"status": "dead_letter"},
+            }
+        }
+        replayed_ids: list[str] = []
+
+        def _replay_request_factory(*, message_id: str, reason: str, force: bool) -> dict[str, object]:
+            return {"message_id": message_id, "reason": reason, "force": force}
+
+        def _replay_messages(*, req: dict[str, object], auth: object) -> dict[str, object]:
+            del auth
+            message_id = str(req["message_id"])
+            if message_id == "msg-2":
+                raise RuntimeError("boom")
+            replayed_ids.append(message_id)
+            return {"ok": True}
+
+        with self.assertLogs("app.ops.service", level="WARNING") as cm:
+            result = _ops_replay_dead_letter_sweep(
+                settings,
+                auth,
+                {"limit": 10, "reason": "test_reason"},
+                load_delivery_state=lambda _repo_root: state,
+                effective_delivery_status=lambda row, _now: str(row.get("status", "")),
+                replay_messages=_replay_messages,
+                replay_request_factory=_replay_request_factory,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["dead_letter_candidates"], 3)
+        self.assertEqual(result["replayed"], ["msg-1", "msg-3"])
+        self.assertEqual(result["replayed_count"], 2)
+        self.assertEqual(result["errors"], [{"message_id": "msg-2", "detail": "boom"}])
+        self.assertEqual(replayed_ids, ["msg-1", "msg-3"])
+        self.assertTrue(any("unexpected error replaying dead-letter msg-2" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":
