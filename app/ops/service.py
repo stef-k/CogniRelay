@@ -74,13 +74,19 @@ def _load_ops_runs(repo_root: Path, limit: int = 200) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-max(1, int(limit)):]:
+    all_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    tail = all_lines[-max(1, int(limit)):]
+    file_offset = len(all_lines) - len(tail)
+    for idx, line in enumerate(tail):
         try:
             row = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
+            _log.warning("malformed JSONL in ops runs (file line %d): %s", file_offset + idx + 1, line[:200])
             continue
-        if isinstance(row, dict):
-            out.append(row)
+        if not isinstance(row, dict):
+            _log.debug("non-dict JSON in ops runs (file line %d), skipping", file_offset + idx + 1)
+            continue
+        out.append(row)
     return out
 
 
