@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from app.config import Settings
 from app.main import ops_catalog, ops_run, ops_schedule_export, ops_status
 from app.models import OpsRunRequest
+from app.ops.service import _load_ops_runs, _release_ops_lock
 
 
 class _AuthStub:
@@ -138,8 +139,6 @@ class TestReleaseOpsLock(unittest.TestCase):
 
     def test_release_ops_lock_logs_on_oserror(self) -> None:
         """OSError during lock release must be logged, not silently swallowed."""
-        from app.ops.service import _release_ops_lock
-
         with tempfile.TemporaryDirectory() as td:
             lock = Path(td) / "test.lock"
             lock.touch()
@@ -150,8 +149,6 @@ class TestReleaseOpsLock(unittest.TestCase):
 
     def test_release_ops_lock_succeeds_normally(self) -> None:
         """Lock release should delete the file without logging."""
-        from app.ops.service import _release_ops_lock
-
         with tempfile.TemporaryDirectory() as td:
             lock = Path(td) / "test.lock"
             lock.touch()
@@ -164,8 +161,6 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
 
     def test_load_ops_runs_logs_malformed_lines(self) -> None:
         """Malformed JSONL lines must be skipped and logged as warnings."""
-        from app.ops.service import _load_ops_runs
-
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             runs_path = repo / "logs" / "ops_runs.jsonl"
@@ -185,11 +180,10 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
         self.assertEqual(result[1]["job_id"], "b")
         self.assertTrue(any("malformed JSONL" in msg for msg in cm.output))
         self.assertTrue(any("not-valid-json" in msg for msg in cm.output))
+        self.assertTrue(any("file line 2" in msg for msg in cm.output))
 
-    def test_load_ops_runs_skips_non_dict_lines(self) -> None:
-        """Valid JSON that is not a dict should be silently skipped."""
-        from app.ops.service import _load_ops_runs
-
+    def test_load_ops_runs_logs_non_dict_lines(self) -> None:
+        """Valid JSON that is not a dict should be skipped with a debug log."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             runs_path = repo / "logs" / "ops_runs.jsonl"
@@ -201,10 +195,33 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = _load_ops_runs(repo)
+            with self.assertLogs("app.ops.service", level="DEBUG") as cm:
+                result = _load_ops_runs(repo)
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["job_id"], "valid")
+        self.assertTrue(any("non-dict JSON" in msg for msg in cm.output))
+
+    def test_load_ops_runs_handles_empty_lines(self) -> None:
+        """Empty lines in a JSONL file should be skipped and logged as malformed."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            runs_path = repo / "logs" / "ops_runs.jsonl"
+            runs_path.parent.mkdir(parents=True, exist_ok=True)
+            runs_path.write_text(
+                '{"job_id":"a","status":"ok"}\n'
+                "\n"
+                '{"job_id":"b","status":"ok"}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                result = _load_ops_runs(repo)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["job_id"], "a")
+        self.assertEqual(result[1]["job_id"], "b")
+        self.assertTrue(any("malformed JSONL" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":
