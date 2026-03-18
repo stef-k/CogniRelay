@@ -494,6 +494,40 @@ class TestCommitFailureGracefulDegradation(unittest.TestCase):
             self.assertFalse((repo_root / "messages" / "outbox" / "peer-a.jsonl").exists())
             self.assertFalse((repo_root / "messages" / "threads" / "thread-1.jsonl").exists())
 
+    def test_send_does_not_snapshot_append_only_histories_before_write(self) -> None:
+        """Tracked send should not read full inbox/outbox/thread files into memory for rollback."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            req = MessageSendRequest(
+                thread_id="thread-1",
+                sender="peer-a",
+                recipient="peer-b",
+                subject="hello",
+                body_md="content",
+                idempotency_key="idem-1",
+            )
+            inbox = repo_root / "messages" / "inbox" / "peer-b.jsonl"
+            outbox = repo_root / "messages" / "outbox" / "peer-a.jsonl"
+            thread = repo_root / "messages" / "threads" / "thread-1.jsonl"
+            for path in (inbox, outbox, thread):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{"existing":true}\n', encoding="utf-8")
+
+            original_read_bytes = Path.read_bytes
+
+            def guarded_read_bytes(path_obj: Path) -> bytes:
+                if path_obj in {inbox, outbox, thread}:
+                    raise AssertionError(f"unexpected full snapshot read for {path_obj}")
+                return original_read_bytes(path_obj)
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                with patch.object(Path, "read_bytes", guarded_read_bytes):
+                    result = messages_send(req=req, auth=_AuthStub())
+
+            self.assertTrue(result["ok"])
+
     def test_ack_rolls_back_state_when_ack_append_fails(self) -> None:
         """Ack should restore delivery state if the ack log append fails mid-operation."""
         with tempfile.TemporaryDirectory() as td:

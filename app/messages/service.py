@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -88,7 +89,7 @@ def _write_delivery_state(repo_root: Path, state: dict[str, Any]) -> Path:
 
 
 def _capture_rollback_plan(paths: list[Path]) -> list[tuple[Path, bytes | None]]:
-    """Capture prior bytes for a set of paths in first-seen order."""
+    """Capture prior bytes for state-style files in first-seen order."""
     rollback_plan: list[tuple[Path, bytes | None]] = []
     seen: set[Path] = set()
     for path in paths:
@@ -110,6 +111,36 @@ def _restore_rollback_plan(rollback_plan: list[tuple[Path, bytes | None]]) -> No
                 write_bytes_file(path, old_bytes)
         except Exception:  # noqa: BLE001 - preserve the original write failure
             _logger.exception("Failed to restore %s during message rollback", path)
+
+
+def _capture_append_targets(paths: list[Path]) -> list[tuple[Path, int, bool]]:
+    """Capture append rollback metadata without reading full file contents."""
+    targets: list[tuple[Path, int, bool]] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        is_new = not path.exists()
+        prior_size = 0 if is_new else path.stat().st_size
+        targets.append((path, prior_size, is_new))
+    return targets
+
+
+def _restore_appends(targets: list[tuple[Path, int, bool]]) -> None:
+    """Best-effort rollback for append-only files after a later write fails."""
+    for path, prior_size, is_new in targets:
+        try:
+            if is_new:
+                path.unlink(missing_ok=True)
+            else:
+                with path.open("r+b") as handle:
+                    handle.truncate(prior_size)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        except Exception:  # noqa: BLE001 - preserve original exception
+            _logger.exception("Failed to restore appended file %s during message rollback", path)
 
 
 def _non_durable_warning(operation: str) -> str:
@@ -310,7 +341,8 @@ def messages_send_service(
 
     commit_paths = list(paths)
     commit_rels = list(rels)
-    rollback_plan = _capture_rollback_plan(paths + ([_delivery_state_path(settings.repo_root)] if should_track_delivery else []))
+    append_targets = _capture_append_targets(paths)
+    state_rollback_plan = _capture_rollback_plan([_delivery_state_path(settings.repo_root)]) if should_track_delivery else []
     try:
         append_jsonl_multi(paths, msg)
         if should_track_delivery:
@@ -318,7 +350,8 @@ def messages_send_service(
             commit_paths.append(state_path)
             commit_rels.append(DELIVERY_STATE_REL)
     except Exception:
-        _restore_rollback_plan(rollback_plan)
+        _restore_rollback_plan(state_rollback_plan)
+        _restore_appends(append_targets)
         raise
 
     if try_commit_paths(paths=commit_paths, gm=gm, commit_message=f"messages: send {msg['id']}"):
@@ -384,12 +417,14 @@ def messages_ack_service(
     ack_rel = f"messages/acks/{req.message_id}.jsonl"
     state_path = _delivery_state_path(repo_root)
     ack_path = safe_path(repo_root, ack_rel)
-    rollback_plan = _capture_rollback_plan([state_path, ack_path])
+    state_rollback_plan = _capture_rollback_plan([state_path])
+    ack_append_targets = _capture_append_targets([ack_path])
     try:
         _write_delivery_state(repo_root, state)
         append_jsonl(ack_path, ack_row)
     except Exception:
-        _restore_rollback_plan(rollback_plan)
+        _restore_appends(ack_append_targets)
+        _restore_rollback_plan(state_rollback_plan)
         raise
     warnings: list[str] = list(state.get("warnings") or [])
     if try_commit_paths(paths=[state_path, ack_path], gm=gm, commit_message=f"messages: ack {req.message_id}"):
@@ -841,12 +876,14 @@ def replay_messages_service(
         record["replay_reason"] = req.reason
 
     state_path = _delivery_state_path(settings.repo_root)
-    rollback_plan = _capture_rollback_plan(paths + [state_path])
+    append_targets = _capture_append_targets(paths)
+    state_rollback_plan = _capture_rollback_plan([state_path])
     try:
         append_jsonl_multi(paths, replay_msg)
         _write_delivery_state(settings.repo_root, state)
     except Exception:
-        _restore_rollback_plan(rollback_plan)
+        _restore_rollback_plan(state_rollback_plan)
+        _restore_appends(append_targets)
         raise
     warnings: list[str] = list(state.get("warnings") or [])
     commit_paths = paths + [state_path]

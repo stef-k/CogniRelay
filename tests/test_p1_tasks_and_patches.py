@@ -212,6 +212,52 @@ class TestP1TasksAndPatches(unittest.TestCase):
             self.assertEqual(err.exception.status_code, 409)
             self.assertIn("base_ref mismatch", str(err.exception.detail))
 
+    def test_docs_patch_apply_blocks_nested_locks_dir_changes(self) -> None:
+        """Patch apply should still block dirty trees with nested .locks paths outside repo root."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._init_git_repo(repo_root)
+            target_rel = "projects/doc.md"
+            target_abs = repo_root / target_rel
+            target_abs.parent.mkdir(parents=True, exist_ok=True)
+            target_abs.write_text("line1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "seed"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+            diff = (
+                "diff --git a/projects/doc.md b/projects/doc.md\n"
+                "--- a/projects/doc.md\n"
+                "+++ b/projects/doc.md\n"
+                "@@ -1 +1 @@\n"
+                "-line1\n"
+                "+line2\n"
+            )
+
+            settings = self._settings(repo_root)
+            gm = GitManager(repo_root=repo_root, author_name="tester", author_email="tester@example.local")
+            with patch("app.main._services", return_value=(settings, gm)):
+                docs_patch_propose(
+                    req=PatchProposeRequest(
+                        patch_id="patch-nested-locks",
+                        target_path=target_rel,
+                        base_ref="HEAD",
+                        diff=diff,
+                    ),
+                    auth=_AuthStub(),
+                )
+                nested_lock = repo_root / "projects" / "doc_files" / ".locks" / "state.json"
+                nested_lock.parent.mkdir(parents=True, exist_ok=True)
+                nested_lock.write_text("dirty\n", encoding="utf-8")
+
+                with self.assertRaises(HTTPException) as err:
+                    docs_patch_apply(
+                        req=PatchApplyRequest(patch_id="patch-nested-locks"),
+                        auth=_AuthStub(),
+                    )
+
+            self.assertEqual(err.exception.status_code, 409)
+            self.assertIn("Working tree must be clean", str(err.exception.detail))
+
 
 if __name__ == "__main__":
     unittest.main()
