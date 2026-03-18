@@ -8,13 +8,14 @@ or unreadable JSONL files without risking an unbounded read.
 import json
 import logging
 import os
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CalledProcessError, run
 from unittest.mock import patch
 
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
+from app.git_manager import GitManager
 from app.models import CompactRequest
 from app.messages.service import messages_inbox_service, messages_thread_service
 from app.ops.service import _load_ops_runs, ops_status_service
@@ -743,47 +744,51 @@ class TestCompactServiceAccessWarnings(unittest.TestCase):
             self.assertTrue(any("access_stats_too_large" in w for w in result["warnings"]))
 
 
-class _FailingCompactCommitGitManager:
-    """Git manager stub that fails the first compaction report commit only."""
+class _FailingCompactionGitManager(GitManager):
+    """Git manager that stages report files and then fails the Markdown commit once."""
 
-    def __init__(self, repo_root: Path) -> None:
-        self.repo_root = repo_root
+    def __init__(self, repo_root: Path, *, exc_factory) -> None:
+        super().__init__(repo_root, "n/a", "n/a")
+        self._exc_factory = exc_factory
         self.calls: list[str] = []
 
     def commit_file(self, path: Path, _message: str) -> bool:
         rel = str(path.relative_to(self.repo_root))
         self.calls.append(rel)
         if rel.endswith(".md"):
-            raise OSError("git commit failed")
-        return True
-
-    def latest_commit(self) -> str:
-        return "test-sha"
-
-
-class _CalledProcessErrorCompactCommitGitManager(_FailingCompactCommitGitManager):
-    """Git manager stub that raises CalledProcessError for the first report commit."""
-
-    def commit_file(self, path: Path, _message: str) -> bool:
-        rel = str(path.relative_to(self.repo_root))
-        self.calls.append(rel)
-        if rel.endswith(".md"):
-            raise subprocess.CalledProcessError(1, "git commit")
-        return True
+            self._run("add", rel)
+            raise self._exc_factory()
+        return super().commit_file(path, _message)
 
 
 class TestCompactServiceCommitFailureDegradation(unittest.TestCase):
     """compact_run_service degrades gracefully when git commits fail."""
 
-    def test_compact_service_oserror_commit_failure_returns_partial_success(self) -> None:
-        """Compaction should still return ok when one report commit raises OSError."""
+    def _init_git_repo(self, repo: Path) -> None:
+        run(["git", "init"], cwd=repo, check=True, text=True, capture_output=True)
+        run(["git", "config", "user.name", "test"], cwd=repo, check=True, text=True, capture_output=True)
+        run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, text=True, capture_output=True)
+
+    def _assert_clean_index(self, repo: Path) -> None:
+        status = run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=repo,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(status.stdout.strip(), "")
+
+    def test_compact_service_oserror_commit_failure_unstages_orphaned_report(self) -> None:
+        """Compaction should keep the index clean after an OSError during report commit."""
         from app.maintenance.service import compact_run_service
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            gm = _FailingCompactCommitGitManager(repo)
+            self._init_git_repo(repo)
+            gm = _FailingCompactionGitManager(repo, exc_factory=lambda: OSError("git commit failed"))
 
-            with self.assertLogs("app.maintenance.service", level=logging.ERROR) as cm:
+            with self.assertLogs("app.git_safety", level=logging.ERROR) as cm:
                 result = compact_run_service(
                     settings=_FakeSettings(repo),
                     gm=gm,
@@ -801,17 +806,22 @@ class TestCompactServiceCommitFailureDegradation(unittest.TestCase):
             self.assertEqual(gm.calls, [md_rel, json_rel])
             self.assertTrue((repo / md_rel).exists())
             self.assertTrue((repo / json_rel).exists())
-            self.assertTrue(any("commit_file failed for compaction report" in msg for msg in cm.output))
+            self._assert_clean_index(repo)
+            self.assertTrue(any("Git commit failed (non-fatal)" in msg for msg in cm.output))
 
-    def test_compact_service_called_process_error_commit_failure_returns_partial_success(self) -> None:
-        """Compaction should still return ok when one report commit raises CalledProcessError."""
+    def test_compact_service_called_process_error_commit_failure_unstages_orphaned_report(self) -> None:
+        """Compaction should keep the index clean after a CalledProcessError during report commit."""
         from app.maintenance.service import compact_run_service
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            gm = _CalledProcessErrorCompactCommitGitManager(repo)
+            self._init_git_repo(repo)
+            gm = _FailingCompactionGitManager(
+                repo,
+                exc_factory=lambda: CalledProcessError(1, ["git", "commit"]),
+            )
 
-            with self.assertLogs("app.maintenance.service", level=logging.ERROR) as cm:
+            with self.assertLogs("app.git_safety", level=logging.ERROR) as cm:
                 result = compact_run_service(
                     settings=_FakeSettings(repo),
                     gm=gm,
@@ -829,7 +839,8 @@ class TestCompactServiceCommitFailureDegradation(unittest.TestCase):
             self.assertEqual(gm.calls, [md_rel, json_rel])
             self.assertTrue((repo / md_rel).exists())
             self.assertTrue((repo / json_rel).exists())
-            self.assertTrue(any("commit_file failed for compaction report" in msg for msg in cm.output))
+            self._assert_clean_index(repo)
+            self.assertTrue(any("Git commit failed (non-fatal)" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":
