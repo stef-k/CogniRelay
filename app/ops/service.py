@@ -352,6 +352,9 @@ def _ops_replay_dead_letter_sweep(
             replayed.append(message_id)
         except HTTPException as exc:
             errors.append({"message_id": message_id, "status_code": exc.status_code, "detail": str(exc.detail)})
+        except Exception as exc:  # noqa: BLE001 - per-message degradation keeps the sweep progressing
+            _log.warning("unexpected error replaying dead-letter %s", message_id, exc_info=True)
+            errors.append({"message_id": message_id, "detail": str(exc)})
 
     result: dict[str, Any] = {
         "ok": True,
