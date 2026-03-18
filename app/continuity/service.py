@@ -31,7 +31,7 @@ from app.models import (
     ContinuityVerificationSignal,
     ContextRetrieveRequest,
 )
-from app.storage import StorageError, canonical_json, safe_path, write_text_file
+from app.storage import StorageError, canonical_json, safe_path, write_bytes_file, write_text_file
 
 CONTINUITY_DIR_REL = "memory/continuity"
 CONTINUITY_SUBJECT_RE = re.compile(r"^(task|thread):(.+)$")
@@ -419,10 +419,9 @@ def _persist_active_capsule(
         restore_error: Exception | None = None
         try:
             if old_bytes is None:
-                if path.exists():
-                    path.unlink()
+                path.unlink(missing_ok=True)
             else:
-                path.write_bytes(old_bytes)
+                write_bytes_file(path, old_bytes)
         except Exception as restore_exc:
             restore_error = restore_exc
         detail = f"Failed to persist continuity capsule: {exc}"
@@ -450,11 +449,9 @@ def _restore_failed_fallback_snapshot(path: Path, old_bytes: bytes | None, exc: 
     restore_error: Exception | None = None
     try:
         if old_bytes is None:
-            if path.exists():
-                path.unlink()
+            path.unlink(missing_ok=True)
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(old_bytes)
+            write_bytes_file(path, old_bytes)
     except Exception as restore_exc:
         restore_error = restore_exc
     detail = f"Failed to persist continuity fallback snapshot: {exc}"
@@ -468,11 +465,9 @@ def _restore_failed_refresh_state(path: Path, old_bytes: bytes | None, exc: Exce
     restore_error: Exception | None = None
     try:
         if old_bytes is None:
-            if path.exists():
-                path.unlink()
+            path.unlink(missing_ok=True)
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(old_bytes)
+            write_bytes_file(path, old_bytes)
     except Exception as restore_exc:
         restore_error = restore_exc
     detail = f"Failed to persist continuity refresh state: {exc}"
@@ -623,20 +618,23 @@ def _qualify_warning(warning: str, subject_kind: str, subject_id: str, *, multi_
 
 def _restore_failed_archive(active_path: Path, archive_path: Path, active_bytes: bytes) -> None:
     """Restore the active capsule and discard the archive envelope after a failed archive commit."""
-    restore_error: Exception | None = None
+    errors: list[str] = []
+    first_exc: Exception | None = None
     try:
-        active_path.parent.mkdir(parents=True, exist_ok=True)
-        active_path.write_bytes(active_bytes)
+        write_bytes_file(active_path, active_bytes)
     except Exception as exc:
-        restore_error = exc
+        first_exc = exc
+        errors.append(f"restore active: {exc}")
     try:
-        if archive_path.exists():
-            archive_path.unlink()
+        archive_path.unlink(missing_ok=True)
     except Exception as exc:
-        if restore_error is None:
-            restore_error = exc
-    if restore_error is not None:
-        raise RuntimeError(f"Failed to restore archived continuity capsule: {restore_error}") from restore_error
+        if first_exc is None:
+            first_exc = exc
+        errors.append(f"remove archive: {exc}")
+    if errors:
+        raise RuntimeError(
+            f"Failed to restore archived continuity capsule: {'; '.join(errors)}"
+        ) from first_exc
 
 
 def _effective_selectors(req: ContextRetrieveRequest) -> tuple[list[dict[str, str]], list[str], list[str]]:
@@ -1417,8 +1415,7 @@ def continuity_delete_service(
         restore_errors: list[str] = []
         for path, data in original_bytes.items():
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
+                write_bytes_file(path, data)
             except Exception as restore_exc:
                 restore_errors.append(f"{path}: {restore_exc}")
         if restore_errors:
