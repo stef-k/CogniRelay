@@ -50,7 +50,17 @@ class GitManager:
 
     def commit_paths(self, paths: list[Path], message: str) -> bool:
         """Commit one or more repository-relative paths if any have staged changes."""
-        rels = [str(path.relative_to(self.repo_root)) for path in paths]
+        resolved_root = self.repo_root.resolve()
+        rels: list[str] = []
+        for path in paths:
+            resolved = path.resolve()
+            try:
+                rels.append(str(resolved.relative_to(resolved_root)))
+            except ValueError as exc:
+                raise ValueError(
+                    f"commit_paths: path {path} (resolved: {resolved}) "
+                    f"is not under repo root {self.repo_root}"
+                ) from exc
         if not rels:
             return False
         self._run("add", *rels)
