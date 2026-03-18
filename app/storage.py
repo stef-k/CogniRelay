@@ -10,12 +10,29 @@ from pathlib import Path
 from typing import Any
 
 
+def _try_fsync_directory(dir_path: Path) -> None:
+    """Best-effort directory fsync after a successful rename.
+
+    Logs a warning on failure rather than raising, because the atomic
+    rename has already succeeded at the call site.
+    """
+    try:
+        _fsync_directory(dir_path)
+    except OSError:
+        logging.warning(
+            "Directory fsync failed for %s — file is written but directory "
+            "entry may not be durable until the kernel flushes it to disk",
+            dir_path,
+            exc_info=True,
+        )
+
+
 def _fsync_directory(dir_path: Path) -> None:
     """Fsync a directory to make its entries durable after a rename.
 
-    Required for rename durability on ext4 (especially ``data=writeback``
-    mounts). On Windows this is a no-op because the Windows API does not
-    support opening a directory as a file descriptor.
+    Required for rename durability on ext4; the risk window is larger on
+    ``data=writeback`` mounts. On Windows this is a no-op because the
+    Windows API does not support opening a directory as a file descriptor.
     """
     if os.name == "nt":
         return
@@ -106,15 +123,7 @@ def write_text_file(path: Path, content: str) -> None:
         except OSError:
             logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
-    try:
-        _fsync_directory(path.parent)
-    except OSError:
-        logging.warning(
-            "Directory fsync failed for %s — file is written but directory "
-            "entry may not survive a power loss before kernel writeback",
-            path.parent,
-            exc_info=True,
-        )
+    _try_fsync_directory(path.parent)
 
 
 def write_bytes_file(path: Path, data: bytes) -> None:
@@ -156,15 +165,7 @@ def write_bytes_file(path: Path, data: bytes) -> None:
         except OSError:
             logging.warning("Failed to clean up temp file: %s", tmp_path)
         raise
-    try:
-        _fsync_directory(path.parent)
-    except OSError:
-        logging.warning(
-            "Directory fsync failed for %s — file is written but directory "
-            "entry may not survive a power loss before kernel writeback",
-            path.parent,
-            exc_info=True,
-        )
+    _try_fsync_directory(path.parent)
 
 
 def canonical_json(data: Any) -> str:

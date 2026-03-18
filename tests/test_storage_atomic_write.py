@@ -262,7 +262,7 @@ class TestDirectoryFsync(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    # -- shared helper (I5: dedup text/bytes ordering tests) --------
+    # -- shared helpers -----------------------------------------------
 
     def _assert_dir_fsync_order(self, write_fn, target, content):
         """Verify: file fsync → replace → dir open → dir fsync → dir close."""
@@ -330,7 +330,7 @@ class TestDirectoryFsync(unittest.TestCase):
             _fsync_directory(self.tmpdir)
             mock_open.assert_not_called()
 
-    # -- dir fsync failure is warning, not exception (C1/I1) --------
+    # -- dir fsync failure is warning, not exception ------------------
 
     def _dir_fsync_failure_helper(self, write_fn, target, content, read_fn):
         """Dir fsync failure logs a warning; file content survives."""
@@ -372,45 +372,43 @@ class TestDirectoryFsync(unittest.TestCase):
             lambda p: p.read_bytes(),
         )
 
-    # -- os.open failure on directory (L4) --------------------------
+    # -- os.open failure on directory --------------------------------
+
+    def _dir_open_failure_helper(self, write_fn, target, content, read_fn):
+        """Dir open failure logs a warning; file content survives."""
+        original_open = os.open
+
+        def open_fail_on_dir(path, flags, *args, **kwargs):
+            if os.O_DIRECTORY & flags:
+                raise PermissionError("dir open denied")
+            return original_open(path, flags, *args, **kwargs)
+
+        with self.assertLogs("root", level=logging.WARNING) as cm, \
+             patch("app.storage.os.open", side_effect=open_fail_on_dir):
+            write_fn(target, content)
+
+        self.assertTrue(
+            any("Directory fsync failed" in msg for msg in cm.output),
+        )
+        self.assertEqual(read_fn(target), content)
 
     def test_dir_open_failure_warns_text(self):
         """write_text_file: if os.open on dir fails, file survives and warning is logged."""
-        target = self.tmpdir / "file.json"
-        original_open = os.open
-
-        def open_fail_on_dir(path, flags, *args, **kwargs):
-            if os.O_DIRECTORY & flags:
-                raise PermissionError("dir open denied")
-            return original_open(path, flags, *args, **kwargs)
-
-        with self.assertLogs("root", level=logging.WARNING) as cm, \
-             patch("app.storage.os.open", side_effect=open_fail_on_dir):
-            write_text_file(target, "survives dir open fail")
-
-        self.assertTrue(
-            any("Directory fsync failed" in msg for msg in cm.output),
+        self._dir_open_failure_helper(
+            write_text_file,
+            self.tmpdir / "file.json",
+            "survives dir open fail",
+            lambda p: p.read_text(encoding="utf-8"),
         )
-        self.assertEqual(target.read_text(encoding="utf-8"), "survives dir open fail")
 
     def test_dir_open_failure_warns_bytes(self):
         """write_bytes_file: if os.open on dir fails, file survives and warning is logged."""
-        target = self.tmpdir / "file.bin"
-        original_open = os.open
-
-        def open_fail_on_dir(path, flags, *args, **kwargs):
-            if os.O_DIRECTORY & flags:
-                raise PermissionError("dir open denied")
-            return original_open(path, flags, *args, **kwargs)
-
-        with self.assertLogs("root", level=logging.WARNING) as cm, \
-             patch("app.storage.os.open", side_effect=open_fail_on_dir):
-            write_bytes_file(target, b"survives dir open fail")
-
-        self.assertTrue(
-            any("Directory fsync failed" in msg for msg in cm.output),
+        self._dir_open_failure_helper(
+            write_bytes_file,
+            self.tmpdir / "file.bin",
+            b"survives dir open fail",
+            lambda p: p.read_bytes(),
         )
-        self.assertEqual(target.read_bytes(), b"survives dir open fail")
 
     # -- fd cleanup on fsync failure --------------------------------
 
