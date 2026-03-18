@@ -366,8 +366,26 @@ class TestLoadOpsRunsMalformed(unittest.TestCase):
         self.assertEqual(result[0]["job_id"], "a")
         self.assertEqual(result[1]["job_id"], "b")
         self.assertTrue(any("malformed JSONL" in msg for msg in cm.output))
-        self.assertTrue(any("not-valid-json" in msg for msg in cm.output))
+        self.assertTrue(any("'not-valid-json'" in msg for msg in cm.output))
         self.assertTrue(any("file line 2" in msg for msg in cm.output))
+        self.assertTrue(any("14 chars" in msg for msg in cm.output))
+
+    def test_load_ops_runs_escapes_control_characters_in_log_preview(self) -> None:
+        """Malformed previews should escape embedded control characters before logging."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            runs_path = repo / "logs" / "ops_runs.jsonl"
+            runs_path.parent.mkdir(parents=True, exist_ok=True)
+            runs_path.write_text('{"job_id":"a","status":"ok"}\n"bad\\nline\x1b[31m"\n', encoding="utf-8")
+
+            with self.assertLogs("app.ops.service", level="WARNING") as cm:
+                result, _warnings = _load_ops_runs(repo)
+
+        self.assertEqual(len(result), 1)
+        preview_log = next(msg for msg in cm.output if "malformed JSONL" in msg)
+        self.assertIn("\\n", preview_log)
+        self.assertIn("\\x1b[31m", preview_log)
+        self.assertNotIn("\nline", preview_log)
 
     def test_load_ops_runs_logs_non_dict_lines(self) -> None:
         """Valid JSON that is not a dict should be skipped with a debug log."""
