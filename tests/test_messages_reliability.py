@@ -30,10 +30,14 @@ class _AuthStub:
 
 
 class _GitManagerStub:
-    """Git manager stub that pretends every file commit succeeds."""
+    """Git manager stub that pretends every commit succeeds."""
 
     def commit_file(self, _path: Path, _message: str) -> bool:
-        """Report a successful commit without touching git."""
+        """Report a successful single-file commit without touching git."""
+        return True
+
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
+        """Report a successful multi-path commit without touching git."""
         return True
 
     def latest_commit(self) -> str:

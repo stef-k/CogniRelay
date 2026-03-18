@@ -191,3 +191,83 @@ def append_jsonl(path: Path, record: Any) -> None:
         except OSError:
             logging.error("append_jsonl I/O failed for %s — record may not be durable", path, exc_info=True)
             raise
+
+
+def _rollback_appends(
+    paths: list[Path],
+    prior_sizes: list[int],
+    new_files: list[bool],
+    count: int,
+) -> None:
+    """Best-effort rollback of already-appended files after a mid-loop failure.
+
+    Truncates each file back to its prior size, or deletes it if it was newly
+    created. Logs warnings on failure rather than raising so the original
+    exception propagates cleanly.
+    """
+    for i in range(count):
+        try:
+            if new_files[i]:
+                paths[i].unlink(missing_ok=True)
+            else:
+                with paths[i].open("r+b") as f:
+                    f.truncate(prior_sizes[i])
+                    f.flush()
+                    os.fsync(f.fileno())
+        except OSError:
+            logging.warning(
+                "rollback failed for %s — file may contain a partial append",
+                paths[i],
+                exc_info=True,
+            )
+
+
+def append_jsonl_multi(paths: list[Path], record: Any) -> None:
+    """Append one JSON line record to multiple files atomically.
+
+    Serializes the record once, then appends to each path in sequence
+    with fsync. On ``OSError`` at file N, files 0..N-1 are truncated
+    back to their prior size (or deleted if newly created), and the
+    original exception is re-raised.
+
+    Raises ``TypeError`` if the record is not JSON-serializable (before
+    any I/O occurs).
+    """
+    if not paths:
+        return
+
+    # Serialize once upfront — catches TypeError before any I/O.
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+
+    # Create parent directories for all paths.
+    for p in paths:
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+    # Capture prior file sizes.
+    prior_sizes: list[int] = []
+    new_files: list[bool] = []
+    for p in paths:
+        if p.exists():
+            prior_sizes.append(p.stat().st_size)
+            new_files.append(False)
+        else:
+            prior_sizes.append(0)
+            new_files.append(True)
+
+    # Append to each file in sequence.
+    for i, p in enumerate(paths):
+        try:
+            with p.open("a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError:
+            logging.error(
+                "append_jsonl_multi I/O failed at file %d/%d (%s) — rolling back",
+                i + 1,
+                len(paths),
+                p,
+                exc_info=True,
+            )
+            _rollback_appends(paths, prior_sizes, new_files, i)
+            raise

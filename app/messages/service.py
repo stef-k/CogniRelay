@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
-from app.storage import append_jsonl, safe_path, write_text_file
+from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_text_file
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
@@ -202,11 +202,11 @@ def messages_send_service(
     outbox_path_rel = f"messages/outbox/{req.sender}.jsonl"
     thread_path_rel = f"messages/threads/{req.thread_id}.jsonl"
 
-    for rel in (inbox_path_rel, outbox_path_rel, thread_path_rel):
-        path = safe_path(settings.repo_root, rel)
-        append_jsonl(path, msg)
-        if gm.commit_file(path, f"messages: append {rel}"):
-            committed_files.append(rel)
+    rels = [inbox_path_rel, outbox_path_rel, thread_path_rel]
+    paths = [safe_path(settings.repo_root, r) for r in rels]
+    append_jsonl_multi(paths, msg)
+    if gm.commit_paths(paths, f"messages: send {msg['id']}"):
+        committed_files.extend(rels)
 
     should_track_delivery = bool(req.idempotency_key or req.delivery.requires_ack)
     delivery_state = None
@@ -462,11 +462,11 @@ def relay_forward_service(
     relay_rel = f"messages/relay/{req.relay_id}.jsonl"
     inbox_rel = f"messages/inbox/{req.target_recipient}.jsonl"
     thread_rel = f"messages/threads/{req.thread_id}.jsonl"
-    for rel in (relay_rel, inbox_rel, thread_rel):
-        path = safe_path(settings.repo_root, rel)
-        append_jsonl(path, msg)
-        if gm.commit_file(path, f"relay: forward {rel}"):
-            committed_files.append(rel)
+    rels = [relay_rel, inbox_rel, thread_rel]
+    paths = [safe_path(settings.repo_root, r) for r in rels]
+    append_jsonl_multi(paths, msg)
+    if gm.commit_paths(paths, f"relay: forward {msg['id']}"):
+        committed_files.extend(rels)
     audit(auth, "relay_forward", {"relay_id": req.relay_id, "to": req.target_recipient, "thread_id": req.thread_id})
     return {
         "ok": True,
@@ -534,13 +534,14 @@ def replay_messages_service(
     inbox_rel = f"messages/inbox/{recipient}.jsonl"
     outbox_rel = f"messages/outbox/{sender}.jsonl"
     thread_rel = f"messages/threads/{thread_id}.jsonl"
-    committed_files = []
-    for rel in (inbox_rel, outbox_rel, thread_rel):
+    rels = [inbox_rel, outbox_rel, thread_rel]
+    for rel in rels:
         auth.require_write_path(rel)
-        path = safe_path(settings.repo_root, rel)
-        append_jsonl(path, replay_msg)
-        if gm.commit_file(path, f"messages: replay append {rel}"):
-            committed_files.append(rel)
+    paths = [safe_path(settings.repo_root, r) for r in rels]
+    append_jsonl_multi(paths, replay_msg)
+    committed_files = []
+    if gm.commit_paths(paths, f"messages: replay {req.message_id}"):
+        committed_files.extend(rels)
 
     if req.requires_ack:
         ack_deadline = (now + timedelta(seconds=req.ack_timeout_seconds)).isoformat()
