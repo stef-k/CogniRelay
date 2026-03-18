@@ -178,6 +178,23 @@ def continuity_fallback_rel_path(subject_kind: str, subject_id: str) -> str:
     return f"{CONTINUITY_DIR_REL}/fallback/{subject_kind}-{normalized}.json"
 
 
+def _continuity_subject_lock_id(subject_kind: str, subject_id: str) -> str:
+    """Return a safe per-subject lock id shared by all continuity mutation endpoints."""
+    normalized = _normalize_subject_id(subject_id)
+    digest = hashlib.sha256(f"{subject_kind}:{normalized}".encode("utf-8")).hexdigest()
+    return f"continuity_{digest}"
+
+
+def _continuity_subject_lock(*, repo_root: Path, subject_kind: str, subject_id: str):
+    """Return the shared per-subject mutation lock context for one selector."""
+    from app.coordination.locking import artifact_lock
+
+    return artifact_lock(
+        _continuity_subject_lock_id(subject_kind, subject_id),
+        lock_dir=repo_root / ".locks",
+    )
+
+
 def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name: str) -> None:
     """Validate that repo-relative paths stay within the repository root."""
     for rel in paths:
@@ -1043,44 +1060,45 @@ def continuity_upsert_service(
     auth.require_write_path(rel)
     _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
-    canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
-    new_bytes = canonical.encode("utf-8")
-    old_bytes = path.read_bytes() if path.exists() else None
-    if old_bytes != new_bytes:
-        stripped_req = ContinuityUpsertRequest(
-            subject_kind=req.subject_kind,
-            subject_id=req.subject_id,
-            capsule=capsule,
-            commit_message=req.commit_message,
-            idempotency_key=req.idempotency_key,
-        )
-        _reject_stale_or_conflicting_write(path, stripped_req)
-    capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
-    created = not path.exists()
-    changed = old_bytes != new_bytes
-    committed = False
-    fallback_warning: str | None = None
-    fallback_warning_detail: str | None = None
-    if changed:
-        _persist_active_capsule(
-            repo_root=repo_root,
-            gm=gm,
-            path=path,
-            canonical=canonical,
-            commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
-        )
-        committed = True
-        fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
-            repo_root=repo_root,
-            gm=gm,
-            subject_kind=req.subject_kind,
-            subject_id=req.subject_id,
-            capsule=capsule.model_dump(mode="json", exclude_none=True),
-        )
-        if fallback_status == "failed":
-            fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
-    else:
-        fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
+    with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
+        canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
+        new_bytes = canonical.encode("utf-8")
+        old_bytes = path.read_bytes() if path.exists() else None
+        if old_bytes != new_bytes:
+            stripped_req = ContinuityUpsertRequest(
+                subject_kind=req.subject_kind,
+                subject_id=req.subject_id,
+                capsule=capsule,
+                commit_message=req.commit_message,
+                idempotency_key=req.idempotency_key,
+            )
+            _reject_stale_or_conflicting_write(path, stripped_req)
+        capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
+        created = not path.exists()
+        changed = old_bytes != new_bytes
+        committed = False
+        fallback_warning: str | None = None
+        fallback_warning_detail: str | None = None
+        if changed:
+            _persist_active_capsule(
+                repo_root=repo_root,
+                gm=gm,
+                path=path,
+                canonical=canonical,
+                commit_message=req.commit_message or f"continuity: upsert {req.subject_kind} {req.subject_id}",
+            )
+            committed = True
+            fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
+                repo_root=repo_root,
+                gm=gm,
+                subject_kind=req.subject_kind,
+                subject_id=req.subject_id,
+                capsule=capsule.model_dump(mode="json", exclude_none=True),
+            )
+            if fallback_status == "failed":
+                fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
+        else:
+            fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
     audit(
         auth,
         "continuity_upsert",
@@ -1349,87 +1367,87 @@ def continuity_delete_service(
     fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
     archive_prefix = f"{req.subject_kind}-{_normalize_subject_id(req.subject_id)}-"
     archive_base = repo_root / CONTINUITY_DIR_REL / "archive"
+    with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
+        selected_rels: list[str] = []
+        missing_paths: list[str] = []
+        paths_to_stage: list[Path] = []
+        original_bytes: dict[Path, bytes] = {}
 
-    selected_rels: list[str] = []
-    missing_paths: list[str] = []
-    paths_to_stage: list[Path] = []
-    original_bytes: dict[Path, bytes] = {}
+        if req.delete_active:
+            auth.require_write_path(active_rel)
+            active_path = safe_path(repo_root, active_rel)
+            if active_path.exists():
+                selected_rels.append(active_rel)
+                paths_to_stage.append(active_path)
+                original_bytes[active_path] = active_path.read_bytes()
+            else:
+                missing_paths.append(active_rel)
 
-    if req.delete_active:
-        auth.require_write_path(active_rel)
-        active_path = safe_path(repo_root, active_rel)
-        if active_path.exists():
-            selected_rels.append(active_rel)
-            paths_to_stage.append(active_path)
-            original_bytes[active_path] = active_path.read_bytes()
-        else:
-            missing_paths.append(active_rel)
+        if req.delete_fallback:
+            auth.require_write_path(fallback_rel)
+            fallback_path = safe_path(repo_root, fallback_rel)
+            if fallback_path.exists():
+                selected_rels.append(fallback_rel)
+                paths_to_stage.append(fallback_path)
+                original_bytes[fallback_path] = fallback_path.read_bytes()
+            else:
+                missing_paths.append(fallback_rel)
 
-    if req.delete_fallback:
-        auth.require_write_path(fallback_rel)
-        fallback_path = safe_path(repo_root, fallback_rel)
-        if fallback_path.exists():
-            selected_rels.append(fallback_rel)
-            paths_to_stage.append(fallback_path)
-            original_bytes[fallback_path] = fallback_path.read_bytes()
-        else:
-            missing_paths.append(fallback_rel)
+        if req.delete_archive and archive_base.exists() and archive_base.is_dir():
+            archive_paths: list[tuple[str, Path]] = []
+            for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
+                stem = path.stem
+                if path.is_dir() or path.suffix.lower() != ".json" or not stem.startswith(archive_prefix):
+                    continue
+                archive_suffix = stem[len(archive_prefix):]
+                if re.fullmatch(r"\d{8}T\d{6}Z", archive_suffix) is None:
+                    continue
+                rel = str(path.relative_to(repo_root))
+                auth.require_write_path(rel)
+                archive_paths.append((rel, path))
+            for rel, path in archive_paths:
+                selected_rels.append(rel)
+                paths_to_stage.append(path)
+                original_bytes[path] = path.read_bytes()
 
-    if req.delete_archive and archive_base.exists() and archive_base.is_dir():
-        archive_paths: list[tuple[str, Path]] = []
-        for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
-            stem = path.stem
-            if path.is_dir() or path.suffix.lower() != ".json" or not stem.startswith(archive_prefix):
-                continue
-            archive_suffix = stem[len(archive_prefix):]
-            if re.fullmatch(r"\d{8}T\d{6}Z", archive_suffix) is None:
-                continue
-            rel = str(path.relative_to(repo_root))
-            auth.require_write_path(rel)
-            archive_paths.append((rel, path))
-        for rel, path in archive_paths:
-            selected_rels.append(rel)
-            paths_to_stage.append(path)
-            original_bytes[path] = path.read_bytes()
-
-    if not paths_to_stage:
-        audit(
-            auth,
-            "continuity_delete",
-            {
-                "subject_kind": req.subject_kind,
-                "subject_id": req.subject_id,
+        if not paths_to_stage:
+            audit(
+                auth,
+                "continuity_delete",
+                {
+                    "subject_kind": req.subject_kind,
+                    "subject_id": req.subject_id,
+                    "deleted_paths": [],
+                    "missing_paths": missing_paths,
+                    "reason": req.reason,
+                },
+            )
+            return {
+                "ok": True,
                 "deleted_paths": [],
                 "missing_paths": missing_paths,
-                "reason": req.reason,
-            },
-        )
-        return {
-            "ok": True,
-            "deleted_paths": [],
-            "missing_paths": missing_paths,
-            "latest_commit": gm.latest_commit(),
-        }
+                "latest_commit": gm.latest_commit(),
+            }
 
-    try:
-        for path in paths_to_stage:
-            path.unlink()
-        committed = gm.commit_paths(paths_to_stage, _delete_commit_message(req.subject_kind, req.subject_id, req.reason))
-        if not committed:
-            raise RuntimeError("Continuity delete commit produced no changes")
-    except Exception as exc:
-        restore_errors: list[str] = []
-        for path, data in original_bytes.items():
-            try:
-                write_bytes_file(path, data)
-            except Exception as restore_exc:
-                restore_errors.append(f"{path}: {restore_exc}")
-        if restore_errors:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Continuity delete failed: {exc}; rollback failed for {', '.join(restore_errors)}",
-            ) from exc
-        raise HTTPException(status_code=500, detail=f"Continuity delete failed: {exc}") from exc
+        try:
+            for path in paths_to_stage:
+                path.unlink()
+            committed = gm.commit_paths(paths_to_stage, _delete_commit_message(req.subject_kind, req.subject_id, req.reason))
+            if not committed:
+                raise RuntimeError("Continuity delete commit produced no changes")
+        except Exception as exc:
+            restore_errors: list[str] = []
+            for path, data in original_bytes.items():
+                try:
+                    write_bytes_file(path, data)
+                except Exception as restore_exc:
+                    restore_errors.append(f"{path}: {restore_exc}")
+            if restore_errors:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Continuity delete failed: {exc}; rollback failed for {', '.join(restore_errors)}",
+                ) from exc
+            raise HTTPException(status_code=500, detail=f"Continuity delete failed: {exc}") from exc
     audit(
         auth,
         "continuity_delete",
@@ -1688,91 +1706,92 @@ def continuity_revalidate_service(
     auth.require_read_path(rel)
     auth.require_write_path(rel)
     active_path = safe_path(repo_root, rel)
-    active = ContinuityCapsule.model_validate(
-        _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
-    )
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    now_iso = now.isoformat().replace("+00:00", "Z")
-    strongest_signal = _strongest_signal_kind(req.signals)
-    derived_status = CONTINUITY_SIGNAL_STATUS[strongest_signal]
-    evidence_refs = _signals_to_evidence_refs(req.signals)
-    compare_changed_fields: list[str] = []
-    result_outcome = req.outcome
-    updated = False
-
-    if req.outcome == "correct":
-        candidate = req.candidate_capsule
-        if candidate is None:
-            raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
-        compare_changed_fields = _compare_capsules(
-            _normalize_compare_payload(repo_root, active),
-            _normalize_compare_payload(repo_root, candidate),
+    with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
+        active = ContinuityCapsule.model_validate(
+            _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
         )
-        if not compare_changed_fields:
-            result_outcome = "confirm"
-            final_capsule = active.model_copy(deep=True)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now.isoformat().replace("+00:00", "Z")
+        strongest_signal = _strongest_signal_kind(req.signals)
+        derived_status = CONTINUITY_SIGNAL_STATUS[strongest_signal]
+        evidence_refs = _signals_to_evidence_refs(req.signals)
+        compare_changed_fields: list[str] = []
+        result_outcome = req.outcome
+        updated = False
+
+        if req.outcome == "correct":
+            candidate = req.candidate_capsule
+            if candidate is None:
+                raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
+            compare_changed_fields = _compare_capsules(
+                _normalize_compare_payload(repo_root, active),
+                _normalize_compare_payload(repo_root, candidate),
+            )
+            if not compare_changed_fields:
+                result_outcome = "confirm"
+                final_capsule = active.model_copy(deep=True)
+            else:
+                updated = True
+                final_capsule = candidate.model_copy(deep=True)
         else:
-            updated = True
-            final_capsule = candidate.model_copy(deep=True)
-    else:
-        final_capsule = active.model_copy(deep=True)
+            final_capsule = active.model_copy(deep=True)
 
-    final_capsule.verified_at = now_iso
-    final_capsule.verification_kind = strongest_signal  # type: ignore[assignment]
+        final_capsule.verified_at = now_iso
+        final_capsule.verification_kind = strongest_signal  # type: ignore[assignment]
 
-    if result_outcome == "conflict":
-        final_capsule.verification_state = ContinuityVerificationState.model_validate({
-            "status": "conflicted",
-            "last_revalidated_at": now_iso,
-            "strongest_signal": strongest_signal,
-            "evidence_refs": evidence_refs,
-            "conflict_summary": req.reason,
-        })
-        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
-            "status": "conflicted",
-            "reasons": [req.reason],
-            "last_checked_at": now_iso,
-        })
-    elif result_outcome == "degrade":
-        final_capsule.verification_state = ContinuityVerificationState.model_validate({
-            "status": derived_status,
-            "last_revalidated_at": now_iso,
-            "strongest_signal": strongest_signal,
-            "evidence_refs": evidence_refs,
-        })
-        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
-            "status": "degraded",
-            "reasons": [req.reason],
-            "last_checked_at": now_iso,
-        })
-    else:
-        final_capsule.verification_state = ContinuityVerificationState.model_validate({
-            "status": derived_status,
-            "last_revalidated_at": now_iso,
-            "strongest_signal": strongest_signal,
-            "evidence_refs": evidence_refs,
-        })
-        final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
-            "status": "healthy",
-            "reasons": [],
-            "last_checked_at": now_iso,
-        })
+        if result_outcome == "conflict":
+            final_capsule.verification_state = ContinuityVerificationState.model_validate({
+                "status": "conflicted",
+                "last_revalidated_at": now_iso,
+                "strongest_signal": strongest_signal,
+                "evidence_refs": evidence_refs,
+                "conflict_summary": req.reason,
+            })
+            final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+                "status": "conflicted",
+                "reasons": [req.reason],
+                "last_checked_at": now_iso,
+            })
+        elif result_outcome == "degrade":
+            final_capsule.verification_state = ContinuityVerificationState.model_validate({
+                "status": derived_status,
+                "last_revalidated_at": now_iso,
+                "strongest_signal": strongest_signal,
+                "evidence_refs": evidence_refs,
+            })
+            final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+                "status": "degraded",
+                "reasons": [req.reason],
+                "last_checked_at": now_iso,
+            })
+        else:
+            final_capsule.verification_state = ContinuityVerificationState.model_validate({
+                "status": derived_status,
+                "last_revalidated_at": now_iso,
+                "strongest_signal": strongest_signal,
+                "evidence_refs": evidence_refs,
+            })
+            final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
+                "status": "healthy",
+                "reasons": [],
+                "last_checked_at": now_iso,
+            })
 
-    _, canonical = _final_capsule_payload(repo_root, final_capsule)
-    _persist_active_capsule(
-        repo_root=repo_root,
-        gm=gm,
-        path=active_path,
-        canonical=canonical,
-        commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
-    )
-    fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
-        repo_root=repo_root,
-        gm=gm,
-        subject_kind=req.subject_kind,
-        subject_id=req.subject_id,
-        capsule=final_capsule.model_dump(mode="json", exclude_none=True),
-    )
+        _, canonical = _final_capsule_payload(repo_root, final_capsule)
+        _persist_active_capsule(
+            repo_root=repo_root,
+            gm=gm,
+            path=active_path,
+            canonical=canonical,
+            commit_message=f"continuity: revalidate {req.subject_kind} {req.subject_id}",
+        )
+        fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
+            repo_root=repo_root,
+            gm=gm,
+            subject_kind=req.subject_kind,
+            subject_id=req.subject_id,
+            capsule=final_capsule.model_dump(mode="json", exclude_none=True),
+        )
     audit(
         auth,
         "continuity_revalidate",
@@ -1818,45 +1837,45 @@ def continuity_archive_service(
     auth.require_read_path(rel)
     auth.require_write_path(rel)
     auth.require_write_path(archive_rel)
+    with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
+        capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+        archive_payload = {
+            "schema_type": CONTINUITY_ARCHIVE_SCHEMA_TYPE,
+            "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+            "archived_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "archived_by": auth.peer_id,
+            "reason": req.reason,
+            "active_path": rel,
+            "capsule": capsule,
+        }
 
-    capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
-    archive_payload = {
-        "schema_type": CONTINUITY_ARCHIVE_SCHEMA_TYPE,
-        "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
-        "archived_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "archived_by": auth.peer_id,
-        "reason": req.reason,
-        "active_path": rel,
-        "capsule": capsule,
-    }
-
-    archive_path = safe_path(repo_root, archive_rel)
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    active_path = safe_path(repo_root, rel)
-    active_bytes = active_path.read_bytes()
-    write_text_file(archive_path, canonical_json(archive_payload))
-    # The active-path deletion must be staged before the git commit can atomically
-    # record the archive write plus active-file removal. If the commit step fails,
-    # restore the active capsule and discard the archive envelope immediately.
-    active_path.unlink()
-    try:
-        committed = gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
-    except Exception as exc:
+        archive_path = safe_path(repo_root, archive_rel)
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        active_path = safe_path(repo_root, rel)
+        active_bytes = active_path.read_bytes()
+        write_text_file(archive_path, canonical_json(archive_payload))
+        # The active-path deletion must be staged before the git commit can atomically
+        # record the archive write plus active-file removal. If the commit step fails,
+        # restore the active capsule and discard the archive envelope immediately.
+        active_path.unlink()
         try:
-            _restore_failed_archive(active_path, archive_path, active_bytes)
-        except Exception as restore_exc:
-            raise RuntimeError(
-                f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}"
-            ) from exc
-        raise
-    if not committed:
-        try:
-            _restore_failed_archive(active_path, archive_path, active_bytes)
-        except Exception as restore_exc:
-            raise RuntimeError(
-                f"Continuity archive commit produced no changes; rollback failed: {restore_exc}"
-            ) from restore_exc
-        raise RuntimeError("Continuity archive commit produced no changes")
+            committed = gm.commit_paths([archive_path, active_path], f"continuity: archive {req.subject_kind} {req.subject_id}")
+        except Exception as exc:
+            try:
+                _restore_failed_archive(active_path, archive_path, active_bytes)
+            except Exception as restore_exc:
+                raise RuntimeError(
+                    f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}"
+                ) from exc
+            raise
+        if not committed:
+            try:
+                _restore_failed_archive(active_path, archive_path, active_bytes)
+            except Exception as restore_exc:
+                raise RuntimeError(
+                    f"Continuity archive commit produced no changes; rollback failed: {restore_exc}"
+                ) from restore_exc
+            raise RuntimeError("Continuity archive commit produced no changes")
 
     audit(
         auth,
