@@ -117,7 +117,13 @@ def _load_ops_runs(
         try:
             row = json.loads(line)
         except (json.JSONDecodeError, ValueError):
-            _log.warning("malformed JSONL in ops runs (file line %d): %s", file_offset + idx + 1, line[:200])
+            preview = repr(line[:200]) + ("..." if len(line) > 200 else "") if line else "<empty>"
+            _log.warning(
+                "malformed JSONL in ops runs (file line %d, %d chars): %s",
+                file_offset + idx + 1,
+                len(line),
+                preview,
+            )
             continue
         if not isinstance(row, dict):
             _log.debug("non-dict JSON in ops runs (file line %d), skipping", file_offset + idx + 1)
