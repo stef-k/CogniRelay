@@ -223,6 +223,34 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _write_pair_exclusive(
+    payload_path: Path,
+    payload: dict[str, Any],
+    stub_path: Path,
+    stub: dict[str, Any],
+) -> bool:
+    """Write a payload+stub pair using exclusive creates.
+
+    Returns True on success, False if either file already exists (concurrent
+    writer got there first).  On non-collision errors the exception propagates.
+    """
+    try:
+        _write_json_exclusive(payload_path, payload)
+    except FileExistsError:
+        return False
+
+    try:
+        _write_json_exclusive(stub_path, stub)
+    except FileExistsError:
+        payload_path.unlink(missing_ok=True)
+        return False
+    except Exception:
+        payload_path.unlink(missing_ok=True)
+        raise
+
+    return True
+
+
 def _write_json_exclusive(path: Path, data: dict[str, Any]) -> None:
     """Write JSON data to path, failing if the file already exists.
 
@@ -379,10 +407,10 @@ def handoff_maintenance_pass(
     if not eligible:
         return {"ok": True, "family": "handoff", "externalized": 0, "warnings": warnings}
 
-    # Build payloads and stubs
-    write_plan: list[tuple[Path, str, dict[str, Any]]] = []
-    delete_plan: list[Path] = []
+    # Build and write payloads+stubs exclusively, then delete hot artifacts.
     reserved_ids: set[str] = set()
+    written_paths: list[str] = []
+    externalized_ids: list[str] = []
 
     for handoff_id, artifact, _ret_ts, source_rel in eligible:
         summary = _handoff_summary(artifact)
@@ -398,33 +426,38 @@ def handoff_maintenance_pass(
             cut_at=now,
             reserved_ids=reserved_ids,
         )
-        write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
-        write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
-        delete_plan.append(safe_path(repo_root, source_rel))
+        if not _write_pair_exclusive(
+            safe_path(repo_root, payload_rel), payload,
+            safe_path(repo_root, stub_rel), stub,
+        ):
+            warnings.append(f"handoff_history_collision:{handoff_id}")
+            continue
+        written_paths.extend([payload_rel, stub_rel])
+        externalized_ids.append(handoff_id)
 
-    # Rollback includes both writes and deletes
-    all_paths = [p for p, _, _ in write_plan] + delete_plan
-    rollback = _capture_rollback(all_paths)
-    try:
-        for path, _, data in write_plan:
-            _write_json(path, data)
-        for hot_path in delete_plan:
+    # Delete hot artifacts only for successfully externalized items
+    delete_plan: list[Path] = []
+    for hid in externalized_ids:
+        hot_path = safe_path(repo_root, f"{HANDOFFS_DIR_REL}/{hid}.json")
+        rollback = _capture_rollback([hot_path])
+        try:
             hot_path.unlink(missing_ok=True)
-    except Exception:
-        _restore_rollback(rollback)
-        raise
+        except Exception:
+            _restore_rollback(rollback)
+            raise
+        delete_plan.append(hot_path)
 
     # Best-effort: remove externalized handoffs from the query sidecar index
     from app.coordination.query_index import try_delete_handoff
-    for handoff_id, _, _, _ in eligible:
-        try_delete_handoff(handoff_id)
+    for hid in externalized_ids:
+        try_delete_handoff(hid)
 
     return {
         "ok": True,
         "family": "handoff",
-        "externalized": len(eligible),
-        "written_paths": [rel for _, rel, _ in write_plan],
-        "deleted_paths": [f"{HANDOFFS_DIR_REL}/{hid}.json" for hid, _, _, _ in eligible],
+        "externalized": len(externalized_ids),
+        "written_paths": written_paths,
+        "deleted_paths": [f"{HANDOFFS_DIR_REL}/{hid}.json" for hid in externalized_ids],
         "warnings": warnings,
     }
 
@@ -591,9 +624,9 @@ def reconciliation_maintenance_pass(
     if not eligible:
         return {"ok": True, "family": "reconciliation", "externalized": 0, "warnings": warnings}
 
-    write_plan: list[tuple[Path, str, dict[str, Any]]] = []
-    delete_plan: list[Path] = []
     reserved_ids: set[str] = set()
+    written_paths: list[str] = []
+    externalized_ids: list[str] = []
 
     for recon_id, artifact, _ts, source_rel in eligible:
         summary = _reconciliation_summary(artifact)
@@ -609,32 +642,35 @@ def reconciliation_maintenance_pass(
             cut_at=now,
             reserved_ids=reserved_ids,
         )
-        write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
-        write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
-        delete_plan.append(safe_path(repo_root, source_rel))
+        if not _write_pair_exclusive(
+            safe_path(repo_root, payload_rel), payload,
+            safe_path(repo_root, stub_rel), stub,
+        ):
+            warnings.append(f"reconciliation_history_collision:{recon_id}")
+            continue
+        written_paths.extend([payload_rel, stub_rel])
+        externalized_ids.append(recon_id)
 
-    all_paths = [p for p, _, _ in write_plan] + delete_plan
-    rollback = _capture_rollback(all_paths)
-    try:
-        for path, _, data in write_plan:
-            _write_json(path, data)
-        for hot_path in delete_plan:
+    for rid in externalized_ids:
+        hot_path = safe_path(repo_root, f"{RECONCILIATIONS_DIR_REL}/{rid}.json")
+        rollback = _capture_rollback([hot_path])
+        try:
             hot_path.unlink(missing_ok=True)
-    except Exception:
-        _restore_rollback(rollback)
-        raise
+        except Exception:
+            _restore_rollback(rollback)
+            raise
 
     # Best-effort: remove externalized reconciliations from the query sidecar index
     from app.coordination.query_index import try_delete_reconciliation
-    for recon_id, _, _, _ in eligible:
-        try_delete_reconciliation(recon_id)
+    for rid in externalized_ids:
+        try_delete_reconciliation(rid)
 
     return {
         "ok": True,
         "family": "reconciliation",
-        "externalized": len(eligible),
-        "written_paths": [rel for _, rel, _ in write_plan],
-        "deleted_paths": [f"{RECONCILIATIONS_DIR_REL}/{rid}.json" for rid, _, _, _ in eligible],
+        "externalized": len(externalized_ids),
+        "written_paths": written_paths,
+        "deleted_paths": [f"{RECONCILIATIONS_DIR_REL}/{rid}.json" for rid in externalized_ids],
         "warnings": warnings,
     }
 
@@ -696,9 +732,9 @@ def task_done_maintenance_pass(
     if not eligible:
         return {"ok": True, "family": "task_done", "externalized": 0, "warnings": warnings}
 
-    write_plan: list[tuple[Path, str, dict[str, Any]]] = []
-    delete_plan: list[Path] = []
     reserved_ids: set[str] = set()
+    written_paths: list[str] = []
+    externalized_ids: list[str] = []
 
     for task_id, artifact, _ts, source_rel in eligible:
         summary = _task_done_summary(artifact)
@@ -714,27 +750,30 @@ def task_done_maintenance_pass(
             cut_at=now,
             reserved_ids=reserved_ids,
         )
-        write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
-        write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
-        delete_plan.append(safe_path(repo_root, source_rel))
+        if not _write_pair_exclusive(
+            safe_path(repo_root, payload_rel), payload,
+            safe_path(repo_root, stub_rel), stub,
+        ):
+            warnings.append(f"task_done_history_collision:{task_id}")
+            continue
+        written_paths.extend([payload_rel, stub_rel])
+        externalized_ids.append(task_id)
 
-    all_paths = [p for p, _, _ in write_plan] + delete_plan
-    rollback = _capture_rollback(all_paths)
-    try:
-        for path, _, data in write_plan:
-            _write_json(path, data)
-        for hot_path in delete_plan:
+    for tid in externalized_ids:
+        hot_path = safe_path(repo_root, f"{TASKS_DONE_DIR_REL}/{tid}.json")
+        rollback = _capture_rollback([hot_path])
+        try:
             hot_path.unlink(missing_ok=True)
-    except Exception:
-        _restore_rollback(rollback)
-        raise
+        except Exception:
+            _restore_rollback(rollback)
+            raise
 
     return {
         "ok": True,
         "family": "task_done",
-        "externalized": len(eligible),
-        "written_paths": [rel for _, rel, _ in write_plan],
-        "deleted_paths": [f"{TASKS_DONE_DIR_REL}/{tid}.json" for tid, _, _, _ in eligible],
+        "externalized": len(externalized_ids),
+        "written_paths": written_paths,
+        "deleted_paths": [f"{TASKS_DONE_DIR_REL}/{tid}.json" for tid in externalized_ids],
         "warnings": warnings,
     }
 
@@ -797,9 +836,9 @@ def patch_applied_maintenance_pass(
     if not eligible:
         return {"ok": True, "family": "patch_applied", "externalized": 0, "warnings": warnings}
 
-    write_plan: list[tuple[Path, str, dict[str, Any]]] = []
-    delete_plan: list[Path] = []
     reserved_ids: set[str] = set()
+    written_paths: list[str] = []
+    externalized_ids: list[str] = []
 
     for patch_id, artifact, _ts, source_rel in eligible:
         summary = _patch_applied_summary(artifact)
@@ -815,27 +854,30 @@ def patch_applied_maintenance_pass(
             cut_at=now,
             reserved_ids=reserved_ids,
         )
-        write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
-        write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
-        delete_plan.append(safe_path(repo_root, source_rel))
+        if not _write_pair_exclusive(
+            safe_path(repo_root, payload_rel), payload,
+            safe_path(repo_root, stub_rel), stub,
+        ):
+            warnings.append(f"patch_applied_history_collision:{patch_id}")
+            continue
+        written_paths.extend([payload_rel, stub_rel])
+        externalized_ids.append(patch_id)
 
-    all_paths = [p for p, _, _ in write_plan] + delete_plan
-    rollback = _capture_rollback(all_paths)
-    try:
-        for path, _, data in write_plan:
-            _write_json(path, data)
-        for hot_path in delete_plan:
+    for pid in externalized_ids:
+        hot_path = safe_path(repo_root, f"{PATCHES_APPLIED_DIR_REL}/{pid}.json")
+        rollback = _capture_rollback([hot_path])
+        try:
             hot_path.unlink(missing_ok=True)
-    except Exception:
-        _restore_rollback(rollback)
-        raise
+        except Exception:
+            _restore_rollback(rollback)
+            raise
 
     return {
         "ok": True,
         "family": "patch_applied",
-        "externalized": len(eligible),
-        "written_paths": [rel for _, rel, _ in write_plan],
-        "deleted_paths": [f"{PATCHES_APPLIED_DIR_REL}/{pid}.json" for pid, _, _, _ in eligible],
+        "externalized": len(externalized_ids),
+        "written_paths": written_paths,
+        "deleted_paths": [f"{PATCHES_APPLIED_DIR_REL}/{pid}.json" for pid in externalized_ids],
         "warnings": warnings,
     }
 

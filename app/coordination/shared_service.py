@@ -454,6 +454,13 @@ def shared_update_service(
                 previous_artifact=artifact,
                 hot_retention_days=int(_shared_hot_retention),
             )
+        except FileExistsError:
+            _log.warning(
+                "Shared history capture collision exhausted retries for %s; superseded version lost",
+                shared_id,
+                exc_info=True,
+            )
+            _update_warnings.append("shared_history_capture_collision: retry budget exhausted, superseded version not archived")
         except Exception:
             _log.warning(
                 "Shared history capture failed for %s; proceeding with update (non-fatal)",

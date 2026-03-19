@@ -738,7 +738,7 @@ class RollbackTestCase(unittest.TestCase):
         def failing_write(path, data):
             raise OSError("disk full")
 
-        with patch("app.artifact_lifecycle.service._write_json", side_effect=failing_write):
+        with patch("app.artifact_lifecycle.service._write_json_exclusive", side_effect=failing_write):
             with self.assertRaises(OSError):
                 handoff_maintenance_pass(
                     repo_root=self.repo, now=self.now,
