@@ -36,8 +36,9 @@ from app.continuity.service import (
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-from app.git_safety import safe_commit_paths, try_commit_file
+from app.git_safety import safe_commit_paths, try_commit_file, try_commit_paths
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
+from app.registry_lifecycle.service import externalize_superseded_pull, externalize_superseded_push
 from app.storage import canonical_json, read_text_file, safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
@@ -739,7 +740,41 @@ def replication_pull_service(
             changed += 1
             tomb_entries.pop(file_row.path, None)
 
-        state.setdefault("last_pull_by_source", {})[req.source_peer] = {
+        # Synchronous pre-write capture per #112: externalize superseded pull row
+        _pull_history_extra: list[str] = []
+        pull_by_source = state.setdefault("last_pull_by_source", {})
+        previous_pull = pull_by_source.get(req.source_peer)
+        if isinstance(previous_pull, dict) and previous_pull:
+            try:
+                ext_result = externalize_superseded_pull(
+                    repo_root=settings.repo_root,
+                    now=now,
+                    source_peer=req.source_peer,
+                    previous_row=previous_pull,
+                    hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
+                )
+                if ext_result:
+                    _pull_history_extra.extend([ext_result["shard_path"], ext_result["stub_path"]])
+                    # Update history_meta per #112
+                    hm = state.setdefault("history_meta", {})
+                    if not isinstance(hm, dict):
+                        hm = {}
+                        state["history_meta"] = hm
+                    rs = hm.setdefault("replication_state", {})
+                    if not isinstance(rs, dict):
+                        rs = {}
+                        hm["replication_state"] = rs
+                    rs["last_cut_at"] = now.isoformat()
+                    rs["last_cut_pull_count"] = rs.get("last_cut_pull_count", 0) + 1 if isinstance(rs.get("last_cut_pull_count"), int) else 1
+            except Exception:
+                _logger.error(
+                    "Failed to externalize superseded pull row for %s; row data will be lost on overwrite: %s",
+                    req.source_peer,
+                    json.dumps(previous_pull, ensure_ascii=False, default=str),
+                    exc_info=True,
+                )
+
+        pull_by_source[req.source_peer] = {
             "pulled_at": now.isoformat(),
             "received_count": len(req.files),
             "changed_count": changed,
@@ -766,6 +801,21 @@ def replication_pull_service(
         tomb_path = safe_path(settings.repo_root, REPLICATION_TOMBSTONES_REL)
         track_change(tomb_path, REPLICATION_TOMBSTONES_REL)
         _write_replication_tombstones(settings.repo_root, tombstones)
+
+        # Track history shard/stub paths for rollback if head write fails.
+        # These files were just created by externalize_superseded_pull, so we
+        # record them with prior bytes=None so rollback *deletes* them rather
+        # than restoring the new content (which would orphan shards the head
+        # no longer references).
+        for extra_rel in _pull_history_extra:
+            extra_path = safe_path(settings.repo_root, extra_rel)
+            resolved = extra_path.resolve()
+            if resolved not in seen_paths:
+                seen_paths.add(resolved)
+                rollback_plan.append((extra_path, None))
+            if extra_path not in changed_paths:
+                changed_paths.append(extra_path)
+                changed_rels.append(extra_rel)
 
         state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
         track_change(state_path, REPLICATION_STATE_REL)
@@ -900,8 +950,41 @@ def replication_push_service(
 
     auth.require_write_path(REPLICATION_STATE_REL)
     state = load_replication_state(settings.repo_root)
+
+    # Synchronous pre-write capture per #112: externalize superseded push row
+    push_now = datetime.now(timezone.utc)  # single timestamp for shard cut_at and state pushed_at
+    _history_extra_paths: list[str] = []
+    previous_push = state.get("last_push")
+    if isinstance(previous_push, dict) and previous_push:
+        try:
+            ext_result = externalize_superseded_push(
+                repo_root=settings.repo_root,
+                now=push_now,
+                previous_row=previous_push,
+                hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
+            )
+            if ext_result:
+                _history_extra_paths.extend([ext_result["shard_path"], ext_result["stub_path"]])
+                # Update history_meta per #112
+                hm = state.setdefault("history_meta", {})
+                if not isinstance(hm, dict):
+                    hm = {}
+                    state["history_meta"] = hm
+                rs = hm.setdefault("replication_state", {})
+                if not isinstance(rs, dict):
+                    rs = {}
+                    hm["replication_state"] = rs
+                rs["last_cut_at"] = push_now.isoformat()
+                rs["last_cut_push_count"] = rs.get("last_cut_push_count", 0) + 1 if isinstance(rs.get("last_cut_push_count"), int) else 1
+        except Exception:
+            _logger.error(
+                "Failed to externalize superseded push row; row data will be lost on overwrite: %s",
+                json.dumps(previous_push, ensure_ascii=False, default=str),
+                exc_info=True,
+            )
+
     state["last_push"] = {
-        "pushed_at": datetime.now(timezone.utc).isoformat(),
+        "pushed_at": push_now.isoformat(),
         "target_url": target_url,
         "file_count": len(files),
         "by_prefix": by_prefix,
@@ -910,9 +993,23 @@ def replication_push_service(
         "include_deleted": req.include_deleted,
     }
     committed_files = []
-    state_path = _write_replication_state(settings.repo_root, state)
+    try:
+        state_path = _write_replication_state(settings.repo_root, state)
+    except Exception:
+        # Clean up shard/stub files created by externalize_superseded_push
+        # to avoid orphaned shards the head doesn't reference.
+        for p in _history_extra_paths:
+            safe_path(settings.repo_root, p).unlink(missing_ok=True)
+        raise
     warnings: list[str] = []
-    if try_commit_file(path=state_path, gm=gm, commit_message="replication: update push state"):
+    if _history_extra_paths:
+        push_commit_paths = [state_path] + [safe_path(settings.repo_root, p) for p in _history_extra_paths]
+        if try_commit_paths(paths=push_commit_paths, gm=gm, commit_message="replication: update push state"):
+            committed_files.append(REPLICATION_STATE_REL)
+            committed_files.extend(_history_extra_paths)
+        else:
+            warnings.append("replication_push_not_durable: state is on disk but not durably committed to git")
+    elif try_commit_file(path=state_path, gm=gm, commit_message="replication: update push state"):
         committed_files.append(REPLICATION_STATE_REL)
     else:
         warnings.append("replication_push_not_durable: state is on disk but not durably committed to git")

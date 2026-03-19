@@ -78,6 +78,22 @@ class Settings:
     max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES  # env override: COGNIRELAY_MAX_JSONL_READ_BYTES
     continuity_retention_archive_days: int = 90
 
+    # Registry lifecycle settings (issue #112)
+    delivery_terminal_retention_days: int = 30
+    delivery_history_cold_after_days: int = 90
+    delivery_idempotency_retention_days: int = 30
+    nonce_retention_days: int = 7
+    peer_trust_history_max_hot_entries: int = 32
+    peer_trust_history_hot_retention_days: int = 30
+    peer_trust_history_cold_after_days: int = 120
+    replication_history_hot_retention_days: int = 14
+    replication_history_cold_after_days: int = 90
+    replication_pull_idempotency_retention_days: int = 14
+    replication_tombstone_grace_days: int = 30
+    replication_tombstone_cold_after_days: int = 90
+    replication_tombstone_retention_days: int = 365
+    registry_history_batch_limit: int = 500
+
 
 _cached: Settings | None = None
 
@@ -226,6 +242,48 @@ def get_settings(force_reload: bool = False) -> Settings:
             _env_first("COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS"),
             90,
             minimum=1,
+        ),
+        delivery_terminal_retention_days=_parse_int(
+            _env_first("COGNIRELAY_DELIVERY_TERMINAL_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        delivery_history_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_DELIVERY_HISTORY_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        delivery_idempotency_retention_days=_parse_int(
+            _env_first("COGNIRELAY_DELIVERY_IDEMPOTENCY_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        nonce_retention_days=_parse_int(
+            _env_first("COGNIRELAY_NONCE_RETENTION_DAYS"), 7, minimum=1,
+        ),
+        peer_trust_history_max_hot_entries=_parse_int(
+            _env_first("COGNIRELAY_PEER_TRUST_HISTORY_MAX_HOT_ENTRIES"), 32, minimum=1,
+        ),
+        peer_trust_history_hot_retention_days=_parse_int(
+            _env_first("COGNIRELAY_PEER_TRUST_HISTORY_HOT_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        peer_trust_history_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_PEER_TRUST_HISTORY_COLD_AFTER_DAYS"), 120, minimum=1,
+        ),
+        replication_history_hot_retention_days=_parse_int(
+            _env_first("COGNIRELAY_REPLICATION_HISTORY_HOT_RETENTION_DAYS"), 14, minimum=1,
+        ),
+        replication_history_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_REPLICATION_HISTORY_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        replication_pull_idempotency_retention_days=_parse_int(
+            _env_first("COGNIRELAY_REPLICATION_PULL_IDEMPOTENCY_RETENTION_DAYS"), 14, minimum=1,
+        ),
+        replication_tombstone_grace_days=_parse_int(
+            _env_first("COGNIRELAY_REPLICATION_TOMBSTONE_GRACE_DAYS"), 30, minimum=1,
+        ),
+        replication_tombstone_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_REPLICATION_TOMBSTONE_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        replication_tombstone_retention_days=_parse_int(
+            _env_first("COGNIRELAY_REPLICATION_TOMBSTONE_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        registry_history_batch_limit=_parse_int(
+            _env_first("COGNIRELAY_REGISTRY_HISTORY_BATCH_LIMIT"), 500, minimum=1,
         ),
     )
     return _cached
