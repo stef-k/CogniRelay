@@ -135,7 +135,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
 - Use `POST /v1/continuity/revalidate` when you need to confirm, correct, degrade, or conflict-mark one active capsule through the audited write path
 - Expect `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` to return additive `recovery_warnings` when the fallback snapshot refresh fails after the active write has already committed
-- Use `POST /v1/continuity/list` when you need active, fallback, or archived continuity summaries with deterministic artifact-state and retention-class labeling
+- Use `POST /v1/continuity/list` when you need active, fallback, archived, or cold continuity summaries with deterministic artifact-state and retention-class labeling
 - Use `POST /v1/continuity/delete` when you need an explicit hard-delete path for active, fallback, or archive continuity artifacts
 - Use `POST /v1/continuity/archive` when you need to remove an active capsule from retrieval while preserving its final archived envelope
 - Use `GET /v1/coordination/handoff/{handoff_id}` and `GET /v1/coordination/handoffs/query` when you need to read or discover existing handoff artifacts without assuming the sender's message or task reference already arrived
@@ -156,8 +156,10 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` also refresh the last-known-good fallback snapshot under `memory/continuity/fallback/`
 - `POST /v1/continuity/refresh/plan` persists the latest operator-visible plan under `memory/continuity/refresh_state.json`
 - Use `POST /v1/continuity/archive` to move an active capsule into `memory/continuity/archive/` through one git-backed archive commit
+- Use `POST /v1/ops/run` with job `continuity_cold_store` to move one archived continuity envelope into `memory/continuity/cold/` as an exact `.json.gz` payload plus searchable hot stub
+- Use `POST /v1/ops/run` with job `continuity_cold_rehydrate` to restore one cold-stored continuity envelope back into `memory/continuity/archive/`
 - `POST /v1/backup/create` includes continuity artifact counts in its manifest when continuity data is in scope
-- `POST /v1/backup/restore-test` can validate restored continuity artifacts and report invalid active, fallback, and archive entries without crashing the drill
+- `POST /v1/backup/restore-test` can validate restored continuity artifacts and report invalid active, fallback, archive, and cold-tier entries without crashing the drill
 - continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
 - continuity capsules may also include optional `trailing_notes`, `curiosity_queue`, and structured `negative_decisions` entries to preserve lower-commitment orientation context
 - `POST /v1/continuity/read` and `POST /v1/context/retrieve` pass those additive fields through unchanged unless deterministic trimming removes them to stay within the continuity budget

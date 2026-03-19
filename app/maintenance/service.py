@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import logging
 import math
@@ -23,9 +24,14 @@ from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.continuity.service import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+    CONTINUITY_COLD_DIR_REL,
+    CONTINUITY_COLD_INDEX_DIR_REL,
     CONTINUITY_DIR_REL,
     CONTINUITY_FALLBACK_SCHEMA_TYPE,
     CONTINUITY_FALLBACK_SCHEMA_VERSION,
+    continuity_archive_rel_path_from_cold_artifact,
+    continuity_cold_stub_rel_path,
+    _load_cold_stub,
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
@@ -77,6 +83,8 @@ def _continuity_counts(repo_root: Path) -> dict[str, int]:
     active_dir = safe_path(repo_root, CONTINUITY_DIR_REL)
     fallback_dir = safe_path(repo_root, f"{CONTINUITY_DIR_REL}/fallback")
     archive_dir = safe_path(repo_root, f"{CONTINUITY_DIR_REL}/archive")
+    cold_dir = safe_path(repo_root, CONTINUITY_COLD_DIR_REL)
+    cold_index_dir = safe_path(repo_root, CONTINUITY_COLD_INDEX_DIR_REL)
 
     def _count_json(directory: Path, *, top_level_only: bool = False) -> int:
         """Count JSON artifacts in one directory, optionally without descending."""
@@ -94,6 +102,8 @@ def _continuity_counts(repo_root: Path) -> dict[str, int]:
         "active_capsules": _count_json(active_dir, top_level_only=True),
         "fallback_snapshots": _count_json(fallback_dir),
         "archive_envelopes": _count_json(archive_dir),
+        "cold_payloads": sum(1 for path in cold_dir.glob("*.json.gz") if path.is_file()) if cold_dir.exists() and cold_dir.is_dir() else 0,
+        "cold_stubs": sum(1 for path in cold_index_dir.glob("*.md") if path.is_file()) if cold_index_dir.exists() and cold_index_dir.is_dir() else 0,
     }
 
 
@@ -153,6 +163,8 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
     active_dir = restore_root / CONTINUITY_DIR_REL
     fallback_dir = restore_root / CONTINUITY_DIR_REL / "fallback"
     archive_dir = restore_root / CONTINUITY_DIR_REL / "archive"
+    cold_dir = restore_root / CONTINUITY_COLD_DIR_REL
+    cold_index_dir = restore_root / CONTINUITY_COLD_INDEX_DIR_REL
 
     active_paths = sorted(
         path for path in active_dir.glob("*.json") if path.is_file() and path.name != "refresh_state.json"
@@ -163,13 +175,24 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
     archive_paths = sorted(
         path for path in archive_dir.glob("*.json") if path.is_file()
     ) if archive_dir.exists() and archive_dir.is_dir() else []
+    cold_payload_paths = sorted(
+        path for path in cold_dir.glob("*.json.gz") if path.is_file()
+    ) if cold_dir.exists() and cold_dir.is_dir() else []
+    cold_stub_paths = sorted(
+        path for path in cold_index_dir.glob("*.md") if path.is_file()
+    ) if cold_index_dir.exists() and cold_index_dir.is_dir() else []
 
     invalid_capsules: list[str] = []
     invalid_fallbacks: list[str] = []
     invalid_archives: list[str] = []
     missing_fallbacks: list[str] = []
+    invalid_cold_stubs: list[str] = []
+    invalid_cold_payloads: list[str] = []
+    unmatched_cold_stubs: list[str] = []
+    unmatched_cold_payloads: list[str] = []
     warnings: list[str] = []
     valid_fallbacks: set[str] = set()
+    valid_stub_by_payload: dict[str, str] = {}
 
     for path in fallback_paths:
         valid, payload = _validate_fallback_snapshot_payload(path, restore_root)
@@ -188,6 +211,48 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
             invalid_archives.append(rel)
             warnings.append(f"continuity_invalid_archive:{rel}")
 
+    for path in cold_stub_paths:
+        rel = str(path.relative_to(restore_root))
+        try:
+            frontmatter = _load_cold_stub(restore_root, rel)
+        except HTTPException:
+            invalid_cold_stubs.append(rel)
+            warnings.append(f"continuity_invalid_cold_stub:{rel}")
+            continue
+        payload_rel = frontmatter["cold_storage_path"]
+        valid_stub_by_payload[payload_rel] = rel
+
+    for path in cold_payload_paths:
+        rel = str(path.relative_to(restore_root))
+        expected_archive_rel = continuity_archive_rel_path_from_cold_artifact(rel)
+        expected_stub_rel = continuity_cold_stub_rel_path(expected_archive_rel)
+        if rel not in valid_stub_by_payload:
+            unmatched_cold_payloads.append(rel)
+            warnings.append(f"continuity_unmatched_cold_payload:{rel}")
+            continue
+        if valid_stub_by_payload[rel] != expected_stub_rel:
+            invalid_cold_payloads.append(rel)
+            warnings.append(f"continuity_invalid_cold_payload:{rel}")
+            continue
+        try:
+            payload = gzip.decompress(path.read_bytes())
+            decoded = json.loads(payload.decode("utf-8"))
+            if decoded.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
+                raise ValueError("wrong schema_type")
+            if decoded.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+                raise ValueError("wrong schema_version")
+            capsule = ContinuityCapsule.model_validate(decoded.get("capsule")).model_dump(mode="json", exclude_none=True)
+            if str(decoded.get("active_path") or "") != continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])):
+                raise ValueError("wrong active_path")
+        except Exception:
+            invalid_cold_payloads.append(rel)
+            warnings.append(f"continuity_invalid_cold_payload:{rel}")
+
+    for payload_rel, stub_rel in valid_stub_by_payload.items():
+        if not safe_path(restore_root, payload_rel).exists():
+            unmatched_cold_stubs.append(stub_rel)
+            warnings.append(f"continuity_unmatched_cold_stub:{stub_rel}")
+
     for path in active_paths:
         valid, capsule = _validate_active_continuity_payload(path, restore_root)
         rel = str(path.relative_to(restore_root))
@@ -201,13 +266,28 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
             warnings.append(f"continuity_missing_fallback:{rel}")
 
     return {
-        "ok": not (invalid_capsules or invalid_fallbacks or invalid_archives or missing_fallbacks),
+        "ok": not (
+            invalid_capsules
+            or invalid_fallbacks
+            or invalid_archives
+            or missing_fallbacks
+            or invalid_cold_stubs
+            or invalid_cold_payloads
+            or unmatched_cold_stubs
+            or unmatched_cold_payloads
+        ),
+        "cold_payloads": len(cold_payload_paths),
+        "cold_stubs": len(cold_stub_paths),
         "active_capsules": len(active_paths),
         "fallback_capsules": len(fallback_paths),
         "archive_envelopes": len(archive_paths),
         "invalid_capsules": invalid_capsules,
         "invalid_fallbacks": invalid_fallbacks,
         "invalid_archives": invalid_archives,
+        "invalid_cold_stubs": invalid_cold_stubs,
+        "invalid_cold_payloads": invalid_cold_payloads,
+        "unmatched_cold_stubs": unmatched_cold_stubs,
+        "unmatched_cold_payloads": unmatched_cold_payloads,
         "missing_fallbacks": missing_fallbacks,
         "warnings": warnings,
     }

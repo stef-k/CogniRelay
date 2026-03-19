@@ -28,6 +28,8 @@ from .context import (
 )
 from .continuity import (
     continuity_archive_service,
+    continuity_cold_rehydrate_service,
+    continuity_cold_store_service,
     continuity_compare_service,
     continuity_delete_service,
     continuity_list_service,
@@ -84,6 +86,8 @@ from .models import (
     CoordinationSharedQueryRequest,
     CoordinationSharedUpdateRequest,
     ContinuityArchiveRequest,
+    ContinuityColdRehydrateRequest,
+    ContinuityColdStoreRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
     ContinuityListRequest,
@@ -541,7 +545,7 @@ def ops_schedule_export(format: str = Query(default="systemd"), auth: AuthContex
 @app.post("/v1/ops/run")
 def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Execute one host-local maintenance operation."""
-    settings, _ = _services()
+    settings, gm = _services()
     return ops_run_service(
         settings=settings,
         auth=auth,
@@ -561,6 +565,22 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
         replication_push_request_factory=ReplicationPushRequest,
         compact_run=compact_run,
         compact_request_factory=CompactRequest,
+        continuity_cold_store=lambda req, auth: continuity_cold_store_service(
+            repo_root=settings.repo_root,
+            gm=gm,
+            auth=auth,
+            req=req,
+            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        ),
+        continuity_cold_store_request_factory=ContinuityColdStoreRequest,
+        continuity_cold_rehydrate=lambda req, auth: continuity_cold_rehydrate_service(
+            repo_root=settings.repo_root,
+            gm=gm,
+            auth=auth,
+            req=req,
+            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        ),
+        continuity_cold_rehydrate_request_factory=ContinuityColdRehydrateRequest,
         load_token_config=load_token_config,
         parse_iso=_parse_iso,
         load_security_keys=load_security_keys,

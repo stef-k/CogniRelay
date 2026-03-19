@@ -48,6 +48,11 @@ _PRIMARY_INDEX_ARTIFACTS = (
 _RAW_SCAN_CANDIDATE_LIMIT = 200
 
 
+def _is_continuity_cold_path(rel: str) -> bool:
+    """Return whether a repo-relative path belongs to the continuity cold tier."""
+    return rel.startswith("memory/continuity/cold/")
+
+
 def _filter_search_results_for_auth(results: list[dict[str, Any]], auth: AuthContext) -> list[dict[str, Any]]:
     """Drop search results the caller cannot read."""
     out: list[dict[str, Any]] = []
@@ -59,6 +64,11 @@ def _filter_search_results_for_auth(results: list[dict[str, Any]], auth: AuthCon
             continue
         out.append(row)
     return out
+
+
+def _exclude_continuity_cold_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop continuity cold-tier artifacts from context retrieval evidence."""
+    return [row for row in results if not _is_continuity_cold_path(str(row.get("path", "")))]
 
 
 def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -446,6 +456,7 @@ def context_retrieve_service(
                 time_window_days=req.time_window_days,
             )
             recent = _filter_search_results_for_auth(recent, auth)
+            recent = _exclude_continuity_cold_results(recent)
         except Exception:
             recent = _raw_scan_recent_relevant(repo_root, auth, req)
             index_health = "stale"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
+import io
 import json
 import logging
 import math
@@ -21,6 +23,8 @@ from app.git_manager import GitManager
 from app.git_safety import unstage_paths
 from app.models import (
     ContinuityArchiveRequest,
+    ContinuityColdRehydrateRequest,
+    ContinuityColdStoreRequest,
     ContinuityCapsuleHealth,
     ContinuityCapsule,
     ContinuityCompareRequest,
@@ -64,6 +68,8 @@ CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
 CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
 CONTINUITY_ARCHIVE_SCHEMA_TYPE = "continuity_archive_envelope"
 CONTINUITY_ARCHIVE_SCHEMA_VERSION = "1.0"
+CONTINUITY_COLD_STUB_SCHEMA_TYPE = "continuity_cold_stub"
+CONTINUITY_COLD_STUB_SCHEMA_VERSION = "1.0"
 CONTINUITY_REFRESH_STATE_SCHEMA_VERSION = "1.0"
 CONTINUITY_INTERACTION_BOUNDARY_KINDS = {
     "person_switch",
@@ -127,6 +133,62 @@ CONTINUITY_SIGNAL_STATUS = {
 CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
+CONTINUITY_COLD_DIR_REL = f"{CONTINUITY_DIR_REL}/cold"
+CONTINUITY_COLD_INDEX_DIR_REL = f"{CONTINUITY_COLD_DIR_REL}/index"
+CONTINUITY_COLD_STUB_SECTION_ORDER = [
+    "top_priorities",
+    "active_constraints",
+    "active_concerns",
+    "open_loops",
+    "stance_summary",
+    "drift_signals",
+    "session_trajectory",
+    "trailing_notes",
+    "curiosity_queue",
+    "negative_decisions",
+]
+CONTINUITY_COLD_STUB_FRONTMATTER_ORDER = [
+    "type",
+    "schema_version",
+    "artifact_state",
+    "subject_kind",
+    "subject_id",
+    "source_archive_path",
+    "cold_storage_path",
+    "archived_at",
+    "cold_stored_at",
+    "verification_kind",
+    "verification_status",
+    "health_status",
+    "freshness_class",
+    "phase",
+    "update_reason",
+]
+CONTINUITY_COLD_GZIP_LEVEL = 9
+
+
+def continuity_cold_storage_rel_path(source_archive_path: str) -> str:
+    """Map an archive envelope path to its cold gzip payload path."""
+    archive_rel = _validate_archive_rel_path(source_archive_path)
+    return f"{CONTINUITY_COLD_DIR_REL}/{Path(archive_rel).name}.gz"
+
+
+def continuity_cold_stub_rel_path(source_archive_path: str) -> str:
+    """Map an archive envelope path to its hot cold-stub path."""
+    archive_rel = _validate_archive_rel_path(source_archive_path)
+    return f"{CONTINUITY_COLD_INDEX_DIR_REL}/{Path(archive_rel).stem}.md"
+
+
+def continuity_archive_rel_path_from_cold_artifact(cold_artifact_path: str) -> str:
+    """Derive the archive envelope path from a cold payload or stub path."""
+    rel = str(cold_artifact_path or "").strip()
+    if rel.startswith(f"{CONTINUITY_COLD_INDEX_DIR_REL}/") and rel.endswith(".md"):
+        basename = Path(rel).stem + ".json"
+        return f"{CONTINUITY_DIR_REL}/archive/{basename}"
+    if rel.startswith(f"{CONTINUITY_COLD_DIR_REL}/") and rel.endswith(".json.gz"):
+        basename = Path(rel).name[:-3]
+        return f"{CONTINUITY_DIR_REL}/archive/{basename}"
+    raise HTTPException(status_code=400, detail="Invalid continuity cold artifact path")
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -178,6 +240,14 @@ def continuity_fallback_rel_path(subject_kind: str, subject_id: str) -> str:
     """Return the repository-relative path for a continuity fallback snapshot."""
     normalized = _normalize_subject_id(subject_id)
     return f"{CONTINUITY_DIR_REL}/fallback/{subject_kind}-{normalized}.json"
+
+
+def _validate_archive_rel_path(rel: str) -> str:
+    """Require a repo-relative continuity archive-envelope path."""
+    normalized = str(rel or "").strip()
+    if not normalized.startswith(f"{CONTINUITY_DIR_REL}/archive/") or not normalized.endswith(".json"):
+        raise HTTPException(status_code=400, detail="source_archive_path must be under memory/continuity/archive/")
+    return normalized
 
 
 def _continuity_subject_lock_id(subject_kind: str, subject_id: str) -> str:
@@ -601,6 +671,152 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope capsule: {e}") from e
     return payload
+
+
+def _normalize_stub_scalar(value: Any) -> str:
+    """Normalize a stub scalar to one trimmed line with newlines replaced."""
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ").strip()
+
+
+def _truncate_stub_text(value: Any, limit: int) -> str:
+    """Apply the cold-stub scalar normalization and code-point truncation."""
+    return _normalize_stub_scalar(value)[:limit]
+
+
+def _build_cold_gzip_bytes(source_bytes: bytes) -> bytes:
+    """Build deterministic gzip bytes for one archive envelope."""
+    buf = io.BytesIO()
+    with gzip.GzipFile(
+        fileobj=buf,
+        mode="wb",
+        filename="",
+        mtime=0,
+        compresslevel=CONTINUITY_COLD_GZIP_LEVEL,
+    ) as handle:
+        handle.write(source_bytes)
+    return buf.getvalue()
+
+
+def _render_cold_stub_list(items: Any, *, count: int, limit: int) -> list[str]:
+    """Project a list-valued continuity field into bounded cold-stub bullets."""
+    if not isinstance(items, list):
+        return []
+    return [_truncate_stub_text(item, limit) for item in items[:count]]
+
+
+def _render_cold_negative_decisions(items: Any) -> list[str]:
+    """Project negative decisions into deterministic stub bullets."""
+    if not isinstance(items, list):
+        return []
+    lines: list[str] = []
+    for item in items[:2]:
+        if not isinstance(item, dict):
+            continue
+        decision = _truncate_stub_text(item.get("decision"), 160)
+        rationale = _truncate_stub_text(item.get("rationale"), 240)
+        lines.append(f"decision: {decision} | rationale: {rationale}")
+    return lines
+
+
+def _build_cold_stub_text(*, envelope: dict[str, Any], source_archive_path: str, cold_storage_path: str, cold_stored_at: str, now: datetime) -> str:
+    """Build the deterministic searchable stub for one cold-stored archive envelope."""
+    capsule = envelope["capsule"]
+    continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
+    freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
+    verification_status = _verification_status(capsule)
+    health_status, _ = _capsule_health_summary(capsule)
+    phase, _ = _continuity_phase(capsule, now)
+    frontmatter = {
+        "type": CONTINUITY_COLD_STUB_SCHEMA_TYPE,
+        "schema_version": '"1.0"',
+        "artifact_state": "cold",
+        "subject_kind": _normalize_stub_scalar(capsule.get("subject_kind")),
+        "subject_id": _normalize_stub_scalar(capsule.get("subject_id")),
+        "source_archive_path": _normalize_stub_scalar(source_archive_path),
+        "cold_storage_path": _normalize_stub_scalar(cold_storage_path),
+        "archived_at": _normalize_stub_scalar(envelope.get("archived_at")),
+        "cold_stored_at": _normalize_stub_scalar(cold_stored_at),
+        "verification_kind": _normalize_stub_scalar(capsule.get("verification_kind")),
+        "verification_status": _normalize_stub_scalar(verification_status),
+        "health_status": _normalize_stub_scalar(health_status),
+        "freshness_class": _normalize_stub_scalar(freshness.get("freshness_class")),
+        "phase": _normalize_stub_scalar(phase),
+        "update_reason": _normalize_stub_scalar((capsule.get("source") or {}).get("update_reason") if isinstance(capsule.get("source"), dict) else ""),
+    }
+    sections = {
+        "top_priorities": _render_cold_stub_list(continuity.get("top_priorities"), count=3, limit=160),
+        "active_constraints": _render_cold_stub_list(continuity.get("active_constraints"), count=3, limit=160),
+        "active_concerns": _render_cold_stub_list(continuity.get("active_concerns"), count=3, limit=160),
+        "open_loops": _render_cold_stub_list(continuity.get("open_loops"), count=3, limit=160),
+        "stance_summary": _truncate_stub_text(continuity.get("stance_summary"), 240),
+        "drift_signals": _render_cold_stub_list(continuity.get("drift_signals"), count=5, limit=160),
+        "session_trajectory": _render_cold_stub_list(continuity.get("session_trajectory"), count=3, limit=80),
+        "trailing_notes": _render_cold_stub_list(continuity.get("trailing_notes"), count=3, limit=160),
+        "curiosity_queue": _render_cold_stub_list(continuity.get("curiosity_queue"), count=3, limit=120),
+        "negative_decisions": _render_cold_negative_decisions(continuity.get("negative_decisions")),
+    }
+    lines = ["---"]
+    for key in CONTINUITY_COLD_STUB_FRONTMATTER_ORDER:
+        lines.append(f"{key}: {frontmatter[key]}")
+    lines.append("---")
+    for section in CONTINUITY_COLD_STUB_SECTION_ORDER:
+        lines.append(f"## {section}")
+        if section == "stance_summary":
+            lines.append(str(sections[section]))
+            continue
+        for item in sections[section]:
+            lines.append(f"- {item}")
+        if not sections[section]:
+            lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _parse_cold_stub_text(text: str) -> tuple[dict[str, str], str]:
+    """Parse a cold-stub frontmatter block and return the body."""
+    if not text.startswith("---\n"):
+        raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter")
+    parts = text.split("\n---\n", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter")
+    frontmatter_raw = parts[0][4:]
+    body = parts[1]
+    values: dict[str, str] = {}
+    for line in frontmatter_raw.splitlines():
+        if ":" not in line:
+            raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter")
+        key, value = line.split(":", 1)
+        values[key.strip()] = value.strip()
+    return values, body
+
+
+def _load_cold_stub(repo_root: Path, rel: str) -> dict[str, str]:
+    """Load and validate one continuity cold stub against shared path helpers."""
+    if not rel.startswith(f"{CONTINUITY_COLD_INDEX_DIR_REL}/") or not rel.endswith(".md"):
+        raise HTTPException(status_code=400, detail="cold_stub_path must be under memory/continuity/cold/index/")
+    path = safe_path(repo_root, rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Continuity cold stub not found")
+    try:
+        frontmatter, _body = _parse_cold_stub_text(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity cold stub text: {exc}") from exc
+    required = set(CONTINUITY_COLD_STUB_FRONTMATTER_ORDER)
+    if set(frontmatter) != required:
+        raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter fields")
+    if frontmatter.get("type") != CONTINUITY_COLD_STUB_SCHEMA_TYPE:
+        raise HTTPException(status_code=400, detail="Invalid continuity cold stub type")
+    if frontmatter.get("schema_version") != '"1.0"':
+        raise HTTPException(status_code=400, detail="Invalid continuity cold stub schema_version")
+    source_archive_path = frontmatter["source_archive_path"]
+    expected_stub_path = continuity_cold_stub_rel_path(source_archive_path)
+    expected_payload_path = continuity_cold_storage_rel_path(source_archive_path)
+    if rel != expected_stub_path:
+        raise HTTPException(status_code=400, detail="Continuity cold stub path does not match source archive identity")
+    if frontmatter.get("cold_storage_path") != expected_payload_path:
+        raise HTTPException(status_code=400, detail="Continuity cold stub payload path does not match source archive identity")
+    if continuity_archive_rel_path_from_cold_artifact(rel) != source_archive_path:
+        raise HTTPException(status_code=400, detail="Continuity cold stub archive identity does not match path")
+    return frontmatter
 
 
 def _resolve_selector(req: ContextRetrieveRequest) -> tuple[str, str, str] | None:
@@ -1345,7 +1561,52 @@ def continuity_list_service(
                         "retention_class": retention_class,
                     }
                 )
-    artifact_order = {"active": 0, "fallback": 1, "archived": 2}
+    if req.include_cold:
+        cold_stub_base = repo_root / CONTINUITY_COLD_INDEX_DIR_REL
+        if cold_stub_base.exists() and cold_stub_base.is_dir():
+            for path in sorted(cold_stub_base.iterdir(), key=lambda item: item.name):
+                if path.is_dir() or path.suffix.lower() != ".md":
+                    continue
+                rel = str(path.relative_to(repo_root))
+                try:
+                    auth.require_read_path(rel)
+                except HTTPException:
+                    continue
+                try:
+                    frontmatter = _load_cold_stub(repo_root, rel)
+                except HTTPException as exc:
+                    if exc.status_code in {400, 404}:
+                        continue
+                    raise
+                source_archive_path = frontmatter["source_archive_path"]
+                try:
+                    auth.require_read_path(source_archive_path)
+                except HTTPException:
+                    continue
+                if req.subject_kind and frontmatter["subject_kind"] != req.subject_kind:
+                    continue
+                summaries.append(
+                    {
+                        "subject_kind": frontmatter["subject_kind"],
+                        "subject_id": frontmatter["subject_id"],
+                        "path": source_archive_path,
+                        "updated_at": None,
+                        "verified_at": None,
+                        "verification_kind": frontmatter["verification_kind"] or None,
+                        "freshness_class": frontmatter["freshness_class"] or None,
+                        "phase": frontmatter["phase"],
+                        "verification_status": frontmatter["verification_status"],
+                        "health_status": frontmatter["health_status"],
+                        "health_reasons": [],
+                        "artifact_state": "cold",
+                        "retention_class": "cold",
+                        "cold_stub_path": rel,
+                        "cold_storage_path": frontmatter["cold_storage_path"],
+                        "archived_at": frontmatter["archived_at"],
+                        "cold_stored_at": frontmatter["cold_stored_at"],
+                    }
+                )
+    artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
     summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
     summaries = summaries[: req.limit]
     audit(
@@ -1912,6 +2173,213 @@ def continuity_archive_service(
         "archived_path": archive_rel,
         "removed_active_path": rel,
         "latest_commit": gm.latest_commit(),
+    }
+
+
+def _restore_failed_cold_store(*, archive_path: Path, archive_bytes: bytes, cold_payload_path: Path, cold_stub_path: Path) -> list[str]:
+    """Restore the source archive and remove partial cold files after a failed cold-store commit."""
+    errors: list[str] = []
+    try:
+        write_bytes_file(archive_path, archive_bytes)
+    except Exception as exc:
+        errors.append(f"restore archive: {exc}")
+    for path in (cold_payload_path, cold_stub_path):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"remove {path}: {exc}")
+    return errors
+
+
+def continuity_cold_store_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityColdStoreRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Transform one archive envelope into a cold gzip plus searchable stub."""
+    auth.require("admin:peers")
+    source_archive_path = _validate_archive_rel_path(req.source_archive_path)
+    auth.require_read_path(source_archive_path)
+    auth.require_write_path(source_archive_path)
+    cold_storage_path = continuity_cold_storage_rel_path(source_archive_path)
+    cold_stub_path = continuity_cold_stub_rel_path(source_archive_path)
+    auth.require_write_path(cold_storage_path)
+    auth.require_write_path(cold_stub_path)
+
+    archive_path = safe_path(repo_root, source_archive_path)
+    if not archive_path.exists() or not archive_path.is_file():
+        raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
+    source_bytes = archive_path.read_bytes()
+    envelope = _load_archive_envelope(repo_root, source_archive_path)
+    cold_payload_file = safe_path(repo_root, cold_storage_path)
+    cold_stub_file = safe_path(repo_root, cold_stub_path)
+    if cold_payload_file.exists() or cold_stub_file.exists():
+        raise HTTPException(status_code=409, detail="Continuity cold artifact already exists for source archive")
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    cold_stored_at = now.isoformat().replace("+00:00", "Z")
+    gzip_bytes = _build_cold_gzip_bytes(source_bytes)
+    stub_text = _build_cold_stub_text(
+        envelope=envelope,
+        source_archive_path=source_archive_path,
+        cold_storage_path=cold_storage_path,
+        cold_stored_at=cold_stored_at,
+        now=now,
+    )
+
+    try:
+        write_bytes_file(cold_payload_file, gzip_bytes)
+        write_text_file(cold_stub_file, stub_text)
+        archive_path.unlink()
+        with repository_mutation_lock(repo_root):
+            committed = gm.commit_paths(
+                [cold_payload_file, cold_stub_file, archive_path],
+                f"continuity: cold-store {envelope['capsule']['subject_kind']} {envelope['capsule']['subject_id']}",
+            )
+            if not committed:
+                raise RuntimeError("Continuity cold-store commit produced no changes")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        unstage_paths(gm, [cold_payload_file, cold_stub_file, archive_path])
+        cleanup_errors = _restore_failed_cold_store(
+            archive_path=archive_path,
+            archive_bytes=source_bytes,
+            cold_payload_path=cold_payload_file,
+            cold_stub_path=cold_stub_file,
+        )
+        detail = f"Continuity cold-store failed: {exc}"
+        if cleanup_errors:
+            detail += f"; rollback failed for {', '.join(cleanup_errors)}"
+        raise HTTPException(status_code=500, detail=detail) from exc
+
+    audit(
+        auth,
+        "continuity_cold_store",
+        {
+            "source_archive_path": source_archive_path,
+            "cold_storage_path": cold_storage_path,
+            "cold_stub_path": cold_stub_path,
+        },
+    )
+    return {
+        "ok": True,
+        "artifact_state": "cold",
+        "source_archive_path": source_archive_path,
+        "cold_storage_path": cold_storage_path,
+        "cold_stub_path": cold_stub_path,
+        "cold_stored_at": cold_stored_at,
+        "committed_files": [cold_storage_path, cold_stub_path, source_archive_path],
+        "latest_commit": gm.latest_commit(),
+        "warnings": [],
+    }
+
+
+def continuity_cold_rehydrate_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityColdRehydrateRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Restore one cold-stored archive envelope back into the hot archive namespace."""
+    auth.require("admin:peers")
+    if req.cold_stub_path:
+        cold_stub_path = str(req.cold_stub_path)
+        frontmatter = _load_cold_stub(repo_root, cold_stub_path)
+        source_archive_path = frontmatter["source_archive_path"]
+    else:
+        source_archive_path = _validate_archive_rel_path(str(req.source_archive_path))
+        cold_stub_path = continuity_cold_stub_rel_path(source_archive_path)
+        frontmatter = _load_cold_stub(repo_root, cold_stub_path)
+        if frontmatter["source_archive_path"] != source_archive_path:
+            raise HTTPException(status_code=400, detail="Continuity cold stub identity does not match requested source archive")
+    cold_storage_path = continuity_cold_storage_rel_path(source_archive_path)
+    auth.require_read_path(cold_stub_path)
+    auth.require_read_path(cold_storage_path)
+    auth.require_write_path(source_archive_path)
+    auth.require_write_path(cold_stub_path)
+    auth.require_write_path(cold_storage_path)
+
+    archive_path = safe_path(repo_root, source_archive_path)
+    cold_payload_file = safe_path(repo_root, cold_storage_path)
+    cold_stub_file = safe_path(repo_root, cold_stub_path)
+    if archive_path.exists():
+        raise HTTPException(status_code=409, detail="Continuity archive envelope already exists")
+    if not cold_payload_file.exists() or not cold_payload_file.is_file():
+        raise HTTPException(status_code=404, detail="Continuity cold payload not found")
+    cold_payload_bytes = cold_payload_file.read_bytes()
+    cold_stub_bytes = cold_stub_file.read_bytes()
+    try:
+        archive_bytes = gzip.decompress(cold_payload_bytes)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity cold payload: {exc}") from exc
+    try:
+        payload = json.loads(archive_bytes.decode("utf-8"))
+        if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
+            raise ValueError("wrong schema_type")
+        if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+            raise ValueError("wrong schema_version")
+        ContinuityCapsule.model_validate(payload.get("capsule"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope in cold payload: {exc}") from exc
+
+    rehydrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    try:
+        write_bytes_file(archive_path, archive_bytes)
+        cold_payload_file.unlink()
+        cold_stub_file.unlink()
+        with repository_mutation_lock(repo_root):
+            committed = gm.commit_paths(
+                [archive_path, cold_payload_file, cold_stub_file],
+                f"continuity: cold-rehydrate {payload['capsule']['subject_kind']} {payload['capsule']['subject_id']}",
+            )
+            if not committed:
+                raise RuntimeError("Continuity cold rehydrate commit produced no changes")
+    except Exception as exc:
+        unstage_paths(gm, [archive_path, cold_payload_file, cold_stub_file])
+        rollback_errors: list[str] = []
+        try:
+            archive_path.unlink(missing_ok=True)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"remove restored archive: {rollback_exc}")
+        try:
+            write_bytes_file(cold_payload_file, cold_payload_bytes)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"restore cold payload: {rollback_exc}")
+        try:
+            write_bytes_file(cold_stub_file, cold_stub_bytes)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"restore cold stub: {rollback_exc}")
+        detail = f"Continuity cold rehydrate failed: {exc}"
+        if rollback_errors:
+            detail += f"; rollback failed for {', '.join(rollback_errors)}"
+        raise HTTPException(status_code=500, detail=detail) from exc
+
+    audit(
+        auth,
+        "continuity_cold_rehydrate",
+        {
+            "source_archive_path": source_archive_path,
+            "cold_storage_path": cold_storage_path,
+            "cold_stub_path": cold_stub_path,
+        },
+    )
+    return {
+        "ok": True,
+        "artifact_state": "archived",
+        "source_archive_path": source_archive_path,
+        "restored_archive_path": source_archive_path,
+        "cold_storage_path": cold_storage_path,
+        "cold_stub_path": cold_stub_path,
+        "rehydrated_at": rehydrated_at,
+        "committed_files": [source_archive_path, cold_storage_path, cold_stub_path],
+        "latest_commit": gm.latest_commit(),
+        "warnings": [],
     }
 
 

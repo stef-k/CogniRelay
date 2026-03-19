@@ -154,6 +154,8 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
                     "active_capsules": 1,
                     "fallback_snapshots": 1,
                     "archive_envelopes": 1,
+                    "cold_payloads": 0,
+                    "cold_stubs": 0,
                 },
             )
 
