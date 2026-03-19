@@ -420,6 +420,37 @@ class TestContinuityColdStorage(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 409)
             self.assertIn("changed during cold-store", str(cm.exception.detail))
 
+    def test_cold_store_rolls_back_partial_cold_files_when_source_unlink_fails(self) -> None:
+        """Cold-store should remove partial cold artifacts if the source unlink fails after writes."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            archive_rel, archive_bytes = self._write_archive(repo_root)
+            archive_path = repo_root / archive_rel
+            cold_payload = repo_root / "memory/continuity/cold/user-alpha-20260319T101500Z.json.gz"
+            cold_stub = repo_root / "memory/continuity/cold/index/user-alpha-20260319T101500Z.md"
+            original_unlink = Path.unlink
+
+            def flaky_unlink(path_self: Path, *args, **kwargs):
+                if path_self == archive_path:
+                    raise FileNotFoundError(str(path_self))
+                return original_unlink(path_self, *args, **kwargs)
+
+            with patch("pathlib.Path.unlink", new=flaky_unlink):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_cold_store_service(
+                        repo_root=repo_root,
+                        gm=_GitManagerStub(repo_root),
+                        auth=_LocalOpsAuth(),
+                        req=type("Req", (), {"source_archive_path": archive_rel})(),
+                        audit=lambda *_args: None,
+                    )
+
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertTrue(archive_path.exists())
+            self.assertEqual(archive_path.read_bytes(), archive_bytes)
+            self.assertFalse(cold_payload.exists())
+            self.assertFalse(cold_stub.exists())
+
     def test_rehydrate_rejects_payload_identity_mismatch(self) -> None:
         """Rehydrate should fail if the gzip payload does not belong to the selected stub identity."""
         with tempfile.TemporaryDirectory() as td:

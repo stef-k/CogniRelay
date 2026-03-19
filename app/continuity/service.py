@@ -2241,6 +2241,12 @@ def continuity_cold_store_service(
             if not archive_path.exists() or not archive_path.is_file():
                 raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
             source_bytes = archive_path.read_bytes()
+        except HTTPException:
+            raise
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=f"Continuity archive envelope changed during cold-store: {exc.filename or exc}") from exc
+
+        try:
             envelope = _load_archive_envelope(repo_root, source_archive_path)
             if _archive_rel_path_from_envelope(envelope) != source_archive_path:
                 raise HTTPException(status_code=400, detail="Continuity archive envelope identity does not match source_archive_path")
@@ -2269,8 +2275,6 @@ def continuity_cold_store_service(
                     raise RuntimeError("Continuity cold-store commit produced no changes")
         except HTTPException:
             raise
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=409, detail=f"Continuity archive envelope changed during cold-store: {exc.filename or exc}") from exc
         except Exception as exc:
             unstage_paths(gm, [cold_payload_file, cold_stub_file, archive_path])
             cleanup_errors = _restore_failed_cold_store(
