@@ -34,6 +34,8 @@ from .continuity import (
     continuity_delete_service,
     continuity_list_service,
     continuity_read_service,
+    continuity_retention_apply_service,
+    continuity_retention_plan_service,
     continuity_refresh_plan_service,
     continuity_revalidate_service,
     continuity_upsert_service,
@@ -92,6 +94,8 @@ from .models import (
     ContinuityDeleteRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRetentionApplyRequest,
+    ContinuityRetentionPlanRequest,
     ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
@@ -334,6 +338,7 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         continuity_compare=lambda req, auth_ctx: continuity_compare(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_revalidate=lambda req, auth_ctx: continuity_revalidate(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_refresh_plan=lambda req, auth_ctx: continuity_refresh_plan(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_retention_plan=lambda req, auth_ctx: continuity_retention_plan(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_list=lambda req, auth_ctx: continuity_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_archive=lambda req, auth_ctx: continuity_archive(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_delete=lambda req, auth_ctx: continuity_delete(req=req, auth=auth_ctx),  # type: ignore[arg-type]
@@ -581,6 +586,16 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
         ),
         continuity_cold_rehydrate_request_factory=ContinuityColdRehydrateRequest,
+        continuity_retention_apply=lambda req, auth: continuity_retention_apply_service(
+            repo_root=settings.repo_root,
+            gm=gm,
+            auth=auth,
+            req=req,
+            now=datetime.now(timezone.utc),
+            retention_archive_days=settings.continuity_retention_archive_days,
+            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        ),
+        continuity_retention_apply_request_factory=ContinuityRetentionApplyRequest,
         load_token_config=load_token_config,
         parse_iso=_parse_iso,
         load_security_keys=load_security_keys,
@@ -728,6 +743,22 @@ def continuity_refresh_plan(req: ContinuityRefreshPlanRequest, auth: AuthContext
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
+        retention_archive_days=settings.continuity_retention_archive_days,
+        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+    )
+
+
+@app.post("/v1/continuity/retention/plan")
+def continuity_retention_plan(req: ContinuityRetentionPlanRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Build and persist a deterministic continuity retention plan."""
+    settings, gm = _services()
+    return continuity_retention_plan_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        now=datetime.now(timezone.utc),
+        retention_archive_days=settings.continuity_retention_archive_days,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 
@@ -766,6 +797,7 @@ def continuity_list(req: ContinuityListRequest, auth: AuthContext = Depends(requ
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
+        retention_archive_days=settings.continuity_retention_archive_days,
         audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
     )
 

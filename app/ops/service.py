@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
-from app.models import ContinuityColdRehydrateRequest, ContinuityColdStoreRequest, OpsRunRequest
+from app.models import ContinuityColdRehydrateRequest, ContinuityColdStoreRequest, ContinuityRetentionApplyRequest, OpsRunRequest
 from app.storage import append_jsonl, safe_path
 
 _log = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ OPS_JOBS = {
     "compact.plan",
     "continuity_cold_store",
     "continuity_cold_rehydrate",
+    "continuity_retention_apply",
 }
 
 
@@ -278,6 +279,15 @@ def _ops_job_catalog() -> list[dict[str, Any]]:
             "idempotent": False,
             "request_schema": ContinuityColdRehydrateRequest.model_json_schema(),
         },
+        {
+            "job_id": "continuity_retention_apply",
+            "description": "Batch-apply stale archived continuity cold-storage policy against exact archive paths only.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "manual or daily policy-driven",
+            "idempotent": False,
+            "request_schema": ContinuityRetentionApplyRequest.model_json_schema(),
+        },
     ]
 
 
@@ -411,6 +421,8 @@ def _ops_execute_job(
     continuity_cold_store_request_factory: Callable[..., Any],
     continuity_cold_rehydrate: Callable[..., dict[str, Any]],
     continuity_cold_rehydrate_request_factory: Callable[..., Any],
+    continuity_retention_apply: Callable[..., dict[str, Any]],
+    continuity_retention_apply_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -467,6 +479,8 @@ def _ops_execute_job(
         return continuity_cold_store(req=continuity_cold_store_request_factory(**args), auth=auth)
     if req.job_id == "continuity_cold_rehydrate":
         return continuity_cold_rehydrate(req=continuity_cold_rehydrate_request_factory(**args), auth=auth)
+    if req.job_id == "continuity_retention_apply":
+        return continuity_retention_apply(req=continuity_retention_apply_request_factory(**args), auth=auth)
     raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
 
 
@@ -584,6 +598,8 @@ def ops_run_service(
     continuity_cold_store_request_factory: Callable[..., Any],
     continuity_cold_rehydrate: Callable[..., dict[str, Any]],
     continuity_cold_rehydrate_request_factory: Callable[..., Any],
+    continuity_retention_apply: Callable[..., dict[str, Any]],
+    continuity_retention_apply_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -629,6 +645,8 @@ def ops_run_service(
             continuity_cold_store_request_factory=continuity_cold_store_request_factory,
             continuity_cold_rehydrate=continuity_cold_rehydrate,
             continuity_cold_rehydrate_request_factory=continuity_cold_rehydrate_request_factory,
+            continuity_retention_apply=continuity_retention_apply,
+            continuity_retention_apply_request_factory=continuity_retention_apply_request_factory,
             load_token_config=load_token_config,
             parse_iso=parse_iso,
             load_security_keys=load_security_keys,

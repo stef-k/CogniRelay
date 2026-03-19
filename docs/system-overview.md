@@ -132,6 +132,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Expect `POST /v1/context/retrieve` to degrade deterministically when search indexes are stale or missing: stale keeps indexed retrieval with warnings, missing falls back to a bounded raw scan
 - Use `POST /v1/continuity/read` when you need the full capsule for one exact selector; set `allow_fallback=true` when you want structured fallback or missing-state degradation
 - Use `POST /v1/continuity/refresh/plan` when you need a deterministic list of the next continuity capsules that should be refreshed
+- Use `POST /v1/continuity/retention/plan` when you need the next deterministic window of stale archived continuity eligible for explicit cold-store policy application
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
 - Use `POST /v1/continuity/revalidate` when you need to confirm, correct, degrade, or conflict-mark one active capsule through the audited write path
 - Expect `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` to return additive `recovery_warnings` when the fallback snapshot refresh fails after the active write has already committed
@@ -155,9 +156,12 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/continuity/upsert` to persist or replace continuity capsules under `memory/continuity/`
 - Successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` also refresh the last-known-good fallback snapshot under `memory/continuity/fallback/`
 - `POST /v1/continuity/refresh/plan` persists the latest operator-visible plan under `memory/continuity/refresh_state.json`
+- `POST /v1/continuity/retention/plan` persists the latest operator-visible stale-archive plan under `memory/continuity/retention_state.json`
 - Use `POST /v1/continuity/archive` to move an active capsule into `memory/continuity/archive/` through one git-backed archive commit
 - Use `POST /v1/ops/run` with job `continuity_cold_store` to move one archived continuity envelope into `memory/continuity/cold/` as an exact `.json.gz` payload plus searchable hot stub
 - Use `POST /v1/ops/run` with job `continuity_cold_rehydrate` to restore one cold-stored continuity envelope back into `memory/continuity/archive/`
+- `archive_stale` now has an executable default policy path: the stale cutoff comes from `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`, planning returns a bounded next-action window plus `total_candidates` and `has_more`, and backlog is drained by repeating plan/apply cycles until `has_more=false` and `count=0`
+- Use `POST /v1/ops/run` with job `continuity_retention_apply` to batch-apply `cold_store` only against exact stale archive paths from a retention plan window; the default action is preservation-first cold storage, not delete
 - `POST /v1/backup/create` includes continuity artifact counts in its manifest when continuity data is in scope
 - `POST /v1/backup/restore-test` can validate restored continuity artifacts and report invalid active, fallback, archive, and cold-tier entries without crashing the drill
 - continuity capsules may include optional `session_trajectory` items to preserve key direction changes within a session
