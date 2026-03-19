@@ -94,6 +94,19 @@ class Settings:
     replication_tombstone_retention_days: int = 365
     registry_history_batch_limit: int = 500
 
+    # Artifact lifecycle settings (issue #113)
+    handoff_terminal_retention_days: int = 30
+    handoff_cold_after_days: int = 90
+    shared_history_hot_retention_days: int = 30
+    shared_history_cold_after_days: int = 90
+    reconciliation_resolved_retention_days: int = 30
+    reconciliation_cold_after_days: int = 90
+    task_done_hot_retention_days: int = 30
+    task_done_cold_after_days: int = 90
+    patch_applied_hot_retention_days: int = 30
+    patch_applied_cold_after_days: int = 90
+    artifact_history_batch_limit: int = 500
+
 
 _cached: Settings | None = None
 
@@ -284,6 +297,39 @@ def get_settings(force_reload: bool = False) -> Settings:
         ),
         registry_history_batch_limit=_parse_int(
             _env_first("COGNIRELAY_REGISTRY_HISTORY_BATCH_LIMIT"), 500, minimum=1,
+        ),
+        handoff_terminal_retention_days=_parse_int(
+            _env_first("COGNIRELAY_HANDOFF_TERMINAL_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        handoff_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_HANDOFF_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        shared_history_hot_retention_days=_parse_int(
+            _env_first("COGNIRELAY_SHARED_HISTORY_HOT_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        shared_history_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_SHARED_HISTORY_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        reconciliation_resolved_retention_days=_parse_int(
+            _env_first("COGNIRELAY_RECONCILIATION_RESOLVED_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        reconciliation_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_RECONCILIATION_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        task_done_hot_retention_days=_parse_int(
+            _env_first("COGNIRELAY_TASK_DONE_HOT_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        task_done_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_TASK_DONE_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        patch_applied_hot_retention_days=_parse_int(
+            _env_first("COGNIRELAY_PATCH_APPLIED_HOT_RETENTION_DAYS"), 30, minimum=1,
+        ),
+        patch_applied_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_PATCH_APPLIED_COLD_AFTER_DAYS"), 90, minimum=1,
+        ),
+        artifact_history_batch_limit=_parse_int(
+            _env_first("COGNIRELAY_ARTIFACT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
         ),
     )
     return _cached

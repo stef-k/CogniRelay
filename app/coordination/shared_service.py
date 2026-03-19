@@ -439,6 +439,26 @@ def shared_update_service(
         if req.expected_version != current_version:
             raise HTTPException(status_code=409, detail="Shared coordination version conflict")
 
+        # Synchronous pre-write capture: externalize superseded version (#113)
+        from app.artifact_lifecycle.service import externalize_superseded_shared
+        from datetime import datetime as _dt, timezone as _tz
+
+        _capture_now = _dt.now(_tz.utc)
+        _shared_hot_retention = getattr(settings, "shared_history_hot_retention_days", 30)
+        try:
+            externalize_superseded_shared(
+                repo_root=repo_root,
+                now=_capture_now,
+                previous_artifact=artifact,
+                hot_retention_days=int(_shared_hot_retention),
+            )
+        except Exception:
+            _log.warning(
+                "Shared history capture failed for %s; proceeding with update (non-fatal)",
+                shared_id,
+                exc_info=True,
+            )
+
         updated = dict(artifact)
         updated["title"] = req.title
         updated["summary"] = req.summary
