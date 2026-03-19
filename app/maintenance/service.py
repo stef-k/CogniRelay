@@ -797,14 +797,15 @@ def replication_pull_service(
         track_change(tomb_path, REPLICATION_TOMBSTONES_REL)
         _write_replication_tombstones(settings.repo_root, tombstones)
 
-        state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
-        track_change(state_path, REPLICATION_STATE_REL)
-        _write_replication_state(settings.repo_root, state)
-
-        # Track history shard/stub paths from pre-write capture
+        # Track history shard/stub paths from pre-write capture before head write
+        # so they are included in rollback if head write fails
         for extra_rel in _pull_history_extra:
             extra_path = safe_path(settings.repo_root, extra_rel)
             track_change(extra_path, extra_rel)
+
+        state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
+        track_change(state_path, REPLICATION_STATE_REL)
+        _write_replication_state(settings.repo_root, state)
     except Exception as exc:
         _restore_rollback_plan(rollback_plan)
         if isinstance(exc, HTTPException):

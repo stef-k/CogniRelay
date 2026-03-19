@@ -814,8 +814,13 @@ def externalize_superseded_push(
 
     shard_path = safe_path(repo_root, shard_rel)
     stub_path = safe_path(repo_root, stub_rel)
-    _write_json(shard_path, shard_payload)
-    _write_json(stub_path, stub_payload)
+    rollback = _capture_rollback([shard_path, stub_path])
+    try:
+        _write_json(shard_path, shard_payload)
+        _write_json(stub_path, stub_payload)
+    except Exception:
+        _restore_rollback(rollback)
+        raise
 
     return {
         "shard_id": shard_id,
@@ -877,8 +882,13 @@ def externalize_superseded_pull(
 
     shard_path = safe_path(repo_root, shard_rel)
     stub_path = safe_path(repo_root, stub_rel)
-    _write_json(shard_path, shard_payload)
-    _write_json(stub_path, stub_payload)
+    rollback = _capture_rollback([shard_path, stub_path])
+    try:
+        _write_json(shard_path, shard_payload)
+        _write_json(stub_path, stub_payload)
+    except Exception:
+        _restore_rollback(rollback)
+        raise
 
     return {
         "shard_id": shard_id,
@@ -1176,6 +1186,17 @@ def registry_maintenance_service(
         all_warnings.extend(result.get("warnings", []))
         written = result.get("written_paths", [])
         all_written.extend(written)
+
+        # Spec: stop after one family reaches the batch limit
+        processed = (
+            result.get("records_externalized", 0)
+            + result.get("idempotency_pruned", 0)
+            + result.get("pruned", 0)
+            + result.get("transitions_externalized", 0)
+            + result.get("entries_externalized", 0)
+        )
+        if processed >= batch_limit:
+            break
 
     # Also prune pull_idempotency (not part of spec family order, handled separately)
     if "replication_state" in requested or not families:

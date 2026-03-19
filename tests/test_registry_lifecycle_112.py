@@ -893,5 +893,94 @@ class TestRegistryMaintenanceOrchestrator(unittest.TestCase):
         self.assertIn("replication_tombstones", result["families"])
 
 
+    def test_orchestrator_stops_after_batch_limit(self):
+        """Orchestrator stops processing families after one reaches the batch limit."""
+        from app.registry_lifecycle.service import registry_maintenance_service
+        from dataclasses import dataclass
+
+        # Create 5 terminal delivery records older than retention
+        old_time = (self.now - timedelta(days=45)).isoformat()
+        records = {}
+        for i in range(5):
+            records[f"msg_{i:03d}"] = {
+                "message_id": f"msg_{i:03d}",
+                "status": "delivered",
+                "sent_at": old_time,
+            }
+        _write_head(self.repo, DELIVERY_STATE_REL, {
+            "version": "1", "records": records, "idempotency": {},
+        })
+
+        # Also create an expired nonce
+        _write_head(self.repo, NONCE_INDEX_REL, {
+            "schema_version": "1.0",
+            "entries": {
+                "k|n": {"key_id": "k", "nonce": "n",
+                         "first_seen_at": old_time,
+                         "expires_at": (self.now - timedelta(hours=1)).isoformat()},
+            },
+        })
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            delivery_terminal_retention_days: int = 30
+            delivery_idempotency_retention_days: int = 30
+            nonce_retention_days: int = 7
+            peer_trust_history_max_hot_entries: int = 32
+            peer_trust_history_hot_retention_days: int = 30
+            replication_tombstone_grace_days: int = 30
+            replication_pull_idempotency_retention_days: int = 14
+            registry_history_batch_limit: int = 3  # Limit of 3
+
+        result = registry_maintenance_service(
+            repo_root=self.repo,
+            gm=None,
+            now=self.now,
+            settings=FakeSettings(),
+        )
+        self.assertTrue(result["ok"])
+        # Delivery should process 3 records (hitting batch limit)
+        self.assertIn("delivery", result["families"])
+        self.assertEqual(result["families"]["delivery"]["records_externalized"], 3)
+        # Nonce should NOT be processed because delivery hit the limit
+        self.assertNotIn("nonce", result["families"])
+
+    def test_externalize_push_rollback_on_stub_failure(self):
+        """If stub write fails, shard is cleaned up."""
+        from unittest.mock import patch
+        from app.registry_lifecycle.service import externalize_superseded_push
+
+        old_push = {
+            "pushed_at": (self.now - timedelta(days=20)).isoformat(),
+            "target_url": "https://peer.example/v1/replication/pull",
+            "file_count": 10,
+        }
+
+        # Patch _write_json to fail on the second call (stub write)
+        call_count = 0
+
+        def failing_write_json(path, data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("disk full")
+            write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+
+        with patch("app.registry_lifecycle.service._write_json", side_effect=failing_write_json):
+            with self.assertRaises(OSError):
+                externalize_superseded_push(
+                    repo_root=self.repo, now=self.now,
+                    previous_row=old_push, hot_retention_days=14,
+                )
+
+        # Verify shard file was cleaned up (rollback removed it)
+        shard_dir = safe_path(self.repo, "peers/history/replication_state")
+        if shard_dir.exists():
+            shard_files = list(shard_dir.glob("*.json"))
+            # Filter out index subdir
+            shard_files = [f for f in shard_files if f.is_file()]
+            self.assertEqual(len(shard_files), 0, "Shard should be cleaned up on rollback")
+
+
 if __name__ == "__main__":
     unittest.main()
