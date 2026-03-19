@@ -873,36 +873,39 @@ def artifact_lifecycle_maintenance_service(
     all_written: list[str] = []
     all_deleted: list[str] = []
     batch_limit = int(settings.artifact_history_batch_limit)
+    remaining_budget = batch_limit
 
     for family in ordered:
+        if remaining_budget <= 0:
+            break
         try:
             if family == "handoff":
                 result = handoff_maintenance_pass(
                     repo_root=repo_root,
                     now=now,
                     terminal_retention_days=int(settings.handoff_terminal_retention_days),
-                    batch_limit=batch_limit,
+                    batch_limit=remaining_budget,
                 )
             elif family == "reconciliation":
                 result = reconciliation_maintenance_pass(
                     repo_root=repo_root,
                     now=now,
                     resolved_retention_days=int(settings.reconciliation_resolved_retention_days),
-                    batch_limit=batch_limit,
+                    batch_limit=remaining_budget,
                 )
             elif family == "task_done":
                 result = task_done_maintenance_pass(
                     repo_root=repo_root,
                     now=now,
                     hot_retention_days=int(settings.task_done_hot_retention_days),
-                    batch_limit=batch_limit,
+                    batch_limit=remaining_budget,
                 )
             elif family == "patch_applied":
                 result = patch_applied_maintenance_pass(
                     repo_root=repo_root,
                     now=now,
                     hot_retention_days=int(settings.patch_applied_hot_retention_days),
-                    batch_limit=batch_limit,
+                    batch_limit=remaining_budget,
                 )
             else:
                 continue
@@ -923,9 +926,9 @@ def artifact_lifecycle_maintenance_service(
         deleted = result.get("deleted_paths", [])
         all_deleted.extend(deleted)
 
-        # Spec: stop after one family reaches the batch limit
         externalized = result.get("externalized", 0)
-        if externalized >= batch_limit:
+        remaining_budget -= externalized
+        if remaining_budget <= 0:
             break
 
     # Git commit all written and deleted paths

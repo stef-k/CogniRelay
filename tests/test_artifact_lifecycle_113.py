@@ -650,6 +650,41 @@ class OrchestratorTestCase(unittest.TestCase):
         # task_done should NOT be in results (stopped after handoff reached limit)
         self.assertNotIn("task_done", result["families"])
 
+    def test_cumulative_budget_across_families(self):
+        """Budget is tracked cumulatively: later families get reduced limit."""
+        # Create 2 terminal handoffs and 2 resolved reconciliations, limit=3
+        for i in range(2):
+            hid = f"handoff_aaaa000000000000000000000000000{i+1}"
+            ts = (self.now - timedelta(days=45)).isoformat()
+            _write_artifact(self.repo, f"{HANDOFFS_DIR_REL}/{hid}.json", {
+                "handoff_id": hid, "created_at": ts, "updated_at": ts,
+                "recipient_status": "accepted_advisory",
+                "sender_peer": "p1", "recipient_peer": "p2", "task_id": "t1",
+            })
+        for i in range(2):
+            rid = f"recon_aaaa000000000000000000000000000{i+1}"
+            ts = (self.now - timedelta(days=45)).isoformat()
+            _write_artifact(self.repo, f"{RECONCILIATIONS_DIR_REL}/{rid}.json", {
+                "reconciliation_id": rid, "created_at": ts, "updated_at": ts,
+                "owner_peer": "p1", "participant_peers": ["p2"],
+                "status": "resolved", "resolution_outcome": "advisory_only",
+                "claims": [{"claimant_peer": "p1"}], "task_id": "t1",
+            })
+
+        settings = self.FakeSettings(artifact_history_batch_limit=3)
+        result = artifact_lifecycle_maintenance_service(
+            repo_root=self.repo, gm=None, now=self.now, settings=settings,
+        )
+
+        # Handoff externalizes 2, leaving budget=1 for reconciliation
+        self.assertEqual(result["families"]["handoff"]["externalized"], 2)
+        self.assertEqual(result["families"]["reconciliation"]["externalized"], 1)
+        # Total across families must not exceed the batch limit
+        total = sum(
+            r.get("externalized", 0) for r in result["families"].values() if isinstance(r, dict)
+        )
+        self.assertLessEqual(total, 3)
+
     def test_selective_families(self):
         """Orchestrator runs only requested families."""
         result = artifact_lifecycle_maintenance_service(
