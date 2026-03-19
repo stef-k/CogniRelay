@@ -474,13 +474,27 @@ def shared_update_service(
         commit_message = req.commit_message
         if commit_message is None or not commit_message.strip():
             commit_message = f"coordination: update {shared_id} v{updated['version']}"
-        rel = _persist_updated_shared_artifact(
-            repo_root=repo_root,
-            gm=gm,
-            shared_id=shared_id,
-            artifact=updated,
-            commit_message=commit_message,
-        )
+        # If persist fails, clean up captured history to avoid phantom entries.
+        _update_warnings: list[str] = []
+        try:
+            rel = _persist_updated_shared_artifact(
+                repo_root=repo_root,
+                gm=gm,
+                shared_id=shared_id,
+                artifact=updated,
+                commit_message=commit_message,
+            )
+        except Exception:
+            if _history_result is not None:
+                for _hkey in ("payload_path", "stub_path"):
+                    _hp = _history_result.get(_hkey)
+                    if _hp:
+                        try:
+                            safe_path(repo_root, _hp).unlink(missing_ok=True)
+                        except Exception:
+                            _log.warning("Failed to clean up history file %s after persist failure", _hp, exc_info=True)
+            raise
+
         # Best-effort commit of shared history files written by the capture hook.
         if _history_result is not None:
             from app.git_safety import try_commit_paths as _try_commit_history
@@ -490,11 +504,13 @@ def shared_update_service(
                 if _hp:
                     _history_paths.append(safe_path(repo_root, _hp))
             if _history_paths:
-                _try_commit_history(
+                _history_committed = _try_commit_history(
                     paths=_history_paths,
                     gm=gm,
                     commit_message=f"coordination: shared history capture for {shared_id}",
                 )
+                if not _history_committed:
+                    _update_warnings.append("shared_history_not_durable: history files written but not committed to git")
 
         # Keep the SQLite sidecar index in sync after successful persist.
         from app.coordination.query_index import try_upsert_shared
@@ -511,4 +527,7 @@ def shared_update_service(
                 "path": rel,
             },
         )
-    return {"ok": True, "shared": updated, "path": rel, "updated": True, "latest_commit": gm.latest_commit()}
+    result: dict[str, Any] = {"ok": True, "shared": updated, "path": rel, "updated": True, "latest_commit": gm.latest_commit()}
+    if _update_warnings:
+        result["warnings"] = _update_warnings
+    return result

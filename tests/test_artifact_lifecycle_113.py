@@ -876,6 +876,52 @@ class SettingsIntegrationTestCase(unittest.TestCase):
         self.assertTrue(expected.issubset(field_names))
 
 
+class NaiveTimestampTestCase(unittest.TestCase):
+    """Tests that naive (offset-less) timestamps don't crash comparisons."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = Path(self.tmp)
+        self.now = _now()
+
+    def test_naive_timestamp_handoff_does_not_crash(self):
+        """Handoff with naive timestamp (no offset) is handled gracefully."""
+        hid = "handoff_aaaa0000000000000000000000000001"
+        # Naive timestamp: no Z, no +00:00
+        naive_ts = "2026-02-01T10:00:00"
+        _write_artifact(self.repo, f"{HANDOFFS_DIR_REL}/{hid}.json", {
+            "handoff_id": hid,
+            "created_at": naive_ts,
+            "updated_at": naive_ts,
+            "recipient_status": "accepted_advisory",
+            "sender_peer": "p1",
+            "recipient_peer": "p2",
+            "task_id": "t1",
+        })
+        # Should not raise TypeError
+        result = handoff_maintenance_pass(
+            repo_root=self.repo, now=self.now,
+            terminal_retention_days=30, batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        # Naive timestamp treated as UTC, 46 days old → externalized
+        self.assertEqual(result["externalized"], 1)
+
+    def test_naive_timestamp_task_done(self):
+        """Done task with naive timestamp is handled gracefully."""
+        _write_artifact(self.repo, f"{TASKS_DONE_DIR_REL}/task-naive.json", {
+            "task_id": "task-naive", "status": "done",
+            "owner_peer": "p1", "updated_at": "2026-02-01T10:00:00",
+        })
+        result = task_done_maintenance_pass(
+            repo_root=self.repo, now=self.now,
+            hot_retention_days=30, batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["externalized"], 1)
+
+
 class OrchestratorResponseFieldsTestCase(unittest.TestCase):
     """Tests for the ok/degraded fields in orchestrator response."""
 
