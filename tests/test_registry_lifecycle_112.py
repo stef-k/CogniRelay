@@ -1249,5 +1249,220 @@ class TestReplicationPreWriteIntegration(unittest.TestCase):
             self.assertIn("last_cut_push_count", rs_meta)
 
 
+    def test_pull_rollback_cleans_shard_on_state_write_failure(self):
+        """Integration: externalize succeeds → state write fails → shard/stub removed."""
+        from dataclasses import dataclass
+        from unittest.mock import patch
+
+        from app.maintenance.service import replication_pull_service
+        from app.models import ReplicationPullRequest
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            repo_root: Path = None  # type: ignore[assignment]
+            replication_history_hot_retention_days: int = 14
+            max_payload_bytes: int = 262_144
+
+        settings = FakeSettings(repo_root=self.repo)
+
+        old_pull_time = (self.now - timedelta(days=20)).isoformat()
+        state = {
+            "schema_version": "1.0",
+            "last_pull_by_source": {
+                "peer-source": {
+                    "pulled_at": old_pull_time,
+                    "received_count": 5,
+                    "changed_count": 3,
+                },
+            },
+            "last_push": None,
+            "pull_idempotency": {},
+        }
+        _write_head(self.repo, "peers/replication_state.json", state)
+
+        # Seed tombstones so the tombstone write doesn't fail first
+        _write_head(self.repo, "peers/replication_tombstones.json", {"schema_version": "1.0", "entries": {}})
+
+        class FakeAuth:
+            peer_id = "peer-test"
+            def require(self, _s): pass
+            def require_write_path(self, _p): pass
+            def require_read_path(self, _p): pass
+
+        class FakeGm:
+            repo_root = self.repo
+            def commit_paths(self, _p, _m): return True
+            def commit_file(self, _p, _m): return True
+            def latest_commit(self): return "test-sha"
+
+        req = ReplicationPullRequest(
+            source_peer="peer-source",
+            files=[],
+            mode="upsert",
+            conflict_policy="source_wins",
+        )
+
+        def noop(*_a, **_kw): pass
+        def parse_iso(v):
+            if not v:
+                return None
+            try:
+                return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        # Patch _write_replication_state to fail AFTER externalize succeeds
+        with patch("app.maintenance.service._write_replication_state", side_effect=OSError("disk full")):
+            with self.assertRaises(Exception):
+                replication_pull_service(
+                    settings=settings,
+                    gm=FakeGm(),
+                    auth=FakeAuth(),
+                    req=req,
+                    enforce_rate_limit=noop,
+                    enforce_payload_limit=noop,
+                    parse_iso=parse_iso,
+                    audit=noop,
+                )
+
+        # Shard/stub files should NOT exist — rollback should have deleted them
+        history_dir = safe_path(self.repo, "peers/history/replication_state")
+        if history_dir.exists():
+            shard_files = [f for f in history_dir.glob("*.json") if f.is_file()]
+            self.assertEqual(len(shard_files), 0, "Shard should be cleaned up on state write failure")
+
+        stub_dir = safe_path(self.repo, "peers/history/replication_state/index")
+        if stub_dir.exists():
+            stub_files = [f for f in stub_dir.glob("*.json") if f.is_file()]
+            self.assertEqual(len(stub_files), 0, "Stub should be cleaned up on state write failure")
+
+    def test_push_rollback_cleans_shard_on_state_write_failure(self):
+        """Integration: externalize succeeds → state write fails → shard/stub removed."""
+        from dataclasses import dataclass
+        from unittest.mock import patch
+
+        from app.maintenance.service import replication_push_service
+        from app.models import ReplicationPushRequest
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            repo_root: Path = None  # type: ignore[assignment]
+            replication_history_hot_retention_days: int = 14
+            max_payload_bytes: int = 262_144
+
+        settings = FakeSettings(repo_root=self.repo)
+
+        (self.repo / "memory" / "core").mkdir(parents=True, exist_ok=True)
+        (self.repo / "memory" / "core" / "identity.md").write_text("# id\n", encoding="utf-8")
+
+        old_push_time = (self.now - timedelta(days=20)).isoformat()
+        state = {
+            "schema_version": "1.0",
+            "last_pull_by_source": {},
+            "last_push": {
+                "pushed_at": old_push_time,
+                "target_url": "https://old.example/v1/replication/pull",
+                "file_count": 3,
+            },
+            "pull_idempotency": {},
+        }
+        _write_head(self.repo, "peers/replication_state.json", state)
+
+        class FakeAuth:
+            peer_id = "peer-test"
+            def require(self, _s): pass
+            def require_write_path(self, _p): pass
+            def require_read_path(self, _p): pass
+
+        class FakeGm:
+            repo_root = self.repo
+            def commit_paths(self, _p, _m): return True
+            def commit_file(self, _p, _m): return True
+            def latest_commit(self): return "test-sha"
+
+        class FakeResp:
+            def read(self):
+                return b'{"ok": true}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *_a):
+                pass
+
+        req = ReplicationPushRequest(
+            dry_run=False,
+            base_url="https://peer.example",
+            include_prefixes=["memory"],
+            target_token="tok",
+        )
+
+        def noop(*_a, **_kw): pass
+        def load_peers(root):
+            return {"peers": {}}
+
+        with patch("app.maintenance.service.urlopen", return_value=FakeResp()):
+            with patch("app.maintenance.service._write_replication_state", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    replication_push_service(
+                        settings=settings,
+                        gm=FakeGm(),
+                        auth=FakeAuth(),
+                        req=req,
+                        enforce_rate_limit=noop,
+                        enforce_payload_limit=noop,
+                        load_peers_registry=load_peers,
+                        audit=noop,
+                    )
+
+        # Shard/stub files should NOT exist
+        history_dir = safe_path(self.repo, "peers/history/replication_state")
+        if history_dir.exists():
+            shard_files = [f for f in history_dir.glob("*.json") if f.is_file()]
+            self.assertEqual(len(shard_files), 0, "Shard should be cleaned up on state write failure")
+
+        stub_dir = safe_path(self.repo, "peers/history/replication_state/index")
+        if stub_dir.exists():
+            stub_files = [f for f in stub_dir.glob("*.json") if f.is_file()]
+            self.assertEqual(len(stub_files), 0, "Stub should be cleaned up on state write failure")
+
+
+class TestNonceRetentionNegative(unittest.TestCase):
+    """Test that recent nonce entries with missing expires_at are retained."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.repo = Path(self._td.name) / "repo"
+        self.repo.mkdir()
+        self.now = _now()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_recent_first_seen_without_expiry_is_retained(self):
+        """Nonce with missing expires_at but recent first_seen_at survives maintenance."""
+        recent = (self.now - timedelta(days=3)).isoformat()
+        state = {
+            "schema_version": "1.0",
+            "entries": {
+                "key1|nonce1": {
+                    "key_id": "key1",
+                    "nonce": "nonce1",
+                    "first_seen_at": recent,
+                },
+            },
+        }
+        _write_head(self.repo, NONCE_INDEX_REL, state)
+
+        result = nonce_maintenance_pass(
+            repo_root=self.repo, now=self.now,
+            nonce_retention_days=7, batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pruned"], 0)
+
+        # Verify entry still exists
+        head = _read_json(self.repo, NONCE_INDEX_REL)
+        self.assertIn("key1|nonce1", head["entries"])
+
+
 if __name__ == "__main__":
     unittest.main()

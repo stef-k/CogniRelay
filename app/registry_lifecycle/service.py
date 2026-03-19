@@ -431,15 +431,16 @@ def delivery_maintenance_pass(
     head["records"] = records
     head["idempotency"] = idempotency
 
-    # --- Write files with rollback ---
+    # --- Write files with rollback (shard→stub→head so partial rollback
+    # failure leaves an orphaned shard, not a mutilated head) ---
     paths_to_write: list[tuple[Path, str, dict[str, Any]]] = []
-    paths_to_write.append((head_path, DELIVERY_STATE_REL, head))
     if shard_rel:
         shard_path = safe_path(repo_root, shard_rel)
         paths_to_write.append((shard_path, shard_rel, shard_payload))  # type: ignore[possibly-undefined]
     if stub_rel:
         stub_path = safe_path(repo_root, stub_rel)
         paths_to_write.append((stub_path, stub_rel, stub_payload))  # type: ignore[possibly-undefined]
+    paths_to_write.append((head_path, DELIVERY_STATE_REL, head))
 
     rollback = _capture_rollback([p for p, _, _ in paths_to_write])
     try:
@@ -727,13 +728,15 @@ def peer_trust_maintenance_pass(
 
     head["peers"] = peers
 
-    # --- Write all files with rollback ---
-    paths_to_write: list[tuple[Path, str, dict[str, Any]]] = [(head_path, PEERS_REGISTRY_REL, head)]
+    # --- Write all files with rollback (shards→stubs→head so partial rollback
+    # failure leaves orphaned shards, not a mutilated head) ---
+    paths_to_write: list[tuple[Path, str, dict[str, Any]]] = []
     for sr in shard_results:
         shard_path = safe_path(repo_root, sr["shard_rel"])
         paths_to_write.append((shard_path, sr["shard_rel"], sr["shard_payload"]))
         stub_path = safe_path(repo_root, sr["stub_rel"])
         paths_to_write.append((stub_path, sr["stub_rel"], sr["stub_payload"]))
+    paths_to_write.append((head_path, PEERS_REGISTRY_REL, head))
 
     rollback = _capture_rollback([p for p, _, _ in paths_to_write])
     try:
@@ -1089,11 +1092,12 @@ def tombstone_maintenance_pass(
 
     head["entries"] = entries
 
-    # Write with rollback
+    # Write with rollback (shard→stub→head so partial rollback failure
+    # leaves an orphaned shard, not a mutilated head)
     paths_to_write: list[tuple[Path, str, dict[str, Any]]] = [
-        (head_path, REPLICATION_TOMBSTONES_REL, head),
         (safe_path(repo_root, shard_rel), shard_rel, shard_payload),
         (safe_path(repo_root, stub_rel), stub_rel, stub_payload),
+        (head_path, REPLICATION_TOMBSTONES_REL, head),
     ]
 
     rollback = _capture_rollback([p for p, _, _ in paths_to_write])
