@@ -771,8 +771,8 @@ def _build_cold_stub_text(*, envelope: dict[str, Any], source_archive_path: str,
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _parse_cold_stub_text(text: str) -> tuple[dict[str, str], str]:
-    """Parse a cold-stub frontmatter block and return the body."""
+def _parse_cold_stub_text(text: str) -> tuple[list[tuple[str, str]], str]:
+    """Parse a cold-stub frontmatter block and return ordered fields plus the body."""
     if not text.startswith("---\n"):
         raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter")
     parts = text.split("\n---\n", 1)
@@ -780,13 +780,25 @@ def _parse_cold_stub_text(text: str) -> tuple[dict[str, str], str]:
         raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter")
     frontmatter_raw = parts[0][4:]
     body = parts[1]
-    values: dict[str, str] = {}
+    values: list[tuple[str, str]] = []
     for line in frontmatter_raw.splitlines():
         if ":" not in line:
             raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter")
         key, value = line.split(":", 1)
-        values[key.strip()] = value.strip()
+        values.append((key.strip(), value.strip()))
     return values, body
+
+
+def _archive_rel_path_from_envelope(payload: dict[str, Any]) -> str:
+    """Derive the canonical archive-envelope path from a validated envelope payload."""
+    capsule = payload.get("capsule")
+    if not isinstance(capsule, dict):
+        raise HTTPException(status_code=400, detail="Invalid continuity archive envelope capsule")
+    subject_kind = str(capsule.get("subject_kind") or "")
+    subject_id = str(capsule.get("subject_id") or "")
+    archived_at = _require_utc_timestamp(str(payload.get("archived_at") or ""), "archived_at")
+    timestamp = archived_at.strftime("%Y%m%dT%H%M%SZ")
+    return f"{CONTINUITY_DIR_REL}/archive/{subject_kind}-{_normalize_subject_id(subject_id)}-{timestamp}.json"
 
 
 def _load_cold_stub(repo_root: Path, rel: str) -> dict[str, str]:
@@ -797,11 +809,14 @@ def _load_cold_stub(repo_root: Path, rel: str) -> dict[str, str]:
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Continuity cold stub not found")
     try:
-        frontmatter, _body = _parse_cold_stub_text(path.read_text(encoding="utf-8"))
+        ordered_fields, _body = _parse_cold_stub_text(path.read_text(encoding="utf-8"))
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid continuity cold stub text: {exc}") from exc
-    required = set(CONTINUITY_COLD_STUB_FRONTMATTER_ORDER)
-    if set(frontmatter) != required:
+    field_order = [key for key, _value in ordered_fields]
+    if field_order != CONTINUITY_COLD_STUB_FRONTMATTER_ORDER:
+        raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter order")
+    frontmatter = dict(ordered_fields)
+    if len(frontmatter) != len(CONTINUITY_COLD_STUB_FRONTMATTER_ORDER):
         raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter fields")
     if frontmatter.get("type") != CONTINUITY_COLD_STUB_SCHEMA_TYPE:
         raise HTTPException(status_code=400, detail="Invalid continuity cold stub type")
@@ -1589,7 +1604,8 @@ def continuity_list_service(
                     {
                         "subject_kind": frontmatter["subject_kind"],
                         "subject_id": frontmatter["subject_id"],
-                        "path": source_archive_path,
+                        "path": rel,
+                        "source_archive_path": source_archive_path,
                         "updated_at": None,
                         "verified_at": None,
                         "verification_kind": frontmatter["verification_kind"] or None,
@@ -2212,49 +2228,60 @@ def continuity_cold_store_service(
     archive_path = safe_path(repo_root, source_archive_path)
     if not archive_path.exists() or not archive_path.is_file():
         raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
-    source_bytes = archive_path.read_bytes()
     envelope = _load_archive_envelope(repo_root, source_archive_path)
+    capsule = envelope["capsule"]
     cold_payload_file = safe_path(repo_root, cold_storage_path)
     cold_stub_file = safe_path(repo_root, cold_stub_path)
-    if cold_payload_file.exists() or cold_stub_file.exists():
-        raise HTTPException(status_code=409, detail="Continuity cold artifact already exists for source archive")
+    with _continuity_subject_lock(
+        repo_root=repo_root,
+        subject_kind=str(capsule["subject_kind"]),
+        subject_id=str(capsule["subject_id"]),
+    ):
+        if not archive_path.exists() or not archive_path.is_file():
+            raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
+        source_bytes = archive_path.read_bytes()
+        envelope = _load_archive_envelope(repo_root, source_archive_path)
+        if _archive_rel_path_from_envelope(envelope) != source_archive_path:
+            raise HTTPException(status_code=400, detail="Continuity archive envelope identity does not match source_archive_path")
+        if cold_payload_file.exists() or cold_stub_file.exists():
+            raise HTTPException(status_code=409, detail="Continuity cold artifact already exists for source archive")
 
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    cold_stored_at = now.isoformat().replace("+00:00", "Z")
-    gzip_bytes = _build_cold_gzip_bytes(source_bytes)
-    stub_text = _build_cold_stub_text(
-        envelope=envelope,
-        source_archive_path=source_archive_path,
-        cold_storage_path=cold_storage_path,
-        cold_stored_at=cold_stored_at,
-        now=now,
-    )
-
-    try:
-        write_bytes_file(cold_payload_file, gzip_bytes)
-        write_text_file(cold_stub_file, stub_text)
-        archive_path.unlink()
-        with repository_mutation_lock(repo_root):
-            committed = gm.commit_paths(
-                [cold_payload_file, cold_stub_file, archive_path],
-                f"continuity: cold-store {envelope['capsule']['subject_kind']} {envelope['capsule']['subject_id']}",
-            )
-            if not committed:
-                raise RuntimeError("Continuity cold-store commit produced no changes")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        unstage_paths(gm, [cold_payload_file, cold_stub_file, archive_path])
-        cleanup_errors = _restore_failed_cold_store(
-            archive_path=archive_path,
-            archive_bytes=source_bytes,
-            cold_payload_path=cold_payload_file,
-            cold_stub_path=cold_stub_file,
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        cold_stored_at = now.isoformat().replace("+00:00", "Z")
+        gzip_bytes = _build_cold_gzip_bytes(source_bytes)
+        stub_text = _build_cold_stub_text(
+            envelope=envelope,
+            source_archive_path=source_archive_path,
+            cold_storage_path=cold_storage_path,
+            cold_stored_at=cold_stored_at,
+            now=now,
         )
-        detail = f"Continuity cold-store failed: {exc}"
-        if cleanup_errors:
-            detail += f"; rollback failed for {', '.join(cleanup_errors)}"
-        raise HTTPException(status_code=500, detail=detail) from exc
+
+        try:
+            write_bytes_file(cold_payload_file, gzip_bytes)
+            write_text_file(cold_stub_file, stub_text)
+            archive_path.unlink()
+            with repository_mutation_lock(repo_root):
+                committed = gm.commit_paths(
+                    [cold_payload_file, cold_stub_file, archive_path],
+                    f"continuity: cold-store {envelope['capsule']['subject_kind']} {envelope['capsule']['subject_id']}",
+                )
+                if not committed:
+                    raise RuntimeError("Continuity cold-store commit produced no changes")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            unstage_paths(gm, [cold_payload_file, cold_stub_file, archive_path])
+            cleanup_errors = _restore_failed_cold_store(
+                archive_path=archive_path,
+                archive_bytes=source_bytes,
+                cold_payload_path=cold_payload_file,
+                cold_stub_path=cold_stub_file,
+            )
+            detail = f"Continuity cold-store failed: {exc}"
+            if cleanup_errors:
+                detail += f"; rollback failed for {', '.join(cleanup_errors)}"
+            raise HTTPException(status_code=500, detail=detail) from exc
 
     audit(
         auth,
@@ -2308,57 +2335,73 @@ def continuity_cold_rehydrate_service(
     archive_path = safe_path(repo_root, source_archive_path)
     cold_payload_file = safe_path(repo_root, cold_storage_path)
     cold_stub_file = safe_path(repo_root, cold_stub_path)
-    if archive_path.exists():
-        raise HTTPException(status_code=409, detail="Continuity archive envelope already exists")
-    if not cold_payload_file.exists() or not cold_payload_file.is_file():
-        raise HTTPException(status_code=404, detail="Continuity cold payload not found")
-    cold_payload_bytes = cold_payload_file.read_bytes()
-    cold_stub_bytes = cold_stub_file.read_bytes()
-    try:
-        archive_bytes = gzip.decompress(cold_payload_bytes)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity cold payload: {exc}") from exc
-    try:
-        payload = json.loads(archive_bytes.decode("utf-8"))
-        if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
-            raise ValueError("wrong schema_type")
-        if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
-            raise ValueError("wrong schema_version")
-        ContinuityCapsule.model_validate(payload.get("capsule"))
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope in cold payload: {exc}") from exc
-
-    rehydrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    try:
-        write_bytes_file(archive_path, archive_bytes)
-        cold_payload_file.unlink()
-        cold_stub_file.unlink()
-        with repository_mutation_lock(repo_root):
-            committed = gm.commit_paths(
-                [archive_path, cold_payload_file, cold_stub_file],
-                f"continuity: cold-rehydrate {payload['capsule']['subject_kind']} {payload['capsule']['subject_id']}",
+    with _continuity_subject_lock(
+        repo_root=repo_root,
+        subject_kind=frontmatter["subject_kind"],
+        subject_id=frontmatter["subject_id"],
+    ):
+        try:
+            frontmatter = _load_cold_stub(repo_root, cold_stub_path)
+            if frontmatter["source_archive_path"] != source_archive_path:
+                raise HTTPException(status_code=400, detail="Continuity cold stub identity does not match requested source archive")
+            if archive_path.exists():
+                raise HTTPException(status_code=409, detail="Continuity archive envelope already exists")
+            if not cold_payload_file.exists() or not cold_payload_file.is_file():
+                raise HTTPException(status_code=404, detail="Continuity cold payload not found")
+            cold_payload_bytes = cold_payload_file.read_bytes()
+            cold_stub_bytes = cold_stub_file.read_bytes()
+            archive_bytes = gzip.decompress(cold_payload_bytes)
+            payload = json.loads(archive_bytes.decode("utf-8"))
+            if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
+                raise ValueError("wrong schema_type")
+            if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+                raise ValueError("wrong schema_version")
+            capsule = ContinuityCapsule.model_validate(payload.get("capsule")).model_dump(mode="json", exclude_none=True)
+            expected_archive_path = _archive_rel_path_from_envelope(
+                {**payload, "capsule": capsule}
             )
-            if not committed:
-                raise RuntimeError("Continuity cold rehydrate commit produced no changes")
-    except Exception as exc:
-        unstage_paths(gm, [archive_path, cold_payload_file, cold_stub_file])
-        rollback_errors: list[str] = []
+            if expected_archive_path != source_archive_path:
+                raise HTTPException(status_code=400, detail="Continuity cold payload identity does not match requested source archive")
+            if str(payload.get("active_path") or "") != continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])):
+                raise HTTPException(status_code=400, detail="Invalid continuity archive envelope in cold payload: active_path mismatch")
+        except HTTPException:
+            raise
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=f"Continuity cold artifact changed during rehydrate: {exc.filename or exc}") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid continuity cold payload: {exc}") from exc
+
+        rehydrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         try:
-            archive_path.unlink(missing_ok=True)
-        except Exception as rollback_exc:
-            rollback_errors.append(f"remove restored archive: {rollback_exc}")
-        try:
-            write_bytes_file(cold_payload_file, cold_payload_bytes)
-        except Exception as rollback_exc:
-            rollback_errors.append(f"restore cold payload: {rollback_exc}")
-        try:
-            write_bytes_file(cold_stub_file, cold_stub_bytes)
-        except Exception as rollback_exc:
-            rollback_errors.append(f"restore cold stub: {rollback_exc}")
-        detail = f"Continuity cold rehydrate failed: {exc}"
-        if rollback_errors:
-            detail += f"; rollback failed for {', '.join(rollback_errors)}"
-        raise HTTPException(status_code=500, detail=detail) from exc
+            write_bytes_file(archive_path, archive_bytes)
+            cold_payload_file.unlink()
+            cold_stub_file.unlink()
+            with repository_mutation_lock(repo_root):
+                committed = gm.commit_paths(
+                    [archive_path, cold_payload_file, cold_stub_file],
+                    f"continuity: cold-rehydrate {capsule['subject_kind']} {capsule['subject_id']}",
+                )
+                if not committed:
+                    raise RuntimeError("Continuity cold rehydrate commit produced no changes")
+        except Exception as exc:
+            unstage_paths(gm, [archive_path, cold_payload_file, cold_stub_file])
+            rollback_errors: list[str] = []
+            try:
+                archive_path.unlink(missing_ok=True)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"remove restored archive: {rollback_exc}")
+            try:
+                write_bytes_file(cold_payload_file, cold_payload_bytes)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"restore cold payload: {rollback_exc}")
+            try:
+                write_bytes_file(cold_stub_file, cold_stub_bytes)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"restore cold stub: {rollback_exc}")
+            detail = f"Continuity cold rehydrate failed: {exc}"
+            if rollback_errors:
+                detail += f"; rollback failed for {', '.join(rollback_errors)}"
+            raise HTTPException(status_code=500, detail=detail) from exc
 
     audit(
         auth,

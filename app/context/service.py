@@ -362,6 +362,8 @@ def _raw_scan_recent_relevant(
             auth.require_read_path(rel)
         except HTTPException:
             continue
+        if _is_continuity_cold_path(rel):
+            continue
         try:
             raw = path.read_bytes()[:4096]
         except Exception:  # noqa: BLE001 — graceful degradation

@@ -6,10 +6,12 @@ import gzip
 import json
 import tempfile
 import unittest
+from fastapi import HTTPException
 from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
+from app.continuity.service import continuity_cold_rehydrate_service, continuity_cold_store_service
 from app.indexer import rebuild_index
 from app.main import backup_create, backup_restore_test, context_retrieve, continuity_list, ops_run
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, ContextRetrieveRequest, ContinuityListRequest, OpsRunRequest
@@ -34,6 +36,32 @@ class _GitManagerStub(SimpleGitManagerStub):
         """Record the commit request and report success."""
         self.commit_paths_calls.append(([str(path) for path in paths], message))
         return True
+
+
+class _BlockingGitManager(_GitManagerStub):
+    """Git stub that can block selected multi-path commits."""
+
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__(repo_root)
+        import threading
+
+        self._entered = threading.Event()
+        self._release = threading.Event()
+        self._message: str | None = None
+
+    def control(self, message: str):
+        """Configure the message to block on and return the entered/release events."""
+        self._message = message
+        return self._entered, self._release
+
+    def commit_paths(self, paths: list[Path], message: str) -> bool:
+        """Block the configured commit message until released."""
+        result = super().commit_paths(paths, message)
+        if message == self._message:
+            self._entered.set()
+            if not self._release.wait(timeout=5):
+                raise RuntimeError("timed out waiting to release commit")
+        return result
 
 
 class TestContinuityColdStorage(unittest.TestCase):
@@ -182,12 +210,45 @@ class TestContinuityColdStorage(unittest.TestCase):
 
             cold_rows = [row for row in listed["capsules"] if row["artifact_state"] == "cold"]
             self.assertEqual(len(cold_rows), 1)
-            self.assertEqual(cold_rows[0]["path"], "memory/continuity/archive/user-alpha-20260319T101500Z.json")
+            self.assertEqual(cold_rows[0]["path"], "memory/continuity/cold/index/user-alpha-20260319T101500Z.md")
+            self.assertEqual(cold_rows[0]["source_archive_path"], "memory/continuity/archive/user-alpha-20260319T101500Z.json")
             self.assertEqual(cold_rows[0]["cold_stub_path"], "memory/continuity/cold/index/user-alpha-20260319T101500Z.md")
             self.assertEqual(cold_rows[0]["cold_storage_path"], "memory/continuity/cold/user-alpha-20260319T101500Z.json.gz")
             recent_paths = [row["path"] for row in retrieved["bundle"]["recent_relevant"]]
             self.assertIn("memory/summaries/alpha.md", recent_paths)
             self.assertNotIn("memory/continuity/cold/index/user-alpha-20260319T101500Z.md", recent_paths)
+
+    def test_context_retrieve_raw_scan_excludes_cold_stub_even_when_candidate_path_injected(self) -> None:
+        """Raw-scan fallback should filter cold stubs even under degraded candidate enumeration."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            summary = repo_root / "memory" / "summaries" / "alpha.md"
+            cold_stub = repo_root / "memory" / "continuity" / "cold" / "index" / "user-alpha-20260319T101500Z.md"
+            summary.parent.mkdir(parents=True, exist_ok=True)
+            cold_stub.parent.mkdir(parents=True, exist_ok=True)
+            summary.write_text("---\ntype: summary\n---\nalpha summary\n", encoding="utf-8")
+            cold_stub.write_text("---\ntype: continuity_cold_stub\n---\nalpha cold stub\n", encoding="utf-8")
+
+            candidate_paths = [
+                (summary, 100.0),
+                (cold_stub, 99.0),
+            ]
+            with patch("app.main._services", return_value=(settings, gm)), patch(
+                "app.context.service._raw_scan_candidate_paths",
+                return_value=candidate_paths,
+            ), patch(
+                "app.context.service._index_health",
+                return_value="missing",
+            ):
+                retrieved = context_retrieve(
+                    ContextRetrieveRequest(task="alpha", limit=10),
+                    auth=AllowAllAuthStub(),
+                )
+
+            recent_paths = [row["path"] for row in retrieved["bundle"]["recent_relevant"]]
+            self.assertEqual(recent_paths, ["memory/summaries/alpha.md"])
 
     def test_ops_run_rehydrate_restores_archive_and_removes_cold_files(self) -> None:
         """Rehydrate should restore the exact archive bytes and remove the cold pair."""
@@ -327,6 +388,161 @@ class TestContinuityColdStorage(unittest.TestCase):
             validation = restored["continuity_validation"]
             self.assertFalse(validation["ok"])
             self.assertIn("memory/continuity/cold/user-alpha-20260319T101500Z.json.gz", validation["invalid_cold_payloads"])
+
+    def test_cold_store_rechecks_conflicts_inside_subject_lock(self) -> None:
+        """Cold-store should fail cleanly when the cold pair appears after lock acquisition planning."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            archive_rel, _archive_bytes = self._write_archive(repo_root)
+            gm = _BlockingGitManager(repo_root)
+            entered, release = gm.control("continuity: cold-store user alpha")
+
+            import threading
+
+            result: dict[str, dict] = {}
+
+            def worker() -> None:
+                result["value"] = continuity_cold_store_service(
+                    repo_root=repo_root,
+                    gm=gm,
+                    auth=_LocalOpsAuth(),
+                    req=type("Req", (), {"source_archive_path": archive_rel})(),
+                    audit=lambda *_args: None,
+                )
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            self.assertTrue(entered.wait(timeout=5))
+            (repo_root / "memory/continuity/cold").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory/continuity/cold/index").mkdir(parents=True, exist_ok=True)
+            release.set()
+            thread.join(timeout=5)
+            self.assertTrue(result["value"]["ok"])
+
+    def test_rehydrate_rejects_payload_identity_mismatch(self) -> None:
+        """Rehydrate should fail if the gzip payload does not belong to the selected stub identity."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            archive_rel, archive_bytes = self._write_archive(repo_root)
+            _other_rel, other_archive_bytes = self._write_archive(repo_root, subject_id="beta")
+            (repo_root / archive_rel).unlink()
+            cold_dir = repo_root / "memory" / "continuity" / "cold"
+            cold_index_dir = cold_dir / "index"
+            cold_index_dir.mkdir(parents=True, exist_ok=True)
+            (cold_dir / "user-alpha-20260319T101500Z.json.gz").write_bytes(gzip.compress(other_archive_bytes, mtime=0))
+            stub = (
+                "---\n"
+                "type: continuity_cold_stub\n"
+                "schema_version: \"1.0\"\n"
+                "artifact_state: cold\n"
+                "subject_kind: user\n"
+                "subject_id: alpha\n"
+                f"source_archive_path: {archive_rel}\n"
+                "cold_storage_path: memory/continuity/cold/user-alpha-20260319T101500Z.json.gz\n"
+                "archived_at: 2026-03-19T10:15:00Z\n"
+                "cold_stored_at: 2026-03-19T10:16:00Z\n"
+                "verification_kind: system_check\n"
+                "verification_status: system_confirmed\n"
+                "health_status: healthy\n"
+                "freshness_class: durable\n"
+                "phase: fresh\n"
+                "update_reason: manual\n"
+                "---\n"
+                "## top_priorities\n\n"
+                "## active_constraints\n\n"
+                "## active_concerns\n\n"
+                "## open_loops\n\n"
+                "## stance_summary\n\n"
+                "## drift_signals\n\n"
+                "## session_trajectory\n\n"
+                "## trailing_notes\n\n"
+                "## curiosity_queue\n\n"
+                "## negative_decisions\n"
+            )
+            (cold_index_dir / "user-alpha-20260319T101500Z.md").write_text(stub, encoding="utf-8")
+
+            with self.assertRaises(HTTPException) as cm:
+                continuity_cold_rehydrate_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(repo_root),
+                    auth=_LocalOpsAuth(),
+                    req=type("Req", (), {"source_archive_path": archive_rel, "cold_stub_path": None})(),
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(cm.exception.status_code, 400)
+
+    def test_rehydrate_returns_controlled_error_when_stub_disappears_after_validation(self) -> None:
+        """Rehydrate should convert a concurrent stub disappearance into a controlled HTTP error."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            archive_rel, _archive_bytes = self._write_archive(repo_root)
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                ops_run(
+                    OpsRunRequest(job_id="continuity_cold_store", arguments={"source_archive_path": archive_rel}),
+                    auth=_LocalOpsAuth(),
+                )
+
+            cold_stub_file = repo_root / "memory" / "continuity" / "cold" / "index" / "user-alpha-20260319T101500Z.md"
+            original_read_bytes = Path.read_bytes
+
+            def flaky_read_bytes(path_self: Path) -> bytes:
+                if path_self == cold_stub_file:
+                    raise FileNotFoundError(str(path_self))
+                return original_read_bytes(path_self)
+
+            with patch("pathlib.Path.read_bytes", new=flaky_read_bytes):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_cold_rehydrate_service(
+                        repo_root=repo_root,
+                        gm=gm,
+                        auth=_LocalOpsAuth(),
+                        req=type("Req", (), {"source_archive_path": archive_rel, "cold_stub_path": None})(),
+                        audit=lambda *_args: None,
+                    )
+
+            self.assertEqual(cm.exception.status_code, 409)
+
+    def test_cold_stub_validation_rejects_reordered_frontmatter(self) -> None:
+        """Cold-stub validation should enforce the exact frontmatter field order."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            cold_index_dir = repo_root / "memory" / "continuity" / "cold" / "index"
+            cold_index_dir.mkdir(parents=True, exist_ok=True)
+            (cold_index_dir / "user-alpha-20260319T101500Z.md").write_text(
+                "---\n"
+                "schema_version: \"1.0\"\n"
+                "type: continuity_cold_stub\n"
+                "artifact_state: cold\n"
+                "subject_kind: user\n"
+                "subject_id: alpha\n"
+                "source_archive_path: memory/continuity/archive/user-alpha-20260319T101500Z.json\n"
+                "cold_storage_path: memory/continuity/cold/user-alpha-20260319T101500Z.json.gz\n"
+                "archived_at: 2026-03-19T10:15:00Z\n"
+                "cold_stored_at: 2026-03-19T10:16:00Z\n"
+                "verification_kind: system_check\n"
+                "verification_status: system_confirmed\n"
+                "health_status: healthy\n"
+                "freshness_class: durable\n"
+                "phase: fresh\n"
+                "update_reason: manual\n"
+                "---\n"
+                "## top_priorities\n",
+                encoding="utf-8",
+            )
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                listed = continuity_list(
+                    ContinuityListRequest(include_cold=True, limit=10),
+                    auth=AllowAllAuthStub(),
+                )
+
+            self.assertEqual(listed["capsules"], [])
 
 
 if __name__ == "__main__":
