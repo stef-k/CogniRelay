@@ -629,6 +629,10 @@ def _retention_cold_state(repo_root: Path, source_archive_path: str) -> tuple[st
     cold_stub_file = safe_path(repo_root, cold_stub_path)
     payload_exists = cold_payload_file.exists()
     stub_exists = cold_stub_file.exists()
+    if payload_exists and not cold_payload_file.is_file():
+        return "conflict", cold_storage_path, cold_stub_path
+    if stub_exists and not cold_stub_file.is_file():
+        return "conflict", cold_storage_path, cold_stub_path
     if payload_exists != stub_exists:
         return "partial", cold_storage_path, cold_stub_path
     if not payload_exists:
@@ -786,6 +790,8 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="Continuity archive envelope not found") from e
     except UnicodeDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope text: {e}") from e
     except OSError as e:

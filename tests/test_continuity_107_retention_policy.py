@@ -393,6 +393,80 @@ class TestContinuityRetentionPolicy(unittest.TestCase):
             )
             self.assertEqual(applied["job_result"]["results"][0]["status"], "failed_invalid_archive")
 
+    def test_cold_payload_directory_is_reported_as_conflict(self) -> None:
+        """A non-file cold payload path should be surfaced as a retention conflict."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root, archive_days=30)
+            gm = _GitManagerStub(repo_root)
+            now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+            archive_rel = self._write_archive(repo_root, subject_id="dir-conflict", archived_at=now - timedelta(days=70))
+            cold_rel, _stub_rel = self._write_cold_pair(repo_root, source_archive_path=archive_rel)
+            cold_path = repo_root / cold_rel
+            cold_path.unlink()
+            cold_path.mkdir(parents=True, exist_ok=True)
+
+            with patch("app.main._services", return_value=(settings, gm)), patch("app.main.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+                planned = continuity_retention_plan(
+                    ContinuityRetentionPlanRequest(limit=25),
+                    auth=AllowAllAuthStub(),
+                )
+                applied = ops_run(
+                    OpsRunRequest(
+                        job_id="continuity_retention_apply",
+                        arguments={"source_archive_paths": [archive_rel]},
+                    ),
+                    auth=_LocalOpsAuth(),
+                )
+
+            self.assertEqual(
+                planned["warnings"],
+                [f"continuity_retention_partial_cold_conflict:{archive_rel}"],
+            )
+            self.assertEqual(planned["count"], 0)
+            self.assertEqual(applied["job_result"]["results"][0]["status"], "failed_conflict")
+
+    def test_archive_disappearance_during_read_is_treated_as_missing(self) -> None:
+        """Concurrent archive disappearance during read should degrade to missing, not malformed."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root, archive_days=30)
+            gm = _GitManagerStub(repo_root)
+            now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+            archive_rel = self._write_archive(repo_root, subject_id="vanish", archived_at=now - timedelta(days=70))
+            target_path = repo_root / archive_rel
+            original_read_text = Path.read_text
+
+            def _flaky_read_text(path_obj: Path, *args: object, **kwargs: object) -> str:
+                if path_obj == target_path:
+                    raise FileNotFoundError("gone after stat")
+                return original_read_text(path_obj, *args, **kwargs)
+
+            with (
+                patch("pathlib.Path.read_text", new=_flaky_read_text),
+                patch("app.main._services", return_value=(settings, gm)),
+                patch("app.main.datetime") as mocked_datetime,
+            ):
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+                planned = continuity_retention_plan(
+                    ContinuityRetentionPlanRequest(limit=25),
+                    auth=AllowAllAuthStub(),
+                )
+                applied = ops_run(
+                    OpsRunRequest(
+                        job_id="continuity_retention_apply",
+                        arguments={"source_archive_paths": [archive_rel]},
+                    ),
+                    auth=_LocalOpsAuth(),
+                )
+
+            self.assertEqual(planned["count"], 0)
+            self.assertEqual(planned["warnings"], [])
+            self.assertEqual(applied["job_result"]["results"][0]["status"], "skipped_missing")
+
     def test_retention_plan_rollback_preserves_newer_bytes_observed_inside_lock(self) -> None:
         """Rollback should restore the bytes observed under lock, not stale pre-lock bytes."""
         with tempfile.TemporaryDirectory() as td:
