@@ -755,6 +755,17 @@ def replication_pull_service(
                 )
                 if ext_result:
                     _pull_history_extra.extend([ext_result["shard_path"], ext_result["stub_path"]])
+                    # Update history_meta per #112
+                    hm = state.setdefault("history_meta", {})
+                    if not isinstance(hm, dict):
+                        hm = {}
+                        state["history_meta"] = hm
+                    rs = hm.setdefault("replication_state", {})
+                    if not isinstance(rs, dict):
+                        rs = {}
+                        hm["replication_state"] = rs
+                    rs["last_cut_at"] = now.isoformat()
+                    rs["last_cut_pull_count"] = rs.get("last_cut_pull_count", 0) + 1 if isinstance(rs.get("last_cut_pull_count"), int) else 1
             except Exception:
                 _logger.warning("Failed to externalize superseded pull row for %s", req.source_peer, exc_info=True)
 
@@ -940,6 +951,17 @@ def replication_push_service(
             )
             if ext_result:
                 _history_extra_paths.extend([ext_result["shard_path"], ext_result["stub_path"]])
+                # Update history_meta per #112
+                hm = state.setdefault("history_meta", {})
+                if not isinstance(hm, dict):
+                    hm = {}
+                    state["history_meta"] = hm
+                rs = hm.setdefault("replication_state", {})
+                if not isinstance(rs, dict):
+                    rs = {}
+                    hm["replication_state"] = rs
+                rs["last_cut_at"] = push_now.isoformat()
+                rs["last_cut_push_count"] = rs.get("last_cut_push_count", 0) + 1 if isinstance(rs.get("last_cut_push_count"), int) else 1
         except Exception:
             _logger.warning("Failed to externalize superseded push row", exc_info=True)
 
