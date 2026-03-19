@@ -211,15 +211,19 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 def _write_json_exclusive(path: Path, data: dict[str, Any]) -> None:
     """Write JSON data to path, failing if the file already exists.
 
-    Uses O_CREAT | O_EXCL to prevent silent overwrites when two concurrent
-    writers allocate the same history_id (e.g. concurrent shared captures).
+    Uses O_CREAT | O_EXCL to claim the filename atomically, then delegates
+    to ``write_text_file`` for durable content (temp+fsync+rename).  If the
+    durable write fails, the empty sentinel is removed so a future retry or
+    concurrent writer can reclaim the sequence.
     """
     import os
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    os.close(fd)
     try:
-        os.write(fd, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
-    finally:
-        os.close(fd)
+        write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -475,19 +479,29 @@ def externalize_superseded_shared(
 
         payload_path = safe_path(repo_root, payload_rel)
         stub_path = safe_path(repo_root, stub_rel)
-        rollback = _capture_rollback([payload_path, stub_path])
+
+        # Write payload first with O_EXCL — if it collides, we wrote nothing.
         try:
             _write_json_exclusive(payload_path, payload)
-            _write_json_exclusive(stub_path, stub)
-            break  # Success
         except FileExistsError:
-            _restore_rollback(rollback)
+            # O_EXCL guarantees we wrote nothing; no rollback needed.
             if attempt == max_retries - 1:
                 raise
-            # Retry with a new sequence number (directory scan will find the existing file)
+            continue
+
+        # Payload written; now write stub.
+        try:
+            _write_json_exclusive(stub_path, stub)
+            break  # Both written successfully
+        except FileExistsError:
+            # We wrote the payload but stub collided; clean up our payload.
+            payload_path.unlink(missing_ok=True)
+            if attempt == max_retries - 1:
+                raise
             continue
         except Exception:
-            _restore_rollback(rollback)
+            # Non-collision failure on stub; clean up our payload.
+            payload_path.unlink(missing_ok=True)
             raise
 
     return {
