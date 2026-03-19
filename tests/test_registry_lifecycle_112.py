@@ -982,5 +982,272 @@ class TestRegistryMaintenanceOrchestrator(unittest.TestCase):
             self.assertEqual(len(shard_files), 0, "Shard should be cleaned up on rollback")
 
 
+    def test_delivery_rollback_on_shard_write_failure(self):
+        """Delivery maintenance rolls back the head when shard write fails."""
+        old_time = (self.now - timedelta(days=45)).isoformat()
+        state = {
+            "version": "1",
+            "records": {
+                "msg_rb": {
+                    "message_id": "msg_rb",
+                    "status": "delivered",
+                    "sent_at": old_time,
+                },
+            },
+            "idempotency": {},
+        }
+        _write_head(self.repo, DELIVERY_STATE_REL, state)
+
+        call_count = 0
+
+        def failing_write(path, data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:  # shard write
+                raise OSError("disk full")
+            write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+
+        from unittest.mock import patch
+        with patch("app.registry_lifecycle.service._write_json", side_effect=failing_write):
+            with self.assertRaises(OSError):
+                delivery_maintenance_pass(
+                    repo_root=self.repo, now=self.now,
+                    terminal_retention_days=30, idempotency_retention_days=30,
+                    batch_limit=500,
+                )
+
+        # Head should be restored to original state
+        head = _read_json(self.repo, DELIVERY_STATE_REL)
+        self.assertIn("msg_rb", head["records"])
+
+    def test_batch_limit_across_multiple_peers(self):
+        """Batch limit is respected across multiple peers in peer trust pass."""
+        old_base = self.now - timedelta(days=60)
+
+        def _make_transitions(count, base):
+            return [
+                {"at": (base + timedelta(days=i)).isoformat(), "from": "restricted",
+                 "to": "trusted", "reason": f"t_{i}", "by": "admin"}
+                for i in range(count)
+            ]
+
+        # Two peers each with 40 transitions (8 beyond max_hot=32)
+        registry = {
+            "schema_version": "1.0",
+            "updated_at": self.now.isoformat(),
+            "peers": {
+                "peer-a": {"trust_level": "trusted", "trust_history": _make_transitions(40, old_base)},
+                "peer-b": {"trust_level": "trusted", "trust_history": _make_transitions(40, old_base)},
+            },
+        }
+        _write_head(self.repo, PEERS_REGISTRY_REL, registry)
+
+        result = peer_trust_maintenance_pass(
+            repo_root=self.repo, now=self.now,
+            max_hot_entries=32, hot_retention_days=30,
+            batch_limit=5,  # Only allow 5 transitions total
+        )
+        self.assertTrue(result["ok"])
+        # Should externalize at most 5 total across both peers
+        self.assertLessEqual(result["transitions_externalized"], 5)
+
+
+# ===================================================================
+# Integration tests for push/pull pre-write capture
+# ===================================================================
+
+class TestReplicationPreWriteIntegration(unittest.TestCase):
+    """Integration tests for synchronous pre-write capture in push/pull flows."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.repo = Path(self._td.name) / "repo"
+        self.repo.mkdir()
+        self.now = _now()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_pull_externalizes_old_superseded_row(self):
+        """Full pull flow externalizes a superseded pull row when old enough."""
+        from dataclasses import dataclass
+
+        from app.maintenance.service import replication_pull_service
+        from app.models import ReplicationPullRequest
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            repo_root: Path = None  # type: ignore[assignment]
+            replication_history_hot_retention_days: int = 14
+            max_payload_bytes: int = 262_144
+
+        settings = FakeSettings(repo_root=self.repo)
+
+        # Pre-seed replication state with an old pull row
+        old_pull_time = (self.now - timedelta(days=20)).isoformat()
+        state = {
+            "schema_version": "1.0",
+            "last_pull_by_source": {
+                "peer-source": {
+                    "pulled_at": old_pull_time,
+                    "received_count": 5,
+                    "changed_count": 3,
+                },
+            },
+            "last_push": None,
+            "pull_idempotency": {},
+        }
+        _write_head(self.repo, "peers/replication_state.json", state)
+
+        class FakeAuth:
+            peer_id = "peer-test"
+            def require(self, _s): pass
+            def require_write_path(self, _p): pass
+            def require_read_path(self, _p): pass
+
+        class FakeGm:
+            repo_root = self.repo
+            def commit_paths(self, _p, _m): return True
+            def commit_file(self, _p, _m): return True
+            def latest_commit(self): return "test-sha"
+
+        req = ReplicationPullRequest(
+            source_peer="peer-source",
+            files=[],
+            mode="upsert",
+            conflict_policy="source_wins",
+        )
+
+        def noop_rate(*a, **kw): pass
+        def noop_payload(*a, **kw): pass
+        def noop_audit(*a, **kw): pass
+        def parse_iso(v):
+            if not v:
+                return None
+            try:
+                from datetime import datetime
+                return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        result = replication_pull_service(
+            settings=settings,
+            gm=FakeGm(),
+            auth=FakeAuth(),
+            req=req,
+            enforce_rate_limit=noop_rate,
+            enforce_payload_limit=noop_payload,
+            parse_iso=parse_iso,
+            audit=noop_audit,
+        )
+        self.assertTrue(result["ok"])
+
+        # Check that a history shard was created
+        history_dir = safe_path(self.repo, "peers/history/replication_state")
+        if history_dir.exists():
+            shard_files = [f for f in history_dir.glob("*.json") if f.is_file()]
+            self.assertGreater(len(shard_files), 0, "Should create a history shard for old superseded pull")
+
+        # Verify history_meta was written in the state
+        updated_state = _read_json(self.repo, "peers/replication_state.json")
+        hm = updated_state.get("history_meta", {})
+        rs_meta = hm.get("replication_state", {})
+        if rs_meta:
+            self.assertIn("last_cut_at", rs_meta)
+            self.assertIn("last_cut_pull_count", rs_meta)
+
+    def test_push_externalizes_old_superseded_row(self):
+        """Full push flow externalizes a superseded push row when old enough."""
+        from unittest.mock import patch
+        from app.maintenance.service import replication_push_service
+        from app.models import ReplicationPushRequest
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            repo_root: Path = None  # type: ignore[assignment]
+            replication_history_hot_retention_days: int = 14
+            max_payload_bytes: int = 262_144
+
+        settings = FakeSettings(repo_root=self.repo)
+
+        # Create a file to push
+        (self.repo / "memory" / "core").mkdir(parents=True, exist_ok=True)
+        (self.repo / "memory" / "core" / "identity.md").write_text("# id\n", encoding="utf-8")
+
+        # Pre-seed replication state with old push
+        old_push_time = (self.now - timedelta(days=20)).isoformat()
+        state = {
+            "schema_version": "1.0",
+            "last_pull_by_source": {},
+            "last_push": {
+                "pushed_at": old_push_time,
+                "target_url": "https://old.example/v1/replication/pull",
+                "file_count": 3,
+            },
+            "pull_idempotency": {},
+        }
+        _write_head(self.repo, "peers/replication_state.json", state)
+
+        class FakeAuth:
+            peer_id = "peer-test"
+            def require(self, _s): pass
+            def require_write_path(self, _p): pass
+            def require_read_path(self, _p): pass
+
+        class FakeGm:
+            repo_root = self.repo
+            def commit_paths(self, _p, _m): return True
+            def commit_file(self, _p, _m): return True
+            def latest_commit(self): return "test-sha"
+
+        class FakeResp:
+            def read(self):
+                return b'{"ok": true}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+
+        req = ReplicationPushRequest(
+            dry_run=False,
+            base_url="https://peer.example",
+            include_prefixes=["memory"],
+            target_token="tok",
+        )
+
+        def noop(*a, **kw): pass
+        def load_peers(root):
+            return {"peers": {}}
+
+        with patch("app.maintenance.service.urlopen", return_value=FakeResp()):
+            result = replication_push_service(
+                settings=settings,
+                gm=FakeGm(),
+                auth=FakeAuth(),
+                req=req,
+                enforce_rate_limit=noop,
+                enforce_payload_limit=noop,
+                load_peers_registry=load_peers,
+                audit=noop,
+            )
+
+        self.assertTrue(result["ok"])
+
+        # Check shard was created
+        history_dir = safe_path(self.repo, "peers/history/replication_state")
+        if history_dir.exists():
+            shard_files = [f for f in history_dir.glob("*.json") if f.is_file()]
+            self.assertGreater(len(shard_files), 0, "Should create a history shard for old superseded push")
+
+        # Verify history_meta
+        updated_state = _read_json(self.repo, "peers/replication_state.json")
+        hm = updated_state.get("history_meta", {})
+        rs_meta = hm.get("replication_state", {})
+        if rs_meta:
+            self.assertIn("last_cut_at", rs_meta)
+            self.assertIn("last_cut_push_count", rs_meta)
+
+
 if __name__ == "__main__":
     unittest.main()

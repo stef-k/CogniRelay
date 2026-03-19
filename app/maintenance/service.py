@@ -38,6 +38,7 @@ from app.continuity.service import (
 )
 from app.git_safety import safe_commit_paths, try_commit_file, try_commit_paths
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
+from app.registry_lifecycle.service import externalize_superseded_pull, externalize_superseded_push
 from app.storage import canonical_json, read_text_file, safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
@@ -745,7 +746,6 @@ def replication_pull_service(
         previous_pull = pull_by_source.get(req.source_peer)
         if isinstance(previous_pull, dict) and previous_pull:
             try:
-                from app.registry_lifecycle.service import externalize_superseded_pull
                 ext_result = externalize_superseded_pull(
                     repo_root=settings.repo_root,
                     now=now,
@@ -767,7 +767,12 @@ def replication_pull_service(
                     rs["last_cut_at"] = now.isoformat()
                     rs["last_cut_pull_count"] = rs.get("last_cut_pull_count", 0) + 1 if isinstance(rs.get("last_cut_pull_count"), int) else 1
             except Exception:
-                _logger.warning("Failed to externalize superseded pull row for %s", req.source_peer, exc_info=True)
+                _logger.error(
+                    "Failed to externalize superseded pull row for %s; row data will be lost on overwrite: %s",
+                    req.source_peer,
+                    json.dumps(previous_pull, ensure_ascii=False, default=str),
+                    exc_info=True,
+                )
 
         pull_by_source[req.source_peer] = {
             "pulled_at": now.isoformat(),
@@ -938,12 +943,11 @@ def replication_push_service(
     state = load_replication_state(settings.repo_root)
 
     # Synchronous pre-write capture per #112: externalize superseded push row
-    push_now = datetime.now(timezone.utc)
+    push_now = datetime.now(timezone.utc)  # single timestamp for shard cut_at and state pushed_at
     _history_extra_paths: list[str] = []
     previous_push = state.get("last_push")
     if isinstance(previous_push, dict) and previous_push:
         try:
-            from app.registry_lifecycle.service import externalize_superseded_push
             ext_result = externalize_superseded_push(
                 repo_root=settings.repo_root,
                 now=push_now,
@@ -964,7 +968,11 @@ def replication_push_service(
                 rs["last_cut_at"] = push_now.isoformat()
                 rs["last_cut_push_count"] = rs.get("last_cut_push_count", 0) + 1 if isinstance(rs.get("last_cut_push_count"), int) else 1
         except Exception:
-            _logger.warning("Failed to externalize superseded push row", exc_info=True)
+            _logger.error(
+                "Failed to externalize superseded push row; row data will be lost on overwrite: %s",
+                json.dumps(previous_push, ensure_ascii=False, default=str),
+                exc_info=True,
+            )
 
     state["last_push"] = {
         "pushed_at": push_now.isoformat(),

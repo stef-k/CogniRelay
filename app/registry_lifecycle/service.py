@@ -433,7 +433,7 @@ def delivery_maintenance_pass(
 
     # --- Write files with rollback ---
     paths_to_write: list[tuple[Path, str, dict[str, Any]]] = []
-    paths_to_write.append((head_path, DELIVERY_STATE_REL, {k: head[k] for k in ("version", "records", "idempotency", "history_meta") if k in head}))
+    paths_to_write.append((head_path, DELIVERY_STATE_REL, head))
     if shard_rel:
         shard_path = safe_path(repo_root, shard_rel)
         paths_to_write.append((shard_path, shard_rel, shard_payload))  # type: ignore[possibly-undefined]
@@ -1149,37 +1149,43 @@ def registry_maintenance_service(
     batch_limit = int(settings.registry_history_batch_limit)
 
     for family in ordered:
-        if family == "delivery":
-            result = delivery_maintenance_pass(
-                repo_root=repo_root,
-                now=now,
-                terminal_retention_days=int(settings.delivery_terminal_retention_days),
-                idempotency_retention_days=int(settings.delivery_idempotency_retention_days),
-                batch_limit=batch_limit,
-            )
-        elif family == "nonce":
-            result = nonce_maintenance_pass(
-                repo_root=repo_root,
-                now=now,
-                nonce_retention_days=int(settings.nonce_retention_days),
-                batch_limit=batch_limit,
-            )
-        elif family == "peer_trust":
-            result = peer_trust_maintenance_pass(
-                repo_root=repo_root,
-                now=now,
-                max_hot_entries=int(settings.peer_trust_history_max_hot_entries),
-                hot_retention_days=int(settings.peer_trust_history_hot_retention_days),
-                batch_limit=batch_limit,
-            )
-        elif family == "replication_tombstones":
-            result = tombstone_maintenance_pass(
-                repo_root=repo_root,
-                now=now,
-                grace_days=int(settings.replication_tombstone_grace_days),
-                batch_limit=batch_limit,
-            )
-        else:
+        try:
+            if family == "delivery":
+                result = delivery_maintenance_pass(
+                    repo_root=repo_root,
+                    now=now,
+                    terminal_retention_days=int(settings.delivery_terminal_retention_days),
+                    idempotency_retention_days=int(settings.delivery_idempotency_retention_days),
+                    batch_limit=batch_limit,
+                )
+            elif family == "nonce":
+                result = nonce_maintenance_pass(
+                    repo_root=repo_root,
+                    now=now,
+                    nonce_retention_days=int(settings.nonce_retention_days),
+                    batch_limit=batch_limit,
+                )
+            elif family == "peer_trust":
+                result = peer_trust_maintenance_pass(
+                    repo_root=repo_root,
+                    now=now,
+                    max_hot_entries=int(settings.peer_trust_history_max_hot_entries),
+                    hot_retention_days=int(settings.peer_trust_history_hot_retention_days),
+                    batch_limit=batch_limit,
+                )
+            elif family == "replication_tombstones":
+                result = tombstone_maintenance_pass(
+                    repo_root=repo_root,
+                    now=now,
+                    grace_days=int(settings.replication_tombstone_grace_days),
+                    batch_limit=batch_limit,
+                )
+            else:
+                continue
+        except Exception:
+            _logger.error("Registry maintenance failed for family %s; continuing with remaining families", family, exc_info=True)
+            results[family] = {"ok": False, "family": family, "error": f"maintenance_failed:{family}"}
+            all_warnings.append(f"registry_maintenance_failed:{family}")
             continue
 
         results[family] = result
@@ -1190,6 +1196,7 @@ def registry_maintenance_service(
         # Spec: stop after one family reaches the batch limit
         processed = (
             result.get("records_externalized", 0)
+            + result.get("idempotency_externalized", 0)
             + result.get("idempotency_pruned", 0)
             + result.get("pruned", 0)
             + result.get("transitions_externalized", 0)
