@@ -41,6 +41,7 @@ For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, s
 - `POST /v1/continuity/read`: load one active continuity capsule by exact selector
 - `POST /v1/continuity/compare`: compare one active continuity capsule to a candidate capsule without mutating storage
 - `POST /v1/continuity/revalidate`: confirm, correct, degrade, or conflict-mark one active continuity capsule
+- `POST /v1/continuity/retention/plan`: persist the next deterministic stale-archive retention plan window
 - `POST /v1/continuity/list`: list active continuity capsule summaries
 - `POST /v1/continuity/archive`: archive one active continuity capsule and remove the active file
 - `POST /v1/coordination/handoff/create`: create one local-first inter-agent handoff artifact from an active continuity capsule
@@ -74,12 +75,13 @@ Notable behavior:
 - `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` surface fallback snapshot failures through additive `recovery_warnings` instead of failing the already durable active write
 - `POST /v1/continuity/read` now returns `source_state` plus `recovery_warnings`; exact-active behavior remains the default and structured fallback or missing-state degradation is enabled with `allow_fallback=true`
 - `POST /v1/continuity/refresh/plan` now returns deterministic refresh candidates and persists the latest plan under `memory/continuity/refresh_state.json`
+- `POST /v1/continuity/retention/plan` now returns a bounded next-action stale-archive window, persists it under `memory/continuity/retention_state.json`, and exposes `total_candidates` plus `has_more` so operators can drain backlog through repeated plan/apply cycles
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule
 - `POST /v1/continuity/revalidate` writes verification status and capsule health through one audited git-backed continuity update
-- `POST /v1/continuity/list` now supports `include_fallback`, `include_archived`, and `include_cold`, and returns additive `artifact_state` plus `retention_class`
+- `POST /v1/continuity/list` now supports `include_fallback`, `include_archived`, and `include_cold`, returns additive `artifact_state` plus `retention_class`, and classifies `archive_stale` using `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`
 - `POST /v1/continuity/delete` deletes exact-selector active, fallback, and archive artifacts through one audited git-backed delete path
 - `POST /v1/continuity/archive` writes an archive envelope under `memory/continuity/archive/` and removes the active capsule in one git-backed commit
-- `POST /v1/ops/run` now supports host-local `continuity_cold_store` and `continuity_cold_rehydrate` jobs for explicit continuity semi-cold storage and recovery
+- `POST /v1/ops/run` now supports host-local `continuity_cold_store`, `continuity_cold_rehydrate`, and `continuity_retention_apply` jobs for explicit continuity semi-cold storage, recovery, and stale-archive policy execution
 - `POST /v1/coordination/handoff/create` projects only `continuity.active_constraints` and `continuity.drift_signals` from one exact active continuity capsule into a stored handoff artifact under `memory/coordination/handoffs/`
 - handoff artifacts are additive coordination records: they do not mutate local continuity capsules, and `POST /v1/coordination/handoff/{handoff_id}/consume` records only recipient outcome fields
 - `GET /v1/coordination/handoffs/query` lets senders and recipients discover visible handoffs without relying on successful message or task-reference delivery; corrupt handoff artifacts are skipped with a warning instead of failing the whole query

@@ -50,6 +50,21 @@ class TestConfigTokens(unittest.TestCase):
             self.assertIn("file-token-a", settings.tokens)
             self.assertNotIn("change-me-local-dev-token", settings.tokens)
 
+    def test_continuity_retention_archive_days_reads_env_and_clamps_minimum(self) -> None:
+        """Retention archive days should come from central env config with minimum clamping."""
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(
+                os.environ,
+                {
+                    "COGNIRELAY_REPO_ROOT": td,
+                    "COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS": "0",
+                },
+                clear=True,
+            ):
+                settings = get_settings(force_reload=True)
+
+            self.assertEqual(settings.continuity_retention_archive_days, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,8 @@ from app.models import (
     ContinuityDeleteRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRetentionApplyRequest,
+    ContinuityRetentionPlanRequest,
     ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
@@ -133,6 +135,9 @@ CONTINUITY_SIGNAL_STATUS = {
 CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
+CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"
+CONTINUITY_RETENTION_PLAN_SCHEMA_TYPE = "continuity_retention_plan"
+CONTINUITY_RETENTION_PLAN_SCHEMA_VERSION = "1.0"
 CONTINUITY_COLD_DIR_REL = f"{CONTINUITY_DIR_REL}/cold"
 CONTINUITY_COLD_INDEX_DIR_REL = f"{CONTINUITY_COLD_DIR_REL}/index"
 CONTINUITY_COLD_STUB_SECTION_ORDER = [
@@ -568,6 +573,126 @@ def _restore_failed_refresh_state(path: Path, old_bytes: bytes | None, exc: Exce
     if restore_error is not None:
         detail = f"{detail}; rollback failed: {restore_error}"
     return HTTPException(status_code=500, detail=detail)
+
+
+def _restore_failed_retention_state(path: Path, old_bytes: bytes | None, exc: Exception) -> HTTPException:
+    """Return a retention-state persistence error after restoring the prior durable bytes."""
+    restore_error: Exception | None = None
+    try:
+        if old_bytes is None:
+            path.unlink(missing_ok=True)
+        else:
+            write_bytes_file(path, old_bytes)
+    except Exception as restore_exc:
+        restore_error = restore_exc
+    detail = f"Failed to persist continuity retention state: {exc}; prior durable plan was restored"
+    if restore_error is not None:
+        detail = f"Failed to persist continuity retention state: {exc}; rollback failed: {restore_error}"
+    return HTTPException(status_code=500, detail=detail)
+
+
+def _is_archive_stale(*, archived_at: datetime | None, now: datetime, retention_archive_days: int) -> bool:
+    """Return whether an archive timestamp is older than the configured stale threshold."""
+    if archived_at is None:
+        return False
+    return (now - archived_at).total_seconds() > (retention_archive_days * 86400)
+
+
+def _retention_age_days(*, archived_at: datetime, generated_at: datetime) -> int:
+    """Return the floor age in UTC days for one archived artifact."""
+    return max(0, math.floor((generated_at - archived_at).total_seconds() / 86400))
+
+
+def _retention_warning_sort_key(warning: str) -> tuple[int, str]:
+    """Return the deterministic sort key for retention warnings."""
+    prefix_order = {
+        "continuity_retention_partial_cold_conflict:": 0,
+        "continuity_retention_skipped_invalid_archive:": 1,
+        "continuity_retention_skipped_unauthorized:": 2,
+        "duplicate_source_archive_path:": 3,
+    }
+    for prefix, rank in prefix_order.items():
+        if warning.startswith(prefix):
+            return rank, warning[len(prefix):]
+    return 99, warning
+
+
+def _retention_cold_state(repo_root: Path, source_archive_path: str) -> tuple[str, str, str]:
+    """Return the cold-artifact state plus expected payload and stub paths for one archive."""
+    cold_storage_path = continuity_cold_storage_rel_path(source_archive_path)
+    cold_stub_path = continuity_cold_stub_rel_path(source_archive_path)
+    cold_payload_file = safe_path(repo_root, cold_storage_path)
+    cold_stub_file = safe_path(repo_root, cold_stub_path)
+    payload_exists = cold_payload_file.exists()
+    stub_exists = cold_stub_file.exists()
+    if payload_exists != stub_exists:
+        return "partial", cold_storage_path, cold_stub_path
+    if not payload_exists:
+        return "none", cold_storage_path, cold_stub_path
+    try:
+        frontmatter = _load_cold_stub(repo_root, cold_stub_path)
+    except HTTPException:
+        return "conflict", cold_storage_path, cold_stub_path
+    if frontmatter.get("source_archive_path") != source_archive_path:
+        return "conflict", cold_storage_path, cold_stub_path
+    return "full", cold_storage_path, cold_stub_path
+
+
+def _retention_candidate_sort_key(candidate: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Return the deterministic candidate ordering tuple."""
+    return (
+        str(candidate["archived_at"]),
+        str(candidate["subject_kind"]),
+        _normalize_subject_id(str(candidate["subject_id"])),
+        str(candidate["source_archive_path"]),
+    )
+
+
+def _retention_candidate_from_envelope(
+    *,
+    envelope: dict[str, Any],
+    source_archive_path: str,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    """Build one retention-plan candidate row from a validated archive envelope."""
+    capsule = envelope["capsule"]
+    archived_at = _require_utc_timestamp(str(envelope.get("archived_at") or ""), "archived_at")
+    return {
+        "subject_kind": capsule["subject_kind"],
+        "subject_id": capsule["subject_id"],
+        "source_archive_path": source_archive_path,
+        "artifact_state": "archived",
+        "retention_class": "archive_stale",
+        "policy_action": "cold_store",
+        "archived_at": archived_at.isoformat().replace("+00:00", "Z"),
+        "age_days": _retention_age_days(archived_at=archived_at, generated_at=generated_at),
+        "cold_storage_path": continuity_cold_storage_rel_path(source_archive_path),
+        "cold_stub_path": continuity_cold_stub_rel_path(source_archive_path),
+        "reason_codes": ["archive_stale"],
+    }
+
+
+def _retention_plan_payload(
+    *,
+    generated_at: datetime,
+    req: ContinuityRetentionPlanRequest,
+    candidates: list[dict[str, Any]],
+    warnings: list[str],
+    total_candidates: int,
+) -> dict[str, Any]:
+    """Build the persisted operator-visible continuity retention plan payload."""
+    return {
+        "schema_type": CONTINUITY_RETENTION_PLAN_SCHEMA_TYPE,
+        "schema_version": CONTINUITY_RETENTION_PLAN_SCHEMA_VERSION,
+        "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+        "path": CONTINUITY_RETENTION_STATE_REL,
+        "filters": {"subject_kind": req.subject_kind, "limit": req.limit},
+        "count": len(candidates),
+        "total_candidates": total_candidates,
+        "has_more": total_candidates > len(candidates),
+        "warnings": warnings,
+        "candidates": candidates,
+    }
 
 
 def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]:
@@ -1444,6 +1569,7 @@ def continuity_list_service(
     auth: AuthContext,
     req: ContinuityListRequest,
     now: datetime,
+    retention_archive_days: int = CONTINUITY_RETENTION_ARCHIVE_DAYS,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
     """List active, fallback, and archive continuity summaries under the repository namespace."""
@@ -1557,7 +1683,7 @@ def continuity_list_service(
                 health_status, health_reasons = _capsule_health_summary(capsule)
                 archived_at = _parse_iso(str(envelope.get("archived_at") or ""))
                 retention_class = "archive_recent"
-                if archived_at is not None and (now - archived_at).total_seconds() > (CONTINUITY_RETENTION_ARCHIVE_DAYS * 86400):
+                if _is_archive_stale(archived_at=archived_at, now=now, retention_archive_days=retention_archive_days):
                     retention_class = "archive_stale"
                 summaries.append(
                     {
@@ -1762,6 +1888,7 @@ def continuity_refresh_plan_service(
     auth: AuthContext,
     req: ContinuityRefreshPlanRequest,
     now: datetime,
+    retention_archive_days: int | None = None,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
     """Build and persist a deterministic continuity refresh plan."""
@@ -1925,6 +2052,287 @@ def continuity_refresh_plan_service(
         "generated_at": payload["last_planned_at"],
         "candidates": candidates,
         "latest_commit": latest_commit,
+    }
+
+
+def _scan_retention_candidates(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    subject_kind: str | None,
+    generated_at: datetime,
+    retention_archive_days: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Scan archive envelopes and return eligible retention candidates plus warnings."""
+    archive_base = repo_root / CONTINUITY_DIR_REL / "archive"
+    candidates: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    if not archive_base.exists() or not archive_base.is_dir():
+        return candidates, warnings
+
+    for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
+        if path.is_dir() or path.suffix.lower() != ".json":
+            continue
+        rel = str(path.relative_to(repo_root))
+        try:
+            auth.require_read_path(rel)
+        except HTTPException:
+            warnings.append(f"continuity_retention_skipped_unauthorized:{rel}")
+            continue
+        try:
+            envelope = _load_archive_envelope(repo_root, rel)
+            if _archive_rel_path_from_envelope(envelope) != rel:
+                raise HTTPException(status_code=400, detail="archive identity mismatch")
+        except HTTPException as exc:
+            if exc.status_code == 400:
+                warnings.append(f"continuity_retention_skipped_invalid_archive:{rel}")
+                continue
+            if exc.status_code == 404:
+                continue
+            raise
+
+        capsule = envelope["capsule"]
+        if subject_kind and capsule["subject_kind"] != subject_kind:
+            continue
+        archived_at = _parse_iso(str(envelope.get("archived_at") or ""))
+        if not _is_archive_stale(archived_at=archived_at, now=generated_at, retention_archive_days=retention_archive_days):
+            continue
+        cold_state, _cold_storage_path, _cold_stub_path = _retention_cold_state(repo_root, rel)
+        if cold_state == "none":
+            candidates.append(
+                _retention_candidate_from_envelope(
+                    envelope=envelope,
+                    source_archive_path=rel,
+                    generated_at=generated_at,
+                )
+            )
+            continue
+        if cold_state in {"partial", "conflict"}:
+            warnings.append(f"continuity_retention_partial_cold_conflict:{rel}")
+
+    candidates.sort(key=_retention_candidate_sort_key)
+    warnings.sort(key=_retention_warning_sort_key)
+    return candidates, warnings
+
+
+def continuity_retention_plan_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityRetentionPlanRequest,
+    now: datetime,
+    retention_archive_days: int,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Build and persist a deterministic continuity retention plan."""
+    auth.require("read:files")
+    auth.require("write:projects")
+    auth.require_write_path(CONTINUITY_RETENTION_STATE_REL)
+
+    all_candidates, warnings = _scan_retention_candidates(
+        repo_root=repo_root,
+        auth=auth,
+        subject_kind=req.subject_kind,
+        generated_at=now,
+        retention_archive_days=retention_archive_days,
+    )
+    candidates = all_candidates[: req.limit]
+
+    retention_path = safe_path(repo_root, CONTINUITY_RETENTION_STATE_REL)
+    payload = _retention_plan_payload(
+        generated_at=now,
+        req=req,
+        candidates=candidates,
+        warnings=warnings,
+        total_candidates=len(all_candidates),
+    )
+    canonical = canonical_json(payload)
+    old_bytes = retention_path.read_bytes() if retention_path.exists() else None
+    new_bytes = canonical.encode("utf-8")
+    latest_commit = gm.latest_commit()
+    if old_bytes != new_bytes:
+        try:
+            write_text_file(retention_path, canonical)
+            with repository_mutation_lock(repo_root):
+                committed = gm.commit_file(retention_path, "continuity: retention plan")
+                if not committed:
+                    raise RuntimeError("git commit produced no changes")
+                latest_commit = gm.latest_commit()
+        except Exception as exc:
+            unstage_paths(gm, [retention_path])
+            raise _restore_failed_retention_state(retention_path, old_bytes, exc) from exc
+
+    audit(
+        auth,
+        "continuity_retention_plan",
+        {
+            "subject_kind": req.subject_kind,
+            "count": len(candidates),
+            "total_candidates": len(all_candidates),
+            "has_more": len(all_candidates) > len(candidates),
+            "path": CONTINUITY_RETENTION_STATE_REL,
+            "warnings_count": len(warnings),
+        },
+    )
+    return {
+        "ok": True,
+        "count": len(candidates),
+        "generated_at": payload["generated_at"],
+        "path": CONTINUITY_RETENTION_STATE_REL,
+        "latest_commit": latest_commit,
+        "warnings": warnings,
+        "candidates": candidates,
+        "total_candidates": len(all_candidates),
+        "has_more": len(all_candidates) > len(candidates),
+    }
+
+
+def continuity_retention_apply_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityRetentionApplyRequest,
+    now: datetime,
+    retention_archive_days: int,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Batch-apply continuity retention policy against exact archive paths."""
+    auth.require("admin:peers")
+
+    warnings: list[str] = []
+    unique_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for raw_path in list(req.source_archive_paths):
+        path = str(raw_path)
+        if path in seen_paths:
+            warnings.append(f"duplicate_source_archive_path:{path}")
+            continue
+        seen_paths.add(path)
+        unique_paths.append(path)
+    warnings.sort(key=_retention_warning_sort_key)
+
+    results: list[dict[str, Any]] = []
+    for raw_path in unique_paths:
+        result: dict[str, Any] = {
+            "source_archive_path": raw_path,
+            "ok": False,
+            "status": "failed_internal",
+            "detail": "",
+            "cold_storage_path": None,
+            "cold_stub_path": None,
+        }
+        try:
+            source_archive_path = _validate_archive_rel_path(raw_path)
+            cold_state, cold_storage_path, cold_stub_path = _retention_cold_state(repo_root, source_archive_path)
+            result["cold_storage_path"] = cold_storage_path
+            result["cold_stub_path"] = cold_stub_path
+
+            try:
+                auth.require_read_path(source_archive_path)
+                auth.require_write_path(source_archive_path)
+                auth.require_write_path(cold_storage_path)
+                auth.require_write_path(cold_stub_path)
+            except HTTPException as exc:
+                result["status"] = "failed_authorization"
+                result["detail"] = str(exc.detail)
+                results.append(result)
+                continue
+
+            archive_path = safe_path(repo_root, source_archive_path)
+            if cold_state in {"partial", "conflict"}:
+                result["status"] = "failed_conflict"
+                result["detail"] = "Partial or conflicting cold artifact state"
+                results.append(result)
+                continue
+            if cold_state == "full":
+                result["ok"] = True
+                result["status"] = "skipped_already_cold"
+                result["detail"] = "Matching cold payload and stub already exist"
+                results.append(result)
+                continue
+            if not archive_path.exists() or not archive_path.is_file():
+                result["ok"] = True
+                result["status"] = "skipped_missing"
+                result["detail"] = "Continuity archive envelope not found"
+                results.append(result)
+                continue
+
+            envelope = _load_archive_envelope(repo_root, source_archive_path)
+            if _archive_rel_path_from_envelope(envelope) != source_archive_path:
+                raise HTTPException(status_code=400, detail="archive identity mismatch")
+            archived_at = _parse_iso(str(envelope.get("archived_at") or ""))
+            if not _is_archive_stale(archived_at=archived_at, now=now, retention_archive_days=retention_archive_days):
+                result["ok"] = True
+                result["status"] = "skipped_not_stale"
+                result["detail"] = "Archive is not stale under current retention threshold"
+                results.append(result)
+                continue
+
+            cold_result = continuity_cold_store_service(
+                repo_root=repo_root,
+                gm=gm,
+                auth=auth,
+                req=ContinuityColdStoreRequest(source_archive_path=source_archive_path),
+                audit=audit,
+            )
+            result["ok"] = True
+            result["status"] = "cold_stored"
+            result["detail"] = "Cold-stored archived continuity envelope"
+            result["cold_storage_path"] = cold_result["cold_storage_path"]
+            result["cold_stub_path"] = cold_result["cold_stub_path"]
+            results.append(result)
+        except HTTPException as exc:
+            if exc.status_code == 400:
+                result["status"] = "failed_invalid_archive"
+            elif exc.status_code == 403:
+                result["status"] = "failed_authorization"
+            elif exc.status_code == 404:
+                result["ok"] = True
+                result["status"] = "skipped_missing"
+            elif exc.status_code == 409:
+                current_source = str(result["source_archive_path"])
+                if current_source.startswith(f"{CONTINUITY_DIR_REL}/archive/"):
+                    cold_state, _cold_storage_path, _cold_stub_path = _retention_cold_state(repo_root, current_source)
+                    if cold_state == "full":
+                        result["ok"] = True
+                        result["status"] = "skipped_already_cold"
+                    else:
+                        result["status"] = "failed_conflict"
+                else:
+                    result["status"] = "failed_conflict"
+            else:
+                result["status"] = "failed_internal"
+            result["detail"] = str(exc.detail)
+            results.append(result)
+        except Exception as exc:
+            result["status"] = "failed_internal"
+            result["detail"] = str(exc)
+            results.append(result)
+
+    failed = sum(1 for row in results if str(row["status"]).startswith("failed_"))
+    cold_stored = sum(1 for row in results if row["status"] == "cold_stored")
+    audit(
+        auth,
+        "continuity_retention_apply",
+        {
+            "requested": len(req.source_archive_paths),
+            "unique_requested": len(unique_paths),
+            "processed": len(results),
+            "cold_stored": cold_stored,
+            "failed": failed,
+        },
+    )
+    return {
+        "ok": True,
+        "requested": len(req.source_archive_paths),
+        "unique_requested": len(unique_paths),
+        "processed": len(results),
+        "cold_stored": cold_stored,
+        "failed": failed,
+        "results": results,
+        "warnings": warnings,
     }
 
 

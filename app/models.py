@@ -571,6 +571,7 @@ class OpsRunRequest(BaseModel):
         "compact.plan",
         "continuity_cold_store",
         "continuity_cold_rehydrate",
+        "continuity_retention_apply",
     ]
     dry_run: bool = False
     force: bool = False
@@ -722,6 +723,12 @@ class ContinuityRefreshPlanRequest(BaseModel):
     include_healthy: bool = False
 
 
+class ContinuityRetentionPlanRequest(BaseModel):
+    """Parameters for deterministic continuity retention planning."""
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    limit: int = Field(default=25, ge=1, le=100)
+
+
 class ContinuityArchiveRequest(BaseModel):
     """Exact-selector request for archiving one active continuity capsule."""
     subject_kind: Literal["user", "peer", "thread", "task"]
@@ -732,6 +739,11 @@ class ContinuityArchiveRequest(BaseModel):
 class ContinuityColdStoreRequest(BaseModel):
     """Host-local request for cold-storing one archived continuity envelope."""
     source_archive_path: str = Field(min_length=1, max_length=400)
+
+
+class ContinuityRetentionApplyRequest(BaseModel):
+    """Host-local request for batch-applying continuity retention policy."""
+    source_archive_paths: List[str] = Field(min_length=1, max_length=100)
 
 
 class ContinuityColdRehydrateRequest(BaseModel):

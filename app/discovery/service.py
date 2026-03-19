@@ -30,6 +30,7 @@ from app.models import (
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
     ContinuityListRequest,
+    ContinuityRetentionPlanRequest,
     ContinuityRefreshPlanRequest,
     ContinuityReadRequest,
     ContinuityRevalidateRequest,
@@ -315,6 +316,15 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["read:files", "write:projects", "read_namespaces", "write_namespaces"],
             "idempotent": False,
             "input_schema": schema_for_model(ContinuityRefreshPlanRequest),
+        },
+        {
+            "name": "continuity.retention_plan",
+            "description": "Build and persist the latest deterministic continuity stale-archive retention plan.",
+            "method": "POST",
+            "path": "/v1/continuity/retention/plan",
+            "scopes": ["read:files", "write:projects", "read_namespaces", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(ContinuityRetentionPlanRequest),
         },
         {
             "name": "continuity.list",
@@ -1066,6 +1076,7 @@ def invoke_tool_by_name(
     continuity_compare: Callable[[ContinuityCompareRequest, AuthContext | None], dict[str, Any]],
     continuity_revalidate: Callable[[ContinuityRevalidateRequest, AuthContext | None], dict[str, Any]],
     continuity_refresh_plan: Callable[[ContinuityRefreshPlanRequest, AuthContext | None], dict[str, Any]],
+    continuity_retention_plan: Callable[[ContinuityRetentionPlanRequest, AuthContext | None], dict[str, Any]],
     continuity_list: Callable[[ContinuityListRequest, AuthContext | None], dict[str, Any]],
     continuity_archive: Callable[[ContinuityArchiveRequest, AuthContext | None], dict[str, Any]],
     continuity_delete: Callable[[ContinuityDeleteRequest, AuthContext | None], dict[str, Any]],
@@ -1174,6 +1185,8 @@ def invoke_tool_by_name(
         return continuity_revalidate(ContinuityRevalidateRequest(**args), auth)
     if name == "continuity.refresh_plan":
         return continuity_refresh_plan(ContinuityRefreshPlanRequest(**args), auth)
+    if name == "continuity.retention_plan":
+        return continuity_retention_plan(ContinuityRetentionPlanRequest(**args), auth)
     if name == "continuity.list":
         return continuity_list(ContinuityListRequest(**args), auth)
     if name == "continuity.archive":
@@ -1530,6 +1543,7 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "POST /v1/continuity/compare": {"scope": "read:files"},
             "POST /v1/continuity/revalidate": {"scope": "write:projects"},
             "POST /v1/continuity/refresh/plan": {"scope": "read:files + write:projects + write_namespaces"},
+            "POST /v1/continuity/retention/plan": {"scope": "read:files + write:projects + write_namespaces"},
             "POST /v1/continuity/list": {"scope": "read:files"},
             "POST /v1/continuity/archive": {"scope": "write:projects"},
             "POST /v1/continuity/delete": {"scope": "write:projects"},

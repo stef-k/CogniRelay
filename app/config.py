@@ -76,6 +76,7 @@ class Settings:
     contract_version: str = "2026-02-25"
     coordination_query_scan_threshold: int = 5000
     max_jsonl_read_bytes: int = DEFAULT_MAX_JSONL_READ_BYTES  # env override: COGNIRELAY_MAX_JSONL_READ_BYTES
+    continuity_retention_archive_days: int = 90
 
 
 _cached: Settings | None = None
@@ -220,6 +221,11 @@ def get_settings(force_reload: bool = False) -> Settings:
         ),
         max_jsonl_read_bytes=_parse_int(
             _env_first("COGNIRELAY_MAX_JSONL_READ_BYTES"), DEFAULT_MAX_JSONL_READ_BYTES, minimum=1024,
+        ),
+        continuity_retention_archive_days=_parse_int(
+            _env_first("COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS"),
+            90,
+            minimum=1,
         ),
     )
     return _cached
