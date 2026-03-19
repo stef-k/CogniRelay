@@ -445,8 +445,9 @@ def shared_update_service(
 
         _capture_now = _dt.now(_tz.utc)
         _shared_hot_retention = getattr(settings, "shared_history_hot_retention_days", 30)
+        _history_result: dict[str, Any] | None = None
         try:
-            externalize_superseded_shared(
+            _history_result = externalize_superseded_shared(
                 repo_root=repo_root,
                 now=_capture_now,
                 previous_artifact=artifact,
@@ -480,6 +481,21 @@ def shared_update_service(
             artifact=updated,
             commit_message=commit_message,
         )
+        # Best-effort commit of shared history files written by the capture hook.
+        if _history_result is not None:
+            from app.git_safety import try_commit_paths as _try_commit_history
+            _history_paths = []
+            for _hkey in ("payload_path", "stub_path"):
+                _hp = _history_result.get(_hkey)
+                if _hp:
+                    _history_paths.append(safe_path(repo_root, _hp))
+            if _history_paths:
+                _try_commit_history(
+                    paths=_history_paths,
+                    gm=gm,
+                    commit_message=f"coordination: shared history capture for {shared_id}",
+                )
+
         # Keep the SQLite sidecar index in sync after successful persist.
         from app.coordination.query_index import try_upsert_shared
 

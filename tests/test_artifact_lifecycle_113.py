@@ -13,6 +13,7 @@ Also covers the orchestrator, rollback, degradation, and deterministic ordering.
 from __future__ import annotations
 
 import json
+import shutil
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,7 @@ class HandoffMaintenanceTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -267,6 +269,7 @@ class SharedHistoryTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -352,14 +355,19 @@ class SharedHistoryTestCase(unittest.TestCase):
 
         call_count = 0
 
-        def failing_write_json(path, data):
+        def failing_write_exclusive(path, data):
             nonlocal call_count
             call_count += 1
             if call_count > 1:
                 raise OSError("disk full")
-            write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+            import os
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                os.write(fd, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+            finally:
+                os.close(fd)
 
-        with patch("app.artifact_lifecycle.service._write_json", side_effect=failing_write_json):
+        with patch("app.artifact_lifecycle.service._write_json_exclusive", side_effect=failing_write_exclusive):
             with self.assertRaises(OSError):
                 externalize_superseded_shared(
                     repo_root=self.repo, now=self.now,
@@ -378,6 +386,7 @@ class ReconciliationMaintenanceTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -450,6 +459,7 @@ class TaskDoneMaintenanceTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -513,6 +523,7 @@ class PatchAppliedMaintenanceTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -566,6 +577,7 @@ class OrchestratorTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -668,6 +680,7 @@ class RollbackTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -707,6 +720,7 @@ class StubPayloadSymmetryTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -801,6 +815,7 @@ class EmptyDirectoryTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.repo = Path(self.tmp)
         self.now = _now()
 
@@ -859,6 +874,145 @@ class SettingsIntegrationTestCase(unittest.TestCase):
             "artifact_history_batch_limit",
         }
         self.assertTrue(expected.issubset(field_names))
+
+
+class OrchestratorResponseFieldsTestCase(unittest.TestCase):
+    """Tests for the ok/degraded fields in orchestrator response."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = Path(self.tmp)
+        self.now = _now()
+
+    @dataclass(frozen=True)
+    class FakeSettings:
+        handoff_terminal_retention_days: int = 30
+        reconciliation_resolved_retention_days: int = 30
+        task_done_hot_retention_days: int = 30
+        patch_applied_hot_retention_days: int = 30
+        artifact_history_batch_limit: int = 500
+
+    def test_ok_false_when_family_fails(self):
+        """Top-level ok is False when any family raises an exception."""
+        from unittest.mock import patch
+
+        with patch("app.artifact_lifecycle.service.handoff_maintenance_pass", side_effect=RuntimeError("boom")):
+            result = artifact_lifecycle_maintenance_service(
+                repo_root=self.repo, gm=None, now=self.now,
+                settings=self.FakeSettings(),
+            )
+        self.assertFalse(result["ok"])
+
+    def test_degraded_false_on_clean_pass(self):
+        """degraded is False when no git issues occur."""
+        result = artifact_lifecycle_maintenance_service(
+            repo_root=self.repo, gm=None, now=self.now,
+            settings=self.FakeSettings(),
+        )
+        self.assertFalse(result["degraded"])
+
+    def test_degraded_present_in_response(self):
+        """degraded field is always present in orchestrator response."""
+        result = artifact_lifecycle_maintenance_service(
+            repo_root=self.repo, gm=None, now=self.now,
+            settings=self.FakeSettings(),
+        )
+        self.assertIn("degraded", result)
+
+
+class SharedUpdateHookIntegrationTestCase(unittest.TestCase):
+    """Integration tests for the shared_update_service pre-write capture hook."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = Path(self.tmp)
+        self.now = _now()
+
+    def test_capture_produces_history_for_old_version(self):
+        """When a shared artifact with an old updated_at is superseded, history is created."""
+        old_ts = (self.now - timedelta(days=45)).isoformat()
+        previous = {
+            "shared_id": "shared_aaaa0000000000000000000000000001",
+            "owner_peer": "peer-alpha",
+            "participant_peers": ["peer-beta"],
+            "version": 2,
+            "task_id": "task-1",
+            "thread_id": "thread-1",
+            "updated_at": old_ts,
+        }
+        result = externalize_superseded_shared(
+            repo_root=self.repo, now=self.now,
+            previous_artifact=previous, hot_retention_days=30,
+        )
+        self.assertIsNotNone(result)
+
+        # Verify payload exists and contains the full previous artifact
+        payload = json.loads(safe_path(self.repo, result["payload_path"]).read_text())
+        self.assertEqual(payload["artifact"]["version"], 2)
+        self.assertEqual(payload["artifact"]["shared_id"], "shared_aaaa0000000000000000000000000001")
+
+        # Verify stub exists
+        stub = json.loads(safe_path(self.repo, result["stub_path"]).read_text())
+        self.assertEqual(stub["schema_type"], "artifact_history_stub")
+        self.assertEqual(stub["family"], "shared_history")
+
+    def test_capture_failure_is_nonfatal(self):
+        """When externalize_superseded_shared raises, the caller should catch and proceed."""
+        from unittest.mock import patch
+
+        previous = {
+            "shared_id": "shared_aaaa0000000000000000000000000001",
+            "owner_peer": "peer-alpha",
+            "participant_peers": [],
+            "version": 1,
+            "updated_at": (self.now - timedelta(days=45)).isoformat(),
+        }
+
+        with patch("app.artifact_lifecycle.service._write_json_exclusive", side_effect=OSError("disk full")):
+            # The function itself raises, but the shared_update_service
+            # wraps it in a try/except — here we test the function does raise
+            with self.assertRaises(OSError):
+                externalize_superseded_shared(
+                    repo_root=self.repo, now=self.now,
+                    previous_artifact=previous, hot_retention_days=30,
+                )
+
+    def test_concurrent_capture_retry_on_collision(self):
+        """When O_EXCL detects a collision, the function retries with a new sequence."""
+        previous = {
+            "shared_id": "shared_aaaa0000000000000000000000000001",
+            "owner_peer": "peer-alpha",
+            "participant_peers": ["peer-beta"],
+            "version": 3,
+            "task_id": "t1",
+            "thread_id": "th1",
+            "updated_at": (self.now - timedelta(days=45)).isoformat(),
+        }
+
+        # Pre-create the first payload file to simulate a concurrent writer
+        from app.artifact_lifecycle.service import (
+            _history_timestamp_str,
+            SHARED_HISTORY_DIR_REL,
+        )
+        ts_str = _history_timestamp_str(self.now)
+        first_id = f"shared_history__{ts_str}__0001"
+        first_path = safe_path(self.repo, f"{SHARED_HISTORY_DIR_REL}/{first_id}.json")
+        first_path.parent.mkdir(parents=True, exist_ok=True)
+        first_path.write_text("{}", encoding="utf-8")
+        # Also create the index stub
+        stub_dir = safe_path(self.repo, f"{SHARED_HISTORY_DIR_REL}/index")
+        stub_dir.mkdir(parents=True, exist_ok=True)
+        (stub_dir / f"{first_id}.json").write_text("{}", encoding="utf-8")
+
+        result = externalize_superseded_shared(
+            repo_root=self.repo, now=self.now,
+            previous_artifact=previous, hot_retention_days=30,
+        )
+        self.assertIsNotNone(result)
+        # Should have allocated sequence 0002
+        self.assertIn("__0002", result["history_id"])
 
 
 if __name__ == "__main__":

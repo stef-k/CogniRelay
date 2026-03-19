@@ -208,6 +208,20 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _write_json_exclusive(path: Path, data: dict[str, Any]) -> None:
+    """Write JSON data to path, failing if the file already exists.
+
+    Uses O_CREAT | O_EXCL to prevent silent overwrites when two concurrent
+    writers allocate the same history_id (e.g. concurrent shared captures).
+    """
+    import os
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        os.write(fd, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 # ---------------------------------------------------------------------------
 # Generic single-artifact externalization
 # ---------------------------------------------------------------------------
@@ -381,6 +395,11 @@ def handoff_maintenance_pass(
         _restore_rollback(rollback)
         raise
 
+    # Best-effort: remove externalized handoffs from the query sidecar index
+    from app.coordination.query_index import try_delete_handoff
+    for handoff_id, _, _, _ in eligible:
+        try_delete_handoff(handoff_id)
+
     return {
         "ok": True,
         "family": "handoff",
@@ -438,27 +457,38 @@ def externalize_superseded_shared(
     source_rel = f"{SHARED_DIR_REL}/{shared_id}.json"
     summary = _shared_history_summary(previous_artifact)
 
-    history_id, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
-        repo_root=repo_root,
-        family="shared_history",
-        schema_type="shared_history_unit",
-        artifact_id=shared_id,
-        source_rel=source_rel,
-        artifact=previous_artifact,
-        summary=summary,
-        history_dir_rel=SHARED_HISTORY_DIR_REL,
-        cut_at=now,
-    )
+    # Use exclusive writes to prevent concurrent captures from silently
+    # overwriting each other (different shared_ids can race at the same second).
+    max_retries = 3
+    for attempt in range(max_retries):
+        history_id, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
+            repo_root=repo_root,
+            family="shared_history",
+            schema_type="shared_history_unit",
+            artifact_id=shared_id,
+            source_rel=source_rel,
+            artifact=previous_artifact,
+            summary=summary,
+            history_dir_rel=SHARED_HISTORY_DIR_REL,
+            cut_at=now,
+        )
 
-    payload_path = safe_path(repo_root, payload_rel)
-    stub_path = safe_path(repo_root, stub_rel)
-    rollback = _capture_rollback([payload_path, stub_path])
-    try:
-        _write_json(payload_path, payload)
-        _write_json(stub_path, stub)
-    except Exception:
-        _restore_rollback(rollback)
-        raise
+        payload_path = safe_path(repo_root, payload_rel)
+        stub_path = safe_path(repo_root, stub_rel)
+        rollback = _capture_rollback([payload_path, stub_path])
+        try:
+            _write_json_exclusive(payload_path, payload)
+            _write_json_exclusive(stub_path, stub)
+            break  # Success
+        except FileExistsError:
+            _restore_rollback(rollback)
+            if attempt == max_retries - 1:
+                raise
+            # Retry with a new sequence number (directory scan will find the existing file)
+            continue
+        except Exception:
+            _restore_rollback(rollback)
+            raise
 
     return {
         "history_id": history_id,
@@ -564,6 +594,11 @@ def reconciliation_maintenance_pass(
     except Exception:
         _restore_rollback(rollback)
         raise
+
+    # Best-effort: remove externalized reconciliations from the query sidecar index
+    from app.coordination.query_index import try_delete_reconciliation
+    for recon_id, _, _, _ in eligible:
+        try_delete_reconciliation(recon_id)
 
     return {
         "ok": True,
@@ -883,8 +918,15 @@ def artifact_lifecycle_maintenance_service(
 
     all_warnings.extend(git_warnings)
 
+    any_family_failed = any(
+        isinstance(r, dict) and not r.get("ok", True)
+        for r in results.values()
+    )
+    degraded = bool(git_warnings)
+
     response: dict[str, Any] = {
-        "ok": True,
+        "ok": not any_family_failed,
+        "degraded": degraded,
         "families": results,
         "committed_files": committed_files,
         "warnings": all_warnings if all_warnings else [],
