@@ -882,6 +882,48 @@ def patch_applied_maintenance_pass(
     }
 
 
+# ---------------------------------------------------------------------------
+# Partial-failure recovery: collect files written by an interrupted pass
+# ---------------------------------------------------------------------------
+
+_FAMILY_DIRS: dict[str, tuple[str, str]] = {
+    "handoff": (HANDOFFS_DIR_REL, HANDOFFS_HISTORY_DIR_REL),
+    "reconciliation": (RECONCILIATIONS_DIR_REL, RECONCILIATIONS_HISTORY_DIR_REL),
+    "task_done": (TASKS_DONE_DIR_REL, TASKS_HISTORY_DONE_DIR_REL),
+    "patch_applied": (PATCHES_APPLIED_DIR_REL, PATCHES_HISTORY_APPLIED_DIR_REL),
+}
+
+
+def _collect_partial_paths(repo_root: Path, family: str) -> list[str]:
+    """Collect repo-relative paths affected by an interrupted family pass.
+
+    Scans the history+index dirs for written files and the hot dir for
+    remaining files (whose deletions need staging). Returns paths suitable
+    for inclusion in the git commit so partial state doesn't remain as
+    uncommitted working-tree changes.
+    """
+    dirs = _FAMILY_DIRS.get(family)
+    if not dirs:
+        return []
+    hot_dir_rel, history_dir_rel = dirs
+    paths: list[str] = []
+    # Collect written history files (payload + stub)
+    for sub in (history_dir_rel, f"{history_dir_rel}/index"):
+        d = repo_root / sub
+        if not d.exists() or not d.is_dir():
+            continue
+        for child in d.iterdir():
+            if child.is_file() and child.suffix == ".json":
+                paths.append(f"{sub}/{child.name}")
+    # Include hot dir files so git stages any deletions from partial passes
+    hot_d = repo_root / hot_dir_rel
+    if hot_d.exists() and hot_d.is_dir():
+        for child in hot_d.iterdir():
+            if child.is_file() and child.suffix == ".json":
+                paths.append(f"{hot_dir_rel}/{child.name}")
+    return paths
+
+
 # ===================================================================
 # Orchestrator: run artifact lifecycle maintenance
 # ===================================================================
@@ -959,6 +1001,11 @@ def artifact_lifecycle_maintenance_service(
             )
             results[family] = {"ok": False, "family": family, "error": f"maintenance_failed:{family}"}
             all_warnings.append(f"artifact_maintenance_failed:{family}")
+            # Scan history and hot dirs for files affected by the partial pass
+            # so they are included in the final commit attempt rather than
+            # left as uncommitted working-tree state.
+            _partial_paths = _collect_partial_paths(repo_root, family)
+            all_written.extend(_partial_paths)
             continue
 
         results[family] = result
