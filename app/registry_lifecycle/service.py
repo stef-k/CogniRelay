@@ -223,7 +223,7 @@ def _delivery_retention_timestamp(record: dict[str, Any], effective_status: str)
     if effective_status == "acked":
         ts = _latest_ack_at("accepted")
         if ts is None:
-            return None, f"delivery_retention_missing:acked record has no parseable accepted ack_at"
+            return None, "delivery_retention_missing:acked record has no parseable accepted ack_at"
         return ts, None
 
     if effective_status == "dead_letter":
@@ -232,7 +232,7 @@ def _delivery_retention_timestamp(record: dict[str, Any], effective_status: str)
             # Effective dead-letter because ack_deadline passed
             dl = _parse_iso(record.get("ack_deadline"))
             if dl is None:
-                return None, f"delivery_retention_missing:effective dead_letter has no parseable ack_deadline"
+                return None, "delivery_retention_missing:effective dead_letter has no parseable ack_deadline"
             return dl, None
         # Stored dead_letter
         ts = _latest_ack_at("rejected")
@@ -242,12 +242,12 @@ def _delivery_retention_timestamp(record: dict[str, Any], effective_status: str)
         ts = _latest_ack_at()
         if ts is not None:
             return ts, None
-        return None, f"delivery_retention_missing:dead_letter record has no parseable ack timestamps"
+        return None, "delivery_retention_missing:dead_letter record has no parseable ack timestamps"
 
     if effective_status == "delivered":
         ts = _parse_iso(record.get("sent_at"))
         if ts is None:
-            return None, f"delivery_retention_missing:delivered record has no parseable sent_at"
+            return None, "delivery_retention_missing:delivered record has no parseable sent_at"
         return ts, None
 
     return None, f"delivery_retention_unknown_status:{effective_status}"
@@ -623,7 +623,7 @@ def peer_trust_maintenance_pass(
         shard_dir.mkdir(parents=True, exist_ok=True)
         shard_id = _next_shard_id("peer_trust", now, shard_dir)
 
-        transition_timestamps = [_parse_iso(t.get("at")) for t in eligible if _parse_iso(t.get("at"))]
+        transition_timestamps: list[datetime] = [dt for t in eligible if (dt := _parse_iso(t.get("at"))) is not None]
         final_trust_after = str(row.get("trust_level") or "untrusted")
 
         summary = {
