@@ -102,8 +102,16 @@ def _next_history_id(
     ts_str = _history_timestamp_str(cut_at)
     prefix = f"{family}__{ts_str}__"
     existing_seqs: list[int] = []
-    if history_dir.exists() and history_dir.is_dir():
-        for child in history_dir.iterdir():
+    # Scan both the payload directory and the index/ stub directory so that
+    # orphan stubs (payload missing) are also accounted for in allocation.
+    scan_dirs = [history_dir]
+    index_dir = history_dir / "index"
+    if index_dir.exists() and index_dir.is_dir():
+        scan_dirs.append(index_dir)
+    for scan_dir in scan_dirs:
+        if not scan_dir.exists() or not scan_dir.is_dir():
+            continue
+        for child in scan_dir.iterdir():
             name = child.stem if child.suffix == ".json" else child.name
             if name.startswith(prefix):
                 suffix = name[len(prefix):]

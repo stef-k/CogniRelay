@@ -446,6 +446,7 @@ def shared_update_service(
         _capture_now = _dt.now(_tz.utc)
         _shared_hot_retention = getattr(settings, "shared_history_hot_retention_days", 30)
         _history_result: dict[str, Any] | None = None
+        _update_warnings: list[str] = []
         try:
             _history_result = externalize_superseded_shared(
                 repo_root=repo_root,
@@ -459,6 +460,7 @@ def shared_update_service(
                 shared_id,
                 exc_info=True,
             )
+            _update_warnings.append("shared_history_capture_failed: superseded version not archived")
 
         updated = dict(artifact)
         updated["title"] = req.title
@@ -475,7 +477,6 @@ def shared_update_service(
         if commit_message is None or not commit_message.strip():
             commit_message = f"coordination: update {shared_id} v{updated['version']}"
         # If persist fails, clean up captured history to avoid phantom entries.
-        _update_warnings: list[str] = []
         try:
             rel = _persist_updated_shared_artifact(
                 repo_root=repo_root,
