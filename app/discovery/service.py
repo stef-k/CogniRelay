@@ -318,7 +318,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "continuity.list",
-            "description": "List active, fallback, and archived continuity summaries with retention and recovery metadata.",
+            "description": "List active, fallback, archived, and optional cold continuity summaries with retention and recovery metadata.",
             "method": "POST",
             "path": "/v1/continuity/list",
             "scopes": ["read:files", "read_namespaces"],

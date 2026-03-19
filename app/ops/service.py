@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
-from app.models import OpsRunRequest
+from app.models import ContinuityColdRehydrateRequest, ContinuityColdStoreRequest, OpsRunRequest
 from app.storage import append_jsonl, safe_path
 
 _log = logging.getLogger(__name__)
@@ -32,6 +32,8 @@ OPS_JOBS = {
     "messages.replay_dead_letter_sweep",
     "security.rotation_check",
     "compact.plan",
+    "continuity_cold_store",
+    "continuity_cold_rehydrate",
 }
 
 
@@ -258,6 +260,24 @@ def _ops_job_catalog() -> list[dict[str, Any]]:
             "recommended_schedule": "daily/weekly",
             "idempotent": False,
         },
+        {
+            "job_id": "continuity_cold_store",
+            "description": "Cold-store one archived continuity envelope into a gzip payload plus searchable stub.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "manual or policy-driven",
+            "idempotent": False,
+            "request_schema": ContinuityColdStoreRequest.model_json_schema(),
+        },
+        {
+            "job_id": "continuity_cold_rehydrate",
+            "description": "Rehydrate one cold-stored continuity envelope back into the hot archive namespace.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "manual or policy-driven",
+            "idempotent": False,
+            "request_schema": ContinuityColdRehydrateRequest.model_json_schema(),
+        },
     ]
 
 
@@ -387,6 +407,10 @@ def _ops_execute_job(
     replication_push_request_factory: Callable[..., Any],
     compact_run: Callable[..., dict[str, Any]],
     compact_request_factory: Callable[..., Any],
+    continuity_cold_store: Callable[..., dict[str, Any]],
+    continuity_cold_store_request_factory: Callable[..., Any],
+    continuity_cold_rehydrate: Callable[..., dict[str, Any]],
+    continuity_cold_rehydrate_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -439,6 +463,10 @@ def _ops_execute_job(
         )
     if req.job_id == "compact.plan":
         return compact_run(req=compact_request_factory(**args), auth=auth)
+    if req.job_id == "continuity_cold_store":
+        return continuity_cold_store(req=continuity_cold_store_request_factory(**args), auth=auth)
+    if req.job_id == "continuity_cold_rehydrate":
+        return continuity_cold_rehydrate(req=continuity_cold_rehydrate_request_factory(**args), auth=auth)
     raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
 
 
@@ -552,6 +580,10 @@ def ops_run_service(
     replication_push_request_factory: Callable[..., Any],
     compact_run: Callable[..., dict[str, Any]],
     compact_request_factory: Callable[..., Any],
+    continuity_cold_store: Callable[..., dict[str, Any]],
+    continuity_cold_store_request_factory: Callable[..., Any],
+    continuity_cold_rehydrate: Callable[..., dict[str, Any]],
+    continuity_cold_rehydrate_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -593,6 +625,10 @@ def ops_run_service(
             replication_push_request_factory=replication_push_request_factory,
             compact_run=compact_run,
             compact_request_factory=compact_request_factory,
+            continuity_cold_store=continuity_cold_store,
+            continuity_cold_store_request_factory=continuity_cold_store_request_factory,
+            continuity_cold_rehydrate=continuity_cold_rehydrate,
+            continuity_cold_rehydrate_request_factory=continuity_cold_rehydrate_request_factory,
             load_token_config=load_token_config,
             parse_iso=parse_iso,
             load_security_keys=load_security_keys,

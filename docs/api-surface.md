@@ -76,9 +76,10 @@ Notable behavior:
 - `POST /v1/continuity/refresh/plan` now returns deterministic refresh candidates and persists the latest plan under `memory/continuity/refresh_state.json`
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule
 - `POST /v1/continuity/revalidate` writes verification status and capsule health through one audited git-backed continuity update
-- `POST /v1/continuity/list` now supports `include_fallback` and `include_archived`, and returns additive `artifact_state` plus `retention_class`
+- `POST /v1/continuity/list` now supports `include_fallback`, `include_archived`, and `include_cold`, and returns additive `artifact_state` plus `retention_class`
 - `POST /v1/continuity/delete` deletes exact-selector active, fallback, and archive artifacts through one audited git-backed delete path
 - `POST /v1/continuity/archive` writes an archive envelope under `memory/continuity/archive/` and removes the active capsule in one git-backed commit
+- `POST /v1/ops/run` now supports host-local `continuity_cold_store` and `continuity_cold_rehydrate` jobs for explicit continuity semi-cold storage and recovery
 - `POST /v1/coordination/handoff/create` projects only `continuity.active_constraints` and `continuity.drift_signals` from one exact active continuity capsule into a stored handoff artifact under `memory/coordination/handoffs/`
 - handoff artifacts are additive coordination records: they do not mutate local continuity capsules, and `POST /v1/coordination/handoff/{handoff_id}/consume` records only recipient outcome fields
 - `GET /v1/coordination/handoffs/query` lets senders and recipients discover visible handoffs without relying on successful message or task-reference delivery; corrupt handoff artifacts are skipped with a warning instead of failing the whole query
@@ -101,7 +102,7 @@ Notable behavior:
 - first-slice reconciliation artifacts are disagreement records: they open, read, query, and resolve bounded disputes without mutating local continuity capsules or 5B shared coordination artifacts
 - all four reconciliation endpoints are exposed through discovery tool catalog, manifest endpoint map, and MCP tool dispatch without introducing a separate transport plane
 - `POST /v1/backup/create` now includes `continuity_counts` in the manifest when continuity artifacts are part of the backup scope
-- `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, and archive artifacts
+- `POST /v1/backup/restore-test` now accepts `verify_continuity` and returns structured `continuity_validation` details for restored active, fallback, archive, and cold continuity artifacts
 - continuity capsules may now carry optional `continuity.session_trajectory` entries to preserve in-session direction changes
 - continuity capsules may also carry optional `continuity.trailing_notes`, `continuity.curiosity_queue`, and `continuity.negative_decisions` fields as additive agent-owned orientation payload
 - `POST /v1/continuity/read` and `POST /v1/context/retrieve` return those additive fields unchanged when present on the stored capsule and when retrieval trimming does not need to drop them

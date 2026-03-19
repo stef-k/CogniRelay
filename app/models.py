@@ -569,6 +569,8 @@ class OpsRunRequest(BaseModel):
         "messages.replay_dead_letter_sweep",
         "security.rotation_check",
         "compact.plan",
+        "continuity_cold_store",
+        "continuity_cold_rehydrate",
     ]
     dry_run: bool = False
     force: bool = False
@@ -710,6 +712,7 @@ class ContinuityListRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
     include_fallback: bool = False
     include_archived: bool = False
+    include_cold: bool = False
 
 
 class ContinuityRefreshPlanRequest(BaseModel):
@@ -724,6 +727,24 @@ class ContinuityArchiveRequest(BaseModel):
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=3, max_length=240)
+
+
+class ContinuityColdStoreRequest(BaseModel):
+    """Host-local request for cold-storing one archived continuity envelope."""
+    source_archive_path: str = Field(min_length=1, max_length=400)
+
+
+class ContinuityColdRehydrateRequest(BaseModel):
+    """Host-local request for rehydrating one cold-stored continuity envelope."""
+    source_archive_path: Optional[str] = Field(default=None, max_length=400)
+    cold_stub_path: Optional[str] = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def _require_exactly_one_selector(self) -> "ContinuityColdRehydrateRequest":
+        """Require exactly one selector field for cold rehydration."""
+        if bool(self.source_archive_path) == bool(self.cold_stub_path):
+            raise ValueError("exactly one of source_archive_path or cold_stub_path is required")
+        return self
 
 
 class ContinuityDeleteRequest(BaseModel):
