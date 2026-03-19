@@ -78,11 +78,19 @@ def _history_timestamp_str(cut_at: datetime) -> str:
     return utc.strftime("%Y%m%dT%H%M%SZ")
 
 
-def _next_history_id(family: str, cut_at: datetime, history_dir: Path) -> str:
+def _next_history_id(
+    family: str,
+    cut_at: datetime,
+    history_dir: Path,
+    reserved_ids: set[str] | None = None,
+) -> str:
     """Allocate the next history_id for a family + timestamp pair.
 
     Format: <family>__<YYYYMMDDTHHMMSSZ>__<sequence>
     Sequence is zero-padded width 4, starts at 0001.
+
+    ``reserved_ids`` tracks IDs already allocated in the current pass
+    (before files are written to disk) to avoid collisions.
     """
     ts_str = _history_timestamp_str(cut_at)
     prefix = f"{family}__{ts_str}__"
@@ -97,10 +105,22 @@ def _next_history_id(family: str, cut_at: datetime, history_dir: Path) -> str:
                     existing_seqs.append(seq)
                 except ValueError:
                     _logger.warning("Malformed history sequence suffix in %s", child.name)
+    # Include sequences from reserved IDs not yet on disk
+    if reserved_ids:
+        for rid in reserved_ids:
+            if rid.startswith(prefix):
+                suffix = rid[len(prefix):]
+                try:
+                    existing_seqs.append(int(suffix))
+                except ValueError:
+                    pass
     next_seq = max(existing_seqs, default=0) + 1
     if next_seq < 1:
         next_seq = 1
-    return f"{prefix}{next_seq:04d}"
+    new_id = f"{prefix}{next_seq:04d}"
+    if reserved_ids is not None:
+        reserved_ids.add(new_id)
+    return new_id
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +224,7 @@ def _externalize_single_artifact(
     summary: dict[str, Any],
     history_dir_rel: str,
     cut_at: datetime,
+    reserved_ids: set[str] | None = None,
 ) -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
     """Build the payload and stub for one artifact externalization.
 
@@ -211,7 +232,7 @@ def _externalize_single_artifact(
     """
     history_dir = safe_path(repo_root, history_dir_rel)
     history_dir.mkdir(parents=True, exist_ok=True)
-    history_id = _next_history_id(family, cut_at, history_dir)
+    history_id = _next_history_id(family, cut_at, history_dir, reserved_ids=reserved_ids)
 
     payload = {
         "schema_type": schema_type,
@@ -226,40 +247,9 @@ def _externalize_single_artifact(
     }
 
     payload_rel = f"{history_dir_rel}/{history_id}.json"
-    stub_rel = f"{history_dir_rel}/{history_id}.json"
-    # Stub filename is the same as payload in the same directory per spec:
-    # "Stub filename: exactly <history_id>.json"
-    # But the stub needs to be a separate searchable artifact.
-    # Re-reading the spec: stubs are in the same history dir but the payload_path
-    # field points to the payload. The stub IS the payload for #113 (the stub
-    # and payload share the same directory). Actually, looking at the registry
-    # lifecycle pattern, stubs go in an index subdirectory. But the #113 spec
-    # says "Stub filename: exactly <history_id>.json" and stubs serve as the
-    # hot searchable discovery artifact. Let me re-read...
-    #
-    # The spec says the hot stub has payload_path pointing to the payload file.
-    # This implies they are separate files. Following the registry_lifecycle
-    # pattern where stubs go in a sibling index dir doesn't match #113 spec
-    # which says stub filename is <history_id>.json.
-    #
-    # Looking at the spec more carefully: the stub IS the hot-tier artifact
-    # that remains after cold-store compresses the payload. So they should be
-    # separate files. The stub goes alongside the payload in the history dir.
-    # But that would mean they have the same filename. This can't be right.
-    #
-    # Actually, re-reading: the cold-store (#108) compresses the *payload*
-    # into .json.gz and keeps the stub as the .json. So in the history dir:
-    # - Initially: <history_id>.json (the full payload)
-    # - After cold-store: <history_id>.json.gz (compressed payload) + <history_id>.json (stub)
-    #
-    # So initially, the payload IS the only file. The stub is created when
-    # cold-store runs. But the spec says "Every historical unit must have one
-    # deterministic hot stub" — this means the stub must exist from the start.
-    #
-    # Resolution: following the registry_lifecycle pattern which has worked in
-    # production. Payload goes in history_dir, stub goes in history_dir/index/.
 
-    # Stub and payload are separate files
+    # Payload lives in history_dir; stub goes in history_dir/index/
+    # following the established registry_lifecycle pattern.
     stub_dir_rel = f"{history_dir_rel}/index"
     stub_dir = safe_path(repo_root, stub_dir_rel)
     stub_dir.mkdir(parents=True, exist_ok=True)
@@ -359,10 +349,11 @@ def handoff_maintenance_pass(
     # Build payloads and stubs
     write_plan: list[tuple[Path, str, dict[str, Any]]] = []
     delete_plan: list[Path] = []
+    reserved_ids: set[str] = set()
 
     for handoff_id, artifact, _ret_ts, source_rel in eligible:
         summary = _handoff_summary(artifact)
-        history_id, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
+        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
             repo_root=repo_root,
             family="handoff",
             schema_type="handoff_history_unit",
@@ -372,6 +363,7 @@ def handoff_maintenance_pass(
             summary=summary,
             history_dir_rel=HANDOFFS_HISTORY_DIR_REL,
             cut_at=now,
+            reserved_ids=reserved_ids,
         )
         write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
         write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
@@ -542,10 +534,11 @@ def reconciliation_maintenance_pass(
 
     write_plan: list[tuple[Path, str, dict[str, Any]]] = []
     delete_plan: list[Path] = []
+    reserved_ids: set[str] = set()
 
     for recon_id, artifact, _ts, source_rel in eligible:
         summary = _reconciliation_summary(artifact)
-        history_id, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
+        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
             repo_root=repo_root,
             family="reconciliation",
             schema_type="reconciliation_history_unit",
@@ -555,6 +548,7 @@ def reconciliation_maintenance_pass(
             summary=summary,
             history_dir_rel=RECONCILIATIONS_HISTORY_DIR_REL,
             cut_at=now,
+            reserved_ids=reserved_ids,
         )
         write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
         write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
@@ -640,10 +634,11 @@ def task_done_maintenance_pass(
 
     write_plan: list[tuple[Path, str, dict[str, Any]]] = []
     delete_plan: list[Path] = []
+    reserved_ids: set[str] = set()
 
     for task_id, artifact, _ts, source_rel in eligible:
         summary = _task_done_summary(artifact)
-        history_id, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
+        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
             repo_root=repo_root,
             family="task_done",
             schema_type="task_done_history_unit",
@@ -653,6 +648,7 @@ def task_done_maintenance_pass(
             summary=summary,
             history_dir_rel=TASKS_HISTORY_DONE_DIR_REL,
             cut_at=now,
+            reserved_ids=reserved_ids,
         )
         write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
         write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
@@ -739,10 +735,11 @@ def patch_applied_maintenance_pass(
 
     write_plan: list[tuple[Path, str, dict[str, Any]]] = []
     delete_plan: list[Path] = []
+    reserved_ids: set[str] = set()
 
     for patch_id, artifact, _ts, source_rel in eligible:
         summary = _patch_applied_summary(artifact)
-        history_id, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
+        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
             repo_root=repo_root,
             family="patch_applied",
             schema_type="patch_applied_history_unit",
@@ -752,6 +749,7 @@ def patch_applied_maintenance_pass(
             summary=summary,
             history_dir_rel=PATCHES_HISTORY_APPLIED_DIR_REL,
             cut_at=now,
+            reserved_ids=reserved_ids,
         )
         write_plan.append((safe_path(repo_root, payload_rel), payload_rel, payload))
         write_plan.append((safe_path(repo_root, stub_rel), stub_rel, stub))
