@@ -2237,27 +2237,26 @@ def continuity_cold_store_service(
         subject_kind=str(capsule["subject_kind"]),
         subject_id=str(capsule["subject_id"]),
     ):
-        if not archive_path.exists() or not archive_path.is_file():
-            raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
-        source_bytes = archive_path.read_bytes()
-        envelope = _load_archive_envelope(repo_root, source_archive_path)
-        if _archive_rel_path_from_envelope(envelope) != source_archive_path:
-            raise HTTPException(status_code=400, detail="Continuity archive envelope identity does not match source_archive_path")
-        if cold_payload_file.exists() or cold_stub_file.exists():
-            raise HTTPException(status_code=409, detail="Continuity cold artifact already exists for source archive")
-
-        now = datetime.now(timezone.utc).replace(microsecond=0)
-        cold_stored_at = now.isoformat().replace("+00:00", "Z")
-        gzip_bytes = _build_cold_gzip_bytes(source_bytes)
-        stub_text = _build_cold_stub_text(
-            envelope=envelope,
-            source_archive_path=source_archive_path,
-            cold_storage_path=cold_storage_path,
-            cold_stored_at=cold_stored_at,
-            now=now,
-        )
-
         try:
+            if not archive_path.exists() or not archive_path.is_file():
+                raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
+            source_bytes = archive_path.read_bytes()
+            envelope = _load_archive_envelope(repo_root, source_archive_path)
+            if _archive_rel_path_from_envelope(envelope) != source_archive_path:
+                raise HTTPException(status_code=400, detail="Continuity archive envelope identity does not match source_archive_path")
+            if cold_payload_file.exists() or cold_stub_file.exists():
+                raise HTTPException(status_code=409, detail="Continuity cold artifact already exists for source archive")
+
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            cold_stored_at = now.isoformat().replace("+00:00", "Z")
+            gzip_bytes = _build_cold_gzip_bytes(source_bytes)
+            stub_text = _build_cold_stub_text(
+                envelope=envelope,
+                source_archive_path=source_archive_path,
+                cold_storage_path=cold_storage_path,
+                cold_stored_at=cold_stored_at,
+                now=now,
+            )
             write_bytes_file(cold_payload_file, gzip_bytes)
             write_text_file(cold_stub_file, stub_text)
             archive_path.unlink()
@@ -2270,6 +2269,8 @@ def continuity_cold_store_service(
                     raise RuntimeError("Continuity cold-store commit produced no changes")
         except HTTPException:
             raise
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=f"Continuity archive envelope changed during cold-store: {exc.filename or exc}") from exc
         except Exception as exc:
             unstage_paths(gm, [cold_payload_file, cold_stub_file, archive_path])
             cleanup_errors = _restore_failed_cold_store(

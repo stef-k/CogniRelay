@@ -29,6 +29,7 @@ from app.continuity.service import (
     CONTINUITY_DIR_REL,
     CONTINUITY_FALLBACK_SCHEMA_TYPE,
     CONTINUITY_FALLBACK_SCHEMA_VERSION,
+    _archive_rel_path_from_envelope,
     continuity_archive_rel_path_from_cold_artifact,
     continuity_cold_stub_rel_path,
     _load_cold_stub,
@@ -244,6 +245,8 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
             capsule = ContinuityCapsule.model_validate(decoded.get("capsule")).model_dump(mode="json", exclude_none=True)
             if str(decoded.get("active_path") or "") != continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])):
                 raise ValueError("wrong active_path")
+            if _archive_rel_path_from_envelope({**decoded, "capsule": capsule}) != expected_archive_rel:
+                raise ValueError("wrong archive identity")
         except Exception:
             invalid_cold_payloads.append(rel)
             warnings.append(f"continuity_invalid_cold_payload:{rel}")

@@ -38,32 +38,6 @@ class _GitManagerStub(SimpleGitManagerStub):
         return True
 
 
-class _BlockingGitManager(_GitManagerStub):
-    """Git stub that can block selected multi-path commits."""
-
-    def __init__(self, repo_root: Path) -> None:
-        super().__init__(repo_root)
-        import threading
-
-        self._entered = threading.Event()
-        self._release = threading.Event()
-        self._message: str | None = None
-
-    def control(self, message: str):
-        """Configure the message to block on and return the entered/release events."""
-        self._message = message
-        return self._entered, self._release
-
-    def commit_paths(self, paths: list[Path], message: str) -> bool:
-        """Block the configured commit message until released."""
-        result = super().commit_paths(paths, message)
-        if message == self._message:
-            self._entered.set()
-            if not self._release.wait(timeout=5):
-                raise RuntimeError("timed out waiting to release commit")
-        return result
-
-
 class TestContinuityColdStorage(unittest.TestCase):
     """Validate the Issue #108 continuity semi-cold tier."""
 
@@ -394,30 +368,57 @@ class TestContinuityColdStorage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             archive_rel, _archive_bytes = self._write_archive(repo_root)
-            gm = _BlockingGitManager(repo_root)
-            entered, release = gm.control("continuity: cold-store user alpha")
+            cold_payload = repo_root / "memory/continuity/cold/user-alpha-20260319T101500Z.json.gz"
+            cold_stub = repo_root / "memory/continuity/cold/index/user-alpha-20260319T101500Z.md"
 
-            import threading
+            class _InjectConflictLock:
+                def __enter__(self):
+                    cold_payload.parent.mkdir(parents=True, exist_ok=True)
+                    cold_stub.parent.mkdir(parents=True, exist_ok=True)
+                    cold_payload.write_bytes(b"conflict")
+                    cold_stub.write_text("conflict", encoding="utf-8")
+                    return self
 
-            result: dict[str, dict] = {}
+                def __exit__(self, exc_type, exc, tb):
+                    return False
 
-            def worker() -> None:
-                result["value"] = continuity_cold_store_service(
-                    repo_root=repo_root,
-                    gm=gm,
-                    auth=_LocalOpsAuth(),
-                    req=type("Req", (), {"source_archive_path": archive_rel})(),
-                    audit=lambda *_args: None,
-                )
+            with patch("app.continuity.service._continuity_subject_lock", return_value=_InjectConflictLock()):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_cold_store_service(
+                        repo_root=repo_root,
+                        gm=_GitManagerStub(repo_root),
+                        auth=_LocalOpsAuth(),
+                        req=type("Req", (), {"source_archive_path": archive_rel})(),
+                        audit=lambda *_args: None,
+                    )
 
-            thread = threading.Thread(target=worker)
-            thread.start()
-            self.assertTrue(entered.wait(timeout=5))
-            (repo_root / "memory/continuity/cold").mkdir(parents=True, exist_ok=True)
-            (repo_root / "memory/continuity/cold/index").mkdir(parents=True, exist_ok=True)
-            release.set()
-            thread.join(timeout=5)
-            self.assertTrue(result["value"]["ok"])
+            self.assertEqual(cm.exception.status_code, 409)
+
+    def test_cold_store_returns_controlled_error_when_archive_disappears_after_lock(self) -> None:
+        """Cold-store should convert an after-lock archive disappearance into a controlled HTTP error."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            archive_rel, _archive_bytes = self._write_archive(repo_root)
+            archive_path = repo_root / archive_rel
+            original_read_bytes = Path.read_bytes
+
+            def flaky_read_bytes(path_self: Path) -> bytes:
+                if path_self == archive_path:
+                    raise FileNotFoundError(str(path_self))
+                return original_read_bytes(path_self)
+
+            with patch("pathlib.Path.read_bytes", new=flaky_read_bytes):
+                with self.assertRaises(HTTPException) as cm:
+                    continuity_cold_store_service(
+                        repo_root=repo_root,
+                        gm=_GitManagerStub(repo_root),
+                        auth=_LocalOpsAuth(),
+                        req=type("Req", (), {"source_archive_path": archive_rel})(),
+                        audit=lambda *_args: None,
+                    )
+
+            self.assertEqual(cm.exception.status_code, 409)
+            self.assertIn("changed during cold-store", str(cm.exception.detail))
 
     def test_rehydrate_rejects_payload_identity_mismatch(self) -> None:
         """Rehydrate should fail if the gzip payload does not belong to the selected stub identity."""
