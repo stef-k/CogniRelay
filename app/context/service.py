@@ -7,6 +7,7 @@ import logging
 import re
 import subprocess
 from datetime import datetime, timezone
+from heapq import nsmallest
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -44,6 +45,7 @@ _PRIMARY_INDEX_ARTIFACTS = (
     "index/search.db",
     "index/index_state.json",
 )
+_RAW_SCAN_CANDIDATE_LIMIT = 200
 
 
 def _filter_search_results_for_auth(results: list[dict[str, Any]], auth: AuthContext) -> list[dict[str, Any]]:
@@ -295,9 +297,19 @@ def _task_terms(task: str) -> list[str]:
     return out
 
 
+def _select_top_raw_scan_candidates(
+    candidates: list[tuple[float, str, Any]],
+    limit: int = _RAW_SCAN_CANDIDATE_LIMIT,
+) -> list[tuple[float, str, Any]]:
+    """Keep a deterministic bounded recent slice without sorting the full population."""
+    if limit <= 0:
+        return []
+    return nsmallest(limit, candidates)
+
+
 def _raw_scan_candidate_paths(repo_root: Path) -> list[tuple[Path, float]]:
     """Enumerate deterministic raw-scan candidates using indexer eligibility rules."""
-    candidates: list[tuple[float, str, Path, float]] = []
+    candidates: list[tuple[float, str, tuple[Path, float]]] = []
     for path in repo_root.rglob("*"):
         if not path.is_file():
             continue
@@ -320,9 +332,9 @@ def _raw_scan_candidate_paths(repo_root: Path) -> list[tuple[Path, float]]:
             stat = path.stat()
         except Exception:
             continue
-        candidates.append((-stat.st_mtime, str(rel_path), path, stat.st_mtime))
-    candidates.sort()
-    return [(item[2], item[3]) for item in candidates[:200]]
+        candidates.append((-stat.st_mtime, str(rel_path), (path, stat.st_mtime)))
+    selected = _select_top_raw_scan_candidates(candidates)
+    return [item[2] for item in selected]
 
 
 def _raw_scan_recent_relevant(

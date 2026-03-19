@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
+from app.context.service import _select_top_raw_scan_candidates
 from app.indexer import rebuild_index
 from app.main import context_retrieve, recent_list, search
 from app.models import ContextRetrieveRequest, RecentRequest, SearchRequest
@@ -50,6 +51,26 @@ class TestContextRetrieval(unittest.TestCase):
             git_author_email="n/a",
             tokens={},
             audit_log_enabled=False,
+        )
+
+    def test_select_top_raw_scan_candidates_keeps_recent_paths_deterministically(self) -> None:
+        """Raw-scan candidate selection should keep only the most recent deterministic slice."""
+        candidates = [
+            (-10.0, "journal/2026/2026-03-10.md", "older"),
+            (-30.0, "messages/threads/thread-3.jsonl", "newest"),
+            (-20.0, "messages/threads/thread-2.jsonl", "middle"),
+            (-20.0, "journal/2026/2026-03-20.md", "middle-tiebreak"),
+        ]
+
+        selected = _select_top_raw_scan_candidates(candidates, limit=3)
+
+        self.assertEqual(
+            selected,
+            [
+                (-30.0, "messages/threads/thread-3.jsonl", "newest"),
+                (-20.0, "journal/2026/2026-03-20.md", "middle-tiebreak"),
+                (-20.0, "messages/threads/thread-2.jsonl", "middle"),
+            ],
         )
 
     def test_search_recent_orders_only_matching_results(self) -> None:
