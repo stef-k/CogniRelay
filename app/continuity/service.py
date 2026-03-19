@@ -138,6 +138,10 @@ CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"
 CONTINUITY_RETENTION_PLAN_SCHEMA_TYPE = "continuity_retention_plan"
 CONTINUITY_RETENTION_PLAN_SCHEMA_VERSION = "1.0"
+CONTINUITY_STATE_METADATA_FILES = {
+    Path(CONTINUITY_REFRESH_STATE_REL).name,
+    Path(CONTINUITY_RETENTION_STATE_REL).name,
+}
 CONTINUITY_COLD_DIR_REL = f"{CONTINUITY_DIR_REL}/cold"
 CONTINUITY_COLD_INDEX_DIR_REL = f"{CONTINUITY_COLD_DIR_REL}/index"
 CONTINUITY_COLD_STUB_SECTION_ORDER = [
@@ -782,6 +786,10 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope text: {e}") from e
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope text: {e}") from e
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope JSON: {e}") from e
     if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
@@ -1580,7 +1588,7 @@ def continuity_list_service(
         for path in sorted(base.iterdir(), key=lambda item: item.name):
             if path.is_dir() or path.suffix.lower() != ".json":
                 continue
-            if path.name == "refresh_state.json":
+            if path.name in CONTINUITY_STATE_METADATA_FILES:
                 continue
             if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
                 continue
@@ -1905,7 +1913,7 @@ def continuity_refresh_plan_service(
         for path in sorted(base.iterdir(), key=lambda item: item.name):
             if path.is_dir() or path.suffix.lower() != ".json":
                 continue
-            if path.name == "refresh_state.json":
+            if path.name in CONTINUITY_STATE_METADATA_FILES:
                 continue
             rel = str(path.relative_to(repo_root))
             if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
@@ -2148,20 +2156,21 @@ def continuity_retention_plan_service(
         total_candidates=len(all_candidates),
     )
     canonical = canonical_json(payload)
-    old_bytes = retention_path.read_bytes() if retention_path.exists() else None
     new_bytes = canonical.encode("utf-8")
-    latest_commit = gm.latest_commit()
-    if old_bytes != new_bytes:
-        try:
-            write_text_file(retention_path, canonical)
-            with repository_mutation_lock(repo_root):
+    latest_commit: str
+    with repository_mutation_lock(repo_root):
+        old_bytes = retention_path.read_bytes() if retention_path.exists() else None
+        latest_commit = gm.latest_commit()
+        if old_bytes != new_bytes:
+            try:
+                write_text_file(retention_path, canonical)
                 committed = gm.commit_file(retention_path, "continuity: retention plan")
                 if not committed:
                     raise RuntimeError("git commit produced no changes")
                 latest_commit = gm.latest_commit()
-        except Exception as exc:
-            unstage_paths(gm, [retention_path])
-            raise _restore_failed_retention_state(retention_path, old_bytes, exc) from exc
+            except Exception as exc:
+                unstage_paths(gm, [retention_path])
+                raise _restore_failed_retention_state(retention_path, old_bytes, exc) from exc
 
     audit(
         auth,

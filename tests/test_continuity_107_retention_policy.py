@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from app.config import Settings
+from app.continuity.service import continuity_retention_plan_service
 from app.main import continuity_list, continuity_retention_plan, discovery_tools, manifest, ops_catalog, ops_run
 from app.models import ContinuityListRequest, ContinuityRetentionPlanRequest, OpsRunRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -51,6 +54,14 @@ class _GitManagerStub(SimpleGitManagerStub):
     def commit_paths(self, paths: list[Path], message: str) -> bool:
         self.commit_paths_calls.append(([str(path) for path in paths], message))
         return True
+
+
+class _NoCommitGitManagerStub(_GitManagerStub):
+    """Git stub that reports no new commit for retention-state persistence."""
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        self.commit_file_calls.append((str(path), message))
+        return False
 
 
 class TestContinuityRetentionPolicy(unittest.TestCase):
@@ -132,6 +143,13 @@ class TestContinuityRetentionPolicy(unittest.TestCase):
         path = repo_root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{not json", encoding="utf-8")
+        return rel
+
+    def _write_invalid_utf8_archive(self, repo_root: Path, *, name: str) -> str:
+        rel = f"memory/continuity/archive/{name}.json"
+        path = repo_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff\xfe\x00bad-utf8")
         return rel
 
     def _write_cold_pair(self, repo_root: Path, *, source_archive_path: str) -> tuple[str, str]:
@@ -344,6 +362,69 @@ class TestContinuityRetentionPolicy(unittest.TestCase):
             self.assertFalse((repo_root / cold_store_rel).exists())
             self.assertTrue((repo_root / "memory/continuity/cold/user-alpha-20260108T120000Z.json.gz").exists())
             self.assertTrue((repo_root / "memory/continuity/cold/index/user-alpha-20260108T120000Z.md").exists())
+
+    def test_invalid_utf8_archives_degrade_in_plan_and_apply(self) -> None:
+        """Invalid UTF-8 archive envelopes should be treated as malformed, not internal failures."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root, archive_days=30)
+            gm = _GitManagerStub(repo_root)
+            now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+            utf8_bad_rel = self._write_invalid_utf8_archive(repo_root, name="user-bad-utf8-20260101T000000Z")
+
+            with patch("app.main._services", return_value=(settings, gm)), patch("app.main.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+                planned = continuity_retention_plan(
+                    ContinuityRetentionPlanRequest(limit=25),
+                    auth=AllowAllAuthStub(),
+                )
+                applied = ops_run(
+                    OpsRunRequest(
+                        job_id="continuity_retention_apply",
+                        arguments={"source_archive_paths": [utf8_bad_rel]},
+                    ),
+                    auth=_LocalOpsAuth(),
+                )
+
+            self.assertEqual(
+                planned["warnings"],
+                [f"continuity_retention_skipped_invalid_archive:{utf8_bad_rel}"],
+            )
+            self.assertEqual(applied["job_result"]["results"][0]["status"], "failed_invalid_archive")
+
+    def test_retention_plan_rollback_preserves_newer_bytes_observed_inside_lock(self) -> None:
+        """Rollback should restore the bytes observed under lock, not stale pre-lock bytes."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+            self._write_archive(repo_root, subject_id="alpha", archived_at=now - timedelta(days=70))
+            retention_path = repo_root / "memory" / "continuity" / "retention_state.json"
+            retention_path.parent.mkdir(parents=True, exist_ok=True)
+            retention_path.write_text('{"sentinel":"old"}', encoding="utf-8")
+            newer_bytes = b'{"sentinel":"newer"}'
+
+            @contextmanager
+            def _mutating_lock(_repo_root: Path):
+                retention_path.write_bytes(newer_bytes)
+                yield
+
+            with (
+                patch("app.continuity.service.repository_mutation_lock", _mutating_lock),
+                self.assertRaises(HTTPException) as ctx,
+            ):
+                continuity_retention_plan_service(
+                    repo_root=repo_root,
+                    gm=_NoCommitGitManagerStub(repo_root),
+                    auth=AllowAllAuthStub(),
+                    req=ContinuityRetentionPlanRequest(limit=25),
+                    now=now,
+                    retention_archive_days=30,
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(ctx.exception.status_code, 500)
+            self.assertEqual(retention_path.read_bytes(), newer_bytes)
 
     def test_discovery_manifest_and_ops_catalog_expose_retention_surfaces(self) -> None:
         """Public discovery surfaces should advertise the new planning and apply entrypoints."""

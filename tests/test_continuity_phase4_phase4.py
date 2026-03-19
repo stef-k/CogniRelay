@@ -208,6 +208,26 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             self.assertIn("memory/continuity/user-alpha.json", validation["missing_fallbacks"])
             self.assertNotIn("memory/continuity/refresh_state.json", validation["invalid_capsules"])
 
+    def test_continuity_list_skips_malformed_retention_state_metadata_file(self) -> None:
+        """Continuity list should ignore retention_state.json instead of parsing it as an active capsule."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+            payload = self._capsule_payload(subject_kind="user", subject_id="alpha", updated_at=now, verified_at=now)
+            self._write_valid_active(repo_root, subject_kind="user", subject_id="alpha", payload=payload)
+            (repo_root / "memory" / "continuity" / "retention_state.json").write_bytes(b"\xff\xfe\x00bad-plan")
+
+            from app.main import continuity_list
+            from app.models import ContinuityListRequest
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                listed = continuity_list(ContinuityListRequest(limit=10), auth=_AuthStub())
+
+            self.assertEqual(listed["count"], 1)
+            self.assertEqual([row["path"] for row in listed["capsules"]], ["memory/continuity/user-alpha.json"])
+
     def test_context_retrieve_uses_indexed_path_when_index_is_stale(self) -> None:
         """Stale indexes should keep indexed retrieval and add a stale warning."""
         with tempfile.TemporaryDirectory() as td:
