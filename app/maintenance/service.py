@@ -36,7 +36,7 @@ from app.continuity.service import (
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-from app.git_safety import safe_commit_paths, try_commit_file
+from app.git_safety import safe_commit_paths, try_commit_file, try_commit_paths
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
 from app.storage import canonical_json, read_text_file, safe_path, write_bytes_file, write_text_file
 
@@ -739,7 +739,26 @@ def replication_pull_service(
             changed += 1
             tomb_entries.pop(file_row.path, None)
 
-        state.setdefault("last_pull_by_source", {})[req.source_peer] = {
+        # Synchronous pre-write capture per #112: externalize superseded pull row
+        _pull_history_extra: list[str] = []
+        pull_by_source = state.setdefault("last_pull_by_source", {})
+        previous_pull = pull_by_source.get(req.source_peer)
+        if isinstance(previous_pull, dict) and previous_pull:
+            try:
+                from app.registry_lifecycle.service import externalize_superseded_pull
+                ext_result = externalize_superseded_pull(
+                    repo_root=settings.repo_root,
+                    now=now,
+                    source_peer=req.source_peer,
+                    previous_row=previous_pull,
+                    hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
+                )
+                if ext_result:
+                    _pull_history_extra.extend([ext_result["shard_path"], ext_result["stub_path"]])
+            except Exception:
+                _logger.warning("Failed to externalize superseded pull row for %s", req.source_peer, exc_info=True)
+
+        pull_by_source[req.source_peer] = {
             "pulled_at": now.isoformat(),
             "received_count": len(req.files),
             "changed_count": changed,
@@ -770,6 +789,11 @@ def replication_pull_service(
         state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
         track_change(state_path, REPLICATION_STATE_REL)
         _write_replication_state(settings.repo_root, state)
+
+        # Track history shard/stub paths from pre-write capture
+        for extra_rel in _pull_history_extra:
+            extra_path = safe_path(settings.repo_root, extra_rel)
+            track_change(extra_path, extra_rel)
     except Exception as exc:
         _restore_rollback_plan(rollback_plan)
         if isinstance(exc, HTTPException):
@@ -900,8 +924,27 @@ def replication_push_service(
 
     auth.require_write_path(REPLICATION_STATE_REL)
     state = load_replication_state(settings.repo_root)
+
+    # Synchronous pre-write capture per #112: externalize superseded push row
+    push_now = datetime.now(timezone.utc)
+    _history_extra_paths: list[str] = []
+    previous_push = state.get("last_push")
+    if isinstance(previous_push, dict) and previous_push:
+        try:
+            from app.registry_lifecycle.service import externalize_superseded_push
+            ext_result = externalize_superseded_push(
+                repo_root=settings.repo_root,
+                now=push_now,
+                previous_row=previous_push,
+                hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
+            )
+            if ext_result:
+                _history_extra_paths.extend([ext_result["shard_path"], ext_result["stub_path"]])
+        except Exception:
+            _logger.warning("Failed to externalize superseded push row", exc_info=True)
+
     state["last_push"] = {
-        "pushed_at": datetime.now(timezone.utc).isoformat(),
+        "pushed_at": push_now.isoformat(),
         "target_url": target_url,
         "file_count": len(files),
         "by_prefix": by_prefix,
@@ -912,7 +955,14 @@ def replication_push_service(
     committed_files = []
     state_path = _write_replication_state(settings.repo_root, state)
     warnings: list[str] = []
-    if try_commit_file(path=state_path, gm=gm, commit_message="replication: update push state"):
+    if _history_extra_paths:
+        push_commit_paths = [state_path] + [safe_path(settings.repo_root, p) for p in _history_extra_paths]
+        if try_commit_paths(paths=push_commit_paths, gm=gm, commit_message="replication: update push state"):
+            committed_files.append(REPLICATION_STATE_REL)
+            committed_files.extend(_history_extra_paths)
+        else:
+            warnings.append("replication_push_not_durable: state is on disk but not durably committed to git")
+    elif try_commit_file(path=state_path, gm=gm, commit_message="replication: update push state"):
         committed_files.append(REPLICATION_STATE_REL)
     else:
         warnings.append("replication_push_not_durable: state is on disk but not durably committed to git")
