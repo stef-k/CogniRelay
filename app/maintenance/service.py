@@ -20,6 +20,13 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.artifact_lifecycle.service import (
+    _ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY,
+    _family_artifact_id_key,
+    _family_source_rel,
+    _family_summary,
+    artifact_history_payload_rel_path_from_cold_artifact,
+)
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.continuity.service import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
@@ -369,6 +376,55 @@ def _validate_artifact_history_payload(
         return False, None
     if not isinstance(payload.get("summary"), dict):
         return False, None
+    artifact = payload["artifact"]
+    artifact_id = str(payload.get("artifact_id") or "")
+    artifact_id_key = _family_artifact_id_key(family)
+    if not artifact_id or str(artifact.get(artifact_id_key) or "") != artifact_id:
+        return False, None
+    if str(payload.get("source_path") or "") != _family_source_rel(family, artifact_id):
+        return False, None
+    if payload.get("summary") != _family_summary(family, artifact):
+        return False, None
+    payload["rel"] = str(path.relative_to(restore_root))
+    return True, payload
+
+
+def _validate_artifact_history_cold_payload(
+    path: Path,
+    restore_root: Path,
+    *,
+    family: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored cold artifact-history payload file."""
+    try:
+        payload_bytes = gzip.decompress(path.read_bytes())
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        return False, None
+    if not isinstance(payload, dict):
+        return False, None
+    hot_rel = artifact_history_payload_rel_path_from_cold_artifact(str(path.relative_to(restore_root)))
+    if payload.get("schema_type") != _ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY[family]:
+        return False, None
+    if payload.get("schema_version") != "1.0":
+        return False, None
+    if payload.get("family") != family:
+        return False, None
+    if payload.get("history_id") != Path(hot_rel).stem:
+        return False, None
+    artifact = payload.get("artifact")
+    if not isinstance(artifact, dict):
+        return False, None
+    if not isinstance(payload.get("summary"), dict):
+        return False, None
+    artifact_id = str(payload.get("artifact_id") or "")
+    artifact_id_key = _family_artifact_id_key(family)
+    if not artifact_id or str(artifact.get(artifact_id_key) or "") != artifact_id:
+        return False, None
+    if str(payload.get("source_path") or "") != _family_source_rel(family, artifact_id):
+        return False, None
+    if payload.get("summary") != _family_summary(family, artifact):
+        return False, None
     payload["rel"] = str(path.relative_to(restore_root))
     return True, payload
 
@@ -405,8 +461,10 @@ def _validate_artifact_history_stub(path: Path, restore_root: Path) -> tuple[boo
 def _validate_restored_artifact_history(restore_root: Path) -> dict[str, Any]:
     """Inspect restored artifact-history payloads/stubs and validate symmetry."""
     payload_count = 0
+    cold_payload_count = 0
     stub_count = 0
     invalid_payloads: list[str] = []
+    invalid_cold_payloads: list[str] = []
     invalid_stubs: list[str] = []
     missing_payloads: list[str] = []
     unmatched_payloads: list[str] = []
@@ -432,6 +490,24 @@ def _validate_restored_artifact_history(restore_root: Path) -> dict[str, Any]:
                 if not valid or payload is None:
                     invalid_payloads.append(rel)
                     warnings.append(f"artifact_history_invalid_payload:{rel}")
+                    continue
+                valid_payloads[rel] = payload
+
+        cold_dir = history_dir / "cold"
+        if cold_dir.exists() and cold_dir.is_dir():
+            for path in sorted(cold_dir.glob("*.json.gz")):
+                if not path.is_file():
+                    continue
+                cold_payload_count += 1
+                valid, payload = _validate_artifact_history_cold_payload(
+                    path,
+                    restore_root,
+                    family=spec["family"],
+                )
+                rel = str(path.relative_to(restore_root))
+                if not valid or payload is None:
+                    invalid_cold_payloads.append(rel)
+                    warnings.append(f"artifact_history_invalid_cold_payload:{rel}")
                     continue
                 valid_payloads[rel] = payload
 
@@ -473,16 +549,23 @@ def _validate_restored_artifact_history(restore_root: Path) -> dict[str, Any]:
             warnings.append(f"artifact_history_stub_mismatch:{rel}")
 
     for rel in valid_payloads:
-        expected_stub_rel = str(Path(rel).parent / "index" / Path(rel).name)
+        payload_path = Path(rel)
+        if payload_path.suffix == ".gz":
+            hot_rel = artifact_history_payload_rel_path_from_cold_artifact(rel)
+            expected_stub_rel = str(Path(hot_rel).parent / "index" / Path(hot_rel).name)
+        else:
+            expected_stub_rel = str(payload_path.parent / "index" / payload_path.name)
         if expected_stub_rel not in valid_stubs:
             unmatched_payloads.append(rel)
             warnings.append(f"artifact_history_missing_stub:{rel}")
 
     return {
-        "ok": not (invalid_payloads or invalid_stubs or missing_payloads or unmatched_payloads or mismatched_stubs),
+        "ok": not (invalid_payloads or invalid_cold_payloads or invalid_stubs or missing_payloads or unmatched_payloads or mismatched_stubs),
         "payloads": payload_count,
+        "cold_payloads": cold_payload_count,
         "stubs": stub_count,
         "invalid_payloads": invalid_payloads,
+        "invalid_cold_payloads": invalid_cold_payloads,
         "invalid_stubs": invalid_stubs,
         "missing_payloads": missing_payloads,
         "unmatched_payloads": unmatched_payloads,

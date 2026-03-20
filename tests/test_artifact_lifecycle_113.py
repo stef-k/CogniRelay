@@ -38,10 +38,17 @@ from app.artifact_lifecycle.service import (
     task_done_maintenance_pass,
     patch_applied_maintenance_pass,
     artifact_lifecycle_maintenance_service,
+    artifact_history_cold_store_service,
+    artifact_history_cold_rehydrate_service,
 )
 from app.coordination.shared_service import shared_update_service
 from app.maintenance.service import BACKUPS_DIR_REL, backup_restore_test_service
-from app.models import BackupRestoreTestRequest, CoordinationSharedUpdateRequest
+from app.models import (
+    ArtifactHistoryColdRehydrateRequest,
+    ArtifactHistoryColdStoreRequest,
+    BackupRestoreTestRequest,
+    CoordinationSharedUpdateRequest,
+)
 from app.storage import safe_path, write_text_file
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
@@ -801,6 +808,47 @@ class RollbackTestCase(unittest.TestCase):
         hot_path = safe_path(self.repo, f"{HANDOFFS_DIR_REL}/{hid}.json")
         self.assertTrue(hot_path.exists())
 
+    def test_handoff_partial_write_rolls_back_previous_history_units(self):
+        """A later write failure removes earlier payload/stub pairs from the same pass."""
+        first_id = "handoff_aaaa0000000000000000000000000001"
+        second_id = "handoff_aaaa0000000000000000000000000002"
+        ts = (self.now - timedelta(days=45)).isoformat()
+        for handoff_id in (first_id, second_id):
+            _write_artifact(self.repo, f"{HANDOFFS_DIR_REL}/{handoff_id}.json", {
+                "handoff_id": handoff_id,
+                "created_at": ts,
+                "updated_at": ts,
+                "recipient_status": "accepted_advisory",
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "task_id": "t1",
+            })
+
+        from unittest.mock import patch
+
+        call_count = {"count": 0}
+        original = __import__("app.artifact_lifecycle.service", fromlist=["_write_json_exclusive"])._write_json_exclusive
+
+        def failing_second_payload(path, data):
+            call_count["count"] += 1
+            if call_count["count"] == 3:
+                raise OSError("disk full on second payload")
+            return original(path, data)
+
+        with patch("app.artifact_lifecycle.service._write_json_exclusive", side_effect=failing_second_payload):
+            with self.assertRaises(OSError):
+                handoff_maintenance_pass(
+                    repo_root=self.repo,
+                    now=self.now,
+                    terminal_retention_days=30,
+                    batch_limit=500,
+                )
+
+        self.assertTrue(safe_path(self.repo, f"{HANDOFFS_DIR_REL}/{first_id}.json").exists())
+        self.assertTrue(safe_path(self.repo, f"{HANDOFFS_DIR_REL}/{second_id}.json").exists())
+        self.assertEqual(list(safe_path(self.repo, HANDOFFS_HISTORY_DIR_REL).glob("handoff__*.json")), [])
+        self.assertEqual(list(safe_path(self.repo, f"{HANDOFFS_HISTORY_DIR_REL}/index").glob("handoff__*.json")), [])
+
 
 class StubPayloadSymmetryTestCase(unittest.TestCase):
     """Tests ensuring stub summary equals payload summary across all families."""
@@ -895,6 +943,64 @@ class StubPayloadSymmetryTestCase(unittest.TestCase):
             previous_artifact=artifact, hot_retention_days=30,
         )
         self._assert_stub_payload_match(SHARED_HISTORY_DIR_REL, "shared_history")
+
+
+class MutableFamilyRaceGuardTestCase(unittest.TestCase):
+    """Maintenance should skip mutable artifacts that change after selection."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = Path(self.tmp)
+        self.now = _now()
+
+    def test_handoff_skips_artifact_changed_after_snapshot(self):
+        """A live writer change before delete should prevent stale externalization."""
+        handoff_id = "handoff_aaaa0000000000000000000000000001"
+        source_rel = f"{HANDOFFS_DIR_REL}/{handoff_id}.json"
+        source_path = _write_artifact(self.repo, source_rel, {
+            "handoff_id": handoff_id,
+            "created_at": (self.now - timedelta(days=60)).isoformat(),
+            "updated_at": (self.now - timedelta(days=45)).isoformat(),
+            "recipient_status": "accepted_advisory",
+            "sender_peer": "peer-alpha",
+            "recipient_peer": "peer-beta",
+            "task_id": "task-1",
+        })
+        original_read_bytes = Path.read_bytes
+        read_counts: dict[Path, int] = {}
+
+        def flaky_read_bytes(path_self: Path) -> bytes:
+            if path_self == source_path:
+                count = read_counts.get(path_self, 0) + 1
+                read_counts[path_self] = count
+                if count == 2:
+                    updated = {
+                        "handoff_id": handoff_id,
+                        "created_at": (self.now - timedelta(days=60)).isoformat(),
+                        "updated_at": self.now.isoformat(),
+                        "recipient_status": "accepted_advisory",
+                        "sender_peer": "peer-alpha",
+                        "recipient_peer": "peer-beta",
+                        "task_id": "task-1",
+                    }
+                    source_path.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+            return original_read_bytes(path_self)
+
+        from unittest.mock import patch
+
+        with patch.object(Path, "read_bytes", new=flaky_read_bytes):
+            result = handoff_maintenance_pass(
+                repo_root=self.repo,
+                now=self.now,
+                terminal_retention_days=30,
+                batch_limit=500,
+            )
+
+        self.assertEqual(result["externalized"], 0)
+        self.assertIn(f"handoff_hot_changed:{handoff_id}", result["warnings"])
+        self.assertTrue(source_path.exists())
+        self.assertEqual(list(safe_path(self.repo, HANDOFFS_HISTORY_DIR_REL).glob("handoff__*.json")), [])
 
 
 class EmptyDirectoryTestCase(unittest.TestCase):
@@ -1338,8 +1444,25 @@ class BackupRestoreArtifactHistoryValidationTestCase(unittest.TestCase):
                         "artifact_id": "handoff_aaaa",
                         "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
                         "cut_at": _now().isoformat(),
-                        "artifact": {"handoff_id": "handoff_aaaa"},
-                        "summary": {"recipient_status": "accepted_advisory"},
+                        "artifact": {
+                            "handoff_id": "handoff_aaaa",
+                            "sender_peer": "peer-alpha",
+                            "recipient_peer": "peer-beta",
+                            "recipient_status": "accepted_advisory",
+                            "task_id": "task-1",
+                            "thread_id": "thread-1",
+                            "created_at": "2026-03-01T10:00:00+00:00",
+                            "updated_at": "2026-03-02T10:00:00+00:00",
+                        },
+                        "summary": {
+                            "sender_peer": "peer-alpha",
+                            "recipient_peer": "peer-beta",
+                            "recipient_status": "accepted_advisory",
+                            "task_id": "task-1",
+                            "thread_id": "thread-1",
+                            "created_at": "2026-03-01T10:00:00+00:00",
+                            "terminal_at": "2026-03-02T10:00:00+00:00",
+                        },
                     }
                 ),
                 "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json": json.dumps(
@@ -1351,7 +1474,15 @@ class BackupRestoreArtifactHistoryValidationTestCase(unittest.TestCase):
                         "payload_path": "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json",
                         "created_at": _now().isoformat(),
                         "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
-                        "summary": {"recipient_status": "rejected"},
+                        "summary": {
+                            "sender_peer": "peer-alpha",
+                            "recipient_peer": "peer-beta",
+                            "recipient_status": "rejected",
+                            "task_id": "task-1",
+                            "thread_id": "thread-1",
+                            "created_at": "2026-03-01T10:00:00+00:00",
+                            "terminal_at": "2026-03-02T10:00:00+00:00",
+                        },
                     }
                 ),
             },
@@ -1365,6 +1496,252 @@ class BackupRestoreArtifactHistoryValidationTestCase(unittest.TestCase):
         self.assertIn(
             "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json",
             validation["mismatched_stubs"],
+        )
+
+    def test_restore_test_rejects_missing_family_specific_summary_fields(self):
+        """Family-specific summary validation should fail empty summaries."""
+        backup_rel = _make_backup(
+            self.repo,
+            "artifact-history-missing-handoff-summary-fields",
+            {
+                "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "handoff_history_unit",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "artifact_id": "handoff_aaaa",
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "cut_at": _now().isoformat(),
+                        "artifact": {
+                            "handoff_id": "handoff_aaaa",
+                            "sender_peer": "peer-alpha",
+                            "recipient_peer": "peer-beta",
+                            "recipient_status": "accepted_advisory",
+                            "task_id": "task-1",
+                            "thread_id": "thread-1",
+                            "created_at": "2026-03-01T10:00:00+00:00",
+                            "updated_at": "2026-03-02T10:00:00+00:00",
+                        },
+                        "summary": {},
+                    }
+                ),
+                "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "artifact_history_stub",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "payload_path": "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json",
+                        "created_at": _now().isoformat(),
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "summary": {},
+                    }
+                ),
+            },
+        )
+
+        result = self._run_restore(backup_rel)
+
+        self.assertFalse(result["ok"])
+        validation = result["artifact_history_validation"]
+        self.assertIn(
+            "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json",
+            validation["invalid_payloads"],
+        )
+
+    def test_restore_test_validates_cold_payload_shape_via_stub_payload_path(self):
+        """Cold payload corruption should fail restore-test without crashing."""
+        payload = {
+            "schema_type": "handoff_history_unit",
+            "schema_version": "1.0",
+            "family": "handoff",
+            "history_id": "handoff__20260319T120000Z__0001",
+            "artifact_id": "handoff_aaaa",
+            "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+            "cut_at": _now().isoformat(),
+            "artifact": {
+                "handoff_id": "handoff_aaaa",
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "updated_at": "2026-03-02T10:00:00+00:00",
+            },
+            "summary": {
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "terminal_at": "2026-03-02T10:00:00+00:00",
+            },
+        }
+        backup_rel = _make_backup(
+            self.repo,
+            "artifact-history-invalid-cold-payload",
+            {
+                "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz": "not-gzip",
+                "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "artifact_history_stub",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "payload_path": "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz",
+                        "created_at": _now().isoformat(),
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "summary": payload["summary"],
+                    }
+                ),
+            },
+        )
+        result = self._run_restore(backup_rel)
+        self.assertFalse(result["ok"])
+        validation = result["artifact_history_validation"]
+        self.assertIn(
+            "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz",
+            validation["invalid_cold_payloads"],
+        )
+
+
+class ArtifactHistoryColdStoreTestCase(unittest.TestCase):
+    """Cold-store and rehydrate behavior for artifact-history payloads."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = Path(self.tmp)
+        self.gm = SimpleGitManagerStub(self.repo)
+        self.auth = AllowAllAuthStub(peer_id="peer-alpha", client_ip="127.0.0.1")
+
+    def _write_handoff_history_unit(self) -> tuple[str, str]:
+        payload_rel = "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json"
+        stub_rel = "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json"
+        payload = {
+            "schema_type": "handoff_history_unit",
+            "schema_version": "1.0",
+            "family": "handoff",
+            "history_id": "handoff__20260319T120000Z__0001",
+            "artifact_id": "handoff_aaaa",
+            "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+            "cut_at": _now().isoformat(),
+            "artifact": {
+                "handoff_id": "handoff_aaaa",
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "updated_at": "2026-03-02T10:00:00+00:00",
+            },
+            "summary": {
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "terminal_at": "2026-03-02T10:00:00+00:00",
+            },
+        }
+        _write_artifact(self.repo, payload_rel, payload)
+        _write_artifact(self.repo, stub_rel, {
+            "schema_type": "artifact_history_stub",
+            "schema_version": "1.0",
+            "family": "handoff",
+            "history_id": "handoff__20260319T120000Z__0001",
+            "payload_path": payload_rel,
+            "created_at": _now().isoformat(),
+            "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+            "summary": payload["summary"],
+        })
+        return payload_rel, stub_rel
+
+    def test_cold_store_replaces_hot_payload_with_gzip_and_updates_stub(self):
+        """Cold-store should keep the stub hot and move the payload bytes into gzip storage."""
+        payload_rel, stub_rel = self._write_handoff_history_unit()
+
+        result = artifact_history_cold_store_service(
+            repo_root=self.repo,
+            gm=self.gm,
+            auth=self.auth,
+            req=ArtifactHistoryColdStoreRequest(source_payload_path=payload_rel),
+            audit=lambda *_args: None,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["artifact_state"], "cold")
+        self.assertFalse(safe_path(self.repo, payload_rel).exists())
+        cold_rel = "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz"
+        self.assertTrue(safe_path(self.repo, cold_rel).exists())
+        stub = json.loads(safe_path(self.repo, stub_rel).read_text(encoding="utf-8"))
+        self.assertEqual(stub["payload_path"], cold_rel)
+
+    def test_rehydrate_restores_hot_payload_and_resets_stub_pointer(self):
+        """Explicit rehydrate should restore the original hot payload path."""
+        payload_rel, stub_rel = self._write_handoff_history_unit()
+        artifact_history_cold_store_service(
+            repo_root=self.repo,
+            gm=self.gm,
+            auth=self.auth,
+            req=ArtifactHistoryColdStoreRequest(source_payload_path=payload_rel),
+            audit=lambda *_args: None,
+        )
+
+        result = artifact_history_cold_rehydrate_service(
+            repo_root=self.repo,
+            gm=self.gm,
+            auth=self.auth,
+            req=ArtifactHistoryColdRehydrateRequest(cold_stub_path=stub_rel),
+            audit=lambda *_args: None,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(safe_path(self.repo, payload_rel).exists())
+        self.assertFalse(safe_path(self.repo, "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz").exists())
+        stub = json.loads(safe_path(self.repo, stub_rel).read_text(encoding="utf-8"))
+        self.assertEqual(stub["payload_path"], payload_rel)
+
+    def test_maintenance_service_applies_cold_store_thresholds(self):
+        """Configured cold-after settings should be consumed by runtime maintenance."""
+        payload_rel, stub_rel = self._write_handoff_history_unit()
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            handoff_terminal_retention_days: int = 30
+            handoff_cold_after_days: int = 10
+            shared_history_hot_retention_days: int = 30
+            shared_history_cold_after_days: int = 90
+            reconciliation_resolved_retention_days: int = 30
+            reconciliation_cold_after_days: int = 90
+            task_done_hot_retention_days: int = 30
+            task_done_cold_after_days: int = 90
+            patch_applied_hot_retention_days: int = 30
+            patch_applied_cold_after_days: int = 90
+            artifact_history_batch_limit: int = 500
+
+        result = artifact_lifecycle_maintenance_service(
+            repo_root=self.repo,
+            gm=self.gm,
+            now=_now(),
+            settings=FakeSettings(),
+            auth=self.auth,
+            audit=lambda *_args: None,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIsNotNone(result["cold_apply"])
+        self.assertEqual(result["cold_apply"]["cold_stored"], 1)
+        self.assertFalse(safe_path(self.repo, payload_rel).exists())
+        stub = json.loads(safe_path(self.repo, stub_rel).read_text(encoding="utf-8"))
+        self.assertEqual(
+            stub["payload_path"],
+            "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz",
         )
 
 

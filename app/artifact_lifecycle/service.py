@@ -17,10 +17,15 @@ from __future__ import annotations
 
 import json
 import logging
+import gzip
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from fastapi import HTTPException
+
+from app.auth import AuthContext
+from app.coordination.locking import artifact_lock
 from app.git_safety import try_commit_paths
 from app.storage import safe_path, write_bytes_file, write_text_file
 
@@ -44,6 +49,22 @@ TASKS_HISTORY_DONE_DIR_REL = "tasks/history/done"
 
 PATCHES_APPLIED_DIR_REL = "patches/applied"
 PATCHES_HISTORY_APPLIED_DIR_REL = "patches/history/applied"
+
+_ARTIFACT_HISTORY_DIRS_BY_FAMILY: dict[str, str] = {
+    "handoff": HANDOFFS_HISTORY_DIR_REL,
+    "shared_history": SHARED_HISTORY_DIR_REL,
+    "reconciliation": RECONCILIATIONS_HISTORY_DIR_REL,
+    "task_done": TASKS_HISTORY_DONE_DIR_REL,
+    "patch_applied": PATCHES_HISTORY_APPLIED_DIR_REL,
+}
+
+_ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY: dict[str, str] = {
+    "handoff": "handoff_history_unit",
+    "shared_history": "shared_history_unit",
+    "reconciliation": "reconciliation_history_unit",
+    "task_done": "task_done_history_unit",
+    "patch_applied": "patch_applied_history_unit",
+}
 
 # Terminal handoff statuses per spec
 _TERMINAL_HANDOFF_STATUSES = frozenset({"accepted_advisory", "deferred", "rejected"})
@@ -220,6 +241,32 @@ def _delete_hot_artifacts_or_rollback(
         _restore_rollback(rollback)
         _remove_paths([safe_path(repo_root, rel) for rel in written_rel_paths])
         raise
+
+
+def artifact_history_cold_dir_rel(history_dir_rel: str) -> str:
+    """Return the cold payload directory for one history namespace."""
+    return f"{history_dir_rel}/cold"
+
+
+def artifact_history_cold_storage_rel_path(payload_rel: str) -> str:
+    """Map a hot artifact-history payload path to its cold gzip payload path."""
+    rel = str(payload_rel or "").strip().strip("/")
+    for history_dir_rel in _ARTIFACT_HISTORY_DIRS_BY_FAMILY.values():
+        prefix = f"{history_dir_rel}/"
+        if rel.startswith(prefix) and rel.endswith(".json") and "/index/" not in rel and "/cold/" not in rel:
+            return f"{artifact_history_cold_dir_rel(history_dir_rel)}/{Path(rel).name}.gz"
+    raise HTTPException(status_code=400, detail="Invalid artifact-history payload path")
+
+
+def artifact_history_payload_rel_path_from_cold_artifact(cold_artifact_path: str) -> str:
+    """Derive the hot payload path from an artifact-history cold payload path."""
+    rel = str(cold_artifact_path or "").strip().strip("/")
+    for history_dir_rel in _ARTIFACT_HISTORY_DIRS_BY_FAMILY.values():
+        cold_prefix = f"{artifact_history_cold_dir_rel(history_dir_rel)}/"
+        if rel.startswith(cold_prefix) and rel.endswith(".json.gz"):
+            stem = Path(rel).name[:-3]
+            return f"{history_dir_rel}/{stem}"
+    raise HTTPException(status_code=400, detail="Invalid artifact-history cold payload path")
 
 
 # ---------------------------------------------------------------------------
@@ -401,11 +448,15 @@ def handoff_maintenance_pass(
         return {"ok": True, "family": "handoff", "externalized": 0, "warnings": warnings}
 
     # Snapshot: load all handoff artifacts
-    eligible: list[tuple[str, dict[str, Any], datetime, str]] = []
+    eligible: list[dict[str, Any]] = []
     for path in sorted(handoffs_dir.iterdir(), key=lambda p: p.name):
         if path.is_dir() or path.suffix.lower() != ".json":
             continue
         handoff_id = path.stem
+        try:
+            snapshot_bytes = path.read_bytes()
+        except Exception:
+            snapshot_bytes = None
         artifact, warn = _load_json_file(path)
         if warn:
             warnings.append(warn)
@@ -427,47 +478,35 @@ def handoff_maintenance_pass(
             continue
 
         source_rel = f"{HANDOFFS_DIR_REL}/{handoff_id}.json"
-        eligible.append((handoff_id, artifact, ret_ts, source_rel))
+        eligible.append(
+            {
+                "artifact_id": handoff_id,
+                "artifact": artifact,
+                "cut_at": now,
+                "source_rel": source_rel,
+                "summary": _handoff_summary(artifact),
+                "snapshot_bytes": snapshot_bytes,
+            }
+        )
         if len(eligible) >= batch_limit:
             break
 
     if not eligible:
         return {"ok": True, "family": "handoff", "externalized": 0, "warnings": warnings}
 
-    # Build and write payloads+stubs exclusively, then delete hot artifacts.
-    reserved_ids: set[str] = set()
-    written_paths: list[str] = []
-    externalized_ids: list[str] = []
-
-    for handoff_id, artifact, _ret_ts, source_rel in eligible:
-        summary = _handoff_summary(artifact)
-        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
-            repo_root=repo_root,
-            family="handoff",
-            schema_type="handoff_history_unit",
-            artifact_id=handoff_id,
-            source_rel=source_rel,
-            artifact=artifact,
-            summary=summary,
-            history_dir_rel=HANDOFFS_HISTORY_DIR_REL,
-            cut_at=now,
-            reserved_ids=reserved_ids,
-        )
-        if not _write_pair_exclusive(
-            safe_path(repo_root, payload_rel), payload,
-            safe_path(repo_root, stub_rel), stub,
-        ):
-            warnings.append(f"handoff_history_collision:{handoff_id}")
-            continue
-        written_paths.extend([payload_rel, stub_rel])
-        externalized_ids.append(handoff_id)
-
-    deleted_paths = [f"{HANDOFFS_DIR_REL}/{hid}.json" for hid in externalized_ids]
-    _delete_hot_artifacts_or_rollback(
+    pass_result = _externalize_selected_family(
         repo_root=repo_root,
-        hot_rel_paths=deleted_paths,
-        written_rel_paths=written_paths,
+        family="handoff",
+        schema_type="handoff_history_unit",
+        history_dir_rel=HANDOFFS_HISTORY_DIR_REL,
+        eligible=eligible,
+        collision_warning_prefix="handoff_history_collision",
+        mutable_hot_family=True,
     )
+    warnings.extend(pass_result["warnings"])
+    written_paths = pass_result["written_paths"]
+    deleted_paths = pass_result["deleted_paths"]
+    externalized_ids = pass_result["externalized_ids"]
 
     # Best-effort: remove externalized handoffs from the query sidecar index
     from app.coordination.query_index import try_delete_handoff
@@ -617,11 +656,15 @@ def reconciliation_maintenance_pass(
     if not recon_dir.exists() or not recon_dir.is_dir():
         return {"ok": True, "family": "reconciliation", "externalized": 0, "warnings": warnings}
 
-    eligible: list[tuple[str, dict[str, Any], datetime, str]] = []
+    eligible: list[dict[str, Any]] = []
     for path in sorted(recon_dir.iterdir(), key=lambda p: p.name):
         if path.is_dir() or path.suffix.lower() != ".json":
             continue
         recon_id = path.stem
+        try:
+            snapshot_bytes = path.read_bytes()
+        except Exception:
+            snapshot_bytes = None
         artifact, warn = _load_json_file(path)
         if warn:
             warnings.append(warn)
@@ -639,46 +682,35 @@ def reconciliation_maintenance_pass(
             continue
 
         source_rel = f"{RECONCILIATIONS_DIR_REL}/{recon_id}.json"
-        eligible.append((recon_id, artifact, updated_at, source_rel))
+        eligible.append(
+            {
+                "artifact_id": recon_id,
+                "artifact": artifact,
+                "cut_at": now,
+                "source_rel": source_rel,
+                "summary": _reconciliation_summary(artifact),
+                "snapshot_bytes": snapshot_bytes,
+            }
+        )
         if len(eligible) >= batch_limit:
             break
 
     if not eligible:
         return {"ok": True, "family": "reconciliation", "externalized": 0, "warnings": warnings}
 
-    reserved_ids: set[str] = set()
-    written_paths: list[str] = []
-    externalized_ids: list[str] = []
-
-    for recon_id, artifact, _ts, source_rel in eligible:
-        summary = _reconciliation_summary(artifact)
-        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
-            repo_root=repo_root,
-            family="reconciliation",
-            schema_type="reconciliation_history_unit",
-            artifact_id=recon_id,
-            source_rel=source_rel,
-            artifact=artifact,
-            summary=summary,
-            history_dir_rel=RECONCILIATIONS_HISTORY_DIR_REL,
-            cut_at=now,
-            reserved_ids=reserved_ids,
-        )
-        if not _write_pair_exclusive(
-            safe_path(repo_root, payload_rel), payload,
-            safe_path(repo_root, stub_rel), stub,
-        ):
-            warnings.append(f"reconciliation_history_collision:{recon_id}")
-            continue
-        written_paths.extend([payload_rel, stub_rel])
-        externalized_ids.append(recon_id)
-
-    deleted_paths = [f"{RECONCILIATIONS_DIR_REL}/{rid}.json" for rid in externalized_ids]
-    _delete_hot_artifacts_or_rollback(
+    pass_result = _externalize_selected_family(
         repo_root=repo_root,
-        hot_rel_paths=deleted_paths,
-        written_rel_paths=written_paths,
+        family="reconciliation",
+        schema_type="reconciliation_history_unit",
+        history_dir_rel=RECONCILIATIONS_HISTORY_DIR_REL,
+        eligible=eligible,
+        collision_warning_prefix="reconciliation_history_collision",
+        mutable_hot_family=True,
     )
+    warnings.extend(pass_result["warnings"])
+    written_paths = pass_result["written_paths"]
+    deleted_paths = pass_result["deleted_paths"]
+    externalized_ids = pass_result["externalized_ids"]
 
     # Best-effort: remove externalized reconciliations from the query sidecar index
     from app.coordination.query_index import try_delete_reconciliation
@@ -726,11 +758,12 @@ def task_done_maintenance_pass(
     if not done_dir.exists() or not done_dir.is_dir():
         return {"ok": True, "family": "task_done", "externalized": 0, "warnings": warnings}
 
-    eligible: list[tuple[str, dict[str, Any], datetime, str]] = []
+    eligible: list[dict[str, Any]] = []
     for path in sorted(done_dir.iterdir(), key=lambda p: p.name):
         if path.is_dir() or path.suffix.lower() != ".json":
             continue
         task_id = path.stem
+        snapshot_bytes = path.read_bytes()
         artifact, warn = _load_json_file(path)
         if warn:
             warnings.append(warn)
@@ -745,46 +778,35 @@ def task_done_maintenance_pass(
             continue
 
         source_rel = f"{TASKS_DONE_DIR_REL}/{task_id}.json"
-        eligible.append((task_id, artifact, updated_at, source_rel))
+        eligible.append(
+            {
+                "artifact_id": task_id,
+                "artifact": artifact,
+                "cut_at": now,
+                "source_rel": source_rel,
+                "summary": _task_done_summary(artifact),
+                "snapshot_bytes": snapshot_bytes,
+            }
+        )
         if len(eligible) >= batch_limit:
             break
 
     if not eligible:
         return {"ok": True, "family": "task_done", "externalized": 0, "warnings": warnings}
 
-    reserved_ids: set[str] = set()
-    written_paths: list[str] = []
-    externalized_ids: list[str] = []
-
-    for task_id, artifact, _ts, source_rel in eligible:
-        summary = _task_done_summary(artifact)
-        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
-            repo_root=repo_root,
-            family="task_done",
-            schema_type="task_done_history_unit",
-            artifact_id=task_id,
-            source_rel=source_rel,
-            artifact=artifact,
-            summary=summary,
-            history_dir_rel=TASKS_HISTORY_DONE_DIR_REL,
-            cut_at=now,
-            reserved_ids=reserved_ids,
-        )
-        if not _write_pair_exclusive(
-            safe_path(repo_root, payload_rel), payload,
-            safe_path(repo_root, stub_rel), stub,
-        ):
-            warnings.append(f"task_done_history_collision:{task_id}")
-            continue
-        written_paths.extend([payload_rel, stub_rel])
-        externalized_ids.append(task_id)
-
-    deleted_paths = [f"{TASKS_DONE_DIR_REL}/{tid}.json" for tid in externalized_ids]
-    _delete_hot_artifacts_or_rollback(
+    pass_result = _externalize_selected_family(
         repo_root=repo_root,
-        hot_rel_paths=deleted_paths,
-        written_rel_paths=written_paths,
+        family="task_done",
+        schema_type="task_done_history_unit",
+        history_dir_rel=TASKS_HISTORY_DONE_DIR_REL,
+        eligible=eligible,
+        collision_warning_prefix="task_done_history_collision",
+        mutable_hot_family=False,
     )
+    warnings.extend(pass_result["warnings"])
+    written_paths = pass_result["written_paths"]
+    deleted_paths = pass_result["deleted_paths"]
+    externalized_ids = pass_result["externalized_ids"]
 
     return {
         "ok": True,
@@ -813,6 +835,137 @@ def _patch_applied_summary(artifact: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _family_summary(family: str, artifact: dict[str, Any]) -> dict[str, Any]:
+    """Build the required summary block for one artifact-history family."""
+    if family == "handoff":
+        return _handoff_summary(artifact)
+    if family == "shared_history":
+        return _shared_history_summary(artifact)
+    if family == "reconciliation":
+        return _reconciliation_summary(artifact)
+    if family == "task_done":
+        return _task_done_summary(artifact)
+    if family == "patch_applied":
+        return _patch_applied_summary(artifact)
+    raise HTTPException(status_code=400, detail=f"Unsupported artifact-history family: {family}")
+
+
+def _family_artifact_id_key(family: str) -> str:
+    """Return the artifact JSON key that carries the family identity."""
+    return {
+        "handoff": "handoff_id",
+        "shared_history": "shared_id",
+        "reconciliation": "reconciliation_id",
+        "task_done": "task_id",
+        "patch_applied": "patch_id",
+    }[family]
+
+
+def _family_source_rel(family: str, artifact_id: str) -> str:
+    """Return the authoritative hot source path for one family artifact."""
+    base_dir_rel = {
+        "handoff": HANDOFFS_DIR_REL,
+        "shared_history": SHARED_DIR_REL,
+        "reconciliation": RECONCILIATIONS_DIR_REL,
+        "task_done": TASKS_DONE_DIR_REL,
+        "patch_applied": PATCHES_APPLIED_DIR_REL,
+    }[family]
+    return f"{base_dir_rel}/{artifact_id}.json"
+
+
+def _family_cold_timestamp(summary: dict[str, Any], *, family: str) -> datetime | None:
+    """Return the configured cold-eligibility timestamp for one family summary."""
+    field = {
+        "handoff": "terminal_at",
+        "shared_history": "updated_at",
+        "reconciliation": "updated_at",
+        "task_done": "updated_at",
+        "patch_applied": "updated_at",
+    }[family]
+    return _parse_iso(str(summary.get(field) or ""))
+
+
+def _externalize_selected_family(
+    *,
+    repo_root: Path,
+    family: str,
+    schema_type: str,
+    history_dir_rel: str,
+    eligible: list[dict[str, Any]],
+    collision_warning_prefix: str,
+    mutable_hot_family: bool,
+) -> dict[str, Any]:
+    """Externalize one selected family set as a single rollback unit."""
+    warnings: list[str] = []
+    reserved_ids: set[str] = set()
+    written_paths: list[str] = []
+    deleted_paths: list[str] = []
+    externalized_ids: list[str] = []
+    rollback_plan: list[tuple[Path, bytes | None]] = []
+    rollback_seen: set[Path] = set()
+    lock_dir = repo_root / ".locks"
+
+    try:
+        for row in eligible:
+            artifact_id = row["artifact_id"]
+
+            def _process_one() -> None:
+                current_path = safe_path(repo_root, row["source_rel"])
+                current_bytes: bytes | None
+                try:
+                    current_bytes = current_path.read_bytes()
+                except FileNotFoundError:
+                    warnings.append(f"{family}_hot_changed:{artifact_id}")
+                    return
+                if mutable_hot_family and current_bytes != row["snapshot_bytes"]:
+                    warnings.append(f"{family}_hot_changed:{artifact_id}")
+                    return
+
+                _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
+                    repo_root=repo_root,
+                    family=family,
+                    schema_type=schema_type,
+                    artifact_id=artifact_id,
+                    source_rel=row["source_rel"],
+                    artifact=row["artifact"],
+                    summary=row["summary"],
+                    history_dir_rel=history_dir_rel,
+                    cut_at=row["cut_at"],
+                    reserved_ids=reserved_ids,
+                )
+                if not _write_pair_exclusive(
+                    safe_path(repo_root, payload_rel), payload,
+                    safe_path(repo_root, stub_rel), stub,
+                ):
+                    warnings.append(f"{collision_warning_prefix}:{artifact_id}")
+                    return
+                if current_path.resolve() not in rollback_seen:
+                    rollback_seen.add(current_path.resolve())
+                    rollback_plan.append((current_path, row["snapshot_bytes"]))
+                written_paths.extend([payload_rel, stub_rel])
+                current_path.unlink(missing_ok=True)
+                deleted_paths.append(row["source_rel"])
+                externalized_ids.append(artifact_id)
+
+            if mutable_hot_family:
+                with artifact_lock(artifact_id, lock_dir=lock_dir):
+                    _process_one()
+            else:
+                _process_one()
+    except Exception:
+        _restore_rollback(rollback_plan)
+        _remove_paths([safe_path(repo_root, rel) for rel in written_paths])
+        raise
+
+    return {
+        "externalized": len(externalized_ids),
+        "written_paths": written_paths,
+        "deleted_paths": deleted_paths,
+        "externalized_ids": externalized_ids,
+        "warnings": warnings,
+    }
+
+
 def patch_applied_maintenance_pass(
     *,
     repo_root: Path,
@@ -828,11 +981,12 @@ def patch_applied_maintenance_pass(
     if not applied_dir.exists() or not applied_dir.is_dir():
         return {"ok": True, "family": "patch_applied", "externalized": 0, "warnings": warnings}
 
-    eligible: list[tuple[str, dict[str, Any], datetime, str]] = []
+    eligible: list[dict[str, Any]] = []
     for path in sorted(applied_dir.iterdir(), key=lambda p: p.name):
         if path.is_dir() or path.suffix.lower() != ".json":
             continue
         patch_id = path.stem
+        snapshot_bytes = path.read_bytes()
         artifact, warn = _load_json_file(path)
         if warn:
             warnings.append(warn)
@@ -847,46 +1001,35 @@ def patch_applied_maintenance_pass(
             continue
 
         source_rel = f"{PATCHES_APPLIED_DIR_REL}/{patch_id}.json"
-        eligible.append((patch_id, artifact, updated_at, source_rel))
+        eligible.append(
+            {
+                "artifact_id": patch_id,
+                "artifact": artifact,
+                "cut_at": now,
+                "source_rel": source_rel,
+                "summary": _patch_applied_summary(artifact),
+                "snapshot_bytes": snapshot_bytes,
+            }
+        )
         if len(eligible) >= batch_limit:
             break
 
     if not eligible:
         return {"ok": True, "family": "patch_applied", "externalized": 0, "warnings": warnings}
 
-    reserved_ids: set[str] = set()
-    written_paths: list[str] = []
-    externalized_ids: list[str] = []
-
-    for patch_id, artifact, _ts, source_rel in eligible:
-        summary = _patch_applied_summary(artifact)
-        _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
-            repo_root=repo_root,
-            family="patch_applied",
-            schema_type="patch_applied_history_unit",
-            artifact_id=patch_id,
-            source_rel=source_rel,
-            artifact=artifact,
-            summary=summary,
-            history_dir_rel=PATCHES_HISTORY_APPLIED_DIR_REL,
-            cut_at=now,
-            reserved_ids=reserved_ids,
-        )
-        if not _write_pair_exclusive(
-            safe_path(repo_root, payload_rel), payload,
-            safe_path(repo_root, stub_rel), stub,
-        ):
-            warnings.append(f"patch_applied_history_collision:{patch_id}")
-            continue
-        written_paths.extend([payload_rel, stub_rel])
-        externalized_ids.append(patch_id)
-
-    deleted_paths = [f"{PATCHES_APPLIED_DIR_REL}/{pid}.json" for pid in externalized_ids]
-    _delete_hot_artifacts_or_rollback(
+    pass_result = _externalize_selected_family(
         repo_root=repo_root,
-        hot_rel_paths=deleted_paths,
-        written_rel_paths=written_paths,
+        family="patch_applied",
+        schema_type="patch_applied_history_unit",
+        history_dir_rel=PATCHES_HISTORY_APPLIED_DIR_REL,
+        eligible=eligible,
+        collision_warning_prefix="patch_applied_history_collision",
+        mutable_hot_family=False,
     )
+    warnings.extend(pass_result["warnings"])
+    written_paths = pass_result["written_paths"]
+    deleted_paths = pass_result["deleted_paths"]
+    externalized_ids = pass_result["externalized_ids"]
 
     return {
         "ok": True,
@@ -896,6 +1039,398 @@ def patch_applied_maintenance_pass(
         "deleted_paths": deleted_paths,
         "warnings": warnings,
     }
+
+
+# ===================================================================
+# Artifact-history cold-store / rehydrate
+# ===================================================================
+
+
+def _validate_artifact_history_payload_rel_path(payload_rel: str) -> tuple[str, str]:
+    """Validate one hot artifact-history payload path and return family + history dir."""
+    rel = str(payload_rel or "").strip().strip("/")
+    for family, history_dir_rel in _ARTIFACT_HISTORY_DIRS_BY_FAMILY.items():
+        prefix = f"{history_dir_rel}/"
+        if rel.startswith(prefix) and rel.endswith(".json") and "/index/" not in rel and "/cold/" not in rel:
+            return family, history_dir_rel
+    raise HTTPException(status_code=400, detail="Invalid artifact-history payload path")
+
+
+def _load_artifact_history_payload(repo_root: Path, payload_rel: str) -> dict[str, Any]:
+    """Load and validate one hot artifact-history payload."""
+    family, _history_dir_rel = _validate_artifact_history_payload_rel_path(payload_rel)
+    path = safe_path(repo_root, payload_rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact-history payload not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid artifact-history payload: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid artifact-history payload")
+    if payload.get("schema_type") != _ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY[family]:
+        raise HTTPException(status_code=400, detail="Artifact-history payload schema_type does not match path")
+    if payload.get("schema_version") != "1.0":
+        raise HTTPException(status_code=400, detail="Artifact-history payload schema_version does not match path")
+    if payload.get("family") != family:
+        raise HTTPException(status_code=400, detail="Artifact-history payload family does not match path")
+    if payload.get("history_id") != path.stem:
+        raise HTTPException(status_code=400, detail="Artifact-history payload history_id does not match path")
+    if not isinstance(payload.get("artifact"), dict):
+        raise HTTPException(status_code=400, detail="Artifact-history payload artifact must be an object")
+    if not isinstance(payload.get("summary"), dict):
+        raise HTTPException(status_code=400, detail="Artifact-history payload summary must be an object")
+    artifact_id_key = _family_artifact_id_key(family)
+    artifact = payload["artifact"]
+    artifact_id = str(payload.get("artifact_id") or "")
+    if not artifact_id or str(artifact.get(artifact_id_key) or "") != artifact_id:
+        raise HTTPException(status_code=400, detail="Artifact-history payload artifact identity mismatch")
+    expected_source_rel = _family_source_rel(family, artifact_id)
+    if payload.get("source_path") != expected_source_rel:
+        raise HTTPException(status_code=400, detail="Artifact-history payload source_path does not match artifact identity")
+    if payload.get("summary") != _family_summary(family, artifact):
+        raise HTTPException(status_code=400, detail="Artifact-history payload summary does not match artifact content")
+    return payload
+
+
+def _load_artifact_history_stub(repo_root: Path, stub_rel: str) -> dict[str, Any]:
+    """Load and validate one artifact-history stub."""
+    rel = str(stub_rel or "").strip().strip("/")
+    path = safe_path(repo_root, rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact-history stub not found")
+    try:
+        stub = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid artifact-history stub: {exc}") from exc
+    if not isinstance(stub, dict):
+        raise HTTPException(status_code=400, detail="Invalid artifact-history stub")
+    if stub.get("schema_type") != "artifact_history_stub" or stub.get("schema_version") != "1.0":
+        raise HTTPException(status_code=400, detail="Invalid artifact-history stub schema")
+    family = str(stub.get("family") or "")
+    if family not in _ARTIFACT_HISTORY_DIRS_BY_FAMILY:
+        raise HTTPException(status_code=400, detail="Invalid artifact-history stub family")
+    expected_stub_rel = f"{_ARTIFACT_HISTORY_DIRS_BY_FAMILY[family]}/index/{path.name}"
+    if rel != expected_stub_rel:
+        raise HTTPException(status_code=400, detail="Artifact-history stub path does not match family identity")
+    if stub.get("history_id") != path.stem:
+        raise HTTPException(status_code=400, detail="Artifact-history stub history_id does not match path")
+    if not isinstance(stub.get("summary"), dict):
+        raise HTTPException(status_code=400, detail="Artifact-history stub summary must be an object")
+    if not isinstance(stub.get("source_path"), str) or not stub["source_path"].strip():
+        raise HTTPException(status_code=400, detail="Artifact-history stub source_path is required")
+    payload_path = str(stub.get("payload_path") or "")
+    if not payload_path:
+        raise HTTPException(status_code=400, detail="Artifact-history stub payload_path is required")
+    return stub
+
+
+def _restore_failed_artifact_history_cold_store(
+    *,
+    source_payload_path: Path,
+    source_payload_bytes: bytes,
+    cold_payload_path: Path,
+    stub_path: Path,
+    original_stub: dict[str, Any],
+) -> list[str]:
+    """Restore the original hot payload and stub after failed cold-store commit."""
+    errors: list[str] = []
+    try:
+        write_bytes_file(source_payload_path, source_payload_bytes)
+    except Exception as exc:
+        errors.append(f"restore payload: {exc}")
+    for path in (cold_payload_path,):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"remove {path}: {exc}")
+    try:
+        _write_json(stub_path, original_stub)
+    except Exception as exc:
+        errors.append(f"restore stub: {exc}")
+    return errors
+
+
+def artifact_history_cold_store_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: AuthContext,
+    req: Any,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Cold-store one artifact-history payload into a gzip payload plus hot JSON stub."""
+    auth.require("admin:peers")
+    source_payload_path = str(req.source_payload_path)
+    auth.require_read_path(source_payload_path)
+    auth.require_write_path(source_payload_path)
+    family, history_dir_rel = _validate_artifact_history_payload_rel_path(source_payload_path)
+    cold_storage_path = artifact_history_cold_storage_rel_path(source_payload_path)
+    cold_payload_path = safe_path(repo_root, cold_storage_path)
+    hot_payload_path = safe_path(repo_root, source_payload_path)
+    stub_rel = f"{history_dir_rel}/index/{hot_payload_path.name}"
+    auth.require_read_path(stub_rel)
+    auth.require_write_path(stub_rel)
+    auth.require_write_path(cold_storage_path)
+
+    payload = _load_artifact_history_payload(repo_root, source_payload_path)
+    stub = _load_artifact_history_stub(repo_root, stub_rel)
+    if stub.get("payload_path") != source_payload_path:
+        raise HTTPException(status_code=409, detail="Artifact-history stub does not point at the hot payload")
+    if stub.get("summary") != payload.get("summary") or stub.get("source_path") != payload.get("source_path"):
+        raise HTTPException(status_code=400, detail="Artifact-history stub does not match payload")
+    source_bytes = hot_payload_path.read_bytes()
+    if cold_payload_path.exists():
+        raise HTTPException(status_code=409, detail="Artifact-history cold payload already exists")
+
+    try:
+        gzip_bytes = gzip.compress(source_bytes, mtime=0)
+        write_bytes_file(cold_payload_path, gzip_bytes)
+        updated_stub = dict(stub)
+        updated_stub["payload_path"] = cold_storage_path
+        _write_json(safe_path(repo_root, stub_rel), updated_stub)
+        hot_payload_path.unlink()
+        committed = bool(gm and try_commit_paths(
+            paths=[cold_payload_path, safe_path(repo_root, stub_rel), hot_payload_path],
+            gm=gm,
+            commit_message=f"artifact-history: cold-store {family} {payload['history_id']}",
+        ))
+        if gm is not None and not committed:
+            raise RuntimeError("Artifact-history cold-store commit produced no changes")
+    except Exception as exc:
+        cleanup_errors = _restore_failed_artifact_history_cold_store(
+            source_payload_path=hot_payload_path,
+            source_payload_bytes=source_bytes,
+            cold_payload_path=cold_payload_path,
+            stub_path=safe_path(repo_root, stub_rel),
+            original_stub=stub,
+        )
+        detail = f"Artifact-history cold-store failed: {exc}"
+        if cleanup_errors:
+            detail += f"; rollback failed for {', '.join(cleanup_errors)}"
+        raise HTTPException(status_code=500, detail=detail) from exc
+
+    audit(
+        auth,
+        "artifact_history_cold_store",
+        {
+            "family": family,
+            "source_payload_path": source_payload_path,
+            "cold_storage_path": cold_storage_path,
+            "cold_stub_path": stub_rel,
+        },
+    )
+    return {
+        "ok": True,
+        "family": family,
+        "artifact_state": "cold",
+        "source_payload_path": source_payload_path,
+        "cold_storage_path": cold_storage_path,
+        "cold_stub_path": stub_rel,
+        "committed_files": [cold_storage_path, stub_rel, source_payload_path],
+        "latest_commit": gm.latest_commit() if gm is not None else None,
+        "warnings": [],
+    }
+
+
+def artifact_history_cold_rehydrate_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: AuthContext,
+    req: Any,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Rehydrate one artifact-history cold payload back into its hot history path."""
+    auth.require("admin:peers")
+    if getattr(req, "cold_stub_path", None):
+        cold_stub_path = str(req.cold_stub_path)
+        stub = _load_artifact_history_stub(repo_root, cold_stub_path)
+        source_payload_path = artifact_history_payload_rel_path_from_cold_artifact(str(stub.get("payload_path") or ""))
+    else:
+        source_payload_path = str(req.source_payload_path)
+        _family, history_dir_rel = _validate_artifact_history_payload_rel_path(source_payload_path)
+        cold_stub_path = f"{history_dir_rel}/index/{Path(source_payload_path).name}"
+        stub = _load_artifact_history_stub(repo_root, cold_stub_path)
+    cold_storage_path = str(stub.get("payload_path") or "")
+    auth.require_read_path(cold_stub_path)
+    auth.require_read_path(cold_storage_path)
+    auth.require_write_path(cold_stub_path)
+    auth.require_write_path(cold_storage_path)
+    auth.require_write_path(source_payload_path)
+
+    stub_path = safe_path(repo_root, cold_stub_path)
+    hot_payload_path = safe_path(repo_root, source_payload_path)
+    cold_payload_path = safe_path(repo_root, cold_storage_path)
+    if hot_payload_path.exists():
+        raise HTTPException(status_code=409, detail="Artifact-history payload already exists")
+    if not cold_payload_path.exists() or not cold_payload_path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact-history cold payload not found")
+    try:
+        cold_payload_bytes = cold_payload_path.read_bytes()
+        cold_stub_bytes = stub_path.read_bytes()
+        payload_bytes = gzip.decompress(cold_payload_bytes)
+        payload = json.loads(payload_bytes.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("payload is not an object")
+        if payload.get("history_id") != Path(source_payload_path).stem:
+            raise ValueError("history_id mismatch")
+        if payload.get("summary") != stub.get("summary") or payload.get("source_path") != stub.get("source_path"):
+            raise ValueError("stub/payload mismatch")
+        _load_artifact_history_payload_from_dict(payload=payload, payload_rel=source_payload_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid artifact-history cold payload: {exc}") from exc
+
+    updated_stub = dict(stub)
+    updated_stub["payload_path"] = source_payload_path
+    try:
+        write_bytes_file(hot_payload_path, payload_bytes)
+        _write_json(stub_path, updated_stub)
+        cold_payload_path.unlink()
+        committed = bool(gm and try_commit_paths(
+            paths=[hot_payload_path, stub_path, cold_payload_path],
+            gm=gm,
+            commit_message=f"artifact-history: cold-rehydrate {payload['family']} {payload['history_id']}",
+        ))
+        if gm is not None and not committed:
+            raise RuntimeError("Artifact-history cold rehydrate commit produced no changes")
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        try:
+            hot_payload_path.unlink(missing_ok=True)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"remove restored payload: {rollback_exc}")
+        try:
+            write_bytes_file(cold_payload_path, cold_payload_bytes)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"restore cold payload: {rollback_exc}")
+        try:
+            write_bytes_file(stub_path, cold_stub_bytes)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"restore cold stub: {rollback_exc}")
+        detail = f"Artifact-history cold rehydrate failed: {exc}"
+        if rollback_errors:
+            detail += f"; rollback failed for {', '.join(rollback_errors)}"
+        raise HTTPException(status_code=500, detail=detail) from exc
+
+    audit(
+        auth,
+        "artifact_history_cold_rehydrate",
+        {
+            "source_payload_path": source_payload_path,
+            "cold_storage_path": cold_storage_path,
+            "cold_stub_path": cold_stub_path,
+        },
+    )
+    return {
+        "ok": True,
+        "family": payload["family"],
+        "artifact_state": "archived",
+        "source_payload_path": source_payload_path,
+        "restored_payload_path": source_payload_path,
+        "cold_storage_path": cold_storage_path,
+        "cold_stub_path": cold_stub_path,
+        "committed_files": [source_payload_path, cold_storage_path, cold_stub_path],
+        "latest_commit": gm.latest_commit() if gm is not None else None,
+        "warnings": [],
+    }
+
+
+def _load_artifact_history_payload_from_dict(*, payload: dict[str, Any], payload_rel: str) -> None:
+    """Validate one artifact-history payload object against its repo-relative path."""
+    family, _history_dir_rel = _validate_artifact_history_payload_rel_path(payload_rel)
+    if payload.get("schema_type") != _ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY[family]:
+        raise ValueError("schema_type mismatch")
+    if payload.get("schema_version") != "1.0":
+        raise ValueError("schema_version mismatch")
+    if payload.get("family") != family:
+        raise ValueError("family mismatch")
+    if payload.get("history_id") != Path(payload_rel).stem:
+        raise ValueError("history_id mismatch")
+    if not isinstance(payload.get("artifact"), dict):
+        raise ValueError("artifact missing")
+    if not isinstance(payload.get("summary"), dict):
+        raise ValueError("summary missing")
+    artifact_id = str(payload.get("artifact_id") or "")
+    artifact_id_key = _family_artifact_id_key(family)
+    if not artifact_id or str(payload["artifact"].get(artifact_id_key) or "") != artifact_id:
+        raise ValueError("artifact identity mismatch")
+    if payload.get("source_path") != _family_source_rel(family, artifact_id):
+        raise ValueError("source_path mismatch")
+    if payload.get("summary") != _family_summary(family, payload["artifact"]):
+        raise ValueError("summary mismatch")
+
+
+def artifact_history_cold_apply_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: AuthContext,
+    now: datetime,
+    settings: Any,
+    families: list[str] | None,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Apply artifact-history cold-store eligibility using the configured thresholds."""
+    requested = families if families else ["handoff", "shared_history", "reconciliation", "task_done", "patch_applied"]
+    cold_after_days_by_family = {
+        "handoff": int(settings.handoff_cold_after_days),
+        "shared_history": int(settings.shared_history_cold_after_days),
+        "reconciliation": int(settings.reconciliation_cold_after_days),
+        "task_done": int(settings.task_done_cold_after_days),
+        "patch_applied": int(settings.patch_applied_cold_after_days),
+    }
+    results: dict[str, Any] = {}
+    warnings: list[str] = []
+    cold_stored = 0
+
+    for family in requested:
+        history_dir = safe_path(repo_root, _ARTIFACT_HISTORY_DIRS_BY_FAMILY[family])
+        eligible_paths: list[str] = []
+        if history_dir.exists() and history_dir.is_dir():
+            cutoff = now - timedelta(days=cold_after_days_by_family[family])
+            for path in sorted(history_dir.glob("*.json")):
+                if not path.is_file():
+                    continue
+                rel = str(path.relative_to(repo_root))
+                try:
+                    payload = _load_artifact_history_payload(repo_root, rel)
+                except HTTPException:
+                    continue
+                cold_ts = _family_cold_timestamp(payload["summary"], family=family)
+                if cold_ts is None:
+                    warnings.append(f"artifact_history_cold_timestamp_missing:{rel}")
+                    continue
+                stub_rel = f"{_ARTIFACT_HISTORY_DIRS_BY_FAMILY[family]}/index/{path.name}"
+                try:
+                    stub = _load_artifact_history_stub(repo_root, stub_rel)
+                except HTTPException:
+                    warnings.append(f"artifact_history_invalid_stub:{stub_rel}")
+                    continue
+                if stub.get("payload_path") != rel:
+                    continue
+                if cold_ts <= cutoff:
+                    eligible_paths.append(rel)
+        family_results: list[dict[str, Any]] = []
+        for rel in eligible_paths:
+            try:
+                family_results.append(
+                    artifact_history_cold_store_service(
+                        repo_root=repo_root,
+                        gm=gm,
+                        auth=auth,
+                        req=type("Req", (), {"source_payload_path": rel})(),
+                        audit=audit,
+                    )
+                )
+                cold_stored += 1
+            except HTTPException as exc:
+                warnings.append(f"artifact_history_cold_store_failed:{rel}:{exc.detail}")
+        results[family] = {"eligible": len(eligible_paths), "cold_stored": len(family_results), "results": family_results}
+
+    return {"ok": True, "cold_stored": cold_stored, "families": results, "warnings": warnings}
 
 
 # ===================================================================
@@ -930,6 +1465,7 @@ def artifact_lifecycle_maintenance_service(
     all_warnings: list[str] = []
     all_written: list[str] = []
     all_deleted: list[str] = []
+    cold_apply_result: dict[str, Any] | None = None
     batch_limit = int(settings.artifact_history_batch_limit)
     remaining_budget = batch_limit
 
@@ -989,6 +1525,18 @@ def artifact_lifecycle_maintenance_service(
         if remaining_budget <= 0:
             break
 
+    if auth is not None and gm is not None:
+        cold_apply_result = artifact_history_cold_apply_service(
+            repo_root=repo_root,
+            gm=gm,
+            auth=auth,
+            now=now,
+            settings=settings,
+            families=None,
+            audit=audit or (lambda *_args, **_kwargs: None),
+        )
+        all_warnings.extend(cold_apply_result.get("warnings", []))
+
     # Git commit all written and deleted paths
     committed_files: list[str] = []
     git_warnings: list[str] = []
@@ -1018,6 +1566,7 @@ def artifact_lifecycle_maintenance_service(
         "ok": not any_family_failed,
         "degraded": degraded,
         "families": results,
+        "cold_apply": cold_apply_result,
         "committed_files": committed_files,
         "warnings": all_warnings if all_warnings else [],
     }

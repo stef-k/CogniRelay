@@ -572,6 +572,8 @@ class OpsRunRequest(BaseModel):
         "continuity_cold_store",
         "continuity_cold_rehydrate",
         "continuity_retention_apply",
+        "artifact_history_cold_store",
+        "artifact_history_cold_rehydrate",
     ]
     dry_run: bool = False
     force: bool = False
@@ -741,6 +743,11 @@ class ContinuityColdStoreRequest(BaseModel):
     source_archive_path: str = Field(min_length=1, max_length=400)
 
 
+class ArtifactHistoryColdStoreRequest(BaseModel):
+    """Host-local request for cold-storing one artifact-history payload."""
+    source_payload_path: str = Field(min_length=1, max_length=400)
+
+
 class ContinuityRetentionApplyRequest(BaseModel):
     """Host-local request for batch-applying continuity retention policy."""
     source_archive_paths: List[str] = Field(min_length=1, max_length=100)
@@ -756,6 +763,19 @@ class ContinuityColdRehydrateRequest(BaseModel):
         """Require exactly one selector field for cold rehydration."""
         if bool(self.source_archive_path) == bool(self.cold_stub_path):
             raise ValueError("exactly one of source_archive_path or cold_stub_path is required")
+        return self
+
+
+class ArtifactHistoryColdRehydrateRequest(BaseModel):
+    """Host-local request for rehydrating one artifact-history cold payload."""
+    source_payload_path: Optional[str] = Field(default=None, max_length=400)
+    cold_stub_path: Optional[str] = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def _require_exactly_one_selector(self) -> "ArtifactHistoryColdRehydrateRequest":
+        """Require exactly one selector field for artifact-history rehydration."""
+        if bool(self.source_payload_path) == bool(self.cold_stub_path):
+            raise ValueError("exactly one of source_payload_path or cold_stub_path is required")
         return self
 
 
