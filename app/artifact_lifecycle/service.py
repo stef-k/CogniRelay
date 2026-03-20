@@ -195,6 +195,33 @@ def _restore_rollback(plan: list[tuple[Path, bytes | None]]) -> None:
             _logger.exception("Rollback restore failed for %s", path)
 
 
+def _remove_paths(paths: list[Path]) -> None:
+    """Best-effort removal of files created during a failed family pass."""
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            _logger.exception("Rollback cleanup failed for %s", path)
+
+
+def _delete_hot_artifacts_or_rollback(
+    *,
+    repo_root: Path,
+    hot_rel_paths: list[str],
+    written_rel_paths: list[str],
+) -> None:
+    """Delete hot artifacts as one rollback unit for a family maintenance pass."""
+    hot_paths = [safe_path(repo_root, rel) for rel in hot_rel_paths]
+    rollback = _capture_rollback(hot_paths)
+    try:
+        for hot_path in hot_paths:
+            hot_path.unlink(missing_ok=True)
+    except Exception:
+        _restore_rollback(rollback)
+        _remove_paths([safe_path(repo_root, rel) for rel in written_rel_paths])
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Shared JSON I/O
 # ---------------------------------------------------------------------------
@@ -435,17 +462,12 @@ def handoff_maintenance_pass(
         written_paths.extend([payload_rel, stub_rel])
         externalized_ids.append(handoff_id)
 
-    # Delete hot artifacts only for successfully externalized items
-    delete_plan: list[Path] = []
-    for hid in externalized_ids:
-        hot_path = safe_path(repo_root, f"{HANDOFFS_DIR_REL}/{hid}.json")
-        rollback = _capture_rollback([hot_path])
-        try:
-            hot_path.unlink(missing_ok=True)
-        except Exception:
-            _restore_rollback(rollback)
-            raise
-        delete_plan.append(hot_path)
+    deleted_paths = [f"{HANDOFFS_DIR_REL}/{hid}.json" for hid in externalized_ids]
+    _delete_hot_artifacts_or_rollback(
+        repo_root=repo_root,
+        hot_rel_paths=deleted_paths,
+        written_rel_paths=written_paths,
+    )
 
     # Best-effort: remove externalized handoffs from the query sidecar index
     from app.coordination.query_index import try_delete_handoff
@@ -457,7 +479,7 @@ def handoff_maintenance_pass(
         "family": "handoff",
         "externalized": len(externalized_ids),
         "written_paths": written_paths,
-        "deleted_paths": [f"{HANDOFFS_DIR_REL}/{hid}.json" for hid in externalized_ids],
+        "deleted_paths": deleted_paths,
         "warnings": warnings,
     }
 
@@ -651,14 +673,12 @@ def reconciliation_maintenance_pass(
         written_paths.extend([payload_rel, stub_rel])
         externalized_ids.append(recon_id)
 
-    for rid in externalized_ids:
-        hot_path = safe_path(repo_root, f"{RECONCILIATIONS_DIR_REL}/{rid}.json")
-        rollback = _capture_rollback([hot_path])
-        try:
-            hot_path.unlink(missing_ok=True)
-        except Exception:
-            _restore_rollback(rollback)
-            raise
+    deleted_paths = [f"{RECONCILIATIONS_DIR_REL}/{rid}.json" for rid in externalized_ids]
+    _delete_hot_artifacts_or_rollback(
+        repo_root=repo_root,
+        hot_rel_paths=deleted_paths,
+        written_rel_paths=written_paths,
+    )
 
     # Best-effort: remove externalized reconciliations from the query sidecar index
     from app.coordination.query_index import try_delete_reconciliation
@@ -670,7 +690,7 @@ def reconciliation_maintenance_pass(
         "family": "reconciliation",
         "externalized": len(externalized_ids),
         "written_paths": written_paths,
-        "deleted_paths": [f"{RECONCILIATIONS_DIR_REL}/{rid}.json" for rid in externalized_ids],
+        "deleted_paths": deleted_paths,
         "warnings": warnings,
     }
 
@@ -759,21 +779,19 @@ def task_done_maintenance_pass(
         written_paths.extend([payload_rel, stub_rel])
         externalized_ids.append(task_id)
 
-    for tid in externalized_ids:
-        hot_path = safe_path(repo_root, f"{TASKS_DONE_DIR_REL}/{tid}.json")
-        rollback = _capture_rollback([hot_path])
-        try:
-            hot_path.unlink(missing_ok=True)
-        except Exception:
-            _restore_rollback(rollback)
-            raise
+    deleted_paths = [f"{TASKS_DONE_DIR_REL}/{tid}.json" for tid in externalized_ids]
+    _delete_hot_artifacts_or_rollback(
+        repo_root=repo_root,
+        hot_rel_paths=deleted_paths,
+        written_rel_paths=written_paths,
+    )
 
     return {
         "ok": True,
         "family": "task_done",
         "externalized": len(externalized_ids),
         "written_paths": written_paths,
-        "deleted_paths": [f"{TASKS_DONE_DIR_REL}/{tid}.json" for tid in externalized_ids],
+        "deleted_paths": deleted_paths,
         "warnings": warnings,
     }
 
@@ -863,65 +881,21 @@ def patch_applied_maintenance_pass(
         written_paths.extend([payload_rel, stub_rel])
         externalized_ids.append(patch_id)
 
-    for pid in externalized_ids:
-        hot_path = safe_path(repo_root, f"{PATCHES_APPLIED_DIR_REL}/{pid}.json")
-        rollback = _capture_rollback([hot_path])
-        try:
-            hot_path.unlink(missing_ok=True)
-        except Exception:
-            _restore_rollback(rollback)
-            raise
+    deleted_paths = [f"{PATCHES_APPLIED_DIR_REL}/{pid}.json" for pid in externalized_ids]
+    _delete_hot_artifacts_or_rollback(
+        repo_root=repo_root,
+        hot_rel_paths=deleted_paths,
+        written_rel_paths=written_paths,
+    )
 
     return {
         "ok": True,
         "family": "patch_applied",
         "externalized": len(externalized_ids),
         "written_paths": written_paths,
-        "deleted_paths": [f"{PATCHES_APPLIED_DIR_REL}/{pid}.json" for pid in externalized_ids],
+        "deleted_paths": deleted_paths,
         "warnings": warnings,
     }
-
-
-# ---------------------------------------------------------------------------
-# Partial-failure recovery: collect files written by an interrupted pass
-# ---------------------------------------------------------------------------
-
-_FAMILY_DIRS: dict[str, tuple[str, str]] = {
-    "handoff": (HANDOFFS_DIR_REL, HANDOFFS_HISTORY_DIR_REL),
-    "reconciliation": (RECONCILIATIONS_DIR_REL, RECONCILIATIONS_HISTORY_DIR_REL),
-    "task_done": (TASKS_DONE_DIR_REL, TASKS_HISTORY_DONE_DIR_REL),
-    "patch_applied": (PATCHES_APPLIED_DIR_REL, PATCHES_HISTORY_APPLIED_DIR_REL),
-}
-
-
-def _collect_partial_paths(repo_root: Path, family: str) -> list[str]:
-    """Collect repo-relative paths affected by an interrupted family pass.
-
-    Scans the history+index dirs for written files and the hot dir for
-    remaining files (whose deletions need staging). Returns paths suitable
-    for inclusion in the git commit so partial state doesn't remain as
-    uncommitted working-tree changes.
-    """
-    dirs = _FAMILY_DIRS.get(family)
-    if not dirs:
-        return []
-    hot_dir_rel, history_dir_rel = dirs
-    paths: list[str] = []
-    # Collect written history files (payload + stub)
-    for sub in (history_dir_rel, f"{history_dir_rel}/index"):
-        d = repo_root / sub
-        if not d.exists() or not d.is_dir():
-            continue
-        for child in d.iterdir():
-            if child.is_file() and child.suffix == ".json":
-                paths.append(f"{sub}/{child.name}")
-    # Include hot dir files so git stages any deletions from partial passes
-    hot_d = repo_root / hot_dir_rel
-    if hot_d.exists() and hot_d.is_dir():
-        for child in hot_d.iterdir():
-            if child.is_file() and child.suffix == ".json":
-                paths.append(f"{hot_dir_rel}/{child.name}")
-    return paths
 
 
 # ===================================================================
@@ -1001,11 +975,6 @@ def artifact_lifecycle_maintenance_service(
             )
             results[family] = {"ok": False, "family": family, "error": f"maintenance_failed:{family}"}
             all_warnings.append(f"artifact_maintenance_failed:{family}")
-            # Scan history and hot dirs for files affected by the partial pass
-            # so they are included in the final commit attempt rather than
-            # left as uncommitted working-tree state.
-            _partial_paths = _collect_partial_paths(repo_root, family)
-            all_written.extend(_partial_paths)
             continue
 
         results[family] = result

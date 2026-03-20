@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tarfile
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ import tempfile
 from app.artifact_lifecycle.service import (
     HANDOFFS_DIR_REL,
     HANDOFFS_HISTORY_DIR_REL,
+    SHARED_DIR_REL,
     SHARED_HISTORY_DIR_REL,
     RECONCILIATIONS_DIR_REL,
     RECONCILIATIONS_HISTORY_DIR_REL,
@@ -37,7 +39,11 @@ from app.artifact_lifecycle.service import (
     patch_applied_maintenance_pass,
     artifact_lifecycle_maintenance_service,
 )
+from app.coordination.shared_service import shared_update_service
+from app.maintenance.service import BACKUPS_DIR_REL, backup_restore_test_service
+from app.models import BackupRestoreTestRequest, CoordinationSharedUpdateRequest
 from app.storage import safe_path, write_text_file
+from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
 def _now() -> datetime:
@@ -49,6 +55,20 @@ def _write_artifact(repo: Path, rel: str, data: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
     return path
+
+
+def _make_backup(repo: Path, backup_name: str, members: dict[str, str]) -> str:
+    """Create one repo-local restore-test archive with the given file members."""
+    backup_rel = f"{BACKUPS_DIR_REL}/{backup_name}.tar.gz"
+    backup_path = safe_path(repo, backup_rel)
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(backup_path, mode="w:gz") as tf:
+        for rel, text in members.items():
+            target = safe_path(repo, rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+            tf.add(target, arcname=rel)
+    return backup_rel
 
 
 class HandoffMaintenanceTestCase(unittest.TestCase):
@@ -262,6 +282,38 @@ class HandoffMaintenanceTestCase(unittest.TestCase):
         hot_dir = safe_path(self.repo, HANDOFFS_DIR_REL)
         remaining = sorted([p.stem for p in hot_dir.iterdir() if p.is_file() and p.suffix == ".json"])
         self.assertEqual(remaining, ["handoff_cccc0000000000000000000000000001"])
+
+    def test_delete_failure_rolls_back_entire_pass(self):
+        """A late hot-delete failure restores all hot artifacts and removes new history."""
+        from unittest.mock import patch
+
+        first_id = "handoff_aaaa0000000000000000000000000001"
+        second_id = "handoff_bbbb0000000000000000000000000001"
+        self._make_handoff(first_id, "accepted_advisory", 45)
+        self._make_handoff(second_id, "rejected", 46)
+        first_hot = safe_path(self.repo, f"{HANDOFFS_DIR_REL}/{first_id}.json")
+        second_hot = safe_path(self.repo, f"{HANDOFFS_DIR_REL}/{second_id}.json")
+        original_unlink = Path.unlink
+
+        def flaky_unlink(path_self: Path, *args, **kwargs):
+            if path_self == second_hot:
+                raise OSError("simulated delete failure")
+            return original_unlink(path_self, *args, **kwargs)
+
+        with patch("pathlib.Path.unlink", new=flaky_unlink):
+            with self.assertRaises(OSError):
+                handoff_maintenance_pass(
+                    repo_root=self.repo,
+                    now=self.now,
+                    terminal_retention_days=30,
+                    batch_limit=500,
+                )
+
+        self.assertTrue(first_hot.exists())
+        self.assertTrue(second_hot.exists())
+        history_dir = safe_path(self.repo, HANDOFFS_HISTORY_DIR_REL)
+        self.assertEqual(list(history_dir.glob("handoff__*.json")), [])
+        self.assertEqual(list((history_dir / "index").glob("handoff__*.json")), [])
 
 
 class SharedHistoryTestCase(unittest.TestCase):
@@ -1011,6 +1063,59 @@ class SharedUpdateHookIntegrationTestCase(unittest.TestCase):
         self.repo = Path(self.tmp)
         self.now = _now()
 
+    @dataclass(frozen=True)
+    class FakeSettings:
+        repo_root: Path
+        shared_history_hot_retention_days: int = 30
+
+    def _write_shared(self, *, version: int = 1, updated_at: str | None = None) -> dict[str, object]:
+        artifact = {
+            "schema_type": "coordination_shared_state",
+            "schema_version": "1.0",
+            "shared_id": "shared_aaaa0000000000000000000000000001",
+            "created_at": (self.now - timedelta(days=60)).isoformat(),
+            "updated_at": updated_at or (self.now - timedelta(days=45)).isoformat(),
+            "created_by": "peer-alpha",
+            "owner_peer": "peer-alpha",
+            "participant_peers": ["peer-beta"],
+            "task_id": "task-1",
+            "thread_id": "thread-1",
+            "title": "Current shared state",
+            "summary": "Current summary",
+            "shared_state": {
+                "constraints": ["constraint-a"],
+                "drift_signals": ["drift-a"],
+                "coordination_alerts": ["alert-a"],
+            },
+            "version": version,
+            "last_updated_by": "peer-alpha",
+        }
+        _write_artifact(self.repo, f"{SHARED_DIR_REL}/{artifact['shared_id']}.json", artifact)
+        return artifact
+
+    def _request(self, *, expected_version: int = 1) -> CoordinationSharedUpdateRequest:
+        return CoordinationSharedUpdateRequest(
+            expected_version=expected_version,
+            title="Updated shared state",
+            summary="Updated summary",
+            constraints=["constraint-b"],
+            drift_signals=["drift-b"],
+            coordination_alerts=["alert-b"],
+        )
+
+    def _run_update(self, req: CoordinationSharedUpdateRequest) -> dict[str, object]:
+        return shared_update_service(
+            repo_root=self.repo,
+            gm=SimpleGitManagerStub(self.repo),
+            auth=AllowAllAuthStub(peer_id="peer-alpha"),
+            shared_id="shared_aaaa0000000000000000000000000001",
+            req=req,
+            enforce_rate_limit=lambda *_args: None,
+            enforce_payload_limit=lambda *_args: None,
+            settings=self.FakeSettings(repo_root=self.repo),
+            audit=lambda *_args: None,
+        )
+
     def test_capture_produces_history_for_old_version(self):
         """When a shared artifact with an old updated_at is superseded, history is created."""
         old_ts = (self.now - timedelta(days=45)).isoformat()
@@ -1040,25 +1145,80 @@ class SharedUpdateHookIntegrationTestCase(unittest.TestCase):
         self.assertEqual(stub["family"], "shared_history")
 
     def test_capture_failure_is_nonfatal(self):
-        """When externalize_superseded_shared raises, the caller should catch and proceed."""
+        """The wired shared update flow survives helper failures and reports warnings."""
         from unittest.mock import patch
 
-        previous = {
-            "shared_id": "shared_aaaa0000000000000000000000000001",
-            "owner_peer": "peer-alpha",
-            "participant_peers": [],
-            "version": 1,
-            "updated_at": (self.now - timedelta(days=45)).isoformat(),
-        }
+        self._write_shared()
 
-        with patch("app.artifact_lifecycle.service._write_json_exclusive", side_effect=OSError("disk full")):
-            # The function itself raises, but the shared_update_service
-            # wraps it in a try/except — here we test the function does raise
-            with self.assertRaises(OSError):
-                externalize_superseded_shared(
-                    repo_root=self.repo, now=self.now,
-                    previous_artifact=previous, hot_retention_days=30,
-                )
+        with patch("app.artifact_lifecycle.service.externalize_superseded_shared", side_effect=RuntimeError("disk full")):
+            result = self._run_update(self._request())
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["updated"])
+        self.assertIn("shared_history_capture_failed", " ".join(result.get("warnings", [])))
+        shared = json.loads(
+            safe_path(self.repo, f"{SHARED_DIR_REL}/shared_aaaa0000000000000000000000000001.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(shared["version"], 2)
+
+    def test_capture_collision_is_nonfatal(self):
+        """A history-id collision warning is surfaced on the real update path."""
+        from unittest.mock import patch
+
+        self._write_shared()
+
+        with patch("app.artifact_lifecycle.service.externalize_superseded_shared", side_effect=FileExistsError("collision")):
+            result = self._run_update(self._request())
+
+        self.assertTrue(result["ok"])
+        self.assertIn("shared_history_capture_collision", " ".join(result.get("warnings", [])))
+
+    def test_history_commit_failure_marks_update_warning(self):
+        """Non-durable shared history capture is surfaced in the update response."""
+        from unittest.mock import patch
+
+        self._write_shared()
+        payload_rel = f"{SHARED_HISTORY_DIR_REL}/shared_history__20260319T120000Z__0001.json"
+        stub_rel = f"{SHARED_HISTORY_DIR_REL}/index/shared_history__20260319T120000Z__0001.json"
+        _write_artifact(self.repo, payload_rel, {"schema_type": "shared_history_unit"})
+        _write_artifact(self.repo, stub_rel, {"schema_type": "artifact_history_stub"})
+
+        with patch(
+            "app.artifact_lifecycle.service.externalize_superseded_shared",
+            return_value={
+                "history_id": "shared_history__20260319T120000Z__0001",
+                "payload_path": payload_rel,
+                "stub_path": stub_rel,
+            },
+        ), patch("app.git_safety.try_commit_paths", return_value=False):
+            result = self._run_update(self._request())
+
+        self.assertTrue(result["ok"])
+        self.assertIn("shared_history_not_durable", " ".join(result.get("warnings", [])))
+
+    def test_persist_failure_cleans_up_captured_history(self):
+        """Captured history is removed if the hot shared update cannot be persisted."""
+        from unittest.mock import patch
+
+        self._write_shared()
+        payload_rel = f"{SHARED_HISTORY_DIR_REL}/shared_history__20260319T120000Z__0001.json"
+        stub_rel = f"{SHARED_HISTORY_DIR_REL}/index/shared_history__20260319T120000Z__0001.json"
+        payload_path = _write_artifact(self.repo, payload_rel, {"schema_type": "shared_history_unit"})
+        stub_path = _write_artifact(self.repo, stub_rel, {"schema_type": "artifact_history_stub"})
+
+        with patch(
+            "app.artifact_lifecycle.service.externalize_superseded_shared",
+            return_value={
+                "history_id": "shared_history__20260319T120000Z__0001",
+                "payload_path": payload_rel,
+                "stub_path": stub_rel,
+            },
+        ), patch("app.coordination.shared_service._persist_updated_shared_artifact", side_effect=RuntimeError("persist failed")):
+            with self.assertRaises(RuntimeError):
+                self._run_update(self._request())
+
+        self.assertFalse(payload_path.exists())
+        self.assertFalse(stub_path.exists())
 
     def test_concurrent_capture_retry_on_collision(self):
         """When O_EXCL detects a collision, the function retries with a new sequence."""
@@ -1094,6 +1254,118 @@ class SharedUpdateHookIntegrationTestCase(unittest.TestCase):
         self.assertIsNotNone(result)
         # Should have allocated sequence 0002
         self.assertIn("__0002", result["history_id"])
+
+
+class BackupRestoreArtifactHistoryValidationTestCase(unittest.TestCase):
+    """Restore-test should validate artifact-history payloads and stub symmetry."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = Path(self.tmp)
+
+    @dataclass(frozen=True)
+    class FakeSettings:
+        repo_root: Path
+
+    def _run_restore(self, backup_rel: str) -> dict[str, object]:
+        return backup_restore_test_service(
+            settings=self.FakeSettings(repo_root=self.repo),
+            auth=AllowAllAuthStub(peer_id="peer-alpha"),
+            req=BackupRestoreTestRequest(backup_path=backup_rel, verify_continuity=False),
+            enforce_rate_limit=lambda *_args: None,
+            enforce_payload_limit=lambda *_args: None,
+            rebuild_index=lambda _root: {"file_count": 0},
+            audit=lambda *_args: None,
+        )
+
+    def test_restore_test_reports_invalid_history_payload(self):
+        """Malformed history payloads fail restore-test with structured validation."""
+        backup_rel = _make_backup(
+            self.repo,
+            "artifact-history-invalid-payload",
+            {
+                "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "wrong_schema",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "artifact_id": "handoff_aaaa",
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "cut_at": _now().isoformat(),
+                        "artifact": {"handoff_id": "handoff_aaaa"},
+                        "summary": {"recipient_status": "accepted_advisory"},
+                    }
+                ),
+                "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "artifact_history_stub",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "payload_path": "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json",
+                        "created_at": _now().isoformat(),
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "summary": {"recipient_status": "accepted_advisory"},
+                    }
+                ),
+            },
+        )
+
+        result = self._run_restore(backup_rel)
+
+        self.assertFalse(result["ok"])
+        validation = result["artifact_history_validation"]
+        self.assertFalse(validation["ok"])
+        self.assertIn(
+            "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json",
+            validation["invalid_payloads"],
+        )
+
+    def test_restore_test_reports_stub_payload_symmetry_failures(self):
+        """Mismatched stub metadata fails restore-test instead of silently passing."""
+        backup_rel = _make_backup(
+            self.repo,
+            "artifact-history-mismatched-stub",
+            {
+                "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "handoff_history_unit",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "artifact_id": "handoff_aaaa",
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "cut_at": _now().isoformat(),
+                        "artifact": {"handoff_id": "handoff_aaaa"},
+                        "summary": {"recipient_status": "accepted_advisory"},
+                    }
+                ),
+                "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "artifact_history_stub",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "payload_path": "memory/coordination/handoffs/history/handoff__20260319T120000Z__0001.json",
+                        "created_at": _now().isoformat(),
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "summary": {"recipient_status": "rejected"},
+                    }
+                ),
+            },
+        )
+
+        result = self._run_restore(backup_rel)
+
+        self.assertFalse(result["ok"])
+        validation = result["artifact_history_validation"]
+        self.assertFalse(validation["ok"])
+        self.assertIn(
+            "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json",
+            validation["mismatched_stubs"],
+        )
 
 
 if __name__ == "__main__":
