@@ -763,7 +763,6 @@ def task_done_maintenance_pass(
         if path.is_dir() or path.suffix.lower() != ".json":
             continue
         task_id = path.stem
-        snapshot_bytes = path.read_bytes()
         artifact, warn = _load_json_file(path)
         if warn:
             warnings.append(warn)
@@ -785,7 +784,6 @@ def task_done_maintenance_pass(
                 "cut_at": now,
                 "source_rel": source_rel,
                 "summary": _task_done_summary(artifact),
-                "snapshot_bytes": snapshot_bytes,
             }
         )
         if len(eligible) >= batch_limit:
@@ -917,6 +915,9 @@ def _externalize_selected_family(
                 except FileNotFoundError:
                     warnings.append(f"{family}_hot_changed:{artifact_id}")
                     return
+                except OSError:
+                    warnings.append(f"artifact_unreadable:{current_path.name}")
+                    return
                 if mutable_hot_family and current_bytes != row["snapshot_bytes"]:
                     warnings.append(f"{family}_hot_changed:{artifact_id}")
                     return
@@ -941,7 +942,7 @@ def _externalize_selected_family(
                     return
                 if current_path.resolve() not in rollback_seen:
                     rollback_seen.add(current_path.resolve())
-                    rollback_plan.append((current_path, row["snapshot_bytes"]))
+                    rollback_plan.append((current_path, current_bytes))
                 written_paths.extend([payload_rel, stub_rel])
                 current_path.unlink(missing_ok=True)
                 deleted_paths.append(row["source_rel"])
@@ -986,7 +987,6 @@ def patch_applied_maintenance_pass(
         if path.is_dir() or path.suffix.lower() != ".json":
             continue
         patch_id = path.stem
-        snapshot_bytes = path.read_bytes()
         artifact, warn = _load_json_file(path)
         if warn:
             warnings.append(warn)
@@ -1008,7 +1008,6 @@ def patch_applied_maintenance_pass(
                 "cut_at": now,
                 "source_rel": source_rel,
                 "summary": _patch_applied_summary(artifact),
-                "snapshot_bytes": snapshot_bytes,
             }
         )
         if len(eligible) >= batch_limit:
@@ -1076,6 +1075,8 @@ def _load_artifact_history_payload(repo_root: Path, payload_rel: str) -> dict[st
         raise HTTPException(status_code=400, detail="Artifact-history payload family does not match path")
     if payload.get("history_id") != path.stem:
         raise HTTPException(status_code=400, detail="Artifact-history payload history_id does not match path")
+    if _parse_iso(str(payload.get("cut_at") or "")) is None:
+        raise HTTPException(status_code=400, detail="Artifact-history payload cut_at is invalid")
     if not isinstance(payload.get("artifact"), dict):
         raise HTTPException(status_code=400, detail="Artifact-history payload artifact must be an object")
     if not isinstance(payload.get("summary"), dict):
@@ -1349,6 +1350,8 @@ def _load_artifact_history_payload_from_dict(*, payload: dict[str, Any], payload
         raise ValueError("family mismatch")
     if payload.get("history_id") != Path(payload_rel).stem:
         raise ValueError("history_id mismatch")
+    if _parse_iso(str(payload.get("cut_at") or "")) is None:
+        raise ValueError("cut_at mismatch")
     if not isinstance(payload.get("artifact"), dict):
         raise ValueError("artifact missing")
     if not isinstance(payload.get("summary"), dict):
@@ -1532,7 +1535,7 @@ def artifact_lifecycle_maintenance_service(
             auth=auth,
             now=now,
             settings=settings,
-            families=None,
+            families=families,
             audit=audit or (lambda *_args, **_kwargs: None),
         )
         all_warnings.extend(cold_apply_result.get("warnings", []))

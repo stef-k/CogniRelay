@@ -412,6 +412,8 @@ def _validate_artifact_history_cold_payload(
         return False, None
     if payload.get("history_id") != Path(hot_rel).stem:
         return False, None
+    if not _is_iso_timestamp(payload.get("cut_at")):
+        return False, None
     artifact = payload.get("artifact")
     if not isinstance(artifact, dict):
         return False, None

@@ -12,6 +12,7 @@ Also covers the orchestrator, rollback, degradation, and deterministic ordering.
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import tarfile
@@ -20,6 +21,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
+
+from fastapi import HTTPException
 
 from app.artifact_lifecycle.service import (
     HANDOFFS_DIR_REL,
@@ -64,7 +68,7 @@ def _write_artifact(repo: Path, rel: str, data: dict) -> Path:
     return path
 
 
-def _make_backup(repo: Path, backup_name: str, members: dict[str, str]) -> str:
+def _make_backup(repo: Path, backup_name: str, members: dict[str, str | bytes]) -> str:
     """Create one repo-local restore-test archive with the given file members."""
     backup_rel = f"{BACKUPS_DIR_REL}/{backup_name}.tar.gz"
     backup_path = safe_path(repo, backup_rel)
@@ -73,7 +77,10 @@ def _make_backup(repo: Path, backup_name: str, members: dict[str, str]) -> str:
         for rel, text in members.items():
             target = safe_path(repo, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
+            if isinstance(text, bytes):
+                target.write_bytes(text)
+            else:
+                target.write_text(text, encoding="utf-8")
             tf.add(target, arcname=rel)
     return backup_rel
 
@@ -576,6 +583,34 @@ class TaskDoneMaintenanceTestCase(unittest.TestCase):
         )
         self.assertTrue(any("task_done_retention_missing" in w for w in result["warnings"]))
 
+    def test_unreadable_done_task_is_skipped_with_warning(self):
+        """Unreadable immutable hot files should degrade instead of aborting the pass."""
+        task_id = "task-unreadable"
+        source_path = _write_artifact(self.repo, f"{TASKS_DONE_DIR_REL}/{task_id}.json", {
+            "task_id": task_id,
+            "status": "done",
+            "owner_peer": "peer-alpha",
+            "thread_id": "thread-1",
+            "updated_at": (self.now - timedelta(days=45)).isoformat(),
+        })
+        original_read_bytes = Path.read_bytes
+
+        def flaky_read_bytes(path_self: Path) -> bytes:
+            if path_self == source_path:
+                raise OSError("read bytes fail")
+            return original_read_bytes(path_self)
+
+        with patch.object(Path, "read_bytes", new=flaky_read_bytes):
+            result = task_done_maintenance_pass(
+                repo_root=self.repo, now=self.now,
+                hot_retention_days=30, batch_limit=500,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["externalized"], 0)
+        self.assertIn(f"artifact_unreadable:{source_path.name}", result["warnings"])
+        self.assertTrue(source_path.exists())
+
 
 class PatchAppliedMaintenanceTestCase(unittest.TestCase):
     """Tests for the applied-patch maintenance pass."""
@@ -629,6 +664,35 @@ class PatchAppliedMaintenanceTestCase(unittest.TestCase):
             hot_retention_days=30, batch_limit=500,
         )
         self.assertEqual(result["externalized"], 0)
+
+    def test_unreadable_applied_patch_is_skipped_with_warning(self):
+        """Unreadable immutable patch files should degrade instead of aborting the pass."""
+        patch_id = "patch_unreadable"
+        source_path = _write_artifact(self.repo, f"{PATCHES_APPLIED_DIR_REL}/{patch_id}.json", {
+            "patch_id": patch_id,
+            "patch_type": "doc_patch",
+            "target_path": "README.md",
+            "status": "applied",
+            "applied_commit": "abc123",
+            "updated_at": (self.now - timedelta(days=45)).isoformat(),
+        })
+        original_read_bytes = Path.read_bytes
+
+        def flaky_read_bytes(path_self: Path) -> bytes:
+            if path_self == source_path:
+                raise OSError("read bytes fail")
+            return original_read_bytes(path_self)
+
+        with patch.object(Path, "read_bytes", new=flaky_read_bytes):
+            result = patch_applied_maintenance_pass(
+                repo_root=self.repo, now=self.now,
+                hot_retention_days=30, batch_limit=500,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["externalized"], 0)
+        self.assertIn(f"artifact_unreadable:{source_path.name}", result["warnings"])
+        self.assertTrue(source_path.exists())
 
 
 class OrchestratorTestCase(unittest.TestCase):
@@ -1607,6 +1671,67 @@ class BackupRestoreArtifactHistoryValidationTestCase(unittest.TestCase):
             validation["invalid_cold_payloads"],
         )
 
+    def test_restore_test_rejects_cold_payload_with_invalid_cut_at(self):
+        """Cold artifact-history payloads must validate the required cut_at field."""
+        payload = {
+            "schema_type": "handoff_history_unit",
+            "schema_version": "1.0",
+            "family": "handoff",
+            "history_id": "handoff__20260319T120000Z__0001",
+            "artifact_id": "handoff_aaaa",
+            "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+            "cut_at": "not-a-timestamp",
+            "artifact": {
+                "handoff_id": "handoff_aaaa",
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "updated_at": "2026-03-02T10:00:00+00:00",
+            },
+            "summary": {
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "terminal_at": "2026-03-02T10:00:00+00:00",
+            },
+        }
+        backup_rel = _make_backup(
+            self.repo,
+            "artifact-history-invalid-cold-cut-at",
+            {
+                "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz": gzip.compress(
+                    json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+                ),
+                "memory/coordination/handoffs/history/index/handoff__20260319T120000Z__0001.json": json.dumps(
+                    {
+                        "schema_type": "artifact_history_stub",
+                        "schema_version": "1.0",
+                        "family": "handoff",
+                        "history_id": "handoff__20260319T120000Z__0001",
+                        "payload_path": "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz",
+                        "created_at": _now().isoformat(),
+                        "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+                        "summary": payload["summary"],
+                    }
+                ),
+            },
+        )
+
+        result = self._run_restore(backup_rel)
+
+        self.assertFalse(result["ok"])
+        validation = result["artifact_history_validation"]
+        self.assertIn(
+            "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz",
+            validation["invalid_cold_payloads"],
+        )
+
 
 class ArtifactHistoryColdStoreTestCase(unittest.TestCase):
     """Cold-store and rehydrate behavior for artifact-history payloads."""
@@ -1658,6 +1783,48 @@ class ArtifactHistoryColdStoreTestCase(unittest.TestCase):
             "payload_path": payload_rel,
             "created_at": _now().isoformat(),
             "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+            "summary": payload["summary"],
+        })
+        return payload_rel, stub_rel
+
+    def _write_shared_history_unit(self) -> tuple[str, str]:
+        payload_rel = "memory/coordination/shared/history/shared_history__20260319T120000Z__0001.json"
+        stub_rel = "memory/coordination/shared/history/index/shared_history__20260319T120000Z__0001.json"
+        payload = {
+            "schema_type": "shared_history_unit",
+            "schema_version": "1.0",
+            "family": "shared_history",
+            "history_id": "shared_history__20260319T120000Z__0001",
+            "artifact_id": "shared_aaaa0000000000000000000000000001",
+            "source_path": f"{SHARED_DIR_REL}/shared_aaaa0000000000000000000000000001.json",
+            "cut_at": _now().isoformat(),
+            "artifact": {
+                "shared_id": "shared_aaaa0000000000000000000000000001",
+                "owner_peer": "peer-alpha",
+                "participant_peers": ["peer-beta"],
+                "version": 3,
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "updated_at": "2026-03-01T10:00:00+00:00",
+            },
+            "summary": {
+                "shared_id": "shared_aaaa0000000000000000000000000001",
+                "owner_peer": "peer-alpha",
+                "version": 3,
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "updated_at": "2026-03-01T10:00:00+00:00",
+            },
+        }
+        _write_artifact(self.repo, payload_rel, payload)
+        _write_artifact(self.repo, stub_rel, {
+            "schema_type": "artifact_history_stub",
+            "schema_version": "1.0",
+            "family": "shared_history",
+            "history_id": "shared_history__20260319T120000Z__0001",
+            "payload_path": payload_rel,
+            "created_at": _now().isoformat(),
+            "source_path": f"{SHARED_DIR_REL}/shared_aaaa0000000000000000000000000001.json",
             "summary": payload["summary"],
         })
         return payload_rel, stub_rel
@@ -1743,6 +1910,91 @@ class ArtifactHistoryColdStoreTestCase(unittest.TestCase):
             stub["payload_path"],
             "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz",
         )
+
+    def test_rehydrate_rejects_cold_payload_with_invalid_cut_at(self):
+        """Cold rehydrate must reject malformed payloads instead of accepting them."""
+        _payload_rel, stub_rel = self._write_handoff_history_unit()
+        cold_rel = "memory/coordination/handoffs/history/cold/handoff__20260319T120000Z__0001.json.gz"
+        invalid_payload = {
+            "schema_type": "handoff_history_unit",
+            "schema_version": "1.0",
+            "family": "handoff",
+            "history_id": "handoff__20260319T120000Z__0001",
+            "artifact_id": "handoff_aaaa",
+            "source_path": f"{HANDOFFS_DIR_REL}/handoff_aaaa.json",
+            "cut_at": "not-a-timestamp",
+            "artifact": {
+                "handoff_id": "handoff_aaaa",
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "updated_at": "2026-03-02T10:00:00+00:00",
+            },
+            "summary": {
+                "sender_peer": "peer-alpha",
+                "recipient_peer": "peer-beta",
+                "recipient_status": "accepted_advisory",
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "created_at": "2026-03-01T10:00:00+00:00",
+                "terminal_at": "2026-03-02T10:00:00+00:00",
+            },
+        }
+        safe_path(self.repo, cold_rel).parent.mkdir(parents=True, exist_ok=True)
+        safe_path(self.repo, cold_rel).write_bytes(
+            gzip.compress(json.dumps(invalid_payload, ensure_ascii=False, indent=2).encode("utf-8"))
+        )
+        stub = json.loads(safe_path(self.repo, stub_rel).read_text(encoding="utf-8"))
+        stub["payload_path"] = cold_rel
+        write_text_file(safe_path(self.repo, stub_rel), json.dumps(stub, ensure_ascii=False, indent=2))
+
+        with self.assertRaises(HTTPException):
+            artifact_history_cold_rehydrate_service(
+                repo_root=self.repo,
+                gm=self.gm,
+                auth=self.auth,
+                req=ArtifactHistoryColdRehydrateRequest(cold_stub_path=stub_rel),
+                audit=lambda *_args: None,
+            )
+
+    def test_selective_maintenance_does_not_cold_store_unrequested_families(self):
+        """Cold apply should honor the same family filter as the externalization pass."""
+        shared_payload_rel, shared_stub_rel = self._write_shared_history_unit()
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            handoff_terminal_retention_days: int = 30
+            handoff_cold_after_days: int = 10
+            shared_history_hot_retention_days: int = 30
+            shared_history_cold_after_days: int = 10
+            reconciliation_resolved_retention_days: int = 30
+            reconciliation_cold_after_days: int = 90
+            task_done_hot_retention_days: int = 30
+            task_done_cold_after_days: int = 90
+            patch_applied_hot_retention_days: int = 30
+            patch_applied_cold_after_days: int = 90
+            artifact_history_batch_limit: int = 500
+
+        result = artifact_lifecycle_maintenance_service(
+            repo_root=self.repo,
+            gm=self.gm,
+            now=_now(),
+            settings=FakeSettings(),
+            families=["handoff"],
+            auth=self.auth,
+            audit=lambda *_args: None,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIsNotNone(result["cold_apply"])
+        self.assertEqual(result["cold_apply"]["cold_stored"], 0)
+        self.assertEqual(set(result["cold_apply"]["families"].keys()), {"handoff"})
+        self.assertTrue(safe_path(self.repo, shared_payload_rel).exists())
+        stub = json.loads(safe_path(self.repo, shared_stub_rel).read_text(encoding="utf-8"))
+        self.assertEqual(stub["payload_path"], shared_payload_rel)
 
 
 if __name__ == "__main__":
