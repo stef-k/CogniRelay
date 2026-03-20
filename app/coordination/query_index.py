@@ -477,6 +477,44 @@ class CoordinationQueryIndex:
                 exc_info=True,
             )
 
+    # -- delete (called after lifecycle externalization) --------------------
+
+    def delete_handoff(self, handoff_id: str) -> None:
+        """Remove one handoff entry from the sidecar index."""
+        if self._conn is None:
+            return
+        try:
+            self._conn.execute("DELETE FROM handoff_index WHERE handoff_id = ?", (handoff_id,))
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            _log.error("Index delete failed for handoff %s", handoff_id, exc_info=True)
+
+    def delete_reconciliation(self, reconciliation_id: str) -> None:
+        """Remove one reconciliation entry and its claimants from the sidecar index."""
+        if self._conn is None:
+            return
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                "DELETE FROM reconciliation_claimants WHERE reconciliation_id = ?",
+                (reconciliation_id,),
+            )
+            cur.execute(
+                "DELETE FROM reconciliation_index WHERE reconciliation_id = ?",
+                (reconciliation_id,),
+            )
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            _log.error("Index delete failed for reconciliation %s", reconciliation_id, exc_info=True)
+
     # -- query --------------------------------------------------------------
 
     def query_handoffs(
@@ -728,3 +766,17 @@ def try_upsert_reconciliation(artifact: dict[str, Any]) -> None:
     idx = _coordination_index
     if idx is not None:
         idx.upsert_reconciliation(artifact)
+
+
+def try_delete_handoff(handoff_id: str) -> None:
+    """Best-effort delete of a handoff entry from the sidecar index."""
+    idx = _coordination_index
+    if idx is not None:
+        idx.delete_handoff(handoff_id)
+
+
+def try_delete_reconciliation(reconciliation_id: str) -> None:
+    """Best-effort delete of a reconciliation entry from the sidecar index."""
+    idx = _coordination_index
+    if idx is not None:
+        idx.delete_reconciliation(reconciliation_id)

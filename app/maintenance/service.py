@@ -20,6 +20,13 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.artifact_lifecycle.service import (
+    _ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY,
+    _family_artifact_id_key,
+    _family_source_rel,
+    _family_summary,
+    artifact_history_payload_rel_path_from_cold_artifact,
+)
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.continuity.service import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
@@ -47,6 +54,34 @@ REPLICATION_STATE_REL = "peers/replication_state.json"
 REPLICATION_ALLOWED_PREFIXES = {"journal", "essays", "projects", "memory", "messages", "tasks", "patches", "runs", "snapshots", "archive"}
 REPLICATION_TOMBSTONES_REL = "peers/replication_tombstones.json"
 BACKUPS_DIR_REL = "backups"
+
+_ARTIFACT_HISTORY_SPECS: tuple[dict[str, str], ...] = (
+    {
+        "family": "handoff",
+        "history_dir_rel": "memory/coordination/handoffs/history",
+        "payload_schema_type": "handoff_history_unit",
+    },
+    {
+        "family": "shared_history",
+        "history_dir_rel": "memory/coordination/shared/history",
+        "payload_schema_type": "shared_history_unit",
+    },
+    {
+        "family": "reconciliation",
+        "history_dir_rel": "memory/coordination/reconciliations/history",
+        "payload_schema_type": "reconciliation_history_unit",
+    },
+    {
+        "family": "task_done",
+        "history_dir_rel": "tasks/history/done",
+        "payload_schema_type": "task_done_history_unit",
+    },
+    {
+        "family": "patch_applied",
+        "history_dir_rel": "patches/history/applied",
+        "payload_schema_type": "patch_applied_history_unit",
+    },
+)
 
 
 def _capture_path_state(path: Path, rollback_plan: list[tuple[Path, bytes | None]], seen: set[Path]) -> None:
@@ -293,6 +328,250 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
         "unmatched_cold_stubs": unmatched_cold_stubs,
         "unmatched_cold_payloads": unmatched_cold_payloads,
         "missing_fallbacks": missing_fallbacks,
+        "warnings": warnings,
+    }
+
+
+def _is_iso_timestamp(value: Any) -> bool:
+    """Return whether a value is a parseable ISO-8601 timestamp."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_artifact_history_payload(
+    path: Path,
+    restore_root: Path,
+    *,
+    family: str,
+    schema_type: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored artifact-history payload file."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, None
+    if not isinstance(payload, dict):
+        return False, None
+    if payload.get("schema_type") != schema_type:
+        return False, None
+    if payload.get("schema_version") != "1.0":
+        return False, None
+    if payload.get("family") != family:
+        return False, None
+    history_id = payload.get("history_id")
+    if not isinstance(history_id, str) or history_id != path.stem:
+        return False, None
+    if not isinstance(payload.get("artifact_id"), str) or not payload["artifact_id"].strip():
+        return False, None
+    if not isinstance(payload.get("source_path"), str) or not payload["source_path"].strip():
+        return False, None
+    if not _is_iso_timestamp(payload.get("cut_at")):
+        return False, None
+    if not isinstance(payload.get("artifact"), dict):
+        return False, None
+    if not isinstance(payload.get("summary"), dict):
+        return False, None
+    artifact = payload["artifact"]
+    artifact_id = str(payload.get("artifact_id") or "")
+    artifact_id_key = _family_artifact_id_key(family)
+    if not artifact_id or str(artifact.get(artifact_id_key) or "") != artifact_id:
+        return False, None
+    if str(payload.get("source_path") or "") != _family_source_rel(family, artifact_id):
+        return False, None
+    if payload.get("summary") != _family_summary(family, artifact):
+        return False, None
+    payload["rel"] = str(path.relative_to(restore_root))
+    return True, payload
+
+
+def _validate_artifact_history_cold_payload(
+    path: Path,
+    restore_root: Path,
+    *,
+    family: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored cold artifact-history payload file."""
+    try:
+        payload_bytes = gzip.decompress(path.read_bytes())
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        return False, None
+    if not isinstance(payload, dict):
+        return False, None
+    hot_rel = artifact_history_payload_rel_path_from_cold_artifact(str(path.relative_to(restore_root)))
+    if payload.get("schema_type") != _ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY[family]:
+        return False, None
+    if payload.get("schema_version") != "1.0":
+        return False, None
+    if payload.get("family") != family:
+        return False, None
+    if payload.get("history_id") != Path(hot_rel).stem:
+        return False, None
+    if not _is_iso_timestamp(payload.get("cut_at")):
+        return False, None
+    artifact = payload.get("artifact")
+    if not isinstance(artifact, dict):
+        return False, None
+    if not isinstance(payload.get("summary"), dict):
+        return False, None
+    artifact_id = str(payload.get("artifact_id") or "")
+    artifact_id_key = _family_artifact_id_key(family)
+    if not artifact_id or str(artifact.get(artifact_id_key) or "") != artifact_id:
+        return False, None
+    if str(payload.get("source_path") or "") != _family_source_rel(family, artifact_id):
+        return False, None
+    if payload.get("summary") != _family_summary(family, artifact):
+        return False, None
+    payload["rel"] = str(path.relative_to(restore_root))
+    return True, payload
+
+
+def _validate_artifact_history_stub(path: Path, restore_root: Path) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored artifact-history stub file."""
+    try:
+        stub = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, None
+    if not isinstance(stub, dict):
+        return False, None
+    if stub.get("schema_type") != "artifact_history_stub":
+        return False, None
+    if stub.get("schema_version") != "1.0":
+        return False, None
+    history_id = stub.get("history_id")
+    if not isinstance(history_id, str) or history_id != path.stem:
+        return False, None
+    if not isinstance(stub.get("family"), str) or not stub["family"].strip():
+        return False, None
+    if not isinstance(stub.get("payload_path"), str) or not stub["payload_path"].strip():
+        return False, None
+    if not _is_iso_timestamp(stub.get("created_at")):
+        return False, None
+    if not isinstance(stub.get("source_path"), str) or not stub["source_path"].strip():
+        return False, None
+    if not isinstance(stub.get("summary"), dict):
+        return False, None
+    stub["rel"] = str(path.relative_to(restore_root))
+    return True, stub
+
+
+def _validate_restored_artifact_history(restore_root: Path) -> dict[str, Any]:
+    """Inspect restored artifact-history payloads/stubs and validate symmetry."""
+    payload_count = 0
+    cold_payload_count = 0
+    stub_count = 0
+    invalid_payloads: list[str] = []
+    invalid_cold_payloads: list[str] = []
+    invalid_stubs: list[str] = []
+    missing_payloads: list[str] = []
+    unmatched_payloads: list[str] = []
+    mismatched_stubs: list[str] = []
+    warnings: list[str] = []
+    valid_payloads: dict[str, dict[str, Any]] = {}
+    valid_stubs: dict[str, dict[str, Any]] = {}
+
+    for spec in _ARTIFACT_HISTORY_SPECS:
+        history_dir = restore_root / spec["history_dir_rel"]
+        if history_dir.exists() and history_dir.is_dir():
+            for path in sorted(history_dir.glob("*.json")):
+                if not path.is_file():
+                    continue
+                payload_count += 1
+                valid, payload = _validate_artifact_history_payload(
+                    path,
+                    restore_root,
+                    family=spec["family"],
+                    schema_type=spec["payload_schema_type"],
+                )
+                rel = str(path.relative_to(restore_root))
+                if not valid or payload is None:
+                    invalid_payloads.append(rel)
+                    warnings.append(f"artifact_history_invalid_payload:{rel}")
+                    continue
+                valid_payloads[rel] = payload
+
+        cold_dir = history_dir / "cold"
+        if cold_dir.exists() and cold_dir.is_dir():
+            for path in sorted(cold_dir.glob("*.json.gz")):
+                if not path.is_file():
+                    continue
+                cold_payload_count += 1
+                valid, payload = _validate_artifact_history_cold_payload(
+                    path,
+                    restore_root,
+                    family=spec["family"],
+                )
+                rel = str(path.relative_to(restore_root))
+                if not valid or payload is None:
+                    invalid_cold_payloads.append(rel)
+                    warnings.append(f"artifact_history_invalid_cold_payload:{rel}")
+                    continue
+                valid_payloads[rel] = payload
+
+        stub_dir = history_dir / "index"
+        if stub_dir.exists() and stub_dir.is_dir():
+            for path in sorted(stub_dir.glob("*.json")):
+                if not path.is_file():
+                    continue
+                stub_count += 1
+                valid, stub = _validate_artifact_history_stub(path, restore_root)
+                rel = str(path.relative_to(restore_root))
+                if not valid or stub is None:
+                    invalid_stubs.append(rel)
+                    warnings.append(f"artifact_history_invalid_stub:{rel}")
+                    continue
+                valid_stubs[rel] = stub
+
+    for rel, stub in valid_stubs.items():
+        try:
+            payload_rel = str(safe_path(restore_root, stub["payload_path"]).relative_to(restore_root))
+        except Exception:
+            invalid_stubs.append(rel)
+            warnings.append(f"artifact_history_invalid_stub_payload_path:{rel}")
+            continue
+
+        payload = valid_payloads.get(payload_rel)
+        if payload is None:
+            missing_payloads.append(rel)
+            warnings.append(f"artifact_history_missing_payload:{rel}")
+            continue
+
+        if (
+            stub.get("family") != payload.get("family")
+            or stub.get("history_id") != payload.get("history_id")
+            or stub.get("source_path") != payload.get("source_path")
+            or stub.get("summary") != payload.get("summary")
+        ):
+            mismatched_stubs.append(rel)
+            warnings.append(f"artifact_history_stub_mismatch:{rel}")
+
+    for rel in valid_payloads:
+        payload_path = Path(rel)
+        if payload_path.suffix == ".gz":
+            hot_rel = artifact_history_payload_rel_path_from_cold_artifact(rel)
+            expected_stub_rel = str(Path(hot_rel).parent / "index" / Path(hot_rel).name)
+        else:
+            expected_stub_rel = str(payload_path.parent / "index" / payload_path.name)
+        if expected_stub_rel not in valid_stubs:
+            unmatched_payloads.append(rel)
+            warnings.append(f"artifact_history_missing_stub:{rel}")
+
+    return {
+        "ok": not (invalid_payloads or invalid_cold_payloads or invalid_stubs or missing_payloads or unmatched_payloads or mismatched_stubs),
+        "payloads": payload_count,
+        "cold_payloads": cold_payload_count,
+        "stubs": stub_count,
+        "invalid_payloads": invalid_payloads,
+        "invalid_cold_payloads": invalid_cold_payloads,
+        "invalid_stubs": invalid_stubs,
+        "missing_payloads": missing_payloads,
+        "unmatched_payloads": unmatched_payloads,
+        "mismatched_stubs": mismatched_stubs,
         "warnings": warnings,
     }
 
@@ -1191,10 +1470,13 @@ def backup_restore_test_service(
         if req.verify_continuity:
             continuity_validation = _validate_restored_continuity(restore_root)
 
+        artifact_history_validation = _validate_restored_artifact_history(restore_root)
+
     ok = (
         extracted_files > 0
         and (index_validation is None or bool(index_validation.get("ok")))
         and (continuity_validation is None or bool(continuity_validation.get("ok")))
+        and bool(artifact_history_validation.get("ok"))
     )
     audit(
         auth,
@@ -1213,6 +1495,7 @@ def backup_restore_test_service(
         "extracted_prefixes": sorted(extracted_prefixes),
         "index_validation": index_validation,
         "continuity_validation": continuity_validation,
+        "artifact_history_validation": artifact_history_validation,
     }
 
 

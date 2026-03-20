@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
+from .artifact_lifecycle.service import artifact_history_cold_rehydrate_service, artifact_history_cold_store_service
 from .context import (
     append_record_service,
     context_retrieve_service,
@@ -75,6 +76,8 @@ from .git_manager import GitManager
 from .indexer import rebuild_index
 from .models import (
     AppendRequest,
+    ArtifactHistoryColdRehydrateRequest,
+    ArtifactHistoryColdStoreRequest,
     CodeCheckRunRequest,
     CodeMergeRequest,
     CompactRequest,
@@ -596,6 +599,22 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
         ),
         continuity_retention_apply_request_factory=ContinuityRetentionApplyRequest,
+        artifact_history_cold_store=lambda req, auth: artifact_history_cold_store_service(
+            repo_root=settings.repo_root,
+            gm=gm,
+            auth=auth,
+            req=req,
+            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        ),
+        artifact_history_cold_store_request_factory=ArtifactHistoryColdStoreRequest,
+        artifact_history_cold_rehydrate=lambda req, auth: artifact_history_cold_rehydrate_service(
+            repo_root=settings.repo_root,
+            gm=gm,
+            auth=auth,
+            req=req,
+            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        ),
+        artifact_history_cold_rehydrate_request_factory=ArtifactHistoryColdRehydrateRequest,
         load_token_config=load_token_config,
         parse_iso=_parse_iso,
         load_security_keys=load_security_keys,
