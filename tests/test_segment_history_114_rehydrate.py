@@ -121,7 +121,7 @@ class TestRehydrateErrors(unittest.TestCase):
             body = result.body
             parsed = json.loads(body)
             self.assertFalse(parsed["ok"])
-            self.assertEqual(parsed["error"]["code"], "stub_not_found")
+            self.assertEqual(parsed["error"]["code"], "segment_history_stub_not_found")
 
     def test_not_cold(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -153,7 +153,7 @@ class TestRehydrateErrors(unittest.TestCase):
             self.assertIsInstance(result, JSONResponse)
             self.assertEqual(result.status_code, 409)
             parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "not_cold")
+            self.assertEqual(parsed["error"]["code"], "segment_history_not_cold")
 
     def test_invalid_segment_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -171,7 +171,7 @@ class TestRehydrateErrors(unittest.TestCase):
             self.assertEqual(result.status_code, 400)
             parsed = json.loads(result.body)
             self.assertFalse(parsed["ok"])
-            self.assertEqual(parsed["error"]["code"], "invalid_segment_id")
+            self.assertEqual(parsed["error"]["code"], "segment_history_invalid_segment_id")
 
     def test_rehydrate_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as td:

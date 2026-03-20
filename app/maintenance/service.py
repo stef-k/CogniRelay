@@ -1475,8 +1475,11 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                 for year_dir in sorted(journal_history.iterdir()):
                     if year_dir.is_dir() and year_dir.name.isdigit():
                         _scan_stub_dir(year_dir / "index", family_name)
-            # Also check legacy/flat stub dir
-            _scan_stub_dir(restore_root / config.stub_dir, family_name)
+        elif family_name == "message_stream":
+            # message_stream has per-kind stub dirs
+            for kind in ("inbox", "outbox", "relay", "acks"):
+                kind_stub_dir = restore_root / "messages" / "history" / kind / "index"
+                _scan_stub_dir(kind_stub_dir, family_name)
         else:
             _scan_stub_dir(restore_root / config.stub_dir, family_name)
 

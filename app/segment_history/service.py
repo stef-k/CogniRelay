@@ -440,6 +440,44 @@ def _cold_payload_path(hot_payload_path: Path) -> Path:
     return hot_payload_path.parent / "cold" / (hot_payload_path.name + ".gz")
 
 
+_MESSAGE_STREAM_KINDS = ("inbox", "outbox", "relay", "acks")
+
+
+def _message_stream_kind_from_source(source_rel: str) -> str:
+    """Extract the stream kind (inbox|outbox|relay|acks) from a message_stream source path.
+
+    E.g. ``messages/inbox/alice.jsonl`` -> ``inbox``.
+    """
+    # source_rel is like messages/<kind>/<file>.jsonl
+    parts = source_rel.split("/")
+    if len(parts) >= 2 and parts[0] == "messages" and parts[1] in _MESSAGE_STREAM_KINDS:
+        return parts[1]
+    # Fallback: try to extract from stream_key (inbox__alice -> inbox)
+    stream_key = _derive_stream_key("message_stream", source_rel)
+    kind = stream_key.split("__")[0]
+    return kind if kind in _MESSAGE_STREAM_KINDS else "inbox"
+
+
+def _message_stream_history_dir(repo_root: Path, source_rel: str) -> Path:
+    """Return the per-kind history dir for a message_stream source."""
+    kind = _message_stream_kind_from_source(source_rel)
+    return repo_root / "messages" / "history" / kind
+
+
+def _message_stream_stub_dir(repo_root: Path, source_rel: str) -> Path:
+    """Return the per-kind stub dir for a message_stream source."""
+    kind = _message_stream_kind_from_source(source_rel)
+    return repo_root / "messages" / "history" / kind / "index"
+
+
+def _message_stream_stub_dirs(repo_root: Path) -> list[Path]:
+    """Return all 4 message_stream stub directories for scanning."""
+    return [
+        repo_root / "messages" / "history" / kind / "index"
+        for kind in _MESSAGE_STREAM_KINDS
+    ]
+
+
 def _rehydrate_hot_path(
     family: str, segment_id: str, source_path: str, repo_root: Path
 ) -> Path:
@@ -594,7 +632,7 @@ def _json_field_counts(
 # Phase 8: Residue detection and manifest reconciliation
 # ===========================================================================
 def _reconcile_manifest_residue(
-    repo_root: Path, caller_op: str, gm: Any
+    repo_root: Path, caller_family: str, caller_op: str, gm: Any
 ) -> dict[str, str] | None:
     """Check for and reconcile a leftover manifest from a prior crash.
 
@@ -604,10 +642,10 @@ def _reconcile_manifest_residue(
     from app.segment_history.manifest import read_manifest, remove_manifest
 
     try:
-        manifest = read_manifest(repo_root)
+        manifest = read_manifest(repo_root, caller_family)
     except ValueError:
         # Corrupt manifest -- clean up
-        remove_manifest(repo_root)
+        remove_manifest(repo_root, caller_family)
         return {"warning": "segment_history_manifest_unreadable_cleanup"}
 
     if manifest is None:
@@ -626,7 +664,7 @@ def _reconcile_manifest_residue(
             recorded_op, family, len(segment_ids),
         )
 
-    remove_manifest(repo_root)
+    remove_manifest(repo_root, caller_family)
     return {
         "warning": f"segment_history_manifest_residue:{recorded_op}:{family}:{len(segment_ids)}"
     }
@@ -681,10 +719,10 @@ def segment_history_maintenance_service(
     warnings: list[dict[str, Any]] = []
 
     # 0. Reconcile any leftover manifest residue
-    residue = _reconcile_manifest_residue(repo_root, "maintenance", gm)
+    residue = _reconcile_manifest_residue(repo_root, family, "maintenance", gm)
     if residue:
         warnings.append(_make_warning(
-            "manifest_residue",
+            "segment_history_manifest_residue",
             residue["warning"],
         ))
 
@@ -700,11 +738,11 @@ def segment_history_maintenance_service(
             continue
         if size == 0:
             # Delete empty ack files outside atomic unit
-            if "acks" in str(src):
+            if src.parent.name == "acks" and str(src.parent).endswith("messages/acks"):
                 try:
                     src.unlink()
                     warnings.append(_make_warning(
-                        "empty_ack_removed",
+                        "segment_history_empty_ack_deleted",
                         f"Removed empty ack file: {src.name}",
                         path=str(src),
                     ))
@@ -736,6 +774,7 @@ def segment_history_maintenance_service(
         }
 
     # 4. Prepare
+    selection_count = 0
     rolled_segment_ids: list[str] = []
     all_created: list[Path] = []
     all_source_rels: list[str] = []
@@ -766,7 +805,7 @@ def segment_history_maintenance_service(
             for src in eligible:
                 if not src.is_file():
                     warnings.append(_make_warning(
-                        "source_missing_under_lock",
+                        "segment_history_source_missing_under_lock",
                         f"Source file missing after lock acquisition: {src.name}",
                         path=str(src),
                     ))
@@ -775,7 +814,7 @@ def segment_history_maintenance_service(
                     size = src.stat().st_size
                 except OSError:
                     warnings.append(_make_warning(
-                        "source_missing_under_lock",
+                        "segment_history_source_missing_under_lock",
                         f"Source file stat failed after lock acquisition: {src.name}",
                         path=str(src),
                     ))
@@ -796,6 +835,9 @@ def segment_history_maintenance_service(
                     year = _journal_year_from_source(rel)
                     history_dir = repo_root / "journal" / "history" / year
                     stub_dir = repo_root / "journal" / "history" / year / "index"
+                elif family == "message_stream":
+                    history_dir = _message_stream_history_dir(repo_root, rel)
+                    stub_dir = _message_stream_stub_dir(repo_root, rel)
                 else:
                     history_dir = repo_root / config.history_dir
                     stub_dir = repo_root / config.stub_dir
@@ -811,6 +853,13 @@ def segment_history_maintenance_service(
                 # Add day field for journal summaries
                 if family == "journal":
                     summary["day"] = src.stem
+                # Add stream_kind and stream_key for message_stream summaries
+                elif family == "message_stream":
+                    summary["stream_kind"] = _message_stream_kind_from_source(rel)
+                    summary["stream_key"] = stream_key
+                # Add thread_id for message_thread summaries
+                elif family == "message_thread":
+                    summary["thread_id"] = src.stem
 
                 # Roll
                 if family == "journal":
@@ -853,7 +902,7 @@ def segment_history_maintenance_service(
     except Exception:
         # Rollback: best-effort cleanup of created paths
         _remove_created_paths(all_created)
-        remove_manifest(repo_root)
+        remove_manifest(repo_root, family)
         raise
 
     # 8. Git commit
@@ -879,18 +928,18 @@ def segment_history_maintenance_service(
                 else:
                     durable = False
                     warnings.append(_make_warning(
-                        "git_commit_failed",
+                        "segment_history_git_commit_failed",
                         "Git commit failed for maintenance roll",
                     ))
         except Exception:
             durable = False
             warnings.append(_make_warning(
-                "git_commit_failed",
+                "segment_history_git_commit_failed",
                 "Git commit failed for maintenance roll",
             ))
 
     # 9. Remove manifest
-    remove_manifest(repo_root)
+    remove_manifest(repo_root, family)
 
     return {
         "ok": True,
@@ -938,21 +987,19 @@ def segment_history_cold_store_service(
     warnings: list[dict[str, Any]] = []
 
     # 0. Reconcile any leftover manifest residue
-    residue = _reconcile_manifest_residue(repo_root, "cold_store", gm)
+    residue = _reconcile_manifest_residue(repo_root, family, "cold_store", gm)
     if residue:
         warnings.append(_make_warning(
-            "manifest_residue",
+            "segment_history_manifest_residue",
             residue["warning"],
         ))
 
     # 1. Discover candidates by scanning stub dir
-    stub_base_dir = repo_root / config.stub_dir
     candidates: list[tuple[str, dict, Path]] = []  # (segment_id, stub, stub_path)
 
-    # For journal, stubs may be under year-based index dirs
+    # Build the list of stub dirs to scan — multi-dir for journal and message_stream
     stub_dirs_to_scan: list[Path] = []
     if family == "journal":
-        # Scan journal/history/<year>/index/ directories
         journal_history = repo_root / "journal" / "history"
         if journal_history.is_dir():
             for year_dir in sorted(journal_history.iterdir()):
@@ -960,10 +1007,10 @@ def segment_history_cold_store_service(
                     idx_dir = year_dir / "index"
                     if idx_dir.is_dir():
                         stub_dirs_to_scan.append(idx_dir)
-        # Also check legacy stubs dir
-        if stub_base_dir.is_dir():
-            stub_dirs_to_scan.append(stub_base_dir)
+    elif family == "message_stream":
+        stub_dirs_to_scan = _message_stream_stub_dirs(repo_root)
     else:
+        stub_base_dir = repo_root / config.stub_dir
         stub_dirs_to_scan = [stub_base_dir]
 
     for sd in stub_dirs_to_scan:
@@ -976,7 +1023,7 @@ def segment_history_cold_store_service(
                 stub = json.loads(entry.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 warnings.append(_make_warning(
-                    "stub_unreadable",
+                    "segment_history_stub_unreadable",
                     f"Cannot read stub file: {entry.name}",
                     path=str(entry),
                 ))
@@ -1071,7 +1118,7 @@ def segment_history_cold_store_service(
             for seg_id, _pre_lock_stub, stub_path in candidates:
                 if not stub_path.is_file():
                     warnings.append(_make_warning(
-                        "stub_missing_under_lock",
+                        "segment_history_stub_missing_under_lock",
                         f"Stub file missing after lock acquisition: {seg_id}",
                         segment_id=seg_id,
                     ))
@@ -1080,7 +1127,7 @@ def segment_history_cold_store_service(
                     stub = json.loads(stub_path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError):
                     warnings.append(_make_warning(
-                        "stub_unreadable_under_lock",
+                        "segment_history_stub_unreadable_under_lock",
                         f"Cannot read stub under lock: {seg_id}",
                         segment_id=seg_id,
                     ))
@@ -1098,7 +1145,7 @@ def segment_history_cold_store_service(
 
                 if not hot_payload.is_file():
                     warnings.append(_make_warning(
-                        "hot_payload_missing",
+                        "segment_history_hot_payload_missing",
                         f"Hot payload file missing for segment: {seg_id}",
                         segment_id=seg_id,
                     ))
@@ -1126,7 +1173,7 @@ def segment_history_cold_store_service(
                     hot_payload.unlink()
                 except OSError:
                     warnings.append(_make_warning(
-                        "hot_payload_remove_failed",
+                        "segment_history_hot_payload_remove_failed",
                         f"Could not remove hot payload after cold-store: {seg_id}",
                         segment_id=seg_id,
                     ))
@@ -1144,7 +1191,7 @@ def segment_history_cold_store_service(
                 })
 
     except Exception:
-        remove_manifest(repo_root)
+        remove_manifest(repo_root, family)
         raise
 
     # Git commit
@@ -1167,17 +1214,17 @@ def segment_history_cold_store_service(
                 else:
                     durable = False
                     warnings.append(_make_warning(
-                        "git_commit_failed",
+                        "segment_history_git_commit_failed",
                         "Git commit failed for cold-store",
                     ))
         except Exception:
             durable = False
             warnings.append(_make_warning(
-                "git_commit_failed",
+                "segment_history_git_commit_failed",
                 "Git commit failed for cold-store",
             ))
 
-    remove_manifest(repo_root)
+    remove_manifest(repo_root, family)
 
     return {
         "ok": True,
@@ -1236,12 +1283,14 @@ def segment_history_cold_rehydrate_service(
     if parsed is None:
         return _error_response(
             400,
-            "invalid_segment_id",
+            "segment_history_invalid_segment_id",
             f"Invalid segment ID format: {segment_id}",
         )
 
-    # Find stub — for journal, check year-based index dirs
+    # Find stub — multi-dir scan for journal and message_stream
     stub_path: Path | None = None
+    stub_matches: list[Path] = []
+
     if family == "journal":
         journal_history = repo_root / "journal" / "history"
         if journal_history.is_dir():
@@ -1249,20 +1298,37 @@ def segment_history_cold_rehydrate_service(
                 if year_dir.is_dir() and year_dir.name.isdigit():
                     candidate = year_dir / "index" / f"{segment_id}.json"
                     if candidate.is_file():
-                        stub_path = candidate
-                        break
-        # Also check legacy stubs dir
-        if stub_path is None:
-            legacy = repo_root / config.stub_dir / f"{segment_id}.json"
-            if legacy.is_file():
-                stub_path = legacy
+                        stub_matches.append(candidate)
+    elif family == "message_stream":
+        for sd in _message_stream_stub_dirs(repo_root):
+            candidate = sd / f"{segment_id}.json"
+            if candidate.is_file():
+                stub_matches.append(candidate)
     else:
-        stub_path = repo_root / config.stub_dir / f"{segment_id}.json"
+        candidate = repo_root / config.stub_dir / f"{segment_id}.json"
+        if candidate.is_file():
+            stub_matches.append(candidate)
 
-    if stub_path is None or not stub_path.is_file():
+    if len(stub_matches) > 1:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "operation": "segment_history_cold_rehydrate",
+                "family": family,
+                "segment_id": segment_id,
+                "error": {
+                    "code": "segment_history_ambiguous_segment_id",
+                    "detail": f"Multiple stubs found for segment: {segment_id}",
+                },
+            },
+        )
+    stub_path = stub_matches[0] if stub_matches else None
+
+    if stub_path is None:
         return _error_response(
             404,
-            "stub_not_found",
+            "segment_history_stub_not_found",
             f"Stub not found for segment: {segment_id}",
         )
 
@@ -1271,7 +1337,7 @@ def segment_history_cold_rehydrate_service(
     except (json.JSONDecodeError, OSError):
         return _error_response(
             409,
-            "stub_unreadable",
+            "segment_history_stub_unreadable",
             f"Cannot read stub for segment: {segment_id}",
         )
 
@@ -1279,8 +1345,8 @@ def segment_history_cold_rehydrate_service(
     if not stub.get("cold_stored_at"):
         return _error_response(
             409,
-            "not_cold",
-            f"Segment is not cold-stored: {segment_id}",
+            "segment_history_not_cold",
+            "The requested segment is already hot and cannot be rehydrated.",
         )
 
     cold_payload_rel = stub.get("payload_path", "")
@@ -1289,7 +1355,7 @@ def segment_history_cold_rehydrate_service(
     if not cold_path.is_file():
         return _error_response(
             409,
-            "cold_payload_missing",
+            "segment_history_cold_payload_missing",
             f"Cold payload file missing for segment: {segment_id}",
         )
 
@@ -1298,10 +1364,20 @@ def segment_history_cold_rehydrate_service(
     hot_path = _rehydrate_hot_path(family, segment_id, source_path_str, repo_root)
 
     if hot_path.is_file():
-        return _error_response(
-            409,
-            "rehydrate_conflict",
-            f"Hot payload already exists for segment: {segment_id}",
+        hot_rel = str(hot_path.relative_to(repo_root))
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "operation": "segment_history_cold_rehydrate",
+                "family": family,
+                "segment_id": segment_id,
+                "error": {
+                    "code": "segment_history_rehydrate_conflict",
+                    "detail": "target rolled payload already exists",
+                },
+                "conflict_path": hot_rel,
+            },
         )
 
     # Lock key derived from source_path via _derive_stream_key
@@ -1314,7 +1390,7 @@ def segment_history_cold_rehydrate_service(
         if not cold_path.is_file():
             return _error_response(
                 409,
-                "cold_payload_missing",
+                "segment_history_cold_payload_missing",
                 f"Cold payload file missing for segment (under lock): {segment_id}",
             )
 
@@ -1324,7 +1400,7 @@ def segment_history_cold_rehydrate_service(
         except ValueError:
             return _error_response(
                 409,
-                "cold_payload_corrupt",
+                "segment_history_cold_payload_corrupt",
                 f"Cold payload is corrupt for segment: {segment_id}",
             )
 
@@ -1347,7 +1423,7 @@ def segment_history_cold_rehydrate_service(
         except OSError:
             cold_removed = False
             warnings.append(_make_warning(
-                "cold_payload_remove_failed",
+                "segment_history_cold_payload_remove_failed",
                 f"Could not remove cold payload after rehydrate: {segment_id}",
                 segment_id=segment_id,
             ))
@@ -1372,13 +1448,13 @@ def segment_history_cold_rehydrate_service(
             else:
                 durable = False
                 warnings.append(_make_warning(
-                    "git_commit_failed",
+                    "segment_history_git_commit_failed",
                     "Git commit failed for rehydrate",
                 ))
     except Exception:
         durable = False
         warnings.append(_make_warning(
-            "git_commit_failed",
+            "segment_history_git_commit_failed",
             "Git commit failed for rehydrate",
         ))
 

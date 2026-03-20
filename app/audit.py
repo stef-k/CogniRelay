@@ -41,7 +41,8 @@ def _check_write_time_rollover(
         config = FAMILIES[family]
         now = datetime.now(timezone.utc)
         rel = str(path.relative_to(repo_root))
-        lock_key = f"segment_history:{family}:{rel}"
+        stream_key = _derive_stream_key(family, rel)
+        lock_key = f"segment_history:{family}:{stream_key}"
         lock_dir = repo_root / ".locks" / "segment_history"
 
         with segment_history_source_lock(lock_key, lock_dir=lock_dir, timeout=5.0):

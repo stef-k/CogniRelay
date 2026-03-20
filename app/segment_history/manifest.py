@@ -25,9 +25,13 @@ def _manifest_dir(repo_root: Path) -> Path:
     return d
 
 
-def manifest_path(repo_root: Path) -> Path:
-    """Return the path to the crash-recovery manifest file."""
-    return _manifest_dir(repo_root) / "manifest.json"
+def manifest_path(repo_root: Path, family: str = "") -> Path:
+    """Return the path to the crash-recovery manifest file.
+
+    When *family* is provided, uses ``<family>.manifest.json`` per spec.
+    """
+    filename = f"{family}.manifest.json" if family else "manifest.json"
+    return _manifest_dir(repo_root) / filename
 
 
 def write_manifest(
@@ -43,7 +47,7 @@ def write_manifest(
 
     Returns the path to the written manifest.
     """
-    path = manifest_path(repo_root)
+    path = manifest_path(repo_root, family)
     payload = {
         "schema_type": "segment_history_manifest",
         "schema_version": "1.0",
@@ -57,13 +61,13 @@ def write_manifest(
     return path
 
 
-def read_manifest(repo_root: Path) -> dict | None:
+def read_manifest(repo_root: Path, family: str = "") -> dict | None:
     """Read and parse an existing manifest, returning None if absent.
 
     Returns the parsed dict if readable, or None if the manifest does not
     exist.  Raises ValueError if the file exists but is corrupt.
     """
-    path = manifest_path(repo_root)
+    path = manifest_path(repo_root, family)
     if not path.is_file():
         return None
     try:
@@ -76,9 +80,9 @@ def read_manifest(repo_root: Path) -> dict | None:
         raise ValueError(f"Corrupt manifest at {path}: {exc}") from exc
 
 
-def remove_manifest(repo_root: Path) -> bool:
+def remove_manifest(repo_root: Path, family: str = "") -> bool:
     """Remove the manifest file if it exists.  Returns True if removed."""
-    path = manifest_path(repo_root)
+    path = manifest_path(repo_root, family)
     if path.is_file():
         try:
             path.unlink()

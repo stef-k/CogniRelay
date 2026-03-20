@@ -93,18 +93,26 @@ def _ops_runs_summary(content: str) -> dict[str, Any]:
 
 
 def _message_stream_summary(content: str) -> dict[str, Any]:
-    """Summary for message stream segments (inbox/outbox/relay/acks)."""
-    # Event timestamp: sent_at for inbox/outbox/relay, ack_at for acks.
-    # Use sent_at as primary; fall back to ack_at for ack-only files.
+    """Summary for message stream segments (inbox/outbox/relay/acks).
+
+    For inbox/outbox/relay: event timestamp ``sent_at``, ids from ``id``,
+    threads from ``thread_id``.
+    For acks: event timestamp ``ack_at``, ids from ``message_id``,
+    threads always empty (ack rows have no ``thread_id``).
+    """
     first, last = _first_last_json_field(content, "sent_at")
     if first is None:
         first, last = _first_last_json_field(content, "ack_at")
+    # message_id_sample: try "id" first (inbox/outbox/relay), fall back to "message_id" (acks)
+    msg_ids = _sample_json_field(content, "id", 5)
+    if not msg_ids:
+        msg_ids = _sample_json_field(content, "message_id", 5)
     return {
         "first_event_at": first,
         "last_event_at": last,
         "line_count": _count_lines(content),
         "byte_size": _byte_size(content),
-        "message_id_sample": _sample_json_field(content, "id", 5),
+        "message_id_sample": msg_ids,
         "thread_id_sample": _sample_json_field(content, "thread_id", 5),
     }
 
@@ -184,8 +192,11 @@ FAMILIES: dict[str, FamilyConfig] = {
             "messages/acks",
             "messages/relay",
         ],
-        history_dir="messages/history/stream",
-        stub_dir="messages/history/stream/index",
+        # Per-kind routing: messages/history/{inbox,outbox,relay,acks}/
+        # history_dir/stub_dir are unused for message_stream — routing is
+        # handled in the service layer based on the source's stream_kind.
+        history_dir="messages/history",
+        stub_dir="messages/history",
         has_size_rollover=True,
         has_day_boundary_rollover=False,
         build_summary=_message_stream_summary,
@@ -332,7 +343,7 @@ def is_journal_day_rollover_eligible(
 ) -> bool:
     """Check if a journal day-bucket file belongs to a past UTC day.
 
-    Only files matching the ``YYYY-MM-DD.jsonl`` naming pattern for a
+    Only files matching the ``YYYY-MM-DD.md`` naming pattern for a
     day strictly before *now*'s UTC date are eligible.
     """
     if not _DAY_BUCKET_RE.match(source_path.name):
@@ -370,6 +381,58 @@ def is_message_thread_inactivity_eligible(
     return age_days >= inactivity
 
 
+def _is_jsonl_day_boundary_eligible(
+    source_path: Path, family: str, now: datetime
+) -> bool:
+    """Check if a JSONL source has crossed a UTC day boundary.
+
+    The day boundary exists when the current UTC day differs from the UTC day
+    of the newest parseable event timestamp.  Falls back to file mtime.
+    """
+    import json as _json
+
+    ts_field_map: dict[str, list[str]] = {
+        "api_audit": ["ts"],
+        "ops_runs": ["finished_at", "started_at"],
+        "episodic": ["at"],
+    }
+    fields = ts_field_map.get(family, [])
+    today_str = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+    newest_day: str | None = None
+    try:
+        content = source_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    for line in reversed(content.split("\n")):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        for fld in fields:
+            val = row.get(fld)
+            if val and isinstance(val, str) and len(val) >= 10:
+                newest_day = val[:10]  # YYYY-MM-DD prefix
+                break
+        if newest_day:
+            break
+
+    if newest_day is None:
+        # Fallback to mtime
+        try:
+            mtime = source_path.stat().st_mtime
+        except OSError:
+            return False
+        mtime_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        newest_day = mtime_dt.strftime("%Y-%m-%d")
+
+    return newest_day < today_str
+
+
 def check_rollover_eligible(
     source_path: Path, family: str, settings: Any, now: datetime
 ) -> bool:
@@ -392,9 +455,11 @@ def check_rollover_eligible(
             return True
         return is_message_stream_max_hot_days_eligible(source_path, settings, now)
 
-    # All others: size or day-boundary
+    # api_audit, ops_runs, episodic: size or day-boundary
     if config.has_size_rollover and is_size_rollover_eligible(source_path, family, settings):
         return True
+    if config.has_day_boundary_rollover:
+        return _is_jsonl_day_boundary_eligible(source_path, family, now)
 
     return False
 

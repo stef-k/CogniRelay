@@ -47,6 +47,9 @@ class TestFamilyRegistry(unittest.TestCase):
 
     def test_stub_dirs_use_index(self) -> None:
         for name, config in FAMILIES.items():
+            if name == "message_stream":
+                # message_stream uses per-kind routing; stub_dir is a base path
+                continue
             self.assertTrue(
                 config.stub_dir.endswith("/index"),
                 f"{name} stub_dir should end with /index, got {config.stub_dir}",

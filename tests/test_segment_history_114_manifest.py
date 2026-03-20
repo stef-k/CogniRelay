@@ -29,7 +29,7 @@ class TestManifestWriteRead(unittest.TestCase):
                 started_at="2026-03-20T12:00:00+00:00",
             )
             self.assertTrue(path.is_file())
-            data = read_manifest(repo)
+            data = read_manifest(repo, "journal")
             self.assertIsNotNone(data)
             self.assertEqual(data["schema_type"], "segment_history_manifest")
             self.assertEqual(data["schema_version"], "1.0")
@@ -40,16 +40,16 @@ class TestManifestWriteRead(unittest.TestCase):
 
     def test_read_absent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            self.assertIsNone(read_manifest(Path(td)))
+            self.assertIsNone(read_manifest(Path(td), "journal"))
 
     def test_read_corrupt_raises(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
-            path = manifest_path(repo)
+            path = manifest_path(repo, "journal")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("not json", encoding="utf-8")
             with self.assertRaises(ValueError):
-                read_manifest(repo)
+                read_manifest(repo, "journal")
 
 
 class TestManifestRemove(unittest.TestCase):
@@ -65,12 +65,12 @@ class TestManifestRemove(unittest.TestCase):
                 source_paths=[],
                 segment_ids=[],
             )
-            self.assertTrue(remove_manifest(repo))
-            self.assertIsNone(read_manifest(repo))
+            self.assertTrue(remove_manifest(repo, "api_audit"))
+            self.assertIsNone(read_manifest(repo, "api_audit"))
 
     def test_remove_absent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            self.assertFalse(remove_manifest(Path(td)))
+            self.assertFalse(remove_manifest(Path(td), "journal"))
 
 
 class TestManifestGitignore(unittest.TestCase):

@@ -34,7 +34,7 @@ class TestReconcileManifestResidue(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
-            result = _reconcile_manifest_residue(repo, "maintenance", gm)
+            result = _reconcile_manifest_residue(repo, "journal", "maintenance", gm)
             self.assertIsNone(result)
 
     def test_stale_manifest_cleaned_up(self) -> None:
@@ -49,7 +49,7 @@ class TestReconcileManifestResidue(unittest.TestCase):
                 source_paths=["journal/2026-03-19.jsonl"],
                 segment_ids=["journal__20260320T000000Z__0001"],
             )
-            result = _reconcile_manifest_residue(repo, "maintenance", gm)
+            result = _reconcile_manifest_residue(repo, "journal", "maintenance", gm)
             # Should clean up and return a warning dict
             self.assertIsNotNone(result)
             self.assertIn("segment_history_manifest_residue", result.get("warning", ""))
@@ -60,11 +60,11 @@ class TestReconcileManifestResidue(unittest.TestCase):
             gm = SimpleGitManagerStub(repo)
             from app.segment_history.manifest import manifest_path
 
-            path = manifest_path(repo)
+            path = manifest_path(repo, "journal")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("not json", encoding="utf-8")
 
-            result = _reconcile_manifest_residue(repo, "maintenance", gm)
+            result = _reconcile_manifest_residue(repo, "journal", "maintenance", gm)
             self.assertIsNotNone(result)
             self.assertIn("unreadable", result.get("warning", ""))
 
@@ -80,7 +80,7 @@ class TestReconcileManifestResidue(unittest.TestCase):
                 source_paths=[],
                 segment_ids=[],
             )
-            result = _reconcile_manifest_residue(repo, "maintenance", gm)
+            result = _reconcile_manifest_residue(repo, "journal", "maintenance", gm)
             # Should still clean up cross-operation residue
             self.assertIsNotNone(result)
 
