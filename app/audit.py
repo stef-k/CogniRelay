@@ -62,7 +62,7 @@ def _check_write_time_rollover(
             content = path.read_text(encoding="utf-8", errors="replace")
             summary = config.build_summary(content)
 
-            _stub, created = _roll_jsonl_source(
+            result = _roll_jsonl_source(
                 source_path=path,
                 payload_path=payload_path,
                 family=family,
@@ -73,6 +73,10 @@ def _check_write_time_rollover(
                 summary=summary,
                 repo_root=repo_root,
             )
+            if result is None:
+                _log.warning("Write-time rollover skipped (partial line only) for %s", path)
+                return
+            _stub, created = result
 
             # Best-effort commit
             if gm is not None:
@@ -80,7 +84,7 @@ def _check_write_time_rollover(
                     commit_paths = created + [path]
                     gm.commit_paths(
                         commit_paths,
-                        f"segment-history: write-time roll {family} {segment_id}",
+                        f"segment-history: roll {family} {stream_key}",
                     )
                 except Exception:
                     _log.warning("Write-time rollover commit failed for %s", segment_id)

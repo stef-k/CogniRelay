@@ -47,8 +47,9 @@ class TestFamilyRegistry(unittest.TestCase):
 
     def test_stub_dirs_use_index(self) -> None:
         for name, config in FAMILIES.items():
-            if name == "message_stream":
-                # message_stream uses per-kind routing; stub_dir is a base path
+            if name in ("message_stream", "journal"):
+                # message_stream uses per-kind routing; stub_dir is a base path.
+                # journal uses per-year stub dirs resolved at runtime.
                 continue
             self.assertTrue(
                 config.stub_dir.endswith("/index"),

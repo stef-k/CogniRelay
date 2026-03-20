@@ -95,15 +95,13 @@ def _ops_runs_summary(content: str) -> dict[str, Any]:
 def _message_stream_summary(content: str) -> dict[str, Any]:
     """Summary for message stream segments (inbox/outbox/relay/acks).
 
-    For inbox/outbox/relay: event timestamp ``sent_at``, ids from ``id``,
-    threads from ``thread_id``.
-    For acks: event timestamp ``ack_at``, ids from ``message_id``,
-    threads always empty (ack rows have no ``thread_id``).
+    Returns base summary with ``sent_at`` timestamps and ``id``-based samples.
+    The service layer must call :func:`fixup_message_stream_summary` after
+    adding ``stream_kind`` to apply ack-specific overrides.
     """
     first, last = _first_last_json_field(content, "sent_at")
     if first is None:
         first, last = _first_last_json_field(content, "ack_at")
-    # message_id_sample: try "id" first (inbox/outbox/relay), fall back to "message_id" (acks)
     msg_ids = _sample_json_field(content, "id", 5)
     if not msg_ids:
         msg_ids = _sample_json_field(content, "message_id", 5)
@@ -115,6 +113,23 @@ def _message_stream_summary(content: str) -> dict[str, Any]:
         "message_id_sample": msg_ids,
         "thread_id_sample": _sample_json_field(content, "thread_id", 5),
     }
+
+
+def fixup_message_stream_summary(
+    summary: dict[str, Any], content: str, stream_kind: str,
+) -> None:
+    """Apply ack-specific overrides to a message-stream summary in place.
+
+    For acks: timestamps from ``ack_at``, ids from ``message_id``,
+    ``thread_id_sample`` forced to empty list.
+    """
+    if stream_kind != "acks":
+        return
+    first, last = _first_last_json_field(content, "ack_at")
+    summary["first_event_at"] = first
+    summary["last_event_at"] = last
+    summary["message_id_sample"] = _sample_json_field(content, "message_id", 5)
+    summary["thread_id_sample"] = []
 
 
 def _message_thread_summary(content: str) -> dict[str, Any]:
@@ -158,7 +173,9 @@ FAMILIES: dict[str, FamilyConfig] = {
         name="journal",
         source_dirs=["journal"],
         history_dir="journal/history",
-        stub_dir="journal/history/index",
+        # Per-year stub dirs (journal/history/<year>/index/) are resolved at
+        # runtime in the service layer; this value is unused for journal.
+        stub_dir="journal/history",
         has_size_rollover=False,
         has_day_boundary_rollover=True,
         build_summary=_journal_summary,

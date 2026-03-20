@@ -255,6 +255,10 @@ def _validate_segment_history_settings(settings: Settings) -> None:
     ]
     errors: list[str] = []
     for cold_name, cold_val, ret_name, ret_val in checks:
+        if cold_val < 1:
+            errors.append(f"{cold_name} ({cold_val}) must be >= 1")
+        if ret_val < 1:
+            errors.append(f"{ret_name} ({ret_val}) must be >= 1")
         if cold_val > ret_val:
             errors.append(
                 f"{cold_name} ({cold_val}) must not exceed {ret_name} ({ret_val})"

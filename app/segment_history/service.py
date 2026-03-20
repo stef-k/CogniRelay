@@ -294,13 +294,15 @@ def _roll_jsonl_source(
     stub_dir: Path,
     summary: dict[str, Any],
     repo_root: Path,
-) -> tuple[dict[str, Any], list[Path]]:
+) -> tuple[dict[str, Any], list[Path]] | None:
     """Roll a JSONL source file into a segment payload and stub.
 
     Reads the source, writes the rolled payload (temp+fsync+rename), writes
     the stub, and replaces the active source with an empty file.
 
-    Returns ``(stub_dict, created_paths)`` for commit tracking.
+    Returns ``(stub_dict, created_paths)`` for commit tracking, or ``None``
+    when the file contains only a partial unterminated line (no complete lines
+    to roll).
     """
     # Read source content
     source_bytes = source_path.read_bytes()
@@ -314,6 +316,10 @@ def _roll_jsonl_source(
     rolled_content = "\n".join(lines)
     if rolled_content and not rolled_content.endswith("\n"):
         rolled_content += "\n"
+
+    # If no complete newline-terminated lines exist, skip the roll
+    if not rolled_content.strip():
+        return None
 
     # Write payload
     payload_path.parent.mkdir(parents=True, exist_ok=True)
@@ -853,10 +859,14 @@ def segment_history_maintenance_service(
                 # Add day field for journal summaries
                 if family == "journal":
                     summary["day"] = src.stem
-                # Add stream_kind and stream_key for message_stream summaries
+                # Add stream_kind and stream_key for message_stream summaries;
+                # apply ack-specific overrides per spec.
                 elif family == "message_stream":
-                    summary["stream_kind"] = _message_stream_kind_from_source(rel)
+                    sk_kind = _message_stream_kind_from_source(rel)
+                    summary["stream_kind"] = sk_kind
                     summary["stream_key"] = stream_key
+                    from app.segment_history.families import fixup_message_stream_summary
+                    fixup_message_stream_summary(summary, content, sk_kind)
                 # Add thread_id for message_thread summaries
                 elif family == "message_thread":
                     summary["thread_id"] = src.stem
@@ -875,7 +885,7 @@ def segment_history_maintenance_service(
                         repo_root=repo_root,
                     )
                 else:
-                    stub, created = _roll_jsonl_source(
+                    result = _roll_jsonl_source(
                         source_path=src,
                         payload_path=payload_path,
                         family=family,
@@ -886,6 +896,14 @@ def segment_history_maintenance_service(
                         summary=summary,
                         repo_root=repo_root,
                     )
+                    if result is None:
+                        warnings.append(_make_warning(
+                            "segment_history_only_partial_line",
+                            f"Source has only a partial unterminated line, skipping roll: {rel}",
+                            path=rel,
+                        ))
+                        continue
+                    stub, created = result
 
                 rolled_segment_ids.append(segment_id)
                 all_created.extend(created)
@@ -1361,6 +1379,22 @@ def segment_history_cold_rehydrate_service(
 
     # Derive hot restoration target canonically from family/segment_id/source_path
     source_path_str = stub.get("source_path", "")
+
+    # Check for pending batch residue — single-source ops must not proceed
+    # if the family manifest lists this source path.
+    from app.segment_history.manifest import read_manifest as _read_manifest
+    try:
+        mf = _read_manifest(repo_root, family)
+    except ValueError:
+        mf = None
+    if mf is not None and source_path_str in mf.get("source_paths", []):
+        return _error_response(
+            409,
+            "segment_history_pending_batch_residue",
+            f"A pending batch operation lists this source; "
+            f"reconciliation must complete first: {source_path_str}",
+        )
+
     hot_path = _rehydrate_hot_path(family, segment_id, source_path_str, repo_root)
 
     if hot_path.is_file():
