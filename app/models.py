@@ -779,6 +779,23 @@ class ArtifactHistoryColdRehydrateRequest(BaseModel):
         return self
 
 
+class SegmentHistoryMaintenanceRequest(BaseModel):
+    """Host-local request for rolling active sources into history segments."""
+    family: str = Field(min_length=1, max_length=50)
+
+
+class SegmentHistoryColdStoreRequest(BaseModel):
+    """Host-local request for cold-storing rolled segment-history payloads."""
+    family: str = Field(min_length=1, max_length=50)
+    segment_ids: Optional[List[str]] = Field(default=None, max_length=500)
+
+
+class SegmentHistoryColdRehydrateRequest(BaseModel):
+    """Host-local request for rehydrating one cold-stored segment-history payload."""
+    family: str = Field(min_length=1, max_length=50)
+    segment_id: str = Field(min_length=1, max_length=200)
+
+
 class ContinuityDeleteRequest(BaseModel):
     """Exact-selector request for deleting continuity artifacts."""
     subject_kind: Literal["user", "peer", "thread", "task"]

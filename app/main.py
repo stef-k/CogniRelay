@@ -14,6 +14,11 @@ from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
 from .artifact_lifecycle.service import artifact_history_cold_rehydrate_service, artifact_history_cold_store_service
+from .segment_history.service import (
+    segment_history_cold_rehydrate_service,
+    segment_history_cold_store_service,
+    segment_history_maintenance_service,
+)
 from .context import (
     append_record_service,
     context_retrieve_service,
@@ -121,6 +126,9 @@ from .models import (
     BackupRestoreTestRequest,
     OpsRunRequest,
     RecentRequest,
+    SegmentHistoryColdRehydrateRequest,
+    SegmentHistoryColdStoreRequest,
+    SegmentHistoryMaintenanceRequest,
     RelayForwardRequest,
     SecurityKeysRotateRequest,
     SearchRequest,
@@ -615,6 +623,28 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
         ),
         artifact_history_cold_rehydrate_request_factory=ArtifactHistoryColdRehydrateRequest,
+        segment_history_maintenance=lambda req, auth: segment_history_maintenance_service(
+            family=req.family,
+            repo_root=settings.repo_root,
+            settings=settings,
+            gm=gm,
+        ),
+        segment_history_maintenance_request_factory=SegmentHistoryMaintenanceRequest,
+        segment_history_cold_store=lambda req, auth: segment_history_cold_store_service(
+            family=req.family,
+            repo_root=settings.repo_root,
+            settings=settings,
+            gm=gm,
+            segment_ids=req.segment_ids,
+        ),
+        segment_history_cold_store_request_factory=SegmentHistoryColdStoreRequest,
+        segment_history_cold_rehydrate=lambda req, auth: segment_history_cold_rehydrate_service(
+            family=req.family,
+            segment_id=req.segment_id,
+            repo_root=settings.repo_root,
+            gm=gm,
+        ),
+        segment_history_cold_rehydrate_request_factory=SegmentHistoryColdRehydrateRequest,
         load_token_config=load_token_config,
         parse_iso=_parse_iso,
         load_security_keys=load_security_keys,

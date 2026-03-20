@@ -107,6 +107,28 @@ class Settings:
     patch_applied_cold_after_days: int = 90
     artifact_history_batch_limit: int = 500
 
+    # Segment-history lifecycle settings (issue #114)
+    journal_cold_after_days: int = 30
+    journal_retention_days: int = 365
+    audit_log_rollover_bytes: int = 1_048_576
+    audit_log_cold_after_days: int = 30
+    audit_log_retention_days: int = 365
+    ops_run_rollover_bytes: int = 1_048_576
+    ops_run_cold_after_days: int = 30
+    ops_run_retention_days: int = 365
+    message_stream_rollover_bytes: int = 1_048_576
+    message_stream_max_hot_days: int = 14
+    message_stream_cold_after_days: int = 30
+    message_stream_retention_days: int = 180
+    message_thread_rollover_bytes: int = 2_097_152
+    message_thread_inactivity_days: int = 30
+    message_thread_cold_after_days: int = 60
+    message_thread_retention_days: int = 365
+    episodic_rollover_bytes: int = 1_048_576
+    episodic_cold_after_days: int = 30
+    episodic_retention_days: int = 180
+    segment_history_batch_limit: int = 500
+
 
 _cached: Settings | None = None
 
@@ -209,6 +231,38 @@ def _merge_tokens(repo_root: Path) -> Dict[str, PeerToken]:
     # Env tokens override same raw key names.
     merged = {**file_tokens, **env_tokens}
     return merged
+
+
+def _validate_segment_history_settings(settings: Settings) -> None:
+    """Validate cross-field invariants for segment-history lifecycle settings.
+
+    Raises SystemExit if any cold_after_days exceeds its corresponding
+    retention_days or if any value is less than 1.
+    """
+    checks: list[tuple[str, int, str, int]] = [
+        ("journal_cold_after_days", settings.journal_cold_after_days,
+         "journal_retention_days", settings.journal_retention_days),
+        ("audit_log_cold_after_days", settings.audit_log_cold_after_days,
+         "audit_log_retention_days", settings.audit_log_retention_days),
+        ("ops_run_cold_after_days", settings.ops_run_cold_after_days,
+         "ops_run_retention_days", settings.ops_run_retention_days),
+        ("message_stream_cold_after_days", settings.message_stream_cold_after_days,
+         "message_stream_retention_days", settings.message_stream_retention_days),
+        ("message_thread_cold_after_days", settings.message_thread_cold_after_days,
+         "message_thread_retention_days", settings.message_thread_retention_days),
+        ("episodic_cold_after_days", settings.episodic_cold_after_days,
+         "episodic_retention_days", settings.episodic_retention_days),
+    ]
+    errors: list[str] = []
+    for cold_name, cold_val, ret_name, ret_val in checks:
+        if cold_val > ret_val:
+            errors.append(
+                f"{cold_name} ({cold_val}) must not exceed {ret_name} ({ret_val})"
+            )
+    if errors:
+        raise SystemExit(
+            "Invalid segment-history settings:\n  " + "\n  ".join(errors)
+        )
 
 
 def get_settings(force_reload: bool = False) -> Settings:
@@ -331,5 +385,67 @@ def get_settings(force_reload: bool = False) -> Settings:
         artifact_history_batch_limit=_parse_int(
             _env_first("COGNIRELAY_ARTIFACT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
         ),
+        # Segment-history lifecycle (issue #114)
+        journal_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_JOURNAL_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        journal_retention_days=_parse_int(
+            _env_first("COGNIRELAY_JOURNAL_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        audit_log_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_AUDIT_LOG_ROLLOVER_BYTES"), 1_048_576, minimum=1,
+        ),
+        audit_log_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_AUDIT_LOG_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        audit_log_retention_days=_parse_int(
+            _env_first("COGNIRELAY_AUDIT_LOG_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        ops_run_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_OPS_RUN_ROLLOVER_BYTES"), 1_048_576, minimum=1,
+        ),
+        ops_run_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_OPS_RUN_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        ops_run_retention_days=_parse_int(
+            _env_first("COGNIRELAY_OPS_RUN_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        message_stream_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_ROLLOVER_BYTES"), 1_048_576, minimum=1,
+        ),
+        message_stream_max_hot_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_MAX_HOT_DAYS"), 14, minimum=1,
+        ),
+        message_stream_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        message_stream_retention_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_RETENTION_DAYS"), 180, minimum=1,
+        ),
+        message_thread_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_ROLLOVER_BYTES"), 2_097_152, minimum=1,
+        ),
+        message_thread_inactivity_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_INACTIVITY_DAYS"), 30, minimum=1,
+        ),
+        message_thread_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_COLD_AFTER_DAYS"), 60, minimum=1,
+        ),
+        message_thread_retention_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        episodic_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_EPISODIC_ROLLOVER_BYTES"), 1_048_576, minimum=1,
+        ),
+        episodic_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_EPISODIC_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        episodic_retention_days=_parse_int(
+            _env_first("COGNIRELAY_EPISODIC_RETENTION_DAYS"), 180, minimum=1,
+        ),
+        segment_history_batch_limit=_parse_int(
+            _env_first("COGNIRELAY_SEGMENT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
+        ),
     )
+    _validate_segment_history_settings(_cached)
     return _cached

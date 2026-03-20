@@ -22,6 +22,9 @@ from app.models import (
     ContinuityColdStoreRequest,
     ContinuityRetentionApplyRequest,
     OpsRunRequest,
+    SegmentHistoryColdRehydrateRequest,
+    SegmentHistoryColdStoreRequest,
+    SegmentHistoryMaintenanceRequest,
 )
 from app.storage import append_jsonl, safe_path
 
@@ -44,6 +47,9 @@ OPS_JOBS = {
     "continuity_retention_apply",
     "artifact_history_cold_store",
     "artifact_history_cold_rehydrate",
+    "segment_history_maintenance",
+    "segment_history_cold_store",
+    "segment_history_cold_rehydrate",
 }
 
 
@@ -315,6 +321,33 @@ def _ops_job_catalog() -> list[dict[str, Any]]:
             "idempotent": False,
             "request_schema": ArtifactHistoryColdRehydrateRequest.model_json_schema(),
         },
+        {
+            "job_id": "segment_history_maintenance",
+            "description": "Discover and roll eligible append-history sources into archived segments.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "daily",
+            "idempotent": True,
+            "request_schema": SegmentHistoryMaintenanceRequest.model_json_schema(),
+        },
+        {
+            "job_id": "segment_history_cold_store",
+            "description": "Compress rolled segment-history payloads into cold storage.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "daily or policy-driven",
+            "idempotent": True,
+            "request_schema": SegmentHistoryColdStoreRequest.model_json_schema(),
+        },
+        {
+            "job_id": "segment_history_cold_rehydrate",
+            "description": "Rehydrate one cold-stored segment-history payload back into its hot namespace.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "manual or policy-driven",
+            "idempotent": False,
+            "request_schema": SegmentHistoryColdRehydrateRequest.model_json_schema(),
+        },
     ]
 
 
@@ -454,6 +487,12 @@ def _ops_execute_job(
     artifact_history_cold_store_request_factory: Callable[..., Any],
     artifact_history_cold_rehydrate: Callable[..., dict[str, Any]],
     artifact_history_cold_rehydrate_request_factory: Callable[..., Any],
+    segment_history_maintenance: Callable[..., dict[str, Any]],
+    segment_history_maintenance_request_factory: Callable[..., Any],
+    segment_history_cold_store: Callable[..., dict[str, Any]],
+    segment_history_cold_store_request_factory: Callable[..., Any],
+    segment_history_cold_rehydrate: Callable[..., dict[str, Any]],
+    segment_history_cold_rehydrate_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -516,6 +555,12 @@ def _ops_execute_job(
         return artifact_history_cold_store(req=artifact_history_cold_store_request_factory(**args), auth=auth)
     if req.job_id == "artifact_history_cold_rehydrate":
         return artifact_history_cold_rehydrate(req=artifact_history_cold_rehydrate_request_factory(**args), auth=auth)
+    if req.job_id == "segment_history_maintenance":
+        return segment_history_maintenance(req=segment_history_maintenance_request_factory(**args), auth=auth)
+    if req.job_id == "segment_history_cold_store":
+        return segment_history_cold_store(req=segment_history_cold_store_request_factory(**args), auth=auth)
+    if req.job_id == "segment_history_cold_rehydrate":
+        return segment_history_cold_rehydrate(req=segment_history_cold_rehydrate_request_factory(**args), auth=auth)
     raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
 
 
@@ -639,6 +684,12 @@ def ops_run_service(
     artifact_history_cold_store_request_factory: Callable[..., Any],
     artifact_history_cold_rehydrate: Callable[..., dict[str, Any]],
     artifact_history_cold_rehydrate_request_factory: Callable[..., Any],
+    segment_history_maintenance: Callable[..., dict[str, Any]],
+    segment_history_maintenance_request_factory: Callable[..., Any],
+    segment_history_cold_store: Callable[..., dict[str, Any]],
+    segment_history_cold_store_request_factory: Callable[..., Any],
+    segment_history_cold_rehydrate: Callable[..., dict[str, Any]],
+    segment_history_cold_rehydrate_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -690,6 +741,12 @@ def ops_run_service(
             artifact_history_cold_store_request_factory=artifact_history_cold_store_request_factory,
             artifact_history_cold_rehydrate=artifact_history_cold_rehydrate,
             artifact_history_cold_rehydrate_request_factory=artifact_history_cold_rehydrate_request_factory,
+            segment_history_maintenance=segment_history_maintenance,
+            segment_history_maintenance_request_factory=segment_history_maintenance_request_factory,
+            segment_history_cold_store=segment_history_cold_store,
+            segment_history_cold_store_request_factory=segment_history_cold_store_request_factory,
+            segment_history_cold_rehydrate=segment_history_cold_rehydrate,
+            segment_history_cold_rehydrate_request_factory=segment_history_cold_rehydrate_request_factory,
             load_token_config=load_token_config,
             parse_iso=parse_iso,
             load_security_keys=load_security_keys,

@@ -1402,6 +1402,96 @@ def backup_create_service(
     }
 
 
+def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
+    """Validate segment-history artifacts in a restored backup.
+
+    Scans all 6 family stub directories, validates stub JSON structure,
+    checks hot/cold payload existence, and reports warnings for each issue.
+    """
+    from app.segment_history.families import FAMILIES
+
+    total_stubs = 0
+    total_hot = 0
+    total_cold = 0
+    invalid_stubs: list[str] = []
+    missing_hot: list[str] = []
+    missing_cold: list[str] = []
+    warnings: list[str] = []
+
+    def _scan_stub_dir(stub_dir: Path, family_name: str) -> None:
+        nonlocal total_stubs, total_hot, total_cold
+        if not stub_dir.is_dir():
+            return
+        for entry in sorted(stub_dir.iterdir()):
+            if not entry.name.endswith(".json") or not entry.is_file():
+                continue
+
+            total_stubs += 1
+            rel = str(entry.relative_to(restore_root))
+
+            try:
+                stub = json.loads(entry.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                invalid_stubs.append(rel)
+                warnings.append(f"segment_history_invalid_stub:{rel}")
+                continue
+
+            if stub.get("schema_type") != "segment_history_stub":
+                invalid_stubs.append(rel)
+                warnings.append(f"segment_history_invalid_stub_type:{rel}")
+                continue
+
+            if stub.get("family") != family_name:
+                invalid_stubs.append(rel)
+                warnings.append(f"segment_history_stub_family_mismatch:{rel}")
+                continue
+
+            # Check payload
+            payload_rel = stub.get("payload_path", "")
+            cold_stored = stub.get("cold_stored_at")
+
+            if not cold_stored:
+                # Should have hot payload
+                total_hot += 1
+                if payload_rel:
+                    hot_path = restore_root / payload_rel
+                    if not hot_path.is_file():
+                        missing_hot.append(rel)
+                        warnings.append(f"segment_history_missing_hot_payload:{rel}")
+            else:
+                # Cold-stored: payload_path points to cold location
+                total_cold += 1
+                if payload_rel:
+                    cold_path = restore_root / payload_rel
+                    if not cold_path.is_file():
+                        missing_cold.append(rel)
+                        warnings.append(f"segment_history_missing_cold_payload:{rel}")
+
+    for family_name, config in FAMILIES.items():
+        if family_name == "journal":
+            # Journal uses year-based index dirs: journal/history/<year>/index/
+            journal_history = restore_root / "journal" / "history"
+            if journal_history.is_dir():
+                for year_dir in sorted(journal_history.iterdir()):
+                    if year_dir.is_dir() and year_dir.name.isdigit():
+                        _scan_stub_dir(year_dir / "index", family_name)
+            # Also check legacy/flat stub dir
+            _scan_stub_dir(restore_root / config.stub_dir, family_name)
+        else:
+            _scan_stub_dir(restore_root / config.stub_dir, family_name)
+
+    return {
+        "ok": not (invalid_stubs or missing_hot or missing_cold),
+        "total_stubs": total_stubs,
+        "hot_payloads": total_hot,
+        "cold_payloads": total_cold,
+        "invalid_stubs": invalid_stubs,
+        "missing_hot_payloads": missing_hot,
+        "missing_cold_payloads": missing_cold,
+        "warnings": warnings,
+    }
+
+
 def backup_restore_test_service(
     *,
     settings: Any,
@@ -1472,11 +1562,14 @@ def backup_restore_test_service(
 
         artifact_history_validation = _validate_restored_artifact_history(restore_root)
 
+        segment_history_validation = _validate_segment_history(restore_root)
+
     ok = (
         extracted_files > 0
         and (index_validation is None or bool(index_validation.get("ok")))
         and (continuity_validation is None or bool(continuity_validation.get("ok")))
         and bool(artifact_history_validation.get("ok"))
+        and bool(segment_history_validation.get("ok"))
     )
     audit(
         auth,
@@ -1496,6 +1589,7 @@ def backup_restore_test_service(
         "index_validation": index_validation,
         "continuity_validation": continuity_validation,
         "artifact_history_validation": artifact_history_validation,
+        "segment_history_validation": segment_history_validation,
     }
 
 
