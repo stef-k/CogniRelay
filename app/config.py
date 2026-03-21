@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Dict, Set
 
 from dotenv import load_dotenv
 
+_log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -107,6 +109,28 @@ class Settings:
     patch_applied_cold_after_days: int = 90
     artifact_history_batch_limit: int = 500
 
+    # Segment-history lifecycle settings (issue #114)
+    journal_cold_after_days: int = 30
+    journal_retention_days: int = 365
+    audit_log_rollover_bytes: int = 1_048_576
+    audit_log_cold_after_days: int = 30
+    audit_log_retention_days: int = 365
+    ops_run_rollover_bytes: int = 1_048_576
+    ops_run_cold_after_days: int = 30
+    ops_run_retention_days: int = 365
+    message_stream_rollover_bytes: int = 1_048_576
+    message_stream_max_hot_days: int = 14
+    message_stream_cold_after_days: int = 30
+    message_stream_retention_days: int = 180
+    message_thread_rollover_bytes: int = 2_097_152
+    message_thread_inactivity_days: int = 30
+    message_thread_cold_after_days: int = 60
+    message_thread_retention_days: int = 365
+    episodic_rollover_bytes: int = 1_048_576
+    episodic_cold_after_days: int = 30
+    episodic_retention_days: int = 180
+    segment_history_batch_limit: int = 500
+
 
 _cached: Settings | None = None
 
@@ -125,6 +149,10 @@ def _parse_int(value: str | None, default: int, minimum: int | None = None) -> i
     try:
         out = int(value.strip())
     except Exception:
+        _log.warning(
+            "Non-numeric value %r for config setting, using default %d",
+            value, default,
+        )
         return default
     if minimum is not None and out < minimum:
         return minimum
@@ -211,6 +239,66 @@ def _merge_tokens(repo_root: Path) -> Dict[str, PeerToken]:
     return merged
 
 
+def _validate_segment_history_settings(settings: Settings) -> None:
+    """Validate cross-field invariants for segment-history lifecycle settings.
+
+    Raises SystemExit if any cold_after_days exceeds its corresponding
+    retention_days or if any value is less than 1.
+    """
+    checks: list[tuple[str, int, str, int]] = [
+        ("journal_cold_after_days", settings.journal_cold_after_days,
+         "journal_retention_days", settings.journal_retention_days),
+        ("audit_log_cold_after_days", settings.audit_log_cold_after_days,
+         "audit_log_retention_days", settings.audit_log_retention_days),
+        ("ops_run_cold_after_days", settings.ops_run_cold_after_days,
+         "ops_run_retention_days", settings.ops_run_retention_days),
+        ("message_stream_cold_after_days", settings.message_stream_cold_after_days,
+         "message_stream_retention_days", settings.message_stream_retention_days),
+        ("message_thread_cold_after_days", settings.message_thread_cold_after_days,
+         "message_thread_retention_days", settings.message_thread_retention_days),
+        ("episodic_cold_after_days", settings.episodic_cold_after_days,
+         "episodic_retention_days", settings.episodic_retention_days),
+    ]
+    errors: list[str] = []
+    for cold_name, cold_val, ret_name, ret_val in checks:
+        if cold_val < 1:
+            errors.append(f"{cold_name} ({cold_val}) must be >= 1")
+        if ret_val < 1:
+            errors.append(f"{ret_name} ({ret_val}) must be >= 1")
+        if cold_val > ret_val:
+            errors.append(
+                f"{cold_name} ({cold_val}) must not exceed {ret_name} ({ret_val})"
+            )
+    # Validate standalone *_DAYS settings (not part of cold/retention pairs)
+    standalone_days: list[tuple[str, int]] = [
+        ("message_stream_max_hot_days", settings.message_stream_max_hot_days),
+        ("message_thread_inactivity_days", settings.message_thread_inactivity_days),
+    ]
+    for name, val in standalone_days:
+        if val < 1:
+            errors.append(f"{name} ({val}) must be >= 1")
+    # Validate byte thresholds
+    byte_thresholds: list[tuple[str, int]] = [
+        ("audit_log_rollover_bytes", settings.audit_log_rollover_bytes),
+        ("ops_run_rollover_bytes", settings.ops_run_rollover_bytes),
+        ("message_stream_rollover_bytes", settings.message_stream_rollover_bytes),
+        ("message_thread_rollover_bytes", settings.message_thread_rollover_bytes),
+        ("episodic_rollover_bytes", settings.episodic_rollover_bytes),
+    ]
+    for name, val in byte_thresholds:
+        if val < 1:
+            errors.append(f"{name} ({val}) must be >= 1")
+    # Validate batch limit
+    if settings.segment_history_batch_limit < 1:
+        errors.append(
+            f"segment_history_batch_limit ({settings.segment_history_batch_limit}) must be >= 1"
+        )
+    if errors:
+        raise SystemExit(
+            "Invalid segment-history settings:\n  " + "\n  ".join(errors)
+        )
+
+
 def get_settings(force_reload: bool = False) -> Settings:
     """Load and cache runtime settings for the current process."""
     global _cached
@@ -219,6 +307,11 @@ def get_settings(force_reload: bool = False) -> Settings:
 
     repo_root_raw = _env_first("COGNIRELAY_REPO_ROOT", "AMR_REPO_ROOT", default="./data_repo") or "./data_repo"
     repo_root = Path(repo_root_raw).expanduser().resolve()
+    if not repo_root.is_dir():
+        _log.warning(
+            "repo_root %s does not exist; it will be created on first write",
+            repo_root,
+        )
 
     key_store_raw = _env_first(
         "COGNIRELAY_KEY_STORE_PATH",
@@ -331,5 +424,67 @@ def get_settings(force_reload: bool = False) -> Settings:
         artifact_history_batch_limit=_parse_int(
             _env_first("COGNIRELAY_ARTIFACT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
         ),
+        # Segment-history lifecycle (issue #114)
+        journal_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_JOURNAL_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        journal_retention_days=_parse_int(
+            _env_first("COGNIRELAY_JOURNAL_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        audit_log_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_AUDIT_LOG_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
+        ),
+        audit_log_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_AUDIT_LOG_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        audit_log_retention_days=_parse_int(
+            _env_first("COGNIRELAY_AUDIT_LOG_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        ops_run_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_OPS_RUN_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
+        ),
+        ops_run_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_OPS_RUN_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        ops_run_retention_days=_parse_int(
+            _env_first("COGNIRELAY_OPS_RUN_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        message_stream_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
+        ),
+        message_stream_max_hot_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_MAX_HOT_DAYS"), 14, minimum=1,
+        ),
+        message_stream_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        message_stream_retention_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_STREAM_RETENTION_DAYS"), 180, minimum=1,
+        ),
+        message_thread_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_ROLLOVER_BYTES"), 2_097_152, minimum=1024,
+        ),
+        message_thread_inactivity_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_INACTIVITY_DAYS"), 30, minimum=1,
+        ),
+        message_thread_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_COLD_AFTER_DAYS"), 60, minimum=1,
+        ),
+        message_thread_retention_days=_parse_int(
+            _env_first("COGNIRELAY_MESSAGE_THREAD_RETENTION_DAYS"), 365, minimum=1,
+        ),
+        episodic_rollover_bytes=_parse_int(
+            _env_first("COGNIRELAY_EPISODIC_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
+        ),
+        episodic_cold_after_days=_parse_int(
+            _env_first("COGNIRELAY_EPISODIC_COLD_AFTER_DAYS"), 30, minimum=1,
+        ),
+        episodic_retention_days=_parse_int(
+            _env_first("COGNIRELAY_EPISODIC_RETENTION_DAYS"), 180, minimum=1,
+        ),
+        segment_history_batch_limit=_parse_int(
+            _env_first("COGNIRELAY_SEGMENT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
+        ),
     )
+    _validate_segment_history_settings(_cached)
     return _cached

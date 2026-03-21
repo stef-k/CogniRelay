@@ -8,21 +8,48 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import logging
+
 from fastapi import HTTPException
 
-from app.audit import append_audit
+from app.audit import WriteTimeRolloverError, append_audit
+from app.segment_history.append import SegmentHistoryAppendError
 from app.config import sha256_token
 from app.discovery import handle_mcp_rpc_request as discovery_handle_mcp_rpc_request
 from app.storage import safe_path, write_text_file
 
+_log = logging.getLogger(__name__)
+
 RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
 
 
-def audit_event(settings: Any, auth: Any, event: str, detail: dict[str, Any]) -> None:
-    """Write an audit event when audit logging is enabled."""
+def audit_event(
+    settings: Any, auth: Any, event: str, detail: dict[str, Any],
+    *, gm: Any = None,
+) -> None:
+    """Write an audit event when audit logging is enabled.
+
+    When *gm* is provided and ``audit_log_rollover_bytes`` > 0, triggers
+    write-time rollover of the audit log before appending.
+    """
     if not settings.audit_log_enabled:
         return
-    append_audit(settings.repo_root, event, auth.peer_id if auth else "anonymous", detail)
+    rollover_bytes = getattr(settings, "audit_log_rollover_bytes", 0)
+    try:
+        # Create audit callback for write-time rollover event emission.
+        # Re-entrancy guard in _emit_audit prevents infinite recursion.
+        def _audit_cb(evt: str, det: dict[str, Any]) -> None:
+            audit_event(settings, auth, evt, det, gm=gm)
+
+        append_audit(
+            settings.repo_root, event, auth.peer_id if auth else "anonymous", detail,
+            rollover_bytes=rollover_bytes, gm=gm, audit=_audit_cb,
+        )
+    except (WriteTimeRolloverError, SegmentHistoryAppendError) as exc:
+        _log.warning(
+            "Audit append failed for event %s: [%s] %s",
+            event, getattr(exc, "code", "unknown"), str(exc),
+        )
 
 
 def scope_for_path(path: str) -> str:

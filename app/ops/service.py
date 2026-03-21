@@ -22,8 +22,11 @@ from app.models import (
     ContinuityColdStoreRequest,
     ContinuityRetentionApplyRequest,
     OpsRunRequest,
+    SegmentHistoryColdRehydrateRequest,
+    SegmentHistoryColdStoreRequest,
+    SegmentHistoryMaintenanceRequest,
 )
-from app.storage import append_jsonl, safe_path
+from app.storage import safe_path
 
 _log = logging.getLogger(__name__)
 
@@ -44,6 +47,9 @@ OPS_JOBS = {
     "continuity_retention_apply",
     "artifact_history_cold_store",
     "artifact_history_cold_rehydrate",
+    "segment_history_maintenance",
+    "segment_history_cold_store",
+    "segment_history_cold_rehydrate",
 }
 
 
@@ -103,12 +109,11 @@ def _load_ops_runs(
     if file_size > max_jsonl_read_bytes:
         _log.warning(
             "Ops runs file %s is %d bytes (limit %d); returning empty to avoid OOM",
-            path, file_size, max_jsonl_read_bytes,
+            path,
+            file_size,
+            max_jsonl_read_bytes,
         )
-        warnings.append(
-            f"ops_runs_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
-            "run history unavailable until file is compacted or truncated"
-        )
+        warnings.append(f"ops_runs_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; run history unavailable until file is compacted or truncated")
         return [], warnings
     out: list[dict[str, Any]] = []
     try:
@@ -123,7 +128,7 @@ def _load_ops_runs(
     if "\ufffd" in raw:
         _log.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     all_lines = raw.splitlines()
-    tail = all_lines[-max(1, int(limit)):]
+    tail = all_lines[-max(1, int(limit)) :]
     file_offset = len(all_lines) - len(tail)
     for idx, line in enumerate(tail):
         try:
@@ -144,10 +149,30 @@ def _load_ops_runs(
     return out, warnings
 
 
-def _append_ops_run(repo_root: Path, payload: dict[str, Any]) -> Path:
-    """Append an ops run record to the run log."""
+def _append_ops_run(
+    repo_root: Path,
+    payload: dict[str, Any],
+    *,
+    gm: Any = None,
+    settings: Any = None,
+) -> Path:
+    """Append an ops run record to the run log.
+
+    Acquires the segment-history source lock for ``ops_runs`` and checks
+    write-time rollover eligibility when *gm* and *settings* are provided.
+    Falls back to lockless append on lock timeout.
+    """
+    from app.segment_history.append import locked_append_jsonl
+
     path = _ops_runs_path(repo_root)
-    append_jsonl(path, payload)
+    locked_append_jsonl(
+        path,
+        payload,
+        repo_root=repo_root,
+        gm=gm,
+        settings=settings,
+        family="ops_runs",
+    )
     return path
 
 
@@ -315,6 +340,33 @@ def _ops_job_catalog() -> list[dict[str, Any]]:
             "idempotent": False,
             "request_schema": ArtifactHistoryColdRehydrateRequest.model_json_schema(),
         },
+        {
+            "job_id": "segment_history_maintenance",
+            "description": "Discover and roll eligible append-history sources into archived segments.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "daily",
+            "idempotent": True,
+            "request_schema": SegmentHistoryMaintenanceRequest.model_json_schema(),
+        },
+        {
+            "job_id": "segment_history_cold_store",
+            "description": "Compress rolled segment-history payloads into cold storage.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "daily or policy-driven",
+            "idempotent": True,
+            "request_schema": SegmentHistoryColdStoreRequest.model_json_schema(),
+        },
+        {
+            "job_id": "segment_history_cold_rehydrate",
+            "description": "Rehydrate one cold-stored segment-history payload back into its hot namespace.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "manual or policy-driven",
+            "idempotent": False,
+            "request_schema": SegmentHistoryColdRehydrateRequest.model_json_schema(),
+        },
     ]
 
 
@@ -454,6 +506,12 @@ def _ops_execute_job(
     artifact_history_cold_store_request_factory: Callable[..., Any],
     artifact_history_cold_rehydrate: Callable[..., dict[str, Any]],
     artifact_history_cold_rehydrate_request_factory: Callable[..., Any],
+    segment_history_maintenance: Callable[..., dict[str, Any]],
+    segment_history_maintenance_request_factory: Callable[..., Any],
+    segment_history_cold_store: Callable[..., dict[str, Any]],
+    segment_history_cold_store_request_factory: Callable[..., Any],
+    segment_history_cold_rehydrate: Callable[..., dict[str, Any]],
+    segment_history_cold_rehydrate_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -516,6 +574,24 @@ def _ops_execute_job(
         return artifact_history_cold_store(req=artifact_history_cold_store_request_factory(**args), auth=auth)
     if req.job_id == "artifact_history_cold_rehydrate":
         return artifact_history_cold_rehydrate(req=artifact_history_cold_rehydrate_request_factory(**args), auth=auth)
+    if req.job_id == "segment_history_maintenance":
+        try:
+            typed_req = segment_history_maintenance_request_factory(**args)
+        except (TypeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid segment_history_maintenance arguments: {exc}") from exc
+        return segment_history_maintenance(req=typed_req, auth=auth)
+    if req.job_id == "segment_history_cold_store":
+        try:
+            typed_req = segment_history_cold_store_request_factory(**args)
+        except (TypeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid segment_history_cold_store arguments: {exc}") from exc
+        return segment_history_cold_store(req=typed_req, auth=auth)
+    if req.job_id == "segment_history_cold_rehydrate":
+        try:
+            typed_req = segment_history_cold_rehydrate_request_factory(**args)
+        except (TypeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid segment_history_cold_rehydrate arguments: {exc}") from exc
+        return segment_history_cold_rehydrate(req=typed_req, auth=auth)
     raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
 
 
@@ -591,17 +667,17 @@ def ops_schedule_export_service(*, settings: Any, auth: AuthContext, format: str
         examples = {
             "service_unit": {
                 "Description": "CogniRelay host ops runner",
-                "ExecStart": f"/bin/sh -lc \"{command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'\"",
+                "ExecStart": f'/bin/sh -lc "{command} -d \'{{"job_id":"metrics.poll_and_alarm_eval"}}\'"',
             },
             "timer_unit": {"OnCalendar": "*:0/5", "Persistent": True},
         }
     else:
         examples = {
             "cron_examples": [
-                f"*/5 * * * * {command} -d '{{\"job_id\":\"index.rebuild_incremental\"}}'",
-                f"0 * * * * {command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'",
-                f"0 2 * * * {command} -d '{{\"job_id\":\"backup.create\"}}'",
-                f"30 2 * * 0 {command} -d '{{\"job_id\":\"backup.restore_test\"}}'",
+                f'*/5 * * * * {command} -d \'{{"job_id":"index.rebuild_incremental"}}\'',
+                f'0 * * * * {command} -d \'{{"job_id":"metrics.poll_and_alarm_eval"}}\'',
+                f'0 2 * * * {command} -d \'{{"job_id":"backup.create"}}\'',
+                f'30 2 * * 0 {command} -d \'{{"job_id":"backup.restore_test"}}\'',
             ]
         }
 
@@ -639,6 +715,12 @@ def ops_run_service(
     artifact_history_cold_store_request_factory: Callable[..., Any],
     artifact_history_cold_rehydrate: Callable[..., dict[str, Any]],
     artifact_history_cold_rehydrate_request_factory: Callable[..., Any],
+    segment_history_maintenance: Callable[..., dict[str, Any]],
+    segment_history_maintenance_request_factory: Callable[..., Any],
+    segment_history_cold_store: Callable[..., dict[str, Any]],
+    segment_history_cold_store_request_factory: Callable[..., Any],
+    segment_history_cold_rehydrate: Callable[..., dict[str, Any]],
+    segment_history_cold_rehydrate_request_factory: Callable[..., Any],
     load_token_config: Callable[[Path], dict[str, Any]],
     parse_iso: Callable[[str | None], datetime | None],
     load_security_keys: Callable[[Path], dict[str, Any]],
@@ -690,6 +772,12 @@ def ops_run_service(
             artifact_history_cold_store_request_factory=artifact_history_cold_store_request_factory,
             artifact_history_cold_rehydrate=artifact_history_cold_rehydrate,
             artifact_history_cold_rehydrate_request_factory=artifact_history_cold_rehydrate_request_factory,
+            segment_history_maintenance=segment_history_maintenance,
+            segment_history_maintenance_request_factory=segment_history_maintenance_request_factory,
+            segment_history_cold_store=segment_history_cold_store,
+            segment_history_cold_store_request_factory=segment_history_cold_store_request_factory,
+            segment_history_cold_rehydrate=segment_history_cold_rehydrate,
+            segment_history_cold_rehydrate_request_factory=segment_history_cold_rehydrate_request_factory,
             load_token_config=load_token_config,
             parse_iso=parse_iso,
             load_security_keys=load_security_keys,
@@ -733,7 +821,7 @@ def ops_run_service(
 
         if run_row is not None:
             try:
-                _append_ops_run(settings.repo_root, run_row)
+                _append_ops_run(settings.repo_root, run_row, settings=settings)
             except Exception:
                 _log.warning("failed to append ops run log for %s", run_id, exc_info=True)
 
