@@ -1141,6 +1141,7 @@ def segment_history_maintenance_service(
         discover_active_sources,
     )
     from app.segment_history.locking import (
+        LockInfrastructureError,
         SegmentHistoryLockTimeout,
         acquire_sorted_source_locks,
     )
@@ -1575,8 +1576,7 @@ def segment_history_maintenance_service(
                 # listed in the manifest that were not tracked in
                 # all_created (e.g. a payload written by _roll_jsonl_source
                 # before the stub write failed).
-                if source_rollback:
-                    _restore_rollback_state(source_rollback)
+                source_ok = _try_restore_rollback_state(source_rollback) if source_rollback else True
                 _remove_created_paths(all_created)
                 # Clean up manifest target files not already in all_created
                 created_set = {str(p) for p in all_created}
@@ -1590,7 +1590,21 @@ def segment_history_maintenance_service(
                                 "Could not remove orphaned target during rollback: %s",
                                 tp,
                             )
-                remove_manifest(repo_root, family, expected_operation="maintenance")
+                # Unstage git index to prevent phantom staged entries
+                from app.git_safety import unstage_paths as _unstage_maint
+                _maint_unstage = all_created + rolled_sources
+                if gm is not None and _maint_unstage:
+                    _unstage_maint(gm, _maint_unstage)
+                # Only remove manifest if source rollback succeeded;
+                # otherwise preserve it for reconciliation recovery.
+                if source_ok:
+                    remove_manifest(repo_root, family, expected_operation="maintenance")
+                else:
+                    _log.warning(
+                        "Preserving manifest for %s: source rollback incomplete; "
+                        "reconciliation will handle orphaned targets on next access",
+                        family,
+                    )
                 raise
 
             # Remove manifest only when the commit succeeded; when durable
@@ -1622,6 +1636,19 @@ def segment_history_maintenance_service(
                 "family": family,
                 "error": {
                     "code": "segment_history_source_lock_timeout",
+                    "detail": str(exc),
+                },
+            },
+        )
+    except LockInfrastructureError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "operation": "segment_history_maintenance",
+                "family": family,
+                "error": {
+                    "code": "segment_history_lock_infrastructure_unavailable",
                     "detail": str(exc),
                 },
             },
@@ -1695,6 +1722,7 @@ def segment_history_cold_store_service(
     """
     from app.segment_history.families import FAMILIES, _get_cold_after_days_setting
     from app.segment_history.locking import (
+        LockInfrastructureError,
         SegmentHistoryLockTimeout,
         acquire_sorted_source_locks,
     )
@@ -2109,6 +2137,12 @@ def segment_history_cold_store_service(
                                 )
                     except Exception:
                         durable = False
+                        # Restore hot payloads so segments remain accessible
+                        _restore_rollback_state(hot_rollback)
+                        # Unstage git index to prevent phantom staged entries
+                        from app.git_safety import unstage_paths as _unstage_cs_commit
+                        if gm is not None and commit_paths:
+                            _unstage_cs_commit(gm, commit_paths)
                         warnings.append(
                             _make_warning(
                                 "segment_history_git_commit_failed",
@@ -2117,19 +2151,23 @@ def segment_history_cold_store_service(
                         )
             except Exception:
                 # Rollback under lock: restore stubs first, then hot
-                # payloads.  Only remove cold .gz and manifest if stub
-                # rollback succeeded — otherwise the stubs still point
-                # to cold paths and removing the .gz would leave the
-                # segments permanently inaccessible.
+                # payloads.  Only remove cold .gz and manifest if both
+                # rollbacks succeeded — otherwise data may be permanently
+                # inaccessible.
                 stub_ok = _try_restore_rollback_state(stub_rollback)
-                _restore_rollback_state(hot_rollback)
-                if stub_ok:
+                hot_ok = _try_restore_rollback_state(hot_rollback)
+                # Unstage git index to prevent phantom staged entries
+                from app.git_safety import unstage_paths as _unstage_cs
+                if gm is not None and commit_paths:
+                    _unstage_cs(gm, commit_paths)
+                if stub_ok and hot_ok:
                     _remove_created_paths(created_cold_paths)
                     remove_manifest(repo_root, family, expected_operation="cold_store")
                 else:
                     _log.warning(
-                        "Preserving cold .gz and manifest for %s: stub rollback failed; cold paths retained as recovery source",
-                        family,
+                        "Preserving cold .gz and manifest for %s: rollback incomplete "
+                        "(stub_ok=%s, hot_ok=%s); retained as recovery source",
+                        family, stub_ok, hot_ok,
                     )
                 raise
 
@@ -2161,6 +2199,19 @@ def segment_history_cold_store_service(
                 "family": family,
                 "error": {
                     "code": "segment_history_source_lock_timeout",
+                    "detail": str(exc),
+                },
+            },
+        )
+    except LockInfrastructureError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "operation": "segment_history_cold_store",
+                "family": family,
+                "error": {
+                    "code": "segment_history_lock_infrastructure_unavailable",
                     "detail": str(exc),
                 },
             },
@@ -2230,6 +2281,7 @@ def segment_history_cold_rehydrate_service(
     """
     from app.segment_history.families import FAMILIES
     from app.segment_history.locking import (
+        LockInfrastructureError,
         SegmentHistoryLockTimeout,
         segment_history_source_lock,
     )
@@ -2647,6 +2699,14 @@ def segment_history_cold_rehydrate_service(
                 # inaccessible.
                 stub_ok = _try_restore_rollback_state(stub_rollback)
                 _remove_created_paths([hot_path])
+                # Unstage git index to prevent phantom staged entries
+                from app.git_safety import unstage_paths as _unstage_rh
+                try:
+                    _rh_unstage = commit_paths_list  # noqa: F841
+                except NameError:
+                    _rh_unstage = [hot_path, stub_path]
+                if gm is not None:
+                    _unstage_rh(gm, _rh_unstage)
                 if stub_ok:
                     _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
                 else:
@@ -2660,6 +2720,20 @@ def segment_history_cold_rehydrate_service(
             409,
             "segment_history_source_lock_timeout",
             str(exc),
+        )
+    except LockInfrastructureError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "operation": "segment_history_cold_rehydrate",
+                "family": family,
+                "segment_id": segment_id,
+                "error": {
+                    "code": "segment_history_lock_infrastructure_unavailable",
+                    "detail": str(exc),
+                },
+            },
         )
     except HTTPException:
         raise
