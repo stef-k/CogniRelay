@@ -85,9 +85,7 @@ class TestNextSegmentId(unittest.TestCase):
 
 class TestValidateSegmentId(unittest.TestCase):
     def test_valid_with_stream_key(self) -> None:
-        result = _validate_segment_id(
-            "journal", "journal__2026__2026-03-19__20260320T120000Z__0001"
-        )
+        result = _validate_segment_id("journal", "journal__2026__2026-03-19__20260320T120000Z__0001")
         self.assertIsNotNone(result)
         family, stream_key, ts, seq = result
         self.assertEqual(family, "journal")

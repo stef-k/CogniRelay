@@ -7,24 +7,33 @@ checks, and active-source discovery rules.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from app.segment_history.service import (
-    _byte_size,
-    _count_lines,
-    _first_last_json_field,
-    _first_nonempty_line_preview,
-    _json_field_counts,
-    _sample_json_field,
+from app.segment_history.utils import (
+    byte_size,
+    count_lines,
+    first_last_json_field,
+    first_nonempty_line_preview,
+    json_field_counts,
+    parse_event_timestamp,
+    sample_json_field,
 )
 
 # ---------------------------------------------------------------------------
 # Family definition
 # ---------------------------------------------------------------------------
 _DAY_BUCKET_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+
+
+def _default_summary(content: str) -> dict[str, Any]:
+    """Fallback summary for families that don't override."""
+    return {
+        "line_count": count_lines(content),
+        "byte_size": byte_size(content),
+    }
 
 
 @dataclass(frozen=True)
@@ -41,18 +50,10 @@ class FamilyConfig:
     has_day_boundary_rollover: bool = True
 
     # Summary builder — receives content string, returns summary dict
-    build_summary: Callable[[str], dict[str, Any]] = field(default=lambda: _default_summary)
+    build_summary: Callable[[str], dict[str, Any]] = _default_summary
 
     # Cold eligibility field — the stub summary field checked against cold_after_days
     cold_eligibility_field: str = "last_event_at"
-
-
-def _default_summary(content: str) -> dict[str, Any]:
-    """Fallback summary for families that don't override."""
-    return {
-        "line_count": _count_lines(content),
-        "byte_size": _byte_size(content),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -61,34 +62,34 @@ def _default_summary(content: str) -> dict[str, Any]:
 def _journal_summary(content: str) -> dict[str, Any]:
     """Summary for journal day-bucket segments."""
     return {
-        "line_count": _count_lines(content),
-        "byte_size": _byte_size(content),
-        "first_nonempty_line_preview": _first_nonempty_line_preview(content),
+        "line_count": count_lines(content),
+        "byte_size": byte_size(content),
+        "first_nonempty_line_preview": first_nonempty_line_preview(content),
     }
 
 
 def _api_audit_summary(content: str) -> dict[str, Any]:
     """Summary for API audit log segments."""
-    first, last = _first_last_json_field(content, "ts")
+    first, last = first_last_json_field(content, "ts")
     return {
         "first_event_at": first,
         "last_event_at": last,
-        "line_count": _count_lines(content),
-        "byte_size": _byte_size(content),
-        "event_name_sample": _sample_json_field(content, "event", 5),
+        "line_count": count_lines(content),
+        "byte_size": byte_size(content),
+        "event_name_sample": sample_json_field(content, "event", 5),
     }
 
 
 def _ops_runs_summary(content: str) -> dict[str, Any]:
     """Summary for ops run log segments."""
-    first_started, _ = _first_last_json_field(content, "started_at")
-    _, last_finished = _first_last_json_field(content, "finished_at")
+    first_started, _ = first_last_json_field(content, "started_at")
+    _, last_finished = first_last_json_field(content, "finished_at")
     return {
         "first_started_at": first_started,
         "last_finished_at": last_finished,
-        "line_count": _count_lines(content),
-        "byte_size": _byte_size(content),
-        "job_id_counts": _json_field_counts(content, "job_id", 10),
+        "line_count": count_lines(content),
+        "byte_size": byte_size(content),
+        "job_id_counts": json_field_counts(content, "job_id", 10),
     }
 
 
@@ -99,24 +100,26 @@ def _message_stream_summary(content: str) -> dict[str, Any]:
     The service layer must call :func:`fixup_message_stream_summary` after
     adding ``stream_kind`` to apply ack-specific overrides.
     """
-    first, last = _first_last_json_field(content, "sent_at")
+    first, last = first_last_json_field(content, "sent_at")
     if first is None:
-        first, last = _first_last_json_field(content, "ack_at")
-    msg_ids = _sample_json_field(content, "id", 5)
+        first, last = first_last_json_field(content, "ack_at")
+    msg_ids = sample_json_field(content, "id", 5)
     if not msg_ids:
-        msg_ids = _sample_json_field(content, "message_id", 5)
+        msg_ids = sample_json_field(content, "message_id", 5)
     return {
         "first_event_at": first,
         "last_event_at": last,
-        "line_count": _count_lines(content),
-        "byte_size": _byte_size(content),
+        "line_count": count_lines(content),
+        "byte_size": byte_size(content),
         "message_id_sample": msg_ids,
-        "thread_id_sample": _sample_json_field(content, "thread_id", 5),
+        "thread_id_sample": sample_json_field(content, "thread_id", 5),
     }
 
 
 def fixup_message_stream_summary(
-    summary: dict[str, Any], content: str, stream_kind: str,
+    summary: dict[str, Any],
+    content: str,
+    stream_kind: str,
 ) -> None:
     """Apply ack-specific overrides to a message-stream summary in place.
 
@@ -125,18 +128,18 @@ def fixup_message_stream_summary(
     """
     if stream_kind != "acks":
         return
-    first, last = _first_last_json_field(content, "ack_at")
+    first, last = first_last_json_field(content, "ack_at")
     summary["first_event_at"] = first
     summary["last_event_at"] = last
-    summary["message_id_sample"] = _sample_json_field(content, "message_id", 5)
+    summary["message_id_sample"] = sample_json_field(content, "message_id", 5)
     summary["thread_id_sample"] = []
 
 
 def _message_thread_summary(content: str) -> dict[str, Any]:
     """Summary for message thread segments."""
-    first, last = _first_last_json_field(content, "sent_at")
-    participants = _sample_json_field(content, "from", 10)
-    to_vals = _sample_json_field(content, "to", 10)
+    first, last = first_last_json_field(content, "sent_at")
+    participants = sample_json_field(content, "from", 10)
+    to_vals = sample_json_field(content, "to", 10)
     seen = set(participants)
     for v in to_vals:
         if v not in seen:
@@ -147,21 +150,21 @@ def _message_thread_summary(content: str) -> dict[str, Any]:
     return {
         "first_event_at": first,
         "last_event_at": last,
-        "line_count": _count_lines(content),
-        "byte_size": _byte_size(content),
+        "line_count": count_lines(content),
+        "byte_size": byte_size(content),
         "participant_sample": participants,
     }
 
 
 def _episodic_summary(content: str) -> dict[str, Any]:
     """Summary for episodic memory segments."""
-    first, last = _first_last_json_field(content, "at")
+    first, last = first_last_json_field(content, "at")
     return {
         "first_event_at": first,
         "last_event_at": last,
-        "line_count": _count_lines(content),
-        "byte_size": _byte_size(content),
-        "subject_kind_counts": _json_field_counts(content, "subject_kind", 10),
+        "line_count": count_lines(content),
+        "byte_size": byte_size(content),
+        "subject_kind_counts": json_field_counts(content, "subject_kind", 10),
     }
 
 
@@ -245,9 +248,7 @@ FAMILIES: dict[str, FamilyConfig] = {
 # ---------------------------------------------------------------------------
 # Active source discovery
 # ---------------------------------------------------------------------------
-def discover_active_sources(
-    family: str, repo_root: Path
-) -> list[Path]:
+def discover_active_sources(family: str, repo_root: Path) -> list[Path]:
     """Discover active source files for a family, excluding history dirs.
 
     Returns sorted list of existing source files.
@@ -326,9 +327,7 @@ def _get_cold_after_days_setting(family: str, settings: Any) -> int:
     return getattr(settings, mapping[family])
 
 
-def is_size_rollover_eligible(
-    source_path: Path, family: str, settings: Any
-) -> bool:
+def is_size_rollover_eligible(source_path: Path, family: str, settings: Any) -> bool:
     """Check if a source file exceeds its family's size rollover threshold."""
     config = FAMILIES[family]
     if not config.has_size_rollover:
@@ -342,9 +341,7 @@ def is_size_rollover_eligible(
         return False
 
 
-def is_journal_day_rollover_eligible(
-    source_path: Path, now: datetime
-) -> bool:
+def is_journal_day_rollover_eligible(source_path: Path, now: datetime) -> bool:
     """Check if a journal day-bucket file belongs to a past UTC day.
 
     Only files matching the ``YYYY-MM-DD.md`` naming pattern for a
@@ -358,8 +355,11 @@ def is_journal_day_rollover_eligible(
 
 
 def is_message_stream_max_hot_days_eligible(
-    source_path: Path, settings: Any, now: datetime,
-    *, warnings: list[dict[str, Any]] | None = None,
+    source_path: Path,
+    settings: Any,
+    now: datetime,
+    *,
+    warnings: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Check if a message stream source exceeds max_hot_days.
 
@@ -396,36 +396,40 @@ def is_message_stream_max_hot_days_eligible(
     if newest_ts is None:
         if warnings is not None:
             from app.segment_history.service import _make_warning
-            warnings.append(_make_warning(
-                "segment_history_missing_stream_timestamp",
-                f"No parseable event timestamp in message_stream source: {source_path.name}",
-                path=str(source_path),
-            ))
+
+            warnings.append(
+                _make_warning(
+                    "segment_history_missing_stream_timestamp",
+                    f"No parseable event timestamp in message_stream source: {source_path.name}",
+                    path=str(source_path),
+                )
+            )
         return False
 
     try:
-        if "T" in newest_ts and newest_ts.endswith("Z") and len(newest_ts) == 16:
-            ts_dt = datetime.strptime(newest_ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-        elif len(newest_ts) == 10:
-            ts_dt = datetime.strptime(newest_ts, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        else:
-            ts_dt = datetime.fromisoformat(newest_ts.replace("Z", "+00:00"))
+        ts_dt = parse_event_timestamp(newest_ts)
         age_days = (now - ts_dt).total_seconds() / 86400
         return age_days >= max_hot
     except (ValueError, TypeError):
         if warnings is not None:
             from app.segment_history.service import _make_warning
-            warnings.append(_make_warning(
-                "segment_history_missing_stream_timestamp",
-                f"Unparseable event timestamp in message_stream source: {source_path.name}",
-                path=str(source_path),
-            ))
+
+            warnings.append(
+                _make_warning(
+                    "segment_history_missing_stream_timestamp",
+                    f"Unparseable event timestamp in message_stream source: {source_path.name}",
+                    path=str(source_path),
+                )
+            )
         return False
 
 
 def is_message_thread_inactivity_eligible(
-    source_path: Path, settings: Any, now: datetime,
-    *, warnings: list[dict[str, Any]] | None = None,
+    source_path: Path,
+    settings: Any,
+    now: datetime,
+    *,
+    warnings: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Check if a message thread source exceeds inactivity_days.
 
@@ -459,36 +463,35 @@ def is_message_thread_inactivity_eligible(
     if newest_ts is None:
         if warnings is not None:
             from app.segment_history.service import _make_warning
-            warnings.append(_make_warning(
-                "segment_history_missing_thread_timestamp",
-                f"No parseable sent_at in message_thread source: {source_path.name}",
-                path=str(source_path),
-            ))
+
+            warnings.append(
+                _make_warning(
+                    "segment_history_missing_thread_timestamp",
+                    f"No parseable sent_at in message_thread source: {source_path.name}",
+                    path=str(source_path),
+                )
+            )
         return False
 
     try:
-        if "T" in newest_ts and newest_ts.endswith("Z") and len(newest_ts) == 16:
-            ts_dt = datetime.strptime(newest_ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-        elif len(newest_ts) == 10:
-            ts_dt = datetime.strptime(newest_ts, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        else:
-            ts_dt = datetime.fromisoformat(newest_ts.replace("Z", "+00:00"))
+        ts_dt = parse_event_timestamp(newest_ts)
         age_days = (now - ts_dt).total_seconds() / 86400
         return age_days >= inactivity
     except (ValueError, TypeError):
         if warnings is not None:
             from app.segment_history.service import _make_warning
-            warnings.append(_make_warning(
-                "segment_history_missing_thread_timestamp",
-                f"Unparseable sent_at in message_thread source: {source_path.name}",
-                path=str(source_path),
-            ))
+
+            warnings.append(
+                _make_warning(
+                    "segment_history_missing_thread_timestamp",
+                    f"Unparseable sent_at in message_thread source: {source_path.name}",
+                    path=str(source_path),
+                )
+            )
         return False
 
 
-def _is_jsonl_day_boundary_eligible(
-    source_path: Path, family: str, now: datetime
-) -> bool:
+def _is_jsonl_day_boundary_eligible(source_path: Path, family: str, now: datetime) -> bool:
     """Check if a JSONL source has crossed a UTC day boundary.
 
     The day boundary exists when the current UTC day differs from the UTC day
@@ -539,8 +542,12 @@ def _is_jsonl_day_boundary_eligible(
 
 
 def check_rollover_eligible(
-    source_path: Path, family: str, settings: Any, now: datetime,
-    *, warnings: list[dict[str, Any]] | None = None,
+    source_path: Path,
+    family: str,
+    settings: Any,
+    now: datetime,
+    *,
+    warnings: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Check if a source file is eligible for rollover under its family's rules."""
     config = FAMILIES[family]
@@ -554,7 +561,10 @@ def check_rollover_eligible(
         if is_size_rollover_eligible(source_path, family, settings):
             return True
         return is_message_thread_inactivity_eligible(
-            source_path, settings, now, warnings=warnings,
+            source_path,
+            settings,
+            now,
+            warnings=warnings,
         )
 
     # Message stream: size or max_hot_days (no day-boundary)
@@ -562,7 +572,10 @@ def check_rollover_eligible(
         if is_size_rollover_eligible(source_path, family, settings):
             return True
         return is_message_stream_max_hot_days_eligible(
-            source_path, settings, now, warnings=warnings,
+            source_path,
+            settings,
+            now,
+            warnings=warnings,
         )
 
     # api_audit, ops_runs, episodic: size or day-boundary

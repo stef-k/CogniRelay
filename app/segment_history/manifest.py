@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import logging
@@ -31,10 +32,7 @@ class ManifestOccupied(Exception):
     def __init__(self, family: str, existing_op: str) -> None:
         self.family = family
         self.existing_op = existing_op
-        super().__init__(
-            f"Manifest slot for family '{family}' is occupied by a "
-            f"'{existing_op}' operation; back off and retry"
-        )
+        super().__init__(f"Manifest slot for family '{family}' is occupied by a '{existing_op}' operation; back off and retry")
 
 
 def _manifest_dir(repo_root: Path) -> Path:
@@ -96,23 +94,14 @@ def write_manifest(
     # caller bug, not a concurrency concern, so fail fast.
     effective_targets = target_paths or []
     if len(effective_targets) % 2 != 0:
-        raise ValueError(
-            f"target_paths must have even length (payload/stub pairs), "
-            f"got {len(effective_targets)}"
-        )
+        raise ValueError(f"target_paths must have even length (payload/stub pairs), got {len(effective_targets)}")
     for i in range(0, len(effective_targets), 2):
         payload_entry = effective_targets[i]
         stub_entry = effective_targets[i + 1] if i + 1 < len(effective_targets) else ""
         if stub_entry and not stub_entry.endswith(".json"):
-            raise ValueError(
-                f"target_paths[{i + 1}] should be a stub (.json), "
-                f"got: {stub_entry}"
-            )
+            raise ValueError(f"target_paths[{i + 1}] should be a stub (.json), got: {stub_entry}")
         if payload_entry and payload_entry.endswith(".json"):
-            raise ValueError(
-                f"target_paths[{i}] should be a payload (not .json), "
-                f"got: {payload_entry}"
-            )
+            raise ValueError(f"target_paths[{i}] should be a payload (not .json), got: {payload_entry}")
 
     path = manifest_path(repo_root, family)
     lock_path = _manifest_lock_path(repo_root, family)
@@ -132,6 +121,11 @@ def write_manifest(
                     lock_file.close()
                     raise ManifestOccupied(family, "lock_timeout") from None
                 time.sleep(_MANIFEST_LOCK_POLL)
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue  # Retry on signal interruption
+                lock_file.close()
+                raise ManifestOccupied(family, "lock_error") from exc
 
         # Guard: refuse to clobber a manifest owned by a non-overlapping operation.
         if path.is_file():
@@ -149,17 +143,18 @@ def write_manifest(
                 lost_sources = existing_sources - new_sources
                 if lost_sources:
                     _log.warning(
-                        "Manifest clobber for family '%s': overwriting "
-                        "manifest whose sources %s are not covered by "
-                        "new operation; crash-recovery for those sources "
-                        "depends on reconciliation",
+                        "Manifest clobber for family '%s': overwriting manifest whose sources %s are not covered by new operation; crash-recovery for those sources depends on reconciliation",
                         family,
                         sorted(lost_sources),
                     )
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
                 # Corrupt or unreadable manifest — safe to overwrite; the
                 # reconciliation path would have cleaned it up anyway.
-                pass
+                _log.warning(
+                    "Overwriting corrupt manifest for family '%s': %s",
+                    family,
+                    exc,
+                )
 
         payload = {
             "schema_type": "segment_history_manifest",
@@ -172,6 +167,10 @@ def write_manifest(
             "cleanup_paths": cleanup_paths or [],
             "started_at": started_at or datetime.now(timezone.utc).isoformat(),
         }
+        # NOTE: write_text_file must write directly to `path` (or via a
+        # sibling temp-rename that resolves atomically before this function
+        # returns) so that the flock above protects the entire check-and-write
+        # sequence against concurrent clobber.
         write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
         return path
     finally:
@@ -223,7 +222,29 @@ def remove_manifest(
         _log.warning("Could not open manifest lock for removal %s: %s", path, exc)
         return False
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        # Use non-blocking flock with timeout to prevent indefinite thread
+        # stalls that could exhaust the ASGI thread pool on a 24/7 system.
+        deadline = time.monotonic() + _MANIFEST_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    _log.warning(
+                        "Manifest removal lock timeout for %s; manifest preserved for next reconciliation pass",
+                        path,
+                    )
+                    lock_file.close()
+                    return False
+                time.sleep(_MANIFEST_LOCK_POLL)
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue  # Retry on signal interruption
+                _log.warning("Unexpected flock error during manifest removal: %s", exc)
+                lock_file.close()
+                return False
+
         if not path.is_file():
             return False
         if expected_operation is not None:
@@ -232,7 +253,7 @@ def remove_manifest(
                 if data.get("operation") != expected_operation:
                     return False
             except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                pass  # corrupt — safe to remove
+                _log.debug("Corrupt manifest during removal check for %s; safe to remove", path)
         try:
             path.unlink()
             return True

@@ -63,9 +63,7 @@ class TestDeferredAuditEmission(unittest.TestCase):
             gm = SimpleGitManagerStub(repo)
             logs = repo / "logs"
             logs.mkdir(parents=True)
-            (logs / "api_audit.jsonl").write_text(
-                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
-            )
+            (logs / "api_audit.jsonl").write_text('{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20)
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
 
             emitted: list[tuple[str, dict]] = []
@@ -183,14 +181,17 @@ class TestRehydrateRollback(unittest.TestCase):
                     raise OSError("Simulated disk-full on stub write")
                 _real_write(path, content)
 
+            from fastapi import HTTPException as _HTTPException
+
             with patch("app.segment_history.service.write_text_file", side_effect=_failing_write):
-                with self.assertRaises(OSError):
+                with self.assertRaises(_HTTPException) as ctx:
                     segment_history_cold_rehydrate_service(
                         family="api_audit",
                         segment_id=seg_id,
                         repo_root=repo,
                         gm=gm,
                     )
+                self.assertEqual(ctx.exception.status_code, 500)
 
             # Hot payload must NOT exist (rollback should have removed it)
             hot_path = repo / "logs" / "history" / "api_audit" / f"{seg_id}.jsonl"
@@ -236,8 +237,12 @@ class TestWriteTimeRolloverManifest(unittest.TestCase):
             audit_file.write_text('{"ts":"2026-03-20","event":"old"}\n' * 100)
 
             append_audit(
-                repo, "new_event", "peer-1", {"key": "value"},
-                rollover_bytes=100, gm=gm,
+                repo,
+                "new_event",
+                "peer-1",
+                {"key": "value"},
+                rollover_bytes=100,
+                gm=gm,
             )
 
             # Manifest must be removed after successful rollover
@@ -256,6 +261,7 @@ class TestWriteTimeRolloverManifest(unittest.TestCase):
             manifest_seen: list[bool] = []
 
             from app.segment_history.service import _roll_jsonl_source
+
             _real_roll = _roll_jsonl_source
 
             def _spying_roll(**kwargs: Any) -> Any:
@@ -266,8 +272,12 @@ class TestWriteTimeRolloverManifest(unittest.TestCase):
             # _roll_jsonl_source is imported inside the function at module level
             with patch("app.segment_history.service._roll_jsonl_source", side_effect=_spying_roll):
                 append_audit(
-                    repo, "new_event", "peer-1", {"key": "value"},
-                    rollover_bytes=100, gm=gm,
+                    repo,
+                    "new_event",
+                    "peer-1",
+                    {"key": "value"},
+                    rollover_bytes=100,
+                    gm=gm,
                 )
 
             # The manifest should have been visible during the roll
@@ -367,9 +377,7 @@ class TestManifestPreservedOnCommitFailure(unittest.TestCase):
             gm.commit_paths = lambda *a, **k: False  # simulate commit failure
             logs = repo / "logs"
             logs.mkdir(parents=True)
-            (logs / "api_audit.jsonl").write_text(
-                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
-            )
+            (logs / "api_audit.jsonl").write_text('{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20)
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             settings = _FakeSettings()
 
@@ -410,8 +418,7 @@ class TestManifestPreservedOnCommitFailure(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 1, "byte_size": 30},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 1, "byte_size": 30},
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
 
@@ -439,9 +446,7 @@ class TestManifestPreservedOnCommitFailure(unittest.TestCase):
             gm = SimpleGitManagerStub(repo)
             logs = repo / "logs"
             logs.mkdir(parents=True)
-            (logs / "api_audit.jsonl").write_text(
-                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
-            )
+            (logs / "api_audit.jsonl").write_text('{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20)
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             settings = _FakeSettings()
 
@@ -500,8 +505,7 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 20, "byte_size": len(rolled_data)},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 20, "byte_size": len(rolled_data)},
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
 
@@ -536,9 +540,7 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
             logs = repo / "logs"
             logs.mkdir(parents=True)
             source = logs / "api_audit.jsonl"
-            source.write_text(
-                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
-            )
+            source.write_text('{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20)
 
             # A stub from a prior successful roll exists (no manifest).
             hist = repo / "logs" / "history" / "api_audit"
@@ -555,8 +557,7 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 1, "byte_size": 30},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 1, "byte_size": 30},
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
 
@@ -606,8 +607,7 @@ class TestRehydrateManifestCheckUnderLock(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(cold_path.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 1, "byte_size": 30},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 1, "byte_size": 30},
             )
             stub["cold_stored_at"] = "2026-03-20T00:00:00Z"
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
@@ -623,6 +623,7 @@ class TestRehydrateManifestCheckUnderLock(unittest.TestCase):
             )
 
             from fastapi import HTTPException
+
             with self.assertRaises(HTTPException) as ctx:
                 segment_history_cold_rehydrate_service(
                     family="api_audit",
@@ -673,8 +674,12 @@ class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
             # Append should succeed — the stale manifest is reconciled inline
             # (no targets exist on disk so manifest is simply removed)
             append_audit(
-                repo, "test_event", "peer-1", {"k": "v"},
-                rollover_bytes=50, gm=gm,
+                repo,
+                "test_event",
+                "peer-1",
+                {"k": "v"},
+                rollover_bytes=50,
+                gm=gm,
             )
 
             # Manifest should be gone after reconciliation
@@ -728,11 +733,14 @@ class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
             # Rollover failure now propagates as SegmentHistoryAppendError
             with self.assertRaises(SegmentHistoryAppendError) as ctx:
                 append_audit(
-                    repo, "test_event", "peer-1", {"k": "v"},
-                    rollover_bytes=50, gm=gm,
+                    repo,
+                    "test_event",
+                    "peer-1",
+                    {"k": "v"},
+                    rollover_bytes=50,
+                    gm=gm,
                 )
-            self.assertEqual(ctx.exception.code,
-                             "segment_history_pending_batch_residue")
+            self.assertEqual(ctx.exception.code, "segment_history_pending_batch_residue")
 
             # Manifest preserved for next retry
             self.assertIsNotNone(read_manifest(repo, "api_audit"))
@@ -1004,8 +1012,10 @@ class TestMaintenanceRollbackCleansOrphanedTargets(unittest.TestCase):
                     raise OSError("Simulated disk full on stub write")
                 original_wtf(path, content)
 
+            from fastapi import HTTPException as _HTTPExc2
+
             with patch("app.segment_history.service.write_text_file", _failing_wtf):
-                with self.assertRaises(OSError):
+                with self.assertRaises(_HTTPExc2) as ctx:
                     segment_history_maintenance_service(
                         family="api_audit",
                         repo_root=repo,
@@ -1013,13 +1023,15 @@ class TestMaintenanceRollbackCleansOrphanedTargets(unittest.TestCase):
                         gm=gm,
                         now=now,
                     )
+                self.assertEqual(ctx.exception.status_code, 500)
 
             # The orphaned payload should have been cleaned up by rollback
             history_dir = repo / "logs" / "history" / "api_audit"
             if history_dir.is_dir():
                 payloads = list(history_dir.glob("*.jsonl"))
                 self.assertEqual(
-                    payloads, [],
+                    payloads,
+                    [],
                     f"Orphaned payload should have been removed: {payloads}",
                 )
 
@@ -1029,6 +1041,7 @@ class TestMaintenanceRollbackCleansOrphanedTargets(unittest.TestCase):
 
             # Manifest should be removed
             from app.segment_history.manifest import manifest_path
+
             self.assertFalse(manifest_path(repo, "api_audit").exists())
 
 
@@ -1069,7 +1082,8 @@ class TestWriteTimeRolloverCleansOrphanedTargets(unittest.TestCase):
             if history_dir.is_dir():
                 payloads = list(history_dir.glob("*.jsonl"))
                 self.assertEqual(
-                    payloads, [],
+                    payloads,
+                    [],
                     f"Orphaned payload should have been removed: {payloads}",
                 )
 
@@ -1248,7 +1262,10 @@ class TestManifestClobberGuard(unittest.TestCase):
 
             # Reconcile with a non-overlapping locked set
             result = _reconcile_manifest_residue(
-                repo, "message_stream", "cold_store", None,
+                repo,
+                "message_stream",
+                "cold_store",
+                None,
                 locked_source_paths={"messages/outbox/bob.jsonl"},
             )
             # Should have been skipped — manifest still exists
@@ -1270,7 +1287,10 @@ class TestManifestClobberGuard(unittest.TestCase):
 
             # Reconcile with an overlapping locked set
             result = _reconcile_manifest_residue(
-                repo, "message_stream", "maintenance", None,
+                repo,
+                "message_stream",
+                "maintenance",
+                None,
                 locked_source_paths={"messages/inbox/alice.jsonl", "messages/outbox/bob.jsonl"},
             )
             # Should have reconciled (no targets → manifest removed)
@@ -1292,11 +1312,13 @@ class TestManifestClobberGuard(unittest.TestCase):
             )
 
             result = _reconcile_manifest_residue(
-                repo, "message_stream", "maintenance", None,
+                repo,
+                "message_stream",
+                "maintenance",
+                None,
             )
             self.assertIsNotNone(result)
             self.assertIsNone(read_manifest(repo, "message_stream"))
-
 
     def test_partial_overlap_skips_reconciliation(self) -> None:
         """When the caller's locked set covers only SOME of the manifest's
@@ -1331,7 +1353,10 @@ class TestManifestClobberGuard(unittest.TestCase):
 
             # Caller only holds lock on alice — partial coverage
             result = _reconcile_manifest_residue(
-                repo, "message_stream", "maintenance", None,
+                repo,
+                "message_stream",
+                "maintenance",
+                None,
                 locked_source_paths={"messages/inbox/alice.jsonl"},
             )
             # Should skip — manifest still exists
@@ -1371,8 +1396,7 @@ class TestReconciliationSourceTruncation(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 1, "byte_size": len(rolled_data)},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 1, "byte_size": len(rolled_data)},
             )
             stub_path = idx / f"{seg_id}.json"
             write_text_file(stub_path, json.dumps(stub))
@@ -1392,7 +1416,10 @@ class TestReconciliationSourceTruncation(unittest.TestCase):
 
             # Reconcile — should commit targets AND truncate source
             result = _reconcile_manifest_residue(
-                repo, "api_audit", "maintenance", gm,
+                repo,
+                "api_audit",
+                "maintenance",
+                gm,
                 locked_source_paths={"logs/api_audit.jsonl"},
             )
             self.assertIsNotNone(result)
@@ -1433,8 +1460,7 @@ class TestCleanupDurable(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 1, "byte_size": 30},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 1, "byte_size": 30},
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub_data))
 
@@ -1532,7 +1558,10 @@ class TestRehydrateOrphanedHotAutoClean(unittest.TestCase):
             hot_path.write_text("orphaned-from-crash")
 
             result = segment_history_cold_rehydrate_service(
-                family=family, segment_id=seg_id, repo_root=repo, gm=gm,
+                family=family,
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=gm,
             )
             self.assertIsInstance(result, dict)
             self.assertTrue(result["ok"])
@@ -1591,12 +1620,17 @@ class TestRehydrateOrphanedHotAutoClean(unittest.TestCase):
                     raise RuntimeError("simulated crash")
                 return original_write(path, content)
 
+            from fastapi import HTTPException as _HTTPExc
+
             with patch.object(_svc, "write_text_file", side_effect=crash_on_stub_write):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(_HTTPExc) as ctx:
                     segment_history_cold_rehydrate_service(
-                        family=family, segment_id=seg_id, repo_root=repo,
+                        family=family,
+                        segment_id=seg_id,
+                        repo_root=repo,
                         gm=SimpleGitManagerStub(repo),
                     )
+                self.assertEqual(ctx.exception.status_code, 500)
 
             # After rollback, manifest should be removed
             self.assertIsNone(read_manifest(repo, family))
@@ -1625,7 +1659,10 @@ class TestInBatchSegmentIdDedup(unittest.TestCase):
 
             # With reserved_ids, the collision is avoided
             id2_with_reserve = _next_segment_id(
-                "api_audit", "api_audit", now, target,
+                "api_audit",
+                "api_audit",
+                now,
+                target,
                 reserved_ids={id1},
             )
             self.assertTrue(id2_with_reserve.endswith("__0002"))
@@ -1649,7 +1686,10 @@ class TestInBatchSegmentIdDedup(unittest.TestCase):
             # With reserved_ids at 0003, gets 0004
             reserved = {id2, id2.replace("__0002", "__0003")}
             id4 = _next_segment_id(
-                "api_audit", "api_audit", now, target,
+                "api_audit",
+                "api_audit",
+                now,
+                target,
                 reserved_ids=reserved,
             )
             self.assertTrue(id4.endswith("__0004"))
@@ -1676,8 +1716,7 @@ class TestManifestOccupied(unittest.TestCase):
                 family="api_audit",
                 source_paths=["logs/api_audit.jsonl"],
                 segment_ids=["seg1"],
-                target_paths=["logs/history/api_audit/seg1.jsonl",
-                              "logs/history/api_audit/index/seg1.json"],
+                target_paths=["logs/history/api_audit/seg1.jsonl", "logs/history/api_audit/index/seg1.json"],
             )
             with self.assertRaises(ManifestOccupied):
                 write_manifest(
@@ -1686,8 +1725,7 @@ class TestManifestOccupied(unittest.TestCase):
                     family="api_audit",
                     source_paths=["logs/other.jsonl"],
                     segment_ids=["seg2"],
-                    target_paths=["logs/history/api_audit/seg2.jsonl",
-                                  "logs/history/api_audit/index/seg2.json"],
+                    target_paths=["logs/history/api_audit/seg2.jsonl", "logs/history/api_audit/index/seg2.json"],
                 )
 
     def test_overwrite_allowed_overlapping(self) -> None:
@@ -1700,8 +1738,7 @@ class TestManifestOccupied(unittest.TestCase):
                 family="api_audit",
                 source_paths=["logs/api_audit.jsonl"],
                 segment_ids=["seg1"],
-                target_paths=["logs/history/api_audit/seg1.jsonl",
-                              "logs/history/api_audit/index/seg1.json"],
+                target_paths=["logs/history/api_audit/seg1.jsonl", "logs/history/api_audit/index/seg1.json"],
             )
             # Same source — should not raise
             write_manifest(
@@ -1710,8 +1747,7 @@ class TestManifestOccupied(unittest.TestCase):
                 family="api_audit",
                 source_paths=["logs/api_audit.jsonl"],
                 segment_ids=["seg1_new"],
-                target_paths=["logs/history/api_audit/seg1_new.jsonl",
-                              "logs/history/api_audit/index/seg1_new.json"],
+                target_paths=["logs/history/api_audit/seg1_new.jsonl", "logs/history/api_audit/index/seg1_new.json"],
             )
             mf = read_manifest(repo, "api_audit")
             self.assertIsNotNone(mf)
@@ -1736,11 +1772,11 @@ class TestManifestOccupied(unittest.TestCase):
                 family="api_audit",
                 source_paths=["logs/other.jsonl"],
                 segment_ids=["other_seg"],
-                target_paths=["logs/history/api_audit/other_seg.jsonl",
-                              "logs/history/api_audit/index/other_seg.json"],
+                target_paths=["logs/history/api_audit/other_seg.jsonl", "logs/history/api_audit/index/other_seg.json"],
             )
 
             from fastapi import HTTPException
+
             with self.assertRaises(HTTPException) as ctx:
                 segment_history_maintenance_service(
                     family="api_audit",
@@ -1751,8 +1787,7 @@ class TestManifestOccupied(unittest.TestCase):
             # C3 fix: maintenance error responses are now HTTPException(409)
             self.assertEqual(ctx.exception.status_code, 409)
             self.assertFalse(ctx.exception.detail["ok"])
-            self.assertEqual(ctx.exception.detail["error"]["code"],
-                             "segment_history_manifest_occupied")
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_manifest_occupied")
 
 
 class TestColdStoreDefersHotDeletion(unittest.TestCase):
@@ -1775,8 +1810,11 @@ class TestColdStoreDefersHotDeletion(unittest.TestCase):
 
             # Roll first
             result = segment_history_maintenance_service(
-                family="api_audit", repo_root=repo, settings=settings,
-                gm=gm, now=now,
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
             )
             self.assertTrue(result["ok"])
 
@@ -1786,8 +1824,11 @@ class TestColdStoreDefersHotDeletion(unittest.TestCase):
                     return False
 
             cs_result = segment_history_cold_store_service(
-                family="api_audit", repo_root=repo, settings=settings,
-                gm=_FailingGM(), now=now,
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=_FailingGM(),
+                now=now,
             )
             self.assertTrue(cs_result["ok"])
             self.assertFalse(cs_result["durable"])
@@ -1796,16 +1837,13 @@ class TestColdStoreDefersHotDeletion(unittest.TestCase):
             # Hot payloads deleted before commit (single-commit-per-pass)
             hist = repo / "logs" / "history" / "api_audit"
             hot_files = list(hist.glob("*.jsonl"))
-            self.assertEqual(len(hot_files), 0,
-                             "Hot payloads are deleted before commit")
+            self.assertEqual(len(hot_files), 0, "Hot payloads are deleted before commit")
 
             # Cold .gz and stub must exist
             cold_files = list((hist / "cold").glob("*.gz"))
-            self.assertTrue(len(cold_files) > 0,
-                            "Cold .gz file must exist")
+            self.assertTrue(len(cold_files) > 0, "Cold .gz file must exist")
             stub_files = list((hist / "index").glob("*.json"))
-            self.assertTrue(len(stub_files) > 0,
-                            "Stub file must exist")
+            self.assertTrue(len(stub_files) > 0, "Stub file must exist")
 
 
 class TestRehydrateDefersRemoval(unittest.TestCase):
@@ -1829,15 +1867,21 @@ class TestRehydrateDefersRemoval(unittest.TestCase):
 
             # Roll
             result = segment_history_maintenance_service(
-                family="api_audit", repo_root=repo, settings=settings,
-                gm=gm, now=now,
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
             )
             seg_id = result["rolled_segment_ids"][0]
 
             # Cold-store
             cs = segment_history_cold_store_service(
-                family="api_audit", repo_root=repo, settings=settings,
-                gm=gm, now=now,
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
             )
             self.assertTrue(cs["ok"])
 
@@ -1847,8 +1891,10 @@ class TestRehydrateDefersRemoval(unittest.TestCase):
                     return False
 
             rh = segment_history_cold_rehydrate_service(
-                family="api_audit", segment_id=seg_id,
-                repo_root=repo, gm=_FailingGM(),
+                family="api_audit",
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=_FailingGM(),
             )
             self.assertTrue(rh["ok"])
             self.assertFalse(rh["durable"])
@@ -1857,14 +1903,12 @@ class TestRehydrateDefersRemoval(unittest.TestCase):
             # Cold payload deleted before commit (single-commit-per-pass)
             cold_dir = repo / "logs" / "history" / "api_audit" / "cold"
             cold_files = list(cold_dir.glob("*.gz"))
-            self.assertEqual(len(cold_files), 0,
-                             "Cold payload is deleted before commit")
+            self.assertEqual(len(cold_files), 0, "Cold payload is deleted before commit")
 
             # Hot payload must exist after rehydration
             hist = repo / "logs" / "history" / "api_audit"
             hot_files = list(hist.glob("*.jsonl"))
-            self.assertTrue(len(hot_files) > 0,
-                            "Hot payload must exist after rehydrate")
+            self.assertTrue(len(hot_files) > 0, "Hot payload must exist after rehydrate")
 
 
 class TestTargetPathsPairingValidation(unittest.TestCase):
@@ -1947,8 +1991,7 @@ class TestEmptyAckLockGuarded(unittest.TestCase):
                 )
 
             # Ack file must survive (was populated before lock-guarded re-check)
-            self.assertTrue(ack_file.exists(),
-                            "Non-empty ack file should not be deleted")
+            self.assertTrue(ack_file.exists(), "Non-empty ack file should not be deleted")
 
 
 class TestAtRiskSegmentIds(unittest.TestCase):
@@ -1976,8 +2019,7 @@ class TestAtRiskSegmentIds(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertFalse(result["durable"])
             self.assertIn("at_risk_segment_ids", result)
-            self.assertEqual(len(result["at_risk_segment_ids"]),
-                             len(result["rolled_segment_ids"]))
+            self.assertEqual(len(result["at_risk_segment_ids"]), len(result["rolled_segment_ids"]))
 
     def test_cold_store_at_risk_ids(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1993,8 +2035,11 @@ class TestAtRiskSegmentIds(unittest.TestCase):
 
             # Roll first
             segment_history_maintenance_service(
-                family="api_audit", repo_root=repo, settings=settings,
-                gm=gm, now=now,
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
             )
 
             class _FailingGM(SimpleGitManagerStub):
@@ -2002,8 +2047,11 @@ class TestAtRiskSegmentIds(unittest.TestCase):
                     return False
 
             cs = segment_history_cold_store_service(
-                family="api_audit", repo_root=repo, settings=settings,
-                gm=_FailingGM(), now=now,
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=_FailingGM(),
+                now=now,
             )
             self.assertTrue(cs["ok"])
             self.assertFalse(cs["durable"])
@@ -2130,6 +2178,7 @@ class TestReviewRound16Fixes(unittest.TestCase):
         class _FailCommitGM:
             def commit_paths(self, _p: Any, _m: Any) -> bool:
                 return False
+
             def latest_commit(self) -> str:
                 return "fake"
 
@@ -2184,6 +2233,7 @@ class TestReviewRound16Fixes(unittest.TestCase):
             _cold_payload_path,
             _mutate_stub_cold,
         )
+
         cold_path = _cold_payload_path(hot_payload)
         cold_path.parent.mkdir(parents=True, exist_ok=True)
         compressed = _build_cold_gzip_bytes(hot_payload.read_bytes())
@@ -2209,7 +2259,10 @@ class TestReviewRound16Fixes(unittest.TestCase):
 
         # Now run reconciliation
         recon = _reconcile_manifest_residue(
-            repo, "api_audit", "cold_store", SimpleGitManagerStub(),
+            repo,
+            "api_audit",
+            "cold_store",
+            SimpleGitManagerStub(),
             locked_source_paths={stub["source_path"]},
         )
         self.assertIsNotNone(recon)
@@ -2259,9 +2312,13 @@ class TestReviewRound16Fixes(unittest.TestCase):
             _rehydrate_hot_path,
             _decompress_cold_payload,
         )
+
         decompressed = _decompress_cold_payload(cold_payload.read_bytes())
         hot_path = _rehydrate_hot_path(
-            "api_audit", seg_id, stub.get("source_path", ""), repo,
+            "api_audit",
+            seg_id,
+            stub.get("source_path", ""),
+            repo,
         )
         hot_path.parent.mkdir(parents=True, exist_ok=True)
         write_bytes_file(hot_path, decompressed)
@@ -2283,7 +2340,10 @@ class TestReviewRound16Fixes(unittest.TestCase):
 
         # Reconcile
         recon = _reconcile_manifest_residue(
-            repo, "api_audit", "rehydrate", SimpleGitManagerStub(),
+            repo,
+            "api_audit",
+            "rehydrate",
+            SimpleGitManagerStub(),
             locked_source_paths={stub.get("source_path", "")},
         )
         self.assertIsNotNone(recon)
@@ -2313,11 +2373,14 @@ class TestReviewRound16Fixes(unittest.TestCase):
         with segment_history_source_lock(lock_key, lock_dir=lock_dir):
             with self.assertRaises(SegmentHistoryAppendError) as ctx:
                 append_audit(
-                    repo, "test_event", "peer-1", {"msg": "during-maintenance"},
-                    rollover_bytes=0, gm=None,
+                    repo,
+                    "test_event",
+                    "peer-1",
+                    {"msg": "during-maintenance"},
+                    rollover_bytes=0,
+                    gm=None,
                 )
-            self.assertEqual(ctx.exception.code,
-                             "segment_history_source_lock_timeout")
+            self.assertEqual(ctx.exception.code, "segment_history_source_lock_timeout")
 
     def test_audit_append_with_rollover_lockless_fallback(self):
         """Audit append with rollover_bytes raises SegmentHistoryAppendError
@@ -2339,11 +2402,14 @@ class TestReviewRound16Fixes(unittest.TestCase):
         with segment_history_source_lock(lock_key, lock_dir=lock_dir):
             with self.assertRaises(SegmentHistoryAppendError) as ctx:
                 append_audit(
-                    repo, "rollover_event", "peer-1", {"msg": "with-rollover"},
-                    rollover_bytes=1024, gm=SimpleGitManagerStub(),
+                    repo,
+                    "rollover_event",
+                    "peer-1",
+                    {"msg": "with-rollover"},
+                    rollover_bytes=1024,
+                    gm=SimpleGitManagerStub(),
                 )
-            self.assertEqual(ctx.exception.code,
-                             "segment_history_source_lock_timeout")
+            self.assertEqual(ctx.exception.code, "segment_history_source_lock_timeout")
 
     # ---------------------------------------------------------------
     # R16-F5: Non-durable rehydrate re-attempt triggers reconciliation
@@ -2387,9 +2453,13 @@ class TestReviewRound16Fixes(unittest.TestCase):
             _mutate_stub_rehydrate,
             _rehydrate_hot_path,
         )
+
         decompressed = _decompress_cold_payload(cold_payload.read_bytes())
         hot_path = _rehydrate_hot_path(
-            "api_audit", seg_id, stub.get("source_path", ""), repo,
+            "api_audit",
+            seg_id,
+            stub.get("source_path", ""),
+            repo,
         )
         hot_path.parent.mkdir(parents=True, exist_ok=True)
         write_bytes_file(hot_path, decompressed)
@@ -2442,6 +2512,7 @@ class TestReviewRound16Fixes(unittest.TestCase):
         seg_id = result["rolled_segment_ids"][0]
 
         from fastapi import HTTPException
+
         with self.assertRaises(HTTPException) as ctx:
             segment_history_cold_rehydrate_service(
                 family="api_audit",
@@ -2492,8 +2563,7 @@ class TestRehydrateReconciliationDurability(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260320T120000Z",
                 payload_path=hot_rel,
-                summary={"last_event_at": "2026-03-20T00:00:00Z",
-                         "line_count": 1, "byte_size": 16},
+                summary={"last_event_at": "2026-03-20T00:00:00Z", "line_count": 1, "byte_size": 16},
             )
             write_text_file(stub_path, json.dumps(stub))
 
@@ -2545,8 +2615,7 @@ class TestRehydrateReconciliationDurability(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260320T120000Z",
                 payload_path=hot_rel,
-                summary={"last_event_at": "2026-03-20T00:00:00Z",
-                         "line_count": 1, "byte_size": 16},
+                summary={"last_event_at": "2026-03-20T00:00:00Z", "line_count": 1, "byte_size": 16},
             )
             write_text_file(stub_path, json.dumps(stub))
 
@@ -2610,11 +2679,14 @@ class TestAuditEventPreservedOnRolloverFailure(unittest.TestCase):
             # Rollover failure now propagates as SegmentHistoryAppendError
             with self.assertRaises(SegmentHistoryAppendError) as ctx:
                 append_audit(
-                    repo, "test_event", "peer-1", {"k": "v"},
-                    rollover_bytes=50, gm=gm,
+                    repo,
+                    "test_event",
+                    "peer-1",
+                    {"k": "v"},
+                    rollover_bytes=50,
+                    gm=gm,
                 )
-            self.assertEqual(ctx.exception.code,
-                             "segment_history_manifest_occupied")
+            self.assertEqual(ctx.exception.code, "segment_history_manifest_occupied")
 
 
 # -----------------------------------------------------------------------
@@ -2653,8 +2725,7 @@ class TestDuplicateGuardContentPrefix(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 20, "byte_size": len(rolled_data)},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 20, "byte_size": len(rolled_data)},
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
 
@@ -2701,8 +2772,7 @@ class TestDuplicateGuardContentPrefix(unittest.TestCase):
                 stream_key="api_audit",
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
-                summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 20, "byte_size": len(rolled_data)},
+                summary={"last_event_at": "2026-03-19T00:00:00Z", "line_count": 20, "byte_size": len(rolled_data)},
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
 
@@ -2743,7 +2813,10 @@ class TestF1StuckManifestDeletedSource(unittest.TestCase):
 
             # Source does NOT exist on disk (simulating post-crash deletion)
             result = _reconcile_manifest_residue(
-                repo, "api_audit", "maintenance", None,
+                repo,
+                "api_audit",
+                "maintenance",
+                None,
                 locked_source_paths=set(),
             )
             # Reconciliation should proceed (not return None)
@@ -2778,7 +2851,10 @@ class TestF1StuckManifestDeletedSource(unittest.TestCase):
 
             # Caller holds lock on alice (the only live source)
             result = _reconcile_manifest_residue(
-                repo, "message_stream", "maintenance", None,
+                repo,
+                "message_stream",
+                "maintenance",
+                None,
                 locked_source_paths={"messages/inbox/alice.jsonl"},
             )
             self.assertIsNotNone(result)
@@ -2808,7 +2884,10 @@ class TestF1StuckManifestDeletedSource(unittest.TestCase):
             )
 
             result = _reconcile_manifest_residue(
-                repo, "message_stream", "maintenance", None,
+                repo,
+                "message_stream",
+                "maintenance",
+                None,
                 locked_source_paths=set(),  # no locks held
             )
             self.assertIsNone(result)
@@ -2895,6 +2974,7 @@ class TestF4RemoveManifestExpectedOperation(unittest.TestCase):
 
     def test_removes_matching_operation(self) -> None:
         from app.segment_history.manifest import remove_manifest
+
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             write_manifest(
@@ -2906,13 +2986,16 @@ class TestF4RemoveManifestExpectedOperation(unittest.TestCase):
                 target_paths=[],
             )
             result = remove_manifest(
-                repo, "api_audit", expected_operation="maintenance",
+                repo,
+                "api_audit",
+                expected_operation="maintenance",
             )
             self.assertTrue(result)
             self.assertIsNone(read_manifest(repo, "api_audit"))
 
     def test_does_not_remove_mismatched_operation(self) -> None:
         from app.segment_history.manifest import remove_manifest
+
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             write_manifest(
@@ -2924,7 +3007,9 @@ class TestF4RemoveManifestExpectedOperation(unittest.TestCase):
                 target_paths=[],
             )
             result = remove_manifest(
-                repo, "api_audit", expected_operation="maintenance",
+                repo,
+                "api_audit",
+                expected_operation="maintenance",
             )
             self.assertFalse(result)
             # Manifest must still be there
@@ -2932,6 +3017,7 @@ class TestF4RemoveManifestExpectedOperation(unittest.TestCase):
 
     def test_removes_unconditionally_without_expected_operation(self) -> None:
         from app.segment_history.manifest import remove_manifest
+
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             write_manifest(

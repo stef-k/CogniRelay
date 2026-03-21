@@ -19,8 +19,12 @@ class TestWriteTimeRollover(unittest.TestCase):
 
             # Write a small audit entry with high threshold
             append_audit(
-                repo, "test_event", "peer-1", {"key": "value"},
-                rollover_bytes=1_000_000, gm=gm,
+                repo,
+                "test_event",
+                "peer-1",
+                {"key": "value"},
+                rollover_bytes=1_000_000,
+                gm=gm,
             )
 
             audit = repo / "logs" / "api_audit.jsonl"
@@ -40,19 +44,31 @@ class TestWriteTimeRollover(unittest.TestCase):
 
             # Append with low rollover threshold
             append_audit(
-                repo, "new_event", "peer-1", {"key": "value"},
-                rollover_bytes=100, gm=gm,
+                repo,
+                "new_event",
+                "peer-1",
+                {"key": "value"},
+                rollover_bytes=100,
+                gm=gm,
             )
 
             # Old content should have been rolled out
             content = audit.read_text(encoding="utf-8")
             self.assertIn("new_event", content)
 
-            # History segment should exist
+            # History segment must exist (unconditional assertion)
             history_dir = repo / "logs" / "history" / "api_audit"
-            if history_dir.is_dir():
-                payloads = list(history_dir.glob("*.jsonl"))
-                self.assertGreater(len(payloads), 0)
+            self.assertTrue(
+                history_dir.is_dir(),
+                "history dir was not created by rollover",
+            )
+            payloads = list(history_dir.glob("*.jsonl"))
+            self.assertGreater(len(payloads), 0, "no rolled payload found")
+            # Verify payload contains original content (M11)
+            payload_content = payloads[0].read_text(encoding="utf-8")
+            self.assertIn('"old"', payload_content, "rolled payload missing original content")
+            # Verify active source no longer contains old content
+            self.assertNotIn('"old"', content, "active source still contains rolled-out content")
 
     def test_backward_compatible_no_rollover_args(self) -> None:
         with tempfile.TemporaryDirectory() as td:

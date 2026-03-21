@@ -59,7 +59,11 @@ def _roll_journal(repo: Path, gm: SimpleGitManagerStub, day: str = "2026-03-19")
     (year_dir / f"{day}.md").write_text("entry 1\nentry 2\n")
     now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
     return segment_history_maintenance_service(
-        family="journal", repo_root=repo, settings=_FakeSettings(), gm=gm, now=now,
+        family="journal",
+        repo_root=repo,
+        settings=_FakeSettings(),
+        gm=gm,
+        now=now,
     )
 
 
@@ -68,7 +72,11 @@ def _cold_store_journal(repo: Path, gm: SimpleGitManagerStub) -> str:
     _roll_journal(repo, gm)
     now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
     cold = segment_history_cold_store_service(
-        family="journal", repo_root=repo, settings=_FakeSettings(), gm=gm, now=now,
+        family="journal",
+        repo_root=repo,
+        settings=_FakeSettings(),
+        gm=gm,
+        now=now,
     )
     return cold["cold_segment_ids"][0]
 
@@ -88,13 +96,19 @@ class TestRehydrateConflictPath(unittest.TestCase):
             # Manually place a file at the hot target to simulate a
             # prior crash between hot-payload write and stub mutation.
             hot_path = _rehydrate_hot_path(
-                "journal", seg_id, "journal/2026/2026-03-19.md", repo,
+                "journal",
+                seg_id,
+                "journal/2026/2026-03-19.md",
+                repo,
             )
             hot_path.parent.mkdir(parents=True, exist_ok=True)
             hot_path.write_text("orphaned-from-crash")
 
             result = segment_history_cold_rehydrate_service(
-                family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                family="journal",
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=gm,
             )
             # Should succeed — orphaned hot file was auto-cleaned
             self.assertIsInstance(result, dict)
@@ -116,26 +130,38 @@ class TestRehydrateConflictPath(unittest.TestCase):
             # Cold-store it
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             cold = segment_history_cold_store_service(
-                family="journal", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="journal",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
             seg_id = cold["cold_segment_ids"][0]
 
             # Rehydrate successfully first
             segment_history_cold_rehydrate_service(
-                family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                family="journal",
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=gm,
             )
 
             # Re-cold-store
             segment_history_cold_store_service(
-                family="journal", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="journal",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
 
             # Now rehydrate again, but delete the cold payload to simulate
             # a state where hot exists and cold is gone (not crash residue)
             hot_path = _rehydrate_hot_path(
-                "journal", seg_id, "journal/2026/2026-03-19.md", repo,
+                "journal",
+                seg_id,
+                "journal/2026/2026-03-19.md",
+                repo,
             )
             hot_path.parent.mkdir(parents=True, exist_ok=True)
             hot_path.write_text("conflict")
@@ -147,7 +173,10 @@ class TestRehydrateConflictPath(unittest.TestCase):
 
             with self.assertRaises(HTTPException) as ctx:
                 segment_history_cold_rehydrate_service(
-                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                    family="journal",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
                 )
             # Should fail because cold payload is missing (checked before
             # conflict check), returning 409
@@ -171,7 +200,10 @@ class TestRehydrateColdPayloadMissing(unittest.TestCase):
 
             with self.assertRaises(HTTPException) as ctx:
                 segment_history_cold_rehydrate_service(
-                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                    family="journal",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
                 )
             self.assertEqual(ctx.exception.status_code, 409)
             self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_cold_payload_missing")
@@ -194,7 +226,10 @@ class TestRehydrateColdPayloadCorrupt(unittest.TestCase):
 
             with self.assertRaises(HTTPException) as ctx:
                 segment_history_cold_rehydrate_service(
-                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                    family="journal",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
                 )
             self.assertEqual(ctx.exception.status_code, 409)
             self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_cold_payload_corrupt")
@@ -235,8 +270,11 @@ class TestEmptyAckDeletion(unittest.TestCase):
 
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             result = segment_history_maintenance_service(
-                family="message_stream", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="message_stream",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
             self.assertTrue(result["ok"])
             # Empty ack should be deleted
@@ -262,8 +300,11 @@ class TestOnlyPartialLineNoRoll(unittest.TestCase):
 
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             result = segment_history_maintenance_service(
-                family="api_audit", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="api_audit",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
             self.assertTrue(result["ok"])
             self.assertEqual(result["rolled_count"], 0)
@@ -290,7 +331,11 @@ class TestBatchLimitReachedBoundary(unittest.TestCase):
 
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             result = segment_history_maintenance_service(
-                family="journal", repo_root=repo, settings=settings, gm=gm, now=now,
+                family="journal",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
             )
             self.assertEqual(result["rolled_count"], 3)
             self.assertFalse(result["batch_limit_reached"])
@@ -308,6 +353,7 @@ class TestPendingBatchResidueBlocksRehydrate(unittest.TestCase):
 
             # Write a fake manifest listing this segment's source_path
             from app.segment_history.manifest import write_manifest
+
             write_manifest(
                 repo,
                 operation="maintenance",
@@ -319,7 +365,10 @@ class TestPendingBatchResidueBlocksRehydrate(unittest.TestCase):
 
             with self.assertRaises(HTTPException) as ctx:
                 segment_history_cold_rehydrate_service(
-                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                    family="journal",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
                 )
             self.assertEqual(ctx.exception.status_code, 409)
             self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_pending_batch_residue")
@@ -331,10 +380,12 @@ class TestPendingBatchResidueBlocksRehydrate(unittest.TestCase):
 class TestSettingsValidationExtended(unittest.TestCase):
     def setUp(self) -> None:
         import app.config as cfg
+
         cfg._cached = None
 
     def tearDown(self) -> None:
         import app.config as cfg
+
         cfg._cached = None
 
     @patch.dict(
@@ -344,6 +395,7 @@ class TestSettingsValidationExtended(unittest.TestCase):
     )
     def test_zero_rollover_bytes_raises(self) -> None:
         from app.config import get_settings
+
         with self.assertRaises(SystemExit):
             get_settings(force_reload=True)
 
@@ -354,6 +406,7 @@ class TestSettingsValidationExtended(unittest.TestCase):
     )
     def test_zero_max_hot_days_raises_or_clamps(self) -> None:
         from app.config import get_settings
+
         with self.assertRaises(SystemExit):
             get_settings(force_reload=True)
 
@@ -364,6 +417,7 @@ class TestSettingsValidationExtended(unittest.TestCase):
     )
     def test_zero_inactivity_days_raises_or_clamps(self) -> None:
         from app.config import get_settings
+
         with self.assertRaises(SystemExit):
             get_settings(force_reload=True)
 
@@ -402,6 +456,7 @@ class TestDayBoundaryRollover(unittest.TestCase):
             f.write_text("not-json\n")
             # Set mtime to yesterday
             import time
+
             yesterday = time.time() - 86400 * 2
             os.utime(f, (yesterday, yesterday))
             now = datetime.now(timezone.utc)
@@ -424,10 +479,7 @@ class TestOpsRunsSummaryField(unittest.TestCase):
     def test_first_started_at_from_started_at_field(self) -> None:
         from app.segment_history.families import _ops_runs_summary
 
-        content = (
-            '{"started_at":"2026-03-19T10:00:00Z","finished_at":"2026-03-19T10:05:00Z","job_id":"j1"}\n'
-            '{"started_at":"2026-03-19T11:00:00Z","finished_at":"2026-03-19T11:05:00Z","job_id":"j2"}\n'
-        )
+        content = '{"started_at":"2026-03-19T10:00:00Z","finished_at":"2026-03-19T10:05:00Z","job_id":"j1"}\n{"started_at":"2026-03-19T11:00:00Z","finished_at":"2026-03-19T11:05:00Z","job_id":"j2"}\n'
         summary = _ops_runs_summary(content)
         self.assertEqual(summary["first_started_at"], "2026-03-19T10:00:00Z")
         self.assertEqual(summary["last_finished_at"], "2026-03-19T11:05:00Z")
@@ -544,9 +596,7 @@ class TestRestoreTestOpsRuns(unittest.TestCase):
 
             seg_id = "ops_runs__ops_runs__20260320T120000Z__0001"
             payload = hist / f"{seg_id}.jsonl"
-            payload.write_text(
-                '{"started_at":"2026-03-20T12:00:00Z","finished_at":"2026-03-20T12:05:00Z","job_id":"j1"}\n'
-            )
+            payload.write_text('{"started_at":"2026-03-20T12:00:00Z","finished_at":"2026-03-20T12:05:00Z","job_id":"j1"}\n')
 
             stub = {
                 "schema_type": "segment_history_stub",
@@ -644,8 +694,11 @@ class TestColdStoreStubDisappearsUnderLock(unittest.TestCase):
             stub_path.write_text("not-json")
 
             result = segment_history_cold_store_service(
-                family="journal", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="journal",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
             self.assertTrue(result["ok"])
             self.assertEqual(result["cold_stored_count"], 0)
@@ -671,8 +724,11 @@ class TestColdStoreStubUnreadableUnderLock(unittest.TestCase):
                 s.write_text("{corrupt")
 
             result = segment_history_cold_store_service(
-                family="journal", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="journal",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
             codes = [w["code"] for w in result["warnings"]]
             # Should use segment_history_stub_unreadable, not _under_lock suffix
@@ -714,13 +770,14 @@ class TestAmbiguousSegmentIdMultiDir(unittest.TestCase):
                 # Also create a fake cold payload
                 cold_d = repo / "messages" / "history" / kind / "cold"
                 cold_d.mkdir(parents=True)
-                (cold_d / f"{seg_id}.jsonl.gz").write_bytes(
-                    gzip.compress(b'{"sent_at":"2026-03-20T12:00:00Z"}\n')
-                )
+                (cold_d / f"{seg_id}.jsonl.gz").write_bytes(gzip.compress(b'{"sent_at":"2026-03-20T12:00:00Z"}\n'))
 
             with self.assertRaises(HTTPException) as ctx:
                 segment_history_cold_rehydrate_service(
-                    family="message_stream", segment_id=seg_id, repo_root=repo, gm=gm,
+                    family="message_stream",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
                 )
             self.assertEqual(ctx.exception.status_code, 409)
             self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_ambiguous_segment_id")
@@ -739,22 +796,26 @@ class TestColdStoreMessageStreamMultiDir(unittest.TestCase):
             for kind in ("inbox", "outbox"):
                 d = repo / "messages" / kind
                 d.mkdir(parents=True)
-                (d / "alice.jsonl").write_text(
-                    '{"sent_at":"2026-03-20T12:00:00Z","id":"m1"}\n' * 5
-                )
+                (d / "alice.jsonl").write_text('{"sent_at":"2026-03-20T12:00:00Z","id":"m1"}\n' * 5)
 
             # Roll via maintenance
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             result = segment_history_maintenance_service(
-                family="message_stream", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="message_stream",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
             self.assertEqual(result["rolled_count"], 2)
 
             # Now cold-store — should find stubs across both inbox and outbox dirs
             cold = segment_history_cold_store_service(
-                family="message_stream", repo_root=repo, settings=_FakeSettings(),
-                gm=gm, now=now,
+                family="message_stream",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
             )
             self.assertTrue(cold["ok"])
             self.assertEqual(cold["cold_stored_count"], 2)
@@ -779,9 +840,7 @@ class TestWriteTimeRolloverFailure(unittest.TestCase):
     def test_lock_timeout_raises_write_time_error(self) -> None:
         from app.audit import WriteTimeRolloverError
 
-        exc = WriteTimeRolloverError(
-            "segment_history_source_lock_timeout", "timed out"
-        )
+        exc = WriteTimeRolloverError("segment_history_source_lock_timeout", "timed out")
         self.assertEqual(exc.code, "segment_history_source_lock_timeout")
 
 
@@ -810,10 +869,13 @@ class TestManifestTargetPaths(unittest.TestCase):
             )
             mf = read_manifest(repo, "journal")
             self.assertIsNotNone(mf)
-            self.assertEqual(mf["target_paths"], [
-                "journal/history/2026/seg1.md",
-                "journal/history/2026/index/seg1.json",
-            ])
+            self.assertEqual(
+                mf["target_paths"],
+                [
+                    "journal/history/2026/seg1.md",
+                    "journal/history/2026/index/seg1.json",
+                ],
+            )
 
 
 # =========================================================================
@@ -1013,7 +1075,9 @@ class TestColdStoreRollbackRestoresStubs(unittest.TestCase):
                 return original_write_bytes(path, data)
 
             with patch("app.segment_history.service.write_bytes_file", side_effect=failing_write_bytes):
-                with self.assertRaises(OSError):
+                from fastapi import HTTPException
+
+                with self.assertRaises(HTTPException) as ctx:
                     segment_history_cold_store_service(
                         family="journal",
                         repo_root=repo,
@@ -1021,13 +1085,15 @@ class TestColdStoreRollbackRestoresStubs(unittest.TestCase):
                         gm=gm,
                         now=datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc),
                     )
+                self.assertEqual(ctx.exception.status_code, 500)
 
             # Verify stubs are restored to pre-cold-store state
             for sd in stub_dirs:
                 for f in sorted(sd.iterdir()):
                     if f.name.endswith(".json") and f.name in stubs_before:
                         self.assertEqual(
-                            f.read_text(), stubs_before[f.name],
+                            f.read_text(),
+                            stubs_before[f.name],
                             f"Stub {f.name} should be restored to pre-cold-store state",
                         )
 

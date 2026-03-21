@@ -24,8 +24,12 @@ class WriteTimeRolloverError(Exception):
 
 
 def _check_write_time_rollover_locked(
-    path: Path, rollover_bytes: int, repo_root: Path, gm: Any,
-    *, family: str = "api_audit",
+    path: Path,
+    rollover_bytes: int,
+    repo_root: Path,
+    gm: Any,
+    *,
+    family: str = "api_audit",
     audit: Callable[..., Any] | None = None,
 ) -> None:
     """Perform write-time rollover if threshold exceeded.
@@ -62,6 +66,7 @@ def _check_write_time_rollover_locked(
         _next_segment_id,
         _roll_jsonl_source,
     )
+
     config = FAMILIES[family]
     now = datetime.now(timezone.utc)
     rel = str(path.relative_to(repo_root))
@@ -80,7 +85,10 @@ def _check_write_time_rollover_locked(
         from app.segment_history.service import _reconcile_manifest_residue
 
         _reconcile_manifest_residue(
-            repo_root, family, "write_time_rollover", gm,
+            repo_root,
+            family,
+            "write_time_rollover",
+            gm,
             locked_source_paths={rel},
         )
         # Re-read after reconciliation — it removes the manifest on success
@@ -112,6 +120,7 @@ def _check_write_time_rollover_locked(
             _message_stream_kind_from_source,
             _message_stream_stub_dir,
         )
+
         history_dir = _message_stream_history_dir(repo_root, rel)
         stub_dir = _message_stream_stub_dir(repo_root, rel)
         _stream_kind = _message_stream_kind_from_source(rel)
@@ -126,6 +135,7 @@ def _check_write_time_rollover_locked(
     summary = config.build_summary(content)
     if family == "message_stream" and _stream_kind is not None:
         from app.segment_history.families import fixup_message_stream_summary
+
         fixup_message_stream_summary(summary, content, _stream_kind)
         summary["stream_kind"] = _stream_kind
         summary["stream_key"] = stream_key
@@ -168,8 +178,8 @@ def _check_write_time_rollover_locked(
             if tp.is_file():
                 try:
                     tp.unlink()
-                except OSError:
-                    pass
+                except OSError as cleanup_exc:
+                    _log.warning("Could not clean up partial target %s during rollover failure: %s", tp, cleanup_exc)
         _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
         raise
     except Exception as exc:
@@ -177,8 +187,8 @@ def _check_write_time_rollover_locked(
             if tp.is_file():
                 try:
                     tp.unlink()
-                except OSError:
-                    pass
+                except OSError as cleanup_exc:
+                    _log.warning("Could not clean up partial target %s during rollover failure: %s", tp, cleanup_exc)
         _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
         raise WriteTimeRolloverError(
             "segment_history_write_time_rollover_failed",
@@ -209,8 +219,7 @@ def _check_write_time_rollover_locked(
             # fails even though local writes are preserved for crash recovery.
             raise WriteTimeRolloverError(
                 "segment_history_write_time_rollover_failed",
-                f"Write-time rollover git commit failed for {segment_id}; "
-                f"local writes preserved on disk for crash recovery",
+                f"Write-time rollover git commit failed for {segment_id}; local writes preserved on disk for crash recovery",
             )
 
     _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
@@ -218,18 +227,21 @@ def _check_write_time_rollover_locked(
     # Emit segment_history_roll audit event for write-time rollovers.
     if audit is not None:
         from app.segment_history.service import _emit_audit
-        _emit_audit(audit, "segment_history_roll", {
-            "family": family,
-            "segment_id": segment_id,
-            "source_path": rel,
-            "payload_path": str(payload_path.relative_to(repo_root)),
-            "warning_count": 0,
-        })
+
+        _emit_audit(
+            audit,
+            "segment_history_roll",
+            {
+                "family": family,
+                "segment_id": segment_id,
+                "source_path": rel,
+                "payload_path": str(payload_path.relative_to(repo_root)),
+                "warning_count": 0,
+            },
+        )
 
 
-def _check_write_time_rollover(
-    path: Path, rollover_bytes: int, repo_root: Path, gm: Any
-) -> None:
+def _check_write_time_rollover(path: Path, rollover_bytes: int, repo_root: Path, gm: Any) -> None:
     """Backward-compatible wrapper that acquires its own lock.
 
     Prefer :func:`append_audit` which holds the lock across both the
@@ -282,8 +294,13 @@ guaranteed 100 % event loss.
 
 
 def append_audit(
-    repo_root: Path, event: str, peer_id: str, detail: dict[str, Any],
-    *, rollover_bytes: int = 0, gm: Any = None,
+    repo_root: Path,
+    event: str,
+    peer_id: str,
+    detail: dict[str, Any],
+    *,
+    rollover_bytes: int = 0,
+    gm: Any = None,
     audit: Callable[..., Any] | None = None,
 ) -> None:
     """Append one structured API audit event to the repository log.
@@ -324,17 +341,24 @@ def append_audit(
 
     try:
         with segment_history_source_lock(
-            lock_key, lock_dir=lock_dir, timeout=_AUDIT_APPEND_LOCK_TIMEOUT,
+            lock_key,
+            lock_dir=lock_dir,
+            timeout=_AUDIT_APPEND_LOCK_TIMEOUT,
         ):
             if rollover_bytes > 0 and gm is not None:
                 _check_write_time_rollover_locked(
-                    path, rollover_bytes, repo_root, gm, audit=audit,
+                    path,
+                    rollover_bytes,
+                    repo_root,
+                    gm,
+                    audit=audit,
                 )
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
     except SegmentHistoryLockTimeout as exc:
         raise SegmentHistoryAppendError(
-            "segment_history_source_lock_timeout", str(exc),
+            "segment_history_source_lock_timeout",
+            str(exc),
         ) from exc
     except WriteTimeRolloverError as exc:
         raise SegmentHistoryAppendError(exc.code, exc.detail) from exc

@@ -12,10 +12,19 @@ import threading
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 from fastapi import HTTPException
 
+from app.segment_history.utils import (
+    byte_size,
+    count_lines,
+    first_last_json_field,
+    first_nonempty_line_preview,
+    json_field_counts,
+    parse_event_timestamp,
+    sample_json_field,
+)
 from app.storage import write_bytes_file, write_text_file
 
 _log = logging.getLogger(__name__)
@@ -31,9 +40,7 @@ SEGMENT_HISTORY_STUB_SCHEMA_VERSION = "1.0"
 # The stream_key component is opaque and may itself contain "__".
 # We validate by checking the family prefix, the 4-digit seq suffix, and
 # the timestamp component immediately before the seq.
-_SEGMENT_ID_TAIL_RE = re.compile(
-    r"^(.+)__(\d{8}T\d{6}Z)__(\d{4})$"
-)
+_SEGMENT_ID_TAIL_RE = re.compile(r"^(.+)__(\d{8}T\d{6}Z)__(\d{4})$")
 
 # Family-specific source-path prefix stripping for stream key derivation
 _FAMILY_PREFIX_STRIP: dict[str, str] = {
@@ -87,13 +94,15 @@ def _derive_stream_key(family: str, source_path: str) -> str:
     prefix = _FAMILY_PREFIX_STRIP.get(family, "")
     key = source_path
     if prefix and key.startswith(prefix):
-        key = key[len(prefix):]
+        key = key[len(prefix) :]
     # Remove file extension
     dot = key.rfind(".")
     if dot > 0:
         key = key[:dot]
     # Replace / with __
     key = key.replace("/", "__")
+    if not key:
+        _log.warning("Empty stream key derived from path: %s (family=%s)", source_path, family)
     return key
 
 
@@ -131,7 +140,7 @@ def _next_segment_id(
                     name = name[: -len(ext)]
                     break
             if name.startswith(prefix):
-                tail = name[len(prefix):]
+                tail = name[len(prefix) :]
                 try:
                     seq = int(tail)
                     if seq > max_seq:
@@ -144,7 +153,7 @@ def _next_segment_id(
     if reserved_ids:
         for rid in reserved_ids:
             if rid.startswith(prefix):
-                tail = rid[len(prefix):]
+                tail = rid[len(prefix) :]
                 try:
                     seq = int(tail)
                     if seq > max_seq:
@@ -167,7 +176,7 @@ def _validate_segment_id(family: str, segment_id: str) -> tuple[str, str, str, i
     if not segment_id.startswith(f"{family}__"):
         return None
     # Strip family prefix
-    remainder = segment_id[len(family) + 2:]  # after "family__"
+    remainder = segment_id[len(family) + 2 :]  # after "family__"
     m = _SEGMENT_ID_TAIL_RE.match(remainder)
     if not m:
         return None
@@ -225,9 +234,7 @@ def _create_stub(
     }
 
 
-def _mutate_stub_cold(
-    stub: dict[str, Any], cold_path: str, cold_stored_at: str
-) -> dict[str, Any]:
+def _mutate_stub_cold(stub: dict[str, Any], cold_path: str, cold_stored_at: str) -> dict[str, Any]:
     """Mutate a stub to reflect cold-store completion.
 
     Moves ``payload_path`` to the cold location and adds ``cold_stored_at``.
@@ -510,7 +517,13 @@ def _message_stream_kind_from_source(source_rel: str) -> str:
     # Fallback: try to extract from stream_key (inbox__alice -> inbox)
     stream_key = _derive_stream_key("message_stream", source_rel)
     kind = stream_key.split("__")[0]
-    return kind if kind in _MESSAGE_STREAM_KINDS else "inbox"
+    if kind not in _MESSAGE_STREAM_KINDS:
+        _log.warning(
+            "Could not determine stream kind from source '%s', defaulting to 'inbox'",
+            source_rel,
+        )
+        return "inbox"
+    return kind
 
 
 def _message_stream_history_dir(repo_root: Path, source_rel: str) -> Path:
@@ -527,15 +540,10 @@ def _message_stream_stub_dir(repo_root: Path, source_rel: str) -> Path:
 
 def _message_stream_stub_dirs(repo_root: Path) -> list[Path]:
     """Return all 4 message_stream stub directories for scanning."""
-    return [
-        repo_root / "messages" / "history" / kind / "index"
-        for kind in _MESSAGE_STREAM_KINDS
-    ]
+    return [repo_root / "messages" / "history" / kind / "index" for kind in _MESSAGE_STREAM_KINDS]
 
 
-def _rehydrate_hot_path(
-    family: str, segment_id: str, source_path: str, repo_root: Path
-) -> Path:
+def _rehydrate_hot_path(family: str, segment_id: str, source_path: str, repo_root: Path) -> Path:
     """Derive the canonical hot restoration target from family, segment_id, and source_path.
 
     Per spec, the hot target is derived canonically per family:
@@ -586,101 +594,16 @@ def _rehydrate_target_path(cold_payload_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# JSONL summary helpers
+# JSONL summary helpers — delegated to app.segment_history.utils
 # ---------------------------------------------------------------------------
-def _count_lines(content: str) -> int:
-    """Count newline-terminated lines in content.
-
-    Per spec, ``line_count`` means count of lines ending with ``\\n``,
-    regardless of JSON parseability.
-    """
-    if not content:
-        return 0
-    return content.count("\n")
-
-
-def _byte_size(content: str | bytes) -> int:
-    """Return byte size of content."""
-    if isinstance(content, str):
-        return len(content.encode("utf-8"))
-    return len(content)
-
-
-def _first_nonempty_line_preview(content: str, max_len: int = 200) -> str:
-    """Return the first non-empty line truncated to *max_len*, or empty string."""
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if stripped:
-            return stripped[:max_len]
-    return ""
-
-
-def _sample_json_field(
-    content: str, field: str, limit: int
-) -> list[str]:
-    """Extract up to *limit* unique values for a JSON field from JSONL content."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for line in content.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-            val = row.get(field)
-            if val is not None:
-                s = str(val)
-                if s not in seen:
-                    seen.add(s)
-                    result.append(s)
-                    if len(result) >= limit:
-                        break
-        except (json.JSONDecodeError, AttributeError):
-            continue
-    return result
-
-
-def _first_last_json_field(content: str, field: str) -> tuple[str | None, str | None]:
-    """Return the first and last values of a JSON field in JSONL content."""
-    first: str | None = None
-    last: str | None = None
-    for line in content.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-            val = row.get(field)
-            if val is not None:
-                s = str(val)
-                if first is None:
-                    first = s
-                last = s
-        except (json.JSONDecodeError, AttributeError):
-            continue
-    return first, last
-
-
-def _json_field_counts(
-    content: str, field: str, limit: int
-) -> dict[str, int]:
-    """Count occurrences of each value for a JSON field, returning top *limit*."""
-    counts: dict[str, int] = {}
-    for line in content.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-            val = row.get(field)
-            if val is not None:
-                s = str(val)
-                counts[s] = counts.get(s, 0) + 1
-        except (json.JSONDecodeError, AttributeError):
-            continue
-    # Sort by count descending, take top limit
-    sorted_items = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:limit]
-    return dict(sorted_items)
+# Backward-compat aliases so existing callers (e.g. audit.py deferred
+# imports) continue to work during migration.
+_count_lines = count_lines
+_byte_size = byte_size
+_first_nonempty_line_preview = first_nonempty_line_preview
+_sample_json_field = sample_json_field
+_first_last_json_field = first_last_json_field
+_json_field_counts = json_field_counts
 
 
 # ===========================================================================
@@ -768,7 +691,7 @@ def _truncate_reconciled_sources(
             except OSError:
                 continue
             if source_content.startswith(payload_content):
-                source_content = source_content[len(payload_content):]
+                source_content = source_content[len(payload_content) :]
 
         # Write the truncated source (only post-roll appends remain).
         try:
@@ -780,7 +703,8 @@ def _truncate_reconciled_sources(
             )
         except OSError:
             _log.warning(
-                "Could not truncate reconciled source: %s", sp_rel,
+                "Could not truncate reconciled source: %s",
+                sp_rel,
             )
 
     # Commit the truncated sources so git reflects the truncation.
@@ -795,10 +719,10 @@ def _truncate_reconciled_sources(
                 )
         except Exception:
             _log.warning(
-                "Could not commit truncated sources for %s", family,
+                "Could not commit truncated sources for %s",
+                family,
                 exc_info=True,
             )
-
 
 
 def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
@@ -855,7 +779,10 @@ def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
             dir_rel = str(d.relative_to(repo_root))
             cp = subprocess.run(
                 ["git", "ls-tree", "--name-only", "HEAD", "--", dir_rel + "/"],
-                cwd=repo_root, text=True, capture_output=True, check=False,
+                cwd=repo_root,
+                text=True,
+                capture_output=True,
+                check=False,
             )
             if cp.returncode == 0:
                 for line in cp.stdout.strip().splitlines():
@@ -867,10 +794,10 @@ def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
                         try:
                             f.unlink()
                             removed += 1
-                        except OSError:
-                            pass
+                        except OSError as exc:
+                            _log.debug("Could not remove orphaned file %s: %s", f, exc)
         except Exception:
-            pass  # Git or I/O failure — skip this dir gracefully
+            _log.warning("Orphan cleanup failed for directory %s", d, exc_info=True)
     return removed
 
 
@@ -887,7 +814,9 @@ def _all_targets_in_head(repo_root: Path, target_paths: list[str]) -> bool:
     try:
         cp = subprocess.run(
             ["git", "diff", "--quiet", "HEAD", "--"] + paths_to_check,
-            cwd=repo_root, capture_output=True, check=False,
+            cwd=repo_root,
+            capture_output=True,
+            check=False,
         )
         if cp.returncode != 0:
             return False
@@ -895,10 +824,13 @@ def _all_targets_in_head(repo_root: Path, target_paths: list[str]) -> bool:
         # untracked files too).
         cp2 = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--"] + paths_to_check,
-            cwd=repo_root, capture_output=True, check=False,
+            cwd=repo_root,
+            capture_output=True,
+            check=False,
         )
         return cp2.returncode == 0
-    except Exception:
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.warning("git check for targets in HEAD failed: %s", exc)
         return False
 
 
@@ -958,9 +890,7 @@ def _reconcile_manifest_residue(
     # skipping prevents double-recovery commits and manifest clobber races.
     manifest_sources = set(manifest.get("source_paths", []))
     if locked_source_paths is not None:
-        live_manifest_sources = {
-            s for s in manifest_sources if (repo_root / s).is_file()
-        }
+        live_manifest_sources = {s for s in manifest_sources if (repo_root / s).is_file()}
         if not manifest_sources or not live_manifest_sources <= locked_source_paths:
             return None
 
@@ -973,7 +903,9 @@ def _reconcile_manifest_residue(
     if caller_op != recorded_op:
         _log.info(
             "Reconciling manifest op=%s during caller_op=%s for family=%s",
-            recorded_op, caller_op, caller_family,
+            recorded_op,
+            caller_op,
+            caller_family,
         )
 
     # Stale-manifest detection: if every target is already in HEAD,
@@ -991,8 +923,11 @@ def _reconcile_manifest_residue(
                 source_paths_list = manifest.get("source_paths", [])
                 try:
                     _truncate_reconciled_sources(
-                        repo_root, family, target_paths,
-                        source_paths_list, gm,
+                        repo_root,
+                        family,
+                        target_paths,
+                        source_paths_list,
+                        gm,
                     )
                 except Exception:
                     _log.warning(
@@ -1003,9 +938,10 @@ def _reconcile_manifest_residue(
 
     if segment_ids:
         _log.warning(
-            "Found stale segment-history manifest (op=%s family=%s segments=%d). "
-            "Attempting to recover orphaned target files.",
-            recorded_op, family, len(segment_ids),
+            "Found stale segment-history manifest (op=%s family=%s segments=%d). Attempting to recover orphaned target files.",
+            recorded_op,
+            family,
+            len(segment_ids),
         )
 
     # Recovery strategy: attempt to commit orphaned target files rather than
@@ -1040,9 +976,7 @@ def _reconcile_manifest_residue(
             # is unreferenced — remove it; the segment will be re-processed.
             if is_cold_store:
                 try:
-                    stub_data = json.loads(
-                        (repo_root / stub_rel).read_text(encoding="utf-8")
-                    )
+                    stub_data = json.loads((repo_root / stub_rel).read_text(encoding="utf-8"))
                     if not stub_data.get("cold_stored_at"):
                         orphaned_payloads.append(repo_root / payload_rel)
                         # Stub is unchanged — still valid, just commit it
@@ -1060,8 +994,8 @@ def _reconcile_manifest_residue(
                 orphaned_payloads.append(repo_root / payload_rel)
             else:
                 _log.warning(
-                    "Reconciliation: unexpected .json file in payload position, "
-                    "skipping deletion: %s", payload_rel,
+                    "Reconciliation: unexpected .json file in payload position, skipping deletion: %s",
+                    payload_rel,
                 )
                 existing_targets.append(repo_root / payload_rel)
         elif stub_exists:
@@ -1105,7 +1039,9 @@ def _reconcile_manifest_residue(
             recovered = True
             _log.info(
                 "Recovered %d orphaned files from crashed %s for %s",
-                len(existing_targets), recorded_op, family,
+                len(existing_targets),
+                recorded_op,
+                family,
             )
 
             # After successfully committing orphaned targets for a
@@ -1116,8 +1052,11 @@ def _reconcile_manifest_residue(
             # duplicated by a subsequent write-time rollover (F2).
             if recorded_op in ("maintenance", "write_time_rollover"):
                 _truncate_reconciled_sources(
-                    repo_root, family, target_paths,
-                    source_paths_list, gm,
+                    repo_root,
+                    family,
+                    target_paths,
+                    source_paths_list,
+                    gm,
                 )
                 reconciled_source_paths = set(source_paths_list)
 
@@ -1137,13 +1076,14 @@ def _reconcile_manifest_residue(
                         )
                     except OSError:
                         _log.warning(
-                            "Could not remove cleanup path: %s", cp_rel,
+                            "Could not remove cleanup path: %s",
+                            cp_rel,
                         )
         except Exception:
             _log.warning(
-                "Could not commit recovered files from crashed %s for %s — "
-                "preserving manifest and targets on disk for next retry",
-                recorded_op, family,
+                "Could not commit recovered files from crashed %s for %s — preserving manifest and targets on disk for next retry",
+                recorded_op,
+                family,
                 exc_info=True,
             )
 
@@ -1155,13 +1095,11 @@ def _reconcile_manifest_residue(
         remove_manifest(repo_root, caller_family)
 
     action = "recovered" if recovered else f"preserved={len(existing_targets)}"
-    detail = (
-        f"segment_history_manifest_residue:{recorded_op}:{family}:"
-        f"{len(segment_ids)}:{action}"
-    )
+    detail = f"segment_history_manifest_residue:{recorded_op}:{family}:{len(segment_ids)}:{action}"
     return {
         "warning": detail,
         "reconciled_source_paths": reconciled_source_paths,
+        "recovery_failed": not recovered and bool(existing_targets),
     }
 
 
@@ -1278,6 +1216,7 @@ def segment_history_maintenance_service(
     # a file that a concurrent writer just populated.
     if deferred_empty_ack_deletes:
         from app.segment_history.locking import segment_history_source_lock
+
         for ack_src in deferred_empty_ack_deletes:
             ack_rel = str(ack_src.relative_to(repo_root))
             ack_sk = _derive_stream_key(family, ack_rel)
@@ -1294,15 +1233,17 @@ def segment_history_maintenance_service(
                     if len(ack_content) == 0:
                         try:
                             ack_src.unlink()
-                            warnings.append(_make_warning(
-                                "segment_history_empty_ack_deleted",
-                                f"Removed empty ack file: {ack_src.name}",
-                                path=str(ack_src),
-                            ))
+                            warnings.append(
+                                _make_warning(
+                                    "segment_history_empty_ack_deleted",
+                                    f"Removed empty ack file: {ack_src.name}",
+                                    path=str(ack_src),
+                                )
+                            )
                         except OSError:
                             pass
             except SegmentHistoryLockTimeout:
-                pass  # Skip this ack file; it'll be cleaned up next run.
+                _log.debug("Lock timeout cleaning empty ack %s; will retry next run", ack_src.name)
 
     # 3. Sort and apply batch limit
     eligible.sort()
@@ -1356,14 +1297,19 @@ def segment_history_maintenance_service(
             #     locked set — prevents clobbering a concurrent operation's
             #     manifest on non-overlapping sources.
             residue = _reconcile_manifest_residue(
-                repo_root, family, "maintenance", gm,
+                repo_root,
+                family,
+                "maintenance",
+                gm,
                 locked_source_paths=set(all_source_rels),
             )
             if residue:
-                warnings.append(_make_warning(
-                    "segment_history_manifest_residue",
-                    residue["warning"],
-                ))
+                warnings.append(
+                    _make_warning(
+                        "segment_history_manifest_residue",
+                        residue["warning"],
+                    )
+                )
 
             # Post-lock: recount eligible for selection_count.
             # Re-check rollover eligibility under lock so that a source
@@ -1372,20 +1318,24 @@ def segment_history_maintenance_service(
             locked_eligible: list[Path] = []
             for src in eligible:
                 if not src.is_file():
-                    warnings.append(_make_warning(
-                        "segment_history_source_missing_under_lock",
-                        f"Source file missing after lock acquisition: {src.name}",
-                        path=str(src),
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_source_missing_under_lock",
+                            f"Source file missing after lock acquisition: {src.name}",
+                            path=str(src),
+                        )
+                    )
                     continue
                 try:
                     size = src.stat().st_size
                 except OSError:
-                    warnings.append(_make_warning(
-                        "segment_history_source_missing_under_lock",
-                        f"Source file stat failed after lock acquisition: {src.name}",
-                        path=str(src),
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_source_missing_under_lock",
+                            f"Source file stat failed after lock acquisition: {src.name}",
+                            path=str(src),
+                        )
+                    )
                     continue
                 if size == 0:
                     continue
@@ -1424,10 +1374,12 @@ def segment_history_maintenance_service(
                             if not existing_payload.is_file():
                                 continue
                             payload_content = existing_payload.read_text(
-                                encoding="utf-8", errors="replace",
+                                encoding="utf-8",
+                                errors="replace",
                             )
                             source_content = src.read_text(
-                                encoding="utf-8", errors="replace",
+                                encoding="utf-8",
+                                errors="replace",
                             )
                             if source_content.startswith(payload_content):
                                 _already_rolled = True
@@ -1435,12 +1387,13 @@ def segment_history_maintenance_service(
                         except (json.JSONDecodeError, OSError):
                             continue
                 if _already_rolled:
-                    warnings.append(_make_warning(
-                        "segment_history_already_rolled",
-                        f"Source still contains already-rolled data "
-                        f"prefix, skipping to prevent duplicate: {rel}",
-                        path=rel,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_already_rolled",
+                            f"Source still contains already-rolled data prefix, skipping to prevent duplicate: {rel}",
+                            path=rel,
+                        )
+                    )
                     continue
 
                 # Pre-filter: partial-line check for JSONL families.
@@ -1452,11 +1405,13 @@ def segment_history_maintenance_service(
                     except OSError:
                         _pf_content = ""
                     if _pf_content and "\n" not in _pf_content:
-                        warnings.append(_make_warning(
-                            "segment_history_only_partial_line",
-                            f"Source has only a partial unterminated line, skipping roll: {rel}",
-                            path=rel,
-                        ))
+                        warnings.append(
+                            _make_warning(
+                                "segment_history_only_partial_line",
+                                f"Source has only a partial unterminated line, skipping roll: {rel}",
+                                path=rel,
+                            )
+                        )
                         continue
 
                 locked_eligible.append(src)
@@ -1486,7 +1441,11 @@ def segment_history_maintenance_service(
                     hist = repo_root / config.history_dir
                     sd = repo_root / config.stub_dir
                 seg_id = _next_segment_id(
-                    family, sk, now, hist, reserved_ids=batch_reserved_ids,
+                    family,
+                    sk,
+                    now,
+                    hist,
+                    reserved_ids=batch_reserved_ids,
                 )
                 batch_reserved_ids.add(seg_id)
                 ext = _FAMILY_EXTENSION.get(family, ".jsonl")
@@ -1532,6 +1491,7 @@ def segment_history_maintenance_service(
                         summary["stream_kind"] = sk_kind
                         summary["stream_key"] = stream_key
                         from app.segment_history.families import fixup_message_stream_summary
+
                         fixup_message_stream_summary(summary, content, sk_kind)
                     # Add thread_id for message_thread summaries
                     elif family == "message_thread":
@@ -1565,10 +1525,7 @@ def segment_history_maintenance_service(
                         if result is None:
                             # Pre-filter should have caught this; treat as
                             # unexpected mutation failure and trigger rollback.
-                            raise OSError(
-                                f"Unexpected partial-line-only source in "
-                                f"mutation loop (pre-filter missed): {rel}"
-                            )
+                            raise OSError(f"Unexpected partial-line-only source in mutation loop (pre-filter missed): {rel}")
                         stub, created = result
 
                     rolled_segment_ids.append(segment_id)
@@ -1578,13 +1535,15 @@ def segment_history_maintenance_service(
                     # Defer audit event — emitting inside the source lock
                     # would self-deadlock when the audit callback triggers
                     # write-time rollover on the same source lock key.
-                    deferred_audit.append({
-                        "family": family,
-                        "segment_id": segment_id,
-                        "source_path": rel,
-                        "payload_path": str(payload_path.relative_to(repo_root)),
-                        "warning_count": len(warnings),
-                    })
+                    deferred_audit.append(
+                        {
+                            "family": family,
+                            "segment_id": segment_id,
+                            "source_path": rel,
+                            "payload_path": str(payload_path.relative_to(repo_root)),
+                            "warning_count": len(warnings),
+                        }
+                    )
 
                 # 8. Git commit — one atomic unit per spec.
                 #    For journal, delete source files BEFORE the commit so
@@ -1604,9 +1563,7 @@ def segment_history_maintenance_service(
                                     )
 
                     commit_paths = all_created + rolled_sources
-                    commit_message = (
-                        f"segment-history: roll {family} {selection_count}"
-                    )
+                    commit_message = f"segment-history: roll {family} {selection_count}"
                     try:
                         with repository_mutation_lock(repo_root):
                             success = gm.commit_paths(commit_paths, commit_message)
@@ -1615,18 +1572,20 @@ def segment_history_maintenance_service(
                                 committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
                             else:
                                 durable = False
-                                warnings.append(_make_warning(
-                                    "segment_history_git_commit_failed",
-                                    f"Git commit failed for maintenance roll; "
-                                    f"at-risk segments: {rolled_segment_ids}",
-                                ))
+                                warnings.append(
+                                    _make_warning(
+                                        "segment_history_git_commit_failed",
+                                        f"Git commit failed for maintenance roll; at-risk segments: {rolled_segment_ids}",
+                                    )
+                                )
                     except Exception:
                         durable = False
-                        warnings.append(_make_warning(
-                            "segment_history_git_commit_failed",
-                            f"Git commit failed for maintenance roll; "
-                            f"at-risk segments: {rolled_segment_ids}",
-                        ))
+                        warnings.append(
+                            _make_warning(
+                                "segment_history_git_commit_failed",
+                                f"Git commit failed for maintenance roll; at-risk segments: {rolled_segment_ids}",
+                            )
+                        )
             except Exception:
                 # Rollback under lock: restore sources, remove created
                 # files, AND remove any partially-written target files
@@ -1645,7 +1604,8 @@ def segment_history_maintenance_service(
                             full.unlink()
                         except OSError:
                             _log.warning(
-                                "Could not remove orphaned target during rollback: %s", tp,
+                                "Could not remove orphaned target during rollback: %s",
+                                tp,
                             )
                 remove_manifest(repo_root, family, expected_operation="maintenance")
                 raise
@@ -1679,6 +1639,27 @@ def segment_history_maintenance_service(
                 "family": family,
                 "error": {
                     "code": "segment_history_source_lock_timeout",
+                    "detail": str(exc),
+                },
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.error(
+            "Unexpected error during segment_history_maintenance for %s: %s",
+            family,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "operation": "segment_history_maintenance",
+                "family": family,
+                "error": {
+                    "code": "segment_history_maintenance_unexpected_error",
                     "detail": str(exc),
                 },
             },
@@ -1811,11 +1792,13 @@ def segment_history_cold_store_service(
             try:
                 stub = json.loads(entry.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
-                warnings.append(_make_warning(
-                    "segment_history_stub_unreadable",
-                    f"Cannot read stub file: {entry.name}",
-                    path=str(entry),
-                ))
+                warnings.append(
+                    _make_warning(
+                        "segment_history_stub_unreadable",
+                        f"Cannot read stub file: {entry.name}",
+                        path=str(entry),
+                    )
+                )
                 continue
 
             seg_id = stub.get("segment_id", entry.stem)
@@ -1823,11 +1806,13 @@ def segment_history_cold_store_service(
             # Skip already cold-stored — with warning if explicitly requested
             if stub.get("cold_stored_at"):
                 if segment_ids and seg_id in segment_ids:
-                    warnings.append(_make_warning(
-                        "segment_history_already_cold",
-                        f"Segment is already cold-stored: {seg_id}",
-                        segment_id=seg_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_already_cold",
+                            f"Segment is already cold-stored: {seg_id}",
+                            segment_id=seg_id,
+                        )
+                    )
                     seen_segment_ids.add(seg_id)
                 continue
 
@@ -1842,35 +1827,29 @@ def segment_history_cold_store_service(
             summary = stub.get("summary", {})
             elig_value = summary.get(elig_field)
             if elig_value is None:
-                warnings.append(_make_warning(
-                    "segment_history_missing_cold_timestamp",
-                    f"Stub summary field '{elig_field}' is null, skipping cold eligibility: {seg_id}",
-                    segment_id=seg_id,
-                ))
+                warnings.append(
+                    _make_warning(
+                        "segment_history_missing_cold_timestamp",
+                        f"Stub summary field '{elig_field}' is null, skipping cold eligibility: {seg_id}",
+                        segment_id=seg_id,
+                    )
+                )
                 continue
 
             try:
-                # Parse timestamp - handle both ISO and compact formats
                 ts_str = str(elig_value)
-                if "T" in ts_str and ts_str.endswith("Z") and len(ts_str) == 16:
-                    # Compact: 20260320T120000Z
-                    elig_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-                else:
-                    # Try ISO or date-only
-                    if len(ts_str) == 10:  # YYYY-MM-DD
-                        elig_dt = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                    else:
-                        elig_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                elig_dt = parse_event_timestamp(ts_str)
                 age_days = (now - elig_dt).total_seconds() / 86400
                 if age_days < cold_after_days:
                     continue
             except (ValueError, TypeError):
-                if family == "journal":
-                    warnings.append(_make_warning(
+                warnings.append(
+                    _make_warning(
                         "segment_history_invalid_stub_summary",
                         f"Invalid '{elig_field}' value in stub summary: {seg_id}",
                         segment_id=seg_id,
-                    ))
+                    )
+                )
                 continue
 
             candidates.append((seg_id, stub, entry))
@@ -1879,11 +1858,13 @@ def segment_history_cold_store_service(
     if segment_ids:
         for req_id in segment_ids:
             if req_id not in seen_segment_ids:
-                warnings.append(_make_warning(
-                    "segment_history_stub_not_found",
-                    f"No stub found for requested segment: {req_id}",
-                    segment_id=req_id,
-                ))
+                warnings.append(
+                    _make_warning(
+                        "segment_history_stub_not_found",
+                        f"No stub found for requested segment: {req_id}",
+                        segment_id=req_id,
+                    )
+                )
 
     # Sort by segment_id, apply batch limit
     candidates.sort(key=lambda x: x[0])
@@ -1916,11 +1897,13 @@ def segment_history_cold_store_service(
     for c in candidates:
         src_path = c[1].get("source_path")
         if src_path is None:
-            warnings.append(_make_warning(
-                "segment_history_stub_invalid",
-                f"Stub missing source_path, skipping: {c[0]}",
-                segment_id=c[0],
-            ))
+            warnings.append(
+                _make_warning(
+                    "segment_history_stub_invalid",
+                    f"Stub missing source_path, skipping: {c[0]}",
+                    segment_id=c[0],
+                )
+            )
             continue
         valid_candidates.append(c)
         cold_store_source_rels.append(src_path)
@@ -1948,64 +1931,72 @@ def segment_history_cold_store_service(
             # locked set — prevents clobbering a concurrent operation's
             # manifest on non-overlapping sources.
             residue = _reconcile_manifest_residue(
-                repo_root, family, "cold_store", gm,
+                repo_root,
+                family,
+                "cold_store",
+                gm,
                 locked_source_paths=set(cold_store_source_rels),
             )
             if residue:
-                warnings.append(_make_warning(
-                    "segment_history_manifest_residue",
-                    residue["warning"],
-                ))
+                warnings.append(
+                    _make_warning(
+                        "segment_history_manifest_residue",
+                        residue["warning"],
+                    )
+                )
 
             # Re-read stubs under lock and revalidate (5 checks per spec)
             validated: list[tuple[str, dict, Path]] = []
             for seg_id, pre_lock_stub, stub_path in candidates:
                 if not stub_path.is_file():
-                    warnings.append(_make_warning(
-                        "segment_history_stub_missing_under_lock",
-                        f"Stub file missing after lock acquisition: {seg_id}",
-                        segment_id=seg_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_stub_missing_under_lock",
+                            f"Stub file missing after lock acquisition: {seg_id}",
+                            segment_id=seg_id,
+                        )
+                    )
                     continue
                 try:
                     stub = json.loads(stub_path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError):
-                    warnings.append(_make_warning(
-                        "segment_history_stub_unreadable",
-                        f"Cannot read stub under lock: {seg_id}",
-                        segment_id=seg_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_stub_unreadable",
+                            f"Cannot read stub under lock: {seg_id}",
+                            segment_id=seg_id,
+                        )
+                    )
                     continue
                 if stub.get("cold_stored_at"):
                     # Already cold-stored by another process
                     continue
                 # Check source_path identity
                 if stub.get("source_path") != pre_lock_stub.get("source_path"):
-                    warnings.append(_make_warning(
-                        "segment_history_stub_source_changed",
-                        f"Stub source_path changed under lock: {seg_id}",
-                        segment_id=seg_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_stub_source_changed",
+                            f"Stub source_path changed under lock: {seg_id}",
+                            segment_id=seg_id,
+                        )
+                    )
                     continue
                 # Re-check cold eligibility under lock
                 elig_field = config.cold_eligibility_field
                 summary = stub.get("summary", {})
                 elig_value = summary.get(elig_field)
                 if elig_value is None:
-                    warnings.append(_make_warning(
-                        "segment_history_missing_cold_timestamp",
-                        f"Stub summary field '{elig_field}' is null under lock, skipping: {seg_id}",
-                        segment_id=seg_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_missing_cold_timestamp",
+                            f"Stub summary field '{elig_field}' is null under lock, skipping: {seg_id}",
+                            segment_id=seg_id,
+                        )
+                    )
                     continue
                 try:
                     ts_str = str(elig_value)
-                    if "T" in ts_str and ts_str.endswith("Z") and len(ts_str) == 16:
-                        elig_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-                    elif len(ts_str) == 10:
-                        elig_dt = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                    else:
-                        elig_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    elig_dt = parse_event_timestamp(ts_str)
                     age_days = (now - elig_dt).total_seconds() / 86400
                     if age_days < cold_after_days:
                         continue
@@ -2014,11 +2005,13 @@ def segment_history_cold_store_service(
                 # Verify hot payload exists before including in validated set
                 _hot_payload_rel = stub.get("payload_path", "")
                 if _hot_payload_rel and not (repo_root / _hot_payload_rel).is_file():
-                    warnings.append(_make_warning(
-                        "segment_history_hot_payload_missing",
-                        f"Hot payload file missing for segment: {seg_id}",
-                        segment_id=seg_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_hot_payload_missing",
+                            f"Hot payload file missing for segment: {seg_id}",
+                            segment_id=seg_id,
+                        )
+                    )
                     continue
                 validated.append((seg_id, stub, stub_path))
 
@@ -2051,11 +2044,7 @@ def segment_history_cold_store_service(
 
             # Capture stub and hot-payload state for rollback
             rollback_stub_paths = [sp for _, _, sp in validated]
-            rollback_hot_paths = [
-                repo_root / s.get("payload_path", "")
-                for _, s, _ in validated
-                if s.get("payload_path")
-            ]
+            rollback_hot_paths = [repo_root / s.get("payload_path", "") for _, s, _ in validated if s.get("payload_path")]
             stub_rollback = _capture_rollback_state(rollback_stub_paths)
             hot_rollback = _capture_rollback_state(rollback_hot_paths)
 
@@ -2077,9 +2066,7 @@ def segment_history_cold_store_service(
                     # Mutate stub: payload_path moves to cold location, add cold_stored_at
                     cold_rel = str(cold_path.relative_to(repo_root))
                     cold_stored_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                    updated_stub = _mutate_stub_cold(
-                        stub, cold_rel, cold_stored_at
-                    )
+                    updated_stub = _mutate_stub_cold(stub, cold_rel, cold_stored_at)
                     write_text_file(
                         stub_path,
                         json.dumps(updated_stub, ensure_ascii=False, indent=2),
@@ -2092,13 +2079,15 @@ def segment_history_cold_store_service(
                     deferred_hot_deletes.append((hot_payload, seg_id))
 
                     # Defer audit — same reason as maintenance (F1 self-lock).
-                    deferred_audit.append({
-                        "family": family,
-                        "segment_id": seg_id,
-                        "source_path": stub.get("source_path", ""),
-                        "cold_payload_path": cold_rel,
-                        "warning_count": len(warnings),
-                    })
+                    deferred_audit.append(
+                        {
+                            "family": family,
+                            "segment_id": seg_id,
+                            "source_path": stub.get("source_path", ""),
+                            "cold_payload_path": cold_rel,
+                            "warning_count": len(warnings),
+                        }
+                    )
 
                 # Single git commit per spec — delete hot payloads BEFORE
                 # commit so git stages the deletions atomically.
@@ -2111,11 +2100,13 @@ def segment_history_cold_store_service(
                         try:
                             hp.unlink()
                         except OSError:
-                            warnings.append(_make_warning(
-                                "segment_history_hot_payload_remove_failed",
-                                f"Could not remove hot payload before cold-store commit: {sid}",
-                                segment_id=sid,
-                            ))
+                            warnings.append(
+                                _make_warning(
+                                    "segment_history_hot_payload_remove_failed",
+                                    f"Could not remove hot payload before cold-store commit: {sid}",
+                                    segment_id=sid,
+                                )
+                            )
 
                 if commit_paths:
                     msg = f"segment-history: cold-store {family} {selection_count}"
@@ -2124,23 +2115,23 @@ def segment_history_cold_store_service(
                             success = gm.commit_paths(commit_paths, msg)
                             if success:
                                 latest_commit = gm.latest_commit()
-                                committed_files = [
-                                    str(p.relative_to(repo_root)) for p in commit_paths
-                                ]
+                                committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
                             else:
                                 durable = False
-                                warnings.append(_make_warning(
-                                    "segment_history_git_commit_failed",
-                                    f"Git commit failed for cold-store; "
-                                    f"at-risk segments: {cold_stored_ids}",
-                                ))
+                                warnings.append(
+                                    _make_warning(
+                                        "segment_history_git_commit_failed",
+                                        f"Git commit failed for cold-store; at-risk segments: {cold_stored_ids}",
+                                    )
+                                )
                     except Exception:
                         durable = False
-                        warnings.append(_make_warning(
-                            "segment_history_git_commit_failed",
-                            f"Git commit failed for cold-store; "
-                            f"at-risk segments: {cold_stored_ids}",
-                        ))
+                        warnings.append(
+                            _make_warning(
+                                "segment_history_git_commit_failed",
+                                f"Git commit failed for cold-store; at-risk segments: {cold_stored_ids}",
+                            )
+                        )
             except Exception:
                 # Rollback under lock: restore stubs first, then hot
                 # payloads.  Only remove cold .gz and manifest if stub
@@ -2154,9 +2145,7 @@ def segment_history_cold_store_service(
                     remove_manifest(repo_root, family, expected_operation="cold_store")
                 else:
                     _log.warning(
-                        "Preserving cold .gz and manifest for %s: stub "
-                        "rollback failed; cold paths retained as recovery "
-                        "source",
+                        "Preserving cold .gz and manifest for %s: stub rollback failed; cold paths retained as recovery source",
                         family,
                     )
                 raise
@@ -2189,6 +2178,27 @@ def segment_history_cold_store_service(
                 "family": family,
                 "error": {
                     "code": "segment_history_source_lock_timeout",
+                    "detail": str(exc),
+                },
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.error(
+            "Unexpected error during segment_history_cold_store for %s: %s",
+            family,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "operation": "segment_history_cold_store",
+                "family": family,
+                "error": {
+                    "code": "segment_history_cold_store_unexpected_error",
                     "detail": str(exc),
                 },
             },
@@ -2259,7 +2269,7 @@ def segment_history_cold_rehydrate_service(
     config = FAMILIES[family]
     warnings: list[dict[str, Any]] = []
 
-    def _error_response(status: int, code: str, detail: str) -> None:
+    def _error_response(status: int, code: str, detail: str) -> NoReturn:
         raise HTTPException(
             status_code=status,
             detail={
@@ -2274,7 +2284,7 @@ def segment_history_cold_rehydrate_service(
     # Validate segment_id
     parsed = _validate_segment_id(family, segment_id)
     if parsed is None:
-        return _error_response(
+        _error_response(
             400,
             "segment_history_invalid_segment_id",
             f"Invalid segment ID format: {segment_id}",
@@ -2319,7 +2329,7 @@ def segment_history_cold_rehydrate_service(
     stub_path = stub_matches[0] if stub_matches else None
 
     if stub_path is None:
-        return _error_response(
+        _error_response(
             404,
             "segment_history_stub_not_found",
             f"Stub not found for segment: {segment_id}",
@@ -2328,7 +2338,7 @@ def segment_history_cold_rehydrate_service(
     try:
         stub = json.loads(stub_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return _error_response(
+        _error_response(
             409,
             "segment_history_stub_unreadable",
             f"Cannot read stub for segment: {segment_id}",
@@ -2339,17 +2349,14 @@ def segment_history_cold_rehydrate_service(
     # the under-lock reconciliation path.
     if not stub.get("cold_stored_at"):
         from app.segment_history.manifest import read_manifest as _pre_lock_read_mf
+
         try:
             _pre_mf = _pre_lock_read_mf(repo_root, family)
         except ValueError:
             _pre_mf = None
-        has_rehydrate_manifest = (
-            _pre_mf is not None
-            and _pre_mf.get("operation") == "rehydrate"
-            and segment_id in _pre_mf.get("segment_ids", [])
-        )
+        has_rehydrate_manifest = _pre_mf is not None and _pre_mf.get("operation") == "rehydrate" and segment_id in _pre_mf.get("segment_ids", [])
         if not has_rehydrate_manifest:
-            return _error_response(
+            _error_response(
                 409,
                 "segment_history_not_cold",
                 "The requested segment is already hot and cannot be rehydrated.",
@@ -2360,7 +2367,7 @@ def segment_history_cold_rehydrate_service(
     cold_path = repo_root / cold_payload_rel
 
     if not cold_path.is_file() and stub.get("cold_stored_at"):
-        return _error_response(
+        _error_response(
             409,
             "segment_history_cold_payload_missing",
             f"Cold payload file missing for segment: {segment_id}",
@@ -2380,7 +2387,7 @@ def segment_history_cold_rehydrate_service(
             try:
                 stub = json.loads(stub_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
-                return _error_response(
+                _error_response(
                     409,
                     "segment_history_stub_unreadable",
                     f"Cannot read stub under lock for segment: {segment_id}",
@@ -2394,18 +2401,18 @@ def segment_history_cold_rehydrate_service(
                 # reconciliation to commit the uncommitted state rather
                 # than permanently blocking re-attempts with a 409.
                 from app.segment_history.manifest import read_manifest as _read_mf_check
+
                 try:
                     mf = _read_mf_check(repo_root, family)
                 except ValueError:
                     mf = None
-                if (
-                    mf is not None
-                    and mf.get("operation") == "rehydrate"
-                    and segment_id in mf.get("segment_ids", [])
-                ):
+                if mf is not None and mf.get("operation") == "rehydrate" and segment_id in mf.get("segment_ids", []):
                     source_path_str_pre = stub.get("source_path", "")
                     recon = _reconcile_manifest_residue(
-                        repo_root, family, "rehydrate", gm,
+                        repo_root,
+                        family,
+                        "rehydrate",
+                        gm,
                         locked_source_paths={source_path_str_pre},
                     )
                     # Determine whether reconciliation actually committed
@@ -2413,20 +2420,15 @@ def segment_history_cold_rehydrate_service(
                     # manifest is preserved and the segment is NOT
                     # durably hot — report durable=False so the agent
                     # knows recovery is still needed.
-                    recon_recovered = (
-                        recon is not None
-                        and "recovered" in recon.get("warning", "")
-                    )
+                    recon_recovered = recon is not None and "recovered" in recon.get("warning", "")
                     if recon:
-                        warnings.append(_make_warning(
-                            "segment_history_rehydrate_recovered"
-                            if recon_recovered
-                            else "segment_history_rehydrate_recovery_pending",
-                            f"{'Recovered' if recon_recovered else 'Recovery pending for'} "
-                            f"non-durable rehydrate for "
-                            f"segment {segment_id} via manifest reconciliation",
-                            segment_id=segment_id,
-                        ))
+                        warnings.append(
+                            _make_warning(
+                                "segment_history_rehydrate_recovered" if recon_recovered else "segment_history_rehydrate_recovery_pending",
+                                f"{'Recovered' if recon_recovered else 'Recovery pending for'} non-durable rehydrate for segment {segment_id} via manifest reconciliation",
+                                segment_id=segment_id,
+                            )
+                        )
                     hot_rel = stub.get("payload_path", "")
                     stub_rel = str(stub_path.relative_to(repo_root))
                     result_recon: dict[str, Any] = {
@@ -2447,7 +2449,7 @@ def segment_history_cold_rehydrate_service(
                     if not recon_recovered:
                         result_recon["at_risk_segment_ids"] = [segment_id]
                     return result_recon
-                return _error_response(
+                _error_response(
                     409,
                     "segment_history_not_cold",
                     "The requested segment is already hot and cannot be rehydrated.",
@@ -2465,16 +2467,16 @@ def segment_history_cold_rehydrate_service(
             # TOCTOU where a manifest appears between pre-lock check
             # and lock acquisition.
             from app.segment_history.manifest import read_manifest as _read_manifest
+
             try:
                 mf = _read_manifest(repo_root, family)
             except ValueError:
                 mf = None
             if mf is not None and source_path_str in mf.get("source_paths", []):
-                return _error_response(
+                _error_response(
                     409,
                     "segment_history_pending_batch_residue",
-                    f"A pending batch operation lists this source; "
-                    f"reconciliation must complete first: {source_path_str}",
+                    f"A pending batch operation lists this source; reconciliation must complete first: {source_path_str}",
                 )
 
             # Conflict check under lock: canonical hot target must not exist.
@@ -2492,12 +2494,13 @@ def segment_history_cold_rehydrate_service(
                             "Removed orphaned hot file from prior crash: %s",
                             hot_path,
                         )
-                        warnings.append(_make_warning(
-                            "segment_history_orphaned_hot_removed",
-                            f"Removed orphaned hot file from prior crash "
-                            f"for segment: {segment_id}",
-                            segment_id=segment_id,
-                        ))
+                        warnings.append(
+                            _make_warning(
+                                "segment_history_orphaned_hot_removed",
+                                f"Removed orphaned hot file from prior crash for segment: {segment_id}",
+                                segment_id=segment_id,
+                            )
+                        )
                     except OSError:
                         hot_rel = str(hot_path.relative_to(repo_root))
                         raise HTTPException(
@@ -2509,8 +2512,7 @@ def segment_history_cold_rehydrate_service(
                                 "segment_id": segment_id,
                                 "error": {
                                     "code": "segment_history_rehydrate_conflict",
-                                    "detail": "target rolled payload already exists "
-                                              "and could not be removed",
+                                    "detail": "target rolled payload already exists and could not be removed",
                                 },
                                 "conflict_path": hot_rel,
                             },
@@ -2534,7 +2536,7 @@ def segment_history_cold_rehydrate_service(
 
             # Re-check cold payload under lock
             if not cold_path.is_file():
-                return _error_response(
+                _error_response(
                     409,
                     "segment_history_cold_payload_missing",
                     f"Cold payload file missing for segment (under lock): {segment_id}",
@@ -2544,7 +2546,7 @@ def segment_history_cold_rehydrate_service(
             try:
                 decompressed = _decompress_cold_payload(compressed)
             except ValueError:
-                return _error_response(
+                _error_response(
                     409,
                     "segment_history_cold_payload_corrupt",
                     f"Cold payload is corrupt for segment: {segment_id}",
@@ -2575,8 +2577,10 @@ def segment_history_cold_rehydrate_service(
                     cleanup_paths=[cold_payload_rel],
                 )
             except _ManifestOccupied as exc:
-                return _error_response(
-                    409, exc.code, str(exc),
+                _error_response(
+                    409,
+                    exc.code,
+                    str(exc),
                 )
 
             # Write hot payload
@@ -2608,11 +2612,13 @@ def segment_history_cold_rehydrate_service(
                     cold_path.unlink()
                     cold_removed = True
                 except OSError:
-                    warnings.append(_make_warning(
-                        "segment_history_cold_payload_remove_failed",
-                        f"Could not remove cold payload before rehydrate commit: {segment_id}",
-                        segment_id=segment_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_cold_payload_remove_failed",
+                            f"Could not remove cold payload before rehydrate commit: {segment_id}",
+                            segment_id=segment_id,
+                        )
+                    )
 
                 commit_paths_list = [hot_path, stub_path]
                 if cold_removed:
@@ -2623,25 +2629,25 @@ def segment_history_cold_rehydrate_service(
                         success = gm.commit_paths(commit_paths_list, msg)
                         if success:
                             latest_commit = gm.latest_commit()
-                            committed_files = [
-                                str(p.relative_to(repo_root)) for p in commit_paths_list
-                            ]
+                            committed_files = [str(p.relative_to(repo_root)) for p in commit_paths_list]
                         else:
                             durable = False
-                            warnings.append(_make_warning(
-                                "segment_history_git_commit_failed",
-                                f"Git commit failed for rehydrate; "
-                                f"at-risk segment: {segment_id}",
-                                segment_id=segment_id,
-                            ))
+                            warnings.append(
+                                _make_warning(
+                                    "segment_history_git_commit_failed",
+                                    f"Git commit failed for rehydrate; at-risk segment: {segment_id}",
+                                    segment_id=segment_id,
+                                )
+                            )
                 except Exception:
                     durable = False
-                    warnings.append(_make_warning(
-                        "segment_history_git_commit_failed",
-                        f"Git commit failed for rehydrate; "
-                        f"at-risk segment: {segment_id}",
-                        segment_id=segment_id,
-                    ))
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_git_commit_failed",
+                            f"Git commit failed for rehydrate; at-risk segment: {segment_id}",
+                            segment_id=segment_id,
+                        )
+                    )
 
                 # Remove manifest after successful commit.  On commit
                 # failure the manifest is preserved so the orphaned-hot
@@ -2662,28 +2668,53 @@ def segment_history_cold_rehydrate_service(
                     _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
                 else:
                     _log.warning(
-                        "Preserving rehydrate manifest for %s: stub "
-                        "rollback failed; manifest will trigger "
-                        "reconciliation on next access",
+                        "Preserving rehydrate manifest for %s: stub rollback failed; manifest will trigger reconciliation on next access",
                         family,
                     )
                 raise
     except SegmentHistoryLockTimeout as exc:
-        return _error_response(
+        _error_response(
             409,
             "segment_history_source_lock_timeout",
             str(exc),
         )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.error(
+            "Unexpected error during segment_history_cold_rehydrate for %s/%s: %s",
+            family,
+            segment_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "operation": "segment_history_cold_rehydrate",
+                "family": family,
+                "segment_id": segment_id,
+                "error": {
+                    "code": "segment_history_cold_rehydrate_unexpected_error",
+                    "detail": str(exc),
+                },
+            },
+        )
 
     # Emit audit event
-    _emit_audit(audit, "segment_history_cold_rehydrate", {
-        "family": family,
-        "segment_id": segment_id,
-        "source_path": source_path_str,
-        "cold_payload_path": cold_payload_rel,
-        "rehydrated_payload_path": hot_rel,
-        "warning_count": len(warnings),
-    })
+    _emit_audit(
+        audit,
+        "segment_history_cold_rehydrate",
+        {
+            "family": family,
+            "segment_id": segment_id,
+            "source_path": source_path_str,
+            "cold_payload_path": cold_payload_rel,
+            "rehydrated_payload_path": hot_rel,
+            "warning_count": len(warnings),
+        },
+    )
 
     stub_rel = str(stub_path.relative_to(repo_root))
 

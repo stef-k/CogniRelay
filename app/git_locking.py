@@ -16,12 +16,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 
-from fastapi import HTTPException
-
 _thread_state = threading.local()
 _log = logging.getLogger(__name__)
 _lock_dir_ready_guard = threading.Lock()
 _lock_dir_ready: set[str] = set()
+
+
+class GitLockInfrastructureError(RuntimeError):
+    """Raised when git lock infrastructure cannot be created.
+
+    Callers translate this to the appropriate HTTP status.
+    """
 
 
 def _repo_lock_id(repo_root: Path) -> str:
@@ -31,17 +36,20 @@ def _repo_lock_id(repo_root: Path) -> str:
 
 
 def _ensure_lock_dir(lock_dir: Path) -> None:
-    """Create the lock directory once per unique path and process lifetime."""
+    """Create the lock directory once per unique path and process lifetime.
+
+    The check and mkdir are performed under the same guard to prevent
+    two threads from both attempting mkdir on the same path.
+    """
     key = str(lock_dir)
     with _lock_dir_ready_guard:
         if key in _lock_dir_ready:
             return
-    try:
-        lock_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _log.error("Cannot create git lock directory %s: %s", lock_dir, exc)
-        raise HTTPException(status_code=503, detail="Git lock infrastructure unavailable") from exc
-    with _lock_dir_ready_guard:
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _log.error("Cannot create git lock directory %s: %s", lock_dir, exc)
+            raise GitLockInfrastructureError(f"Git lock infrastructure unavailable: {exc}") from exc
         _lock_dir_ready.add(key)
 
 
@@ -55,7 +63,7 @@ def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
         lock_file = lock_path.open("w")
     except OSError as exc:
         _log.error("Cannot open git lock file %s: %s", lock_path, exc)
-        raise HTTPException(status_code=503, detail="Git lock infrastructure unavailable") from exc
+        raise GitLockInfrastructureError(f"Cannot open git lock file {lock_path}: {exc}") from exc
     try:
         # Blocking wait — no timeout per spec.  Source locks (30 s timeout)
         # bound concurrency; the git lock is only held during brief

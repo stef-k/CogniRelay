@@ -72,8 +72,14 @@ def _exclude_continuity_cold_results(results: list[dict[str, Any]]) -> list[dict
 
 
 def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command inside the repository without raising on failure."""
-    return subprocess.run(["git", *args], cwd=repo_root, text=True, capture_output=True, check=False)
+    """Run a git command inside the repository without raising on failure.
+
+    Delegates to ``app.runtime.service.run_git`` — kept as a private alias
+    for call-site compatibility.
+    """
+    from app.runtime.service import run_git
+
+    return run_git(repo_root, *args)
 
 
 def _commit_index_artifacts(repo_root: Path, gm: Any, message_prefix: str) -> list[str]:
@@ -82,7 +88,8 @@ def _commit_index_artifacts(repo_root: Path, gm: Any, message_prefix: str) -> li
     for rel in _INDEX_ARTIFACTS:
         path = repo_root / rel
         if path.exists() and try_commit_file(
-            path=path, gm=gm,
+            path=path,
+            gm=gm,
             commit_message=f"{message_prefix} {Path(rel).name}",
         ):
             commits.append(rel)
@@ -162,7 +169,8 @@ def write_file_service(
     write_old_bytes = path.read_bytes() if path.exists() else None
     write_text_file(path, req.content)
     committed = safe_commit_updated_file(
-        path=path, gm=gm,
+        path=path,
+        gm=gm,
         commit_message=req.commit_message or f"write: {req.path}",
         error_detail=f"Failed to commit write for {req.path}",
         old_bytes=write_old_bytes,
@@ -208,12 +216,14 @@ def append_record_service(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     append_old_bytes = path.read_bytes() if path.exists() else None
     from app.segment_history.append import SegmentHistoryAppendError, locked_append_jsonl
+
     try:
         locked_append_jsonl(path, req.record, repo_root=repo_root, gm=gm, settings=settings)
     except SegmentHistoryAppendError as exc:
         raise HTTPException(status_code=503, detail=f"Append failed: {exc.detail}") from exc
     committed = safe_commit_updated_file(
-        path=path, gm=gm,
+        path=path,
+        gm=gm,
         commit_message=req.commit_message or f"append: {req.path}",
         error_detail=f"Failed to commit append for {req.path}",
         old_bytes=append_old_bytes,
@@ -415,6 +425,7 @@ def _raw_scan_recent_relevant(
 
 def _pack_recent_relevant(results: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Sort evidence using the established packing order and score tie-breaks."""
+
     def _group(path: str) -> int:
         """Bucket paths into summary, message, then everything-else ordering groups."""
         if path.startswith("memory/summaries/"):
@@ -449,9 +460,7 @@ def context_retrieve_service(
     index_health = _index_health(repo_root, now)
     if index_health == "missing":
         recent = _raw_scan_recent_relevant(repo_root, auth, req)
-        continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + [
-            "continuity_index_missing"
-        ]
+        continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + ["continuity_index_missing"]
     else:
         try:
             recent = search_index(
@@ -467,9 +476,7 @@ def context_retrieve_service(
             recent = _raw_scan_recent_relevant(repo_root, auth, req)
             index_health = "stale"
         if index_health == "stale":
-            continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + [
-                "continuity_index_stale"
-            ]
+            continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + ["continuity_index_stale"]
     recent = _pack_recent_relevant(recent, req.limit)
     open_questions = [row["snippet"] for row in recent[:10] if "?" in row.get("snippet", "")]
     bundle = {
@@ -693,13 +700,9 @@ def context_snapshot_create_service(
     auth.require("write:projects")
     as_of = _resolve_as_of_ref(repo_root, req.as_of.mode, req.as_of.value)
     if as_of["mode"] == "working_tree":
-        core_memory, items, open_questions = _build_snapshot_from_working_tree(
-            repo_root, auth, req.task, req.include_types, req.limit, req.include_core
-        )
+        core_memory, items, open_questions = _build_snapshot_from_working_tree(repo_root, auth, req.task, req.include_types, req.limit, req.include_core)
     else:
-        core_memory, items, open_questions = _build_snapshot_from_commit(
-            repo_root, auth, req.task, req.include_types, req.limit, req.include_core, str(as_of["value"])
-        )
+        core_memory, items, open_questions = _build_snapshot_from_commit(repo_root, auth, req.task, req.include_types, req.limit, req.include_core, str(as_of["value"]))
 
     snapshot_id = f"snap_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
     snapshot_rel = f"{SNAPSHOT_DIR_REL}/{snapshot_id}.json"
@@ -719,7 +722,8 @@ def context_snapshot_create_service(
     path = safe_path(repo_root, snapshot_rel)
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
     committed = safe_commit_new_file(
-        path=path, gm=gm,
+        path=path,
+        gm=gm,
         commit_message=f"snapshot: create {snapshot_id}",
         error_detail=f"Failed to commit snapshot {snapshot_id}",
     )

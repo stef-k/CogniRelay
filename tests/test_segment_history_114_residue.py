@@ -90,17 +90,18 @@ class TestMaintenanceWithResidue(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
-            journal = repo / "journal"
-            journal.mkdir()
-            (journal / "2026-03-20.jsonl").write_text("today\n")
+            # Use correct journal structure: journal/<year>/<YYYY-MM-DD>.md
+            journal_year = repo / "journal" / "2026"
+            journal_year.mkdir(parents=True)
+            (journal_year / "2026-03-19.md").write_text("# Past day entry\n")
 
-            # Plant a stale manifest
+            # Plant a stale manifest with source paths that overlap the actual sources
             write_manifest(
                 repo,
                 operation="maintenance",
                 family="journal",
-                source_paths=[],
-                segment_ids=[],
+                source_paths=["journal/2026/2026-03-19.md"],
+                segment_ids=["journal__2026__2026-03-19__20260320T000000Z__0001"],
             )
 
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
@@ -113,11 +114,16 @@ class TestMaintenanceWithResidue(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            # Stale manifest should have been handled
+            # Stale manifest should have been handled — verify warning was emitted
+            warning_strs = [w.get("detail", "") if isinstance(w, dict) else str(w) for w in result["warnings"]]
             self.assertTrue(
-                any("residue" in w or "manifest" in w for w in result["warnings"])
-                or result["rolled_count"] == 0
+                any("residue" in w or "manifest" in w for w in warning_strs),
+                f"Expected residue/manifest warning, got: {result['warnings']}",
             )
+            # Verify manifest was actually removed
+            from app.segment_history.manifest import read_manifest
+
+            self.assertIsNone(read_manifest(repo, "journal"))
 
 
 if __name__ == "__main__":

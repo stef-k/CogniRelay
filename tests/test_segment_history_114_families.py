@@ -200,5 +200,33 @@ class TestSummaryBuilders(unittest.TestCase):
         self.assertEqual(summary["last_event_at"], "t2")
 
 
+class TestFixupMessageStreamSummary(unittest.TestCase):
+    """Tests for fixup_message_stream_summary ack-specific overrides."""
+
+    def test_acks_overrides_applied(self) -> None:
+        from app.segment_history.families import fixup_message_stream_summary
+
+        content = '{"ack_at":"2026-03-20","message_id":"m1","thread_id":"t1"}\n{"ack_at":"2026-03-21","message_id":"m2","thread_id":"t2"}\n'
+        summary = {
+            "first_event_at": "wrong",
+            "last_event_at": "wrong",
+            "message_id_sample": ["wrong"],
+            "thread_id_sample": ["t1"],
+        }
+        fixup_message_stream_summary(summary, content, "acks")
+        self.assertEqual(summary["first_event_at"], "2026-03-20")
+        self.assertEqual(summary["last_event_at"], "2026-03-21")
+        self.assertIn("m1", summary["message_id_sample"])
+        self.assertEqual(summary["thread_id_sample"], [])
+
+    def test_non_acks_no_mutation(self) -> None:
+        from app.segment_history.families import fixup_message_stream_summary
+
+        content = '{"sent_at":"2026-03-20","id":"id1"}\n'
+        summary = {"first_event_at": "original", "last_event_at": "original"}
+        fixup_message_stream_summary(summary, content, "inbox")
+        self.assertEqual(summary["first_event_at"], "original")
+
+
 if __name__ == "__main__":
     unittest.main()

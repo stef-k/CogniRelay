@@ -109,12 +109,11 @@ def _load_ops_runs(
     if file_size > max_jsonl_read_bytes:
         _log.warning(
             "Ops runs file %s is %d bytes (limit %d); returning empty to avoid OOM",
-            path, file_size, max_jsonl_read_bytes,
+            path,
+            file_size,
+            max_jsonl_read_bytes,
         )
-        warnings.append(
-            f"ops_runs_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; "
-            "run history unavailable until file is compacted or truncated"
-        )
+        warnings.append(f"ops_runs_too_large: file is {file_size} bytes, exceeds {max_jsonl_read_bytes} byte safety limit; run history unavailable until file is compacted or truncated")
         return [], warnings
     out: list[dict[str, Any]] = []
     try:
@@ -129,7 +128,7 @@ def _load_ops_runs(
     if "\ufffd" in raw:
         _log.warning("file %s contains invalid UTF-8 bytes (replaced with U+FFFD)", path)
     all_lines = raw.splitlines()
-    tail = all_lines[-max(1, int(limit)):]
+    tail = all_lines[-max(1, int(limit)) :]
     file_offset = len(all_lines) - len(tail)
     for idx, line in enumerate(tail):
         try:
@@ -151,8 +150,11 @@ def _load_ops_runs(
 
 
 def _append_ops_run(
-    repo_root: Path, payload: dict[str, Any],
-    *, gm: Any = None, settings: Any = None,
+    repo_root: Path,
+    payload: dict[str, Any],
+    *,
+    gm: Any = None,
+    settings: Any = None,
 ) -> Path:
     """Append an ops run record to the run log.
 
@@ -164,8 +166,11 @@ def _append_ops_run(
 
     path = _ops_runs_path(repo_root)
     locked_append_jsonl(
-        path, payload,
-        repo_root=repo_root, gm=gm, settings=settings,
+        path,
+        payload,
+        repo_root=repo_root,
+        gm=gm,
+        settings=settings,
         family="ops_runs",
     )
     return path
@@ -570,11 +575,23 @@ def _ops_execute_job(
     if req.job_id == "artifact_history_cold_rehydrate":
         return artifact_history_cold_rehydrate(req=artifact_history_cold_rehydrate_request_factory(**args), auth=auth)
     if req.job_id == "segment_history_maintenance":
-        return segment_history_maintenance(req=segment_history_maintenance_request_factory(**args), auth=auth)
+        try:
+            typed_req = segment_history_maintenance_request_factory(**args)
+        except (TypeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid segment_history_maintenance arguments: {exc}") from exc
+        return segment_history_maintenance(req=typed_req, auth=auth)
     if req.job_id == "segment_history_cold_store":
-        return segment_history_cold_store(req=segment_history_cold_store_request_factory(**args), auth=auth)
+        try:
+            typed_req = segment_history_cold_store_request_factory(**args)
+        except (TypeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid segment_history_cold_store arguments: {exc}") from exc
+        return segment_history_cold_store(req=typed_req, auth=auth)
     if req.job_id == "segment_history_cold_rehydrate":
-        return segment_history_cold_rehydrate(req=segment_history_cold_rehydrate_request_factory(**args), auth=auth)
+        try:
+            typed_req = segment_history_cold_rehydrate_request_factory(**args)
+        except (TypeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid segment_history_cold_rehydrate arguments: {exc}") from exc
+        return segment_history_cold_rehydrate(req=typed_req, auth=auth)
     raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
 
 
@@ -650,17 +667,17 @@ def ops_schedule_export_service(*, settings: Any, auth: AuthContext, format: str
         examples = {
             "service_unit": {
                 "Description": "CogniRelay host ops runner",
-                "ExecStart": f"/bin/sh -lc \"{command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'\"",
+                "ExecStart": f'/bin/sh -lc "{command} -d \'{{"job_id":"metrics.poll_and_alarm_eval"}}\'"',
             },
             "timer_unit": {"OnCalendar": "*:0/5", "Persistent": True},
         }
     else:
         examples = {
             "cron_examples": [
-                f"*/5 * * * * {command} -d '{{\"job_id\":\"index.rebuild_incremental\"}}'",
-                f"0 * * * * {command} -d '{{\"job_id\":\"metrics.poll_and_alarm_eval\"}}'",
-                f"0 2 * * * {command} -d '{{\"job_id\":\"backup.create\"}}'",
-                f"30 2 * * 0 {command} -d '{{\"job_id\":\"backup.restore_test\"}}'",
+                f'*/5 * * * * {command} -d \'{{"job_id":"index.rebuild_incremental"}}\'',
+                f'0 * * * * {command} -d \'{{"job_id":"metrics.poll_and_alarm_eval"}}\'',
+                f'0 2 * * * {command} -d \'{{"job_id":"backup.create"}}\'',
+                f'30 2 * * 0 {command} -d \'{{"job_id":"backup.restore_test"}}\'',
             ]
         }
 

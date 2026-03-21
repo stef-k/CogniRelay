@@ -85,9 +85,7 @@ class TestMaintenanceApiAudit(unittest.TestCase):
             logs = repo / "logs"
             logs.mkdir()
             # Create audit log exceeding 100 bytes threshold
-            (logs / "api_audit.jsonl").write_text(
-                '{"ts":"2026-03-20","event":"write","peer_id":"p1"}\n' * 5
-            )
+            (logs / "api_audit.jsonl").write_text('{"ts":"2026-03-20","event":"write","peer_id":"p1"}\n' * 5)
 
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             gm = SimpleGitManagerStub(repo)
@@ -201,6 +199,122 @@ class TestMaintenanceStubCreation(unittest.TestCase):
                 self.assertIsInstance(w, dict)
                 self.assertIn("code", w)
                 self.assertIn("detail", w)
+
+
+class TestMaintenanceOpsRuns(unittest.TestCase):
+    """End-to-end maintenance test for ops_runs family (H12)."""
+
+    def test_rolls_oversized_ops_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            # ops_runs uses logs/ops_runs.jsonl
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            content = '{"started_at":"2026-03-19T12:00:00Z","finished_at":"2026-03-19T12:01:00Z","job_id":"backup"}\n'
+            (logs / "ops_runs.jsonl").write_text(content * 5)
+
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            result = segment_history_maintenance_service(
+                family="ops_runs",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertGreater(result["rolled_count"], 0)
+            # Verify payload and stub created in correct dirs
+            history_dir = repo / "logs" / "history" / "ops_runs"
+            self.assertTrue(history_dir.is_dir())
+            payloads = list(history_dir.glob("*.jsonl"))
+            self.assertGreater(len(payloads), 0)
+            stub_dir = history_dir / "index"
+            self.assertTrue(stub_dir.is_dir())
+
+
+class TestMaintenanceMessageStream(unittest.TestCase):
+    """End-to-end maintenance test for message_stream family (H12)."""
+
+    def test_rolls_oversized_message_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            # message_stream uses messages/{inbox,outbox,acks,relay}/<file>.jsonl
+            inbox = repo / "messages" / "inbox"
+            inbox.mkdir(parents=True)
+            content = '{"sent_at":"2026-03-19T12:00:00Z","id":"msg1","thread_id":"t1"}\n'
+            (inbox / "alice.jsonl").write_text(content * 5)
+
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            result = segment_history_maintenance_service(
+                family="message_stream",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertGreater(result["rolled_count"], 0)
+            # Verify per-kind history dir routing
+            history_dir = repo / "messages" / "history" / "inbox"
+            self.assertTrue(history_dir.is_dir())
+
+
+class TestMaintenanceMessageThread(unittest.TestCase):
+    """End-to-end maintenance test for message_thread family (H12)."""
+
+    def test_rolls_oversized_message_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            threads = repo / "messages" / "threads"
+            threads.mkdir(parents=True)
+            content = '{"sent_at":"2026-03-19T12:00:00Z","from":"a","to":"b"}\n'
+            (threads / "t1.jsonl").write_text(content * 5)
+
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            result = segment_history_maintenance_service(
+                family="message_thread",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertGreater(result["rolled_count"], 0)
+            history_dir = repo / "messages" / "history" / "threads"
+            self.assertTrue(history_dir.is_dir())
+
+
+class TestMaintenanceEpisodic(unittest.TestCase):
+    """End-to-end maintenance test for episodic family (H12)."""
+
+    def test_rolls_oversized_episodic(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            episodic = repo / "memory" / "episodic"
+            episodic.mkdir(parents=True)
+            content = '{"at":"2026-03-19T12:00:00Z","subject_kind":"observation"}\n'
+            (episodic / "observations.jsonl").write_text(content * 5)
+
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            result = segment_history_maintenance_service(
+                family="episodic",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=now,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertGreater(result["rolled_count"], 0)
+            history_dir = repo / "memory" / "episodic" / "history"
+            self.assertTrue(history_dir.is_dir())
 
 
 if __name__ == "__main__":

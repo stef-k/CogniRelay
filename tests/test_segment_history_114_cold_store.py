@@ -123,6 +123,15 @@ class TestColdStoreNotEligible(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["cold_stored_count"], 0)
 
+            # Verify hot payload still exists on disk (M8)
+            history_dir = repo / "journal" / "history"
+            hot_payloads = list(history_dir.rglob("*.md"))
+            self.assertGreater(
+                len(hot_payloads),
+                0,
+                "Hot payload should still exist when cold_after_days not met",
+            )
+
 
 class TestColdStoreIdempotent(unittest.TestCase):
     def test_already_cold_stored_skipped(self) -> None:

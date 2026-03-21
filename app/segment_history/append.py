@@ -46,6 +46,7 @@ class SegmentHistoryAppendError(Exception):
         self.detail = detail
         super().__init__(f"{code}: {detail}")
 
+
 # ---------------------------------------------------------------------------
 # Path -> family reverse lookup
 # ---------------------------------------------------------------------------
@@ -120,6 +121,7 @@ def locked_append_jsonl(
     line = json.dumps(record, ensure_ascii=False) + "\n"
 
     from app.segment_history.locking import (
+        LockInfrastructureError,
         SegmentHistoryLockTimeout,
         segment_history_source_lock,
     )
@@ -133,7 +135,9 @@ def locked_append_jsonl(
 
     try:
         with segment_history_source_lock(
-            lock_key, lock_dir=lock_dir, timeout=lock_timeout,
+            lock_key,
+            lock_dir=lock_dir,
+            timeout=lock_timeout,
         ):
             _check_and_rollover_locked(path, family, repo_root, gm, settings, audit=audit)
             # Journal: reject appends to non-current-day files under lock.
@@ -144,10 +148,16 @@ def locked_append_jsonl(
                 f.write(line)
     except SegmentHistoryLockTimeout as exc:
         raise SegmentHistoryAppendError(
-            "segment_history_source_lock_timeout", str(exc),
+            "segment_history_source_lock_timeout",
+            str(exc),
         ) from exc
     except WriteTimeRolloverError as exc:
         raise SegmentHistoryAppendError(exc.code, exc.detail) from exc
+    except LockInfrastructureError as exc:
+        raise SegmentHistoryAppendError(
+            "segment_history_lock_infrastructure_unavailable",
+            str(exc),
+        ) from exc
 
 
 def locked_append_jsonl_multi(
@@ -182,6 +192,7 @@ def locked_append_jsonl_multi(
     non_sh_paths: list[Path] = []
 
     from app.segment_history.locking import (
+        LockInfrastructureError,
         SegmentHistoryLockTimeout,
         acquire_sorted_source_locks,
     )
@@ -211,13 +222,20 @@ def locked_append_jsonl_multi(
 
     from app.audit import WriteTimeRolloverError
 
+    written_paths: list[str] = []
     try:
         with acquire_sorted_source_locks(
-            lock_keys, lock_dir=lock_dir, total_budget=lock_timeout,
+            lock_keys,
+            lock_dir=lock_dir,
+            total_budget=lock_timeout,
         ):
             for path_entry, fam_entry, _lk in sh_entries:
                 _check_and_rollover_locked(
-                    path_entry, fam_entry, repo_root, gm, settings,
+                    path_entry,
+                    fam_entry,
+                    repo_root,
+                    gm,
+                    settings,
                     audit=audit,
                 )
                 if fam_entry == "journal":
@@ -225,12 +243,24 @@ def locked_append_jsonl_multi(
                 path_entry.parent.mkdir(parents=True, exist_ok=True)
                 with path_entry.open("a", encoding="utf-8") as f:
                     f.write(line)
+                written_paths.append(str(path_entry))
     except SegmentHistoryLockTimeout as exc:
         raise SegmentHistoryAppendError(
-            "segment_history_source_lock_timeout", str(exc),
+            "segment_history_source_lock_timeout",
+            str(exc),
         ) from exc
     except WriteTimeRolloverError as exc:
         raise SegmentHistoryAppendError(exc.code, exc.detail) from exc
+    except LockInfrastructureError as exc:
+        raise SegmentHistoryAppendError(
+            "segment_history_lock_infrastructure_unavailable",
+            str(exc),
+        ) from exc
+    except OSError as exc:
+        raise SegmentHistoryAppendError(
+            "segment_history_partial_multi_append",
+            f"Multi-append failed after writing to {len(written_paths)} of {len(sh_entries)} files: {exc}; succeeded: {written_paths}",
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +281,11 @@ def _check_and_rollover_locked(
     append must fail on rollover failure.
     """
     if gm is None or settings is None:
+        _log.debug(
+            "Skipping write-time rollover check: gm=%s settings=%s",
+            gm is not None,
+            settings is not None,
+        )
         return
 
     from app.segment_history.families import (
@@ -282,11 +317,17 @@ def _check_and_rollover_locked(
     rollover_bytes = 0
     if config.has_size_rollover:
         from app.segment_history.families import _get_rollover_bytes_setting
+
         rb = _get_rollover_bytes_setting(family, settings)
         rollover_bytes = rb if rb is not None else 0
 
     _check_write_time_rollover_locked(
-        path, rollover_bytes, repo_root, gm, family=family, audit=audit,
+        path,
+        rollover_bytes,
+        repo_root,
+        gm,
+        family=family,
+        audit=audit,
     )
 
 
@@ -298,16 +339,14 @@ def _reject_non_current_day_journal(path: Path) -> None:
     path is now non-current-day, the writer must reject that append.
     """
     from app.audit import WriteTimeRolloverError
+    from app.segment_history.families import _DAY_BUCKET_RE
 
-    import re
-    day_re = re.compile(r"\d{4}-\d{2}-\d{2}\.md$")
-    if not day_re.search(path.name):
+    if not _DAY_BUCKET_RE.match(path.name):
         return
     file_day = path.stem  # e.g. "2026-03-19"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if file_day != today:
         raise WriteTimeRolloverError(
             "segment_history_journal_non_current_day",
-            f"Journal append rejected: file day {file_day} != current UTC day {today}. "
-            f"Retry against the current-day path.",
+            f"Journal append rejected: file day {file_day} != current UTC day {today}. Retry against the current-day path.",
         )

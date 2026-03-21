@@ -270,6 +270,16 @@ def _make_audit(settings: Any, gm: Any) -> Callable:
     return lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail, gm=gm)
 
 
+def _make_segment_audit(settings: Any, auth: Any, gm: Any) -> Callable:
+    """Build a 2-arg audit callback for segment_history services.
+
+    Segment-history services call ``_emit_audit(audit, event, detail)``
+    which invokes ``audit(event, detail)`` — a 2-arg form that bakes in
+    the ``auth`` context from the enclosing ops_run handler.
+    """
+    return lambda event, detail: _audit(settings, auth, event, detail, gm=gm)
+
+
 def _schema_for_model(model_cls: Any) -> dict[str, Any]:
     """Return the JSON schema for a Pydantic model class."""
     return model_cls.model_json_schema()
@@ -516,7 +526,6 @@ def manifest() -> dict:
     return manifest_payload(app_version=app.version)
 
 
-
 @app.get("/v1/contracts")
 def contracts() -> dict:
     """Return contract version metadata and compatibility policy."""
@@ -634,7 +643,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             settings=settings,
             gm=gm,
             batch_limit=req.batch_limit,
-            audit=lambda event, detail: _audit(settings, auth, event, detail, gm=gm),
+            audit=_make_segment_audit(settings, auth, gm),
         ),
         segment_history_maintenance_request_factory=SegmentHistoryMaintenanceRequest,
         segment_history_cold_store=lambda req, auth: segment_history_cold_store_service(
@@ -644,7 +653,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             gm=gm,
             batch_limit=req.batch_limit,
             segment_ids=req.segment_ids,
-            audit=lambda event, detail: _audit(settings, auth, event, detail, gm=gm),
+            audit=_make_segment_audit(settings, auth, gm),
         ),
         segment_history_cold_store_request_factory=SegmentHistoryColdStoreRequest,
         segment_history_cold_rehydrate=lambda req, auth: segment_history_cold_rehydrate_service(
@@ -652,7 +661,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             segment_id=req.segment_id,
             repo_root=settings.repo_root,
             gm=gm,
-            audit=lambda event, detail: _audit(settings, auth, event, detail, gm=gm),
+            audit=_make_segment_audit(settings, auth, gm),
         ),
         segment_history_cold_rehydrate_request_factory=SegmentHistoryColdRehydrateRequest,
         load_token_config=load_token_config,
@@ -1075,9 +1084,7 @@ def coordination_reconciliations_query(
     owner_peer: Annotated[str | None, Query()] = None,
     claimant_peer: Annotated[str | None, Query()] = None,
     status: Annotated[Literal["open", "resolved"] | None, Query()] = None,
-    classification: Annotated[
-        Literal["contradictory", "stale_observation", "frame_conflict", "concurrent_race"] | None, Query()
-    ] = None,
+    classification: Annotated[Literal["contradictory", "stale_observation", "frame_conflict", "concurrent_race"] | None, Query()] = None,
     task_id: Annotated[str | None, Query()] = None,
     thread_id: Annotated[str | None, Query()] = None,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -1157,6 +1164,7 @@ def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(re
         now=datetime.now(timezone.utc),
         audit=_make_audit(settings, gm),
     )
+
 
 @app.get("/v1/peers")
 def peers_list(auth: AuthContext = Depends(require_auth)) -> dict:
@@ -1361,6 +1369,8 @@ def code_merge(req: CodeMergeRequest, auth: AuthContext = Depends(require_auth))
         run_git=_run_git,
         audit=_make_audit(settings, gm),
     )
+
+
 @app.post("/v1/messages/send")
 def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Send a direct message with optional signed-ingress enforcement."""
@@ -1516,7 +1526,6 @@ def security_tokens_revoke(req: SecurityTokenRevokeRequest, auth: AuthContext = 
     )
 
 
-
 @app.post("/v1/security/tokens/rotate")
 def security_tokens_rotate(req: SecurityTokenRotateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Rotate an existing peer token and optionally update its metadata."""
@@ -1532,6 +1541,8 @@ def security_tokens_rotate(req: SecurityTokenRotateRequest, auth: AuthContext = 
         audit=_make_audit(settings, gm),
         refresh_settings=lambda: get_settings(force_reload=True),
     )
+
+
 @app.post("/v1/security/keys/rotate")
 def security_keys_rotate(req: SecurityKeysRotateRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Rotate signing keys used for signed ingress and verification."""
@@ -1625,7 +1636,6 @@ def replication_push(req: ReplicationPushRequest, auth: AuthContext = Depends(re
         load_peers_registry=load_peers_registry,
         audit=_make_audit(settings, gm),
     )
-
 
 
 @app.post("/v1/backup/create")

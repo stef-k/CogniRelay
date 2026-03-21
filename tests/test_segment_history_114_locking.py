@@ -42,14 +42,10 @@ class TestSourceLock(unittest.TestCase):
     def test_acquire_and_release(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             lock_dir = Path(td) / "locks"
-            with segment_history_source_lock(
-                "segment_history:journal:test", lock_dir=lock_dir
-            ):
+            with segment_history_source_lock("segment_history:journal:test", lock_dir=lock_dir):
                 self.assertTrue(lock_dir.is_dir())
             # Lock released — should be re-acquirable
-            with segment_history_source_lock(
-                "segment_history:journal:test", lock_dir=lock_dir
-            ):
+            with segment_history_source_lock("segment_history:journal:test", lock_dir=lock_dir):
                 pass
 
     def test_colon_key_accepted(self) -> None:
@@ -84,6 +80,37 @@ class TestAcquireSortedSourceLocks(unittest.TestCase):
             keys = ["same:key", "same:key", "same:key"]
             with acquire_sorted_source_locks(keys, lock_dir=lock_dir):
                 pass
+
+
+class TestLockContention(unittest.TestCase):
+    """Verify that contention raises SegmentHistoryLockTimeout under real threading."""
+
+    def test_lock_contention_raises_timeout(self) -> None:
+        import threading
+        import time
+
+        from app.segment_history.locking import SegmentHistoryLockTimeout
+
+        with tempfile.TemporaryDirectory() as td:
+            lock_dir = Path(td) / ".locks" / "segment_history"
+            lock_dir.mkdir(parents=True)
+            key = "test:contention"
+            barrier = threading.Barrier(2, timeout=5)
+
+            def hold_lock() -> None:
+                with segment_history_source_lock(key, lock_dir=lock_dir, timeout=5):
+                    barrier.wait()
+                    time.sleep(0.5)
+
+            t = threading.Thread(target=hold_lock, daemon=True)
+            t.start()
+            barrier.wait()
+            # Small sleep to ensure the background thread has the lock
+            time.sleep(0.05)
+            with self.assertRaises(SegmentHistoryLockTimeout):
+                with segment_history_source_lock(key, lock_dir=lock_dir, timeout=0.1):
+                    pass
+            t.join(timeout=2)
 
 
 if __name__ == "__main__":

@@ -54,9 +54,7 @@ class TestValidateSegmentHistory(unittest.TestCase):
                 "payload_path": "journal/history/2026/journal__2026__2026-03-19__20260320T000000Z__0001.md",
                 "summary": {"day": "2026-03-19", "line_count": 1, "byte_size": 6},
             }
-            (stub_dir / "journal__2026__2026-03-19__20260320T000000Z__0001.json").write_text(
-                json.dumps(stub), encoding="utf-8"
-            )
+            (stub_dir / "journal__2026__2026-03-19__20260320T000000Z__0001.json").write_text(json.dumps(stub), encoding="utf-8")
 
             result = _validate_segment_history(restore)
             self.assertTrue(result["ok"])
@@ -84,9 +82,7 @@ class TestValidateSegmentHistory(unittest.TestCase):
                 "payload_path": "journal/history/2026/journal__2026__2026-03-19__20260320T000000Z__0001.md",
                 "summary": {"day": "2026-03-19"},
             }
-            (stub_dir / "journal__2026__2026-03-19__20260320T000000Z__0001.json").write_text(
-                json.dumps(stub), encoding="utf-8"
-            )
+            (stub_dir / "journal__2026__2026-03-19__20260320T000000Z__0001.json").write_text(json.dumps(stub), encoding="utf-8")
 
             result = _validate_segment_history(restore)
             self.assertFalse(result["ok"])
@@ -114,9 +110,7 @@ class TestValidateSegmentHistory(unittest.TestCase):
                 "summary": {"day": "2026-03-19"},
                 "cold_stored_at": "2026-03-21T00:00:00Z",
             }
-            (stub_dir / "journal__2026__2026-03-19__20260320T000000Z__0001.json").write_text(
-                json.dumps(stub), encoding="utf-8"
-            )
+            (stub_dir / "journal__2026__2026-03-19__20260320T000000Z__0001.json").write_text(json.dumps(stub), encoding="utf-8")
 
             result = _validate_segment_history(restore)
             self.assertFalse(result["ok"])
@@ -157,9 +151,7 @@ class TestValidateSegmentHistory(unittest.TestCase):
                 "payload_path": "journal/history/2026/journal__20260320T000000Z__0001.md",
                 "summary": {},
             }
-            (stub_dir / "wrong.json").write_text(
-                json.dumps(stub), encoding="utf-8"
-            )
+            (stub_dir / "wrong.json").write_text(json.dumps(stub), encoding="utf-8")
 
             result = _validate_segment_history(restore)
             self.assertFalse(result["ok"])

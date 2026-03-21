@@ -9,6 +9,7 @@ semaphore) is deferred to a separate issue.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import logging
@@ -17,8 +18,6 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
-
-from fastapi import HTTPException
 
 _log = logging.getLogger(__name__)
 
@@ -38,30 +37,36 @@ class SegmentHistoryLockTimeout(Exception):
     def __init__(self, lock_key: str, timeout: float) -> None:
         self.lock_key = lock_key
         self.timeout = timeout
-        super().__init__(
-            f"Segment-history lock acquisition timed out for {lock_key} "
-            f"after {timeout:.1f}s"
-        )
+        super().__init__(f"Segment-history lock acquisition timed out for {lock_key} after {timeout:.1f}s")
+
+
+class LockInfrastructureError(Exception):
+    """Raised when lock infrastructure (directory, file) cannot be created.
+
+    Callers translate this to an appropriate HTTP status or degraded response.
+    This keeps the locking module decoupled from the HTTP layer.
+    """
+
 
 _lock_dir_ready_guard = threading.Lock()
 _lock_dir_ready: set[str] = set()
 
 
 def _ensure_lock_dir(lock_dir: Path) -> None:
-    """Create the lock directory once per unique path, per process lifetime."""
+    """Create the lock directory once per unique path, per process lifetime.
+
+    The check and mkdir are performed under the same guard to prevent
+    two threads from both attempting mkdir on the same path.
+    """
     key = str(lock_dir)
     with _lock_dir_ready_guard:
         if key in _lock_dir_ready:
             return
-    try:
-        lock_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _log.error("Cannot create lock directory %s: %s", lock_dir, exc)
-        raise HTTPException(
-            status_code=503,
-            detail="Segment-history lock infrastructure unavailable",
-        ) from exc
-    with _lock_dir_ready_guard:
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _log.error("Cannot create lock directory %s: %s", lock_dir, exc)
+            raise LockInfrastructureError(f"Segment-history lock infrastructure unavailable: {exc}") from exc
         _lock_dir_ready.add(key)
 
 
@@ -75,9 +80,7 @@ def _safe_lock_filename(lock_key: str) -> str:
 
 
 @contextmanager
-def segment_history_source_lock(
-    lock_key: str, *, lock_dir: Path, timeout: float = LOCK_TIMEOUT_SECONDS
-) -> Generator[None, None, None]:
+def segment_history_source_lock(lock_key: str, *, lock_dir: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Generator[None, None, None]:
     """Acquire an exclusive per-source advisory lock for a segment-history mutation.
 
     Unlike ``artifact_lock``, this accepts arbitrary colon-separated keys
@@ -90,10 +93,7 @@ def segment_history_source_lock(
         lock_file = lock_path.open("a")
     except OSError as exc:
         _log.error("Cannot open lock file %s: %s", lock_path, exc)
-        raise HTTPException(
-            status_code=503,
-            detail="Segment-history lock infrastructure unavailable",
-        ) from exc
+        raise LockInfrastructureError(f"Cannot open lock file {lock_path}: {exc}") from exc
     try:
         deadline = time.monotonic() + timeout
         while True:
@@ -110,15 +110,19 @@ def segment_history_source_lock(
                     )
                     raise SegmentHistoryLockTimeout(lock_key, timeout) from None
                 time.sleep(_LOCK_POLL_INTERVAL)
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue  # Retry on signal interruption
+                _log.error("Unexpected flock error for %s: %s", lock_key, exc)
+                lock_file.close()
+                raise SegmentHistoryLockTimeout(lock_key, timeout) from exc
         yield
     finally:
         lock_file.close()
 
 
 @contextmanager
-def acquire_sorted_source_locks(
-    keys: list[str], *, lock_dir: Path, total_budget: float = 30.0
-) -> Generator[None, None, None]:
+def acquire_sorted_source_locks(keys: list[str], *, lock_dir: Path, total_budget: float = 30.0) -> Generator[None, None, None]:
     """Acquire exclusive locks on multiple sources in sorted order.
 
     Sorting prevents deadlocks when concurrent callers target overlapping
@@ -143,10 +147,7 @@ def acquire_sorted_source_locks(
                 lock_file = lock_path.open("a")
             except OSError as exc:
                 _log.error("Cannot open lock file %s: %s", lock_path, exc)
-                raise HTTPException(
-                    status_code=503,
-                    detail="Segment-history lock infrastructure unavailable",
-                ) from exc
+                raise LockInfrastructureError(f"Cannot open lock file {lock_path}: {exc}") from exc
             held.append(lock_file)
             while True:
                 try:
@@ -160,6 +161,11 @@ def acquire_sorted_source_locks(
                         )
                         raise SegmentHistoryLockTimeout(key, total_budget) from None
                     time.sleep(_LOCK_POLL_INTERVAL)
+                except OSError as exc:
+                    if exc.errno == errno.EINTR:
+                        continue  # Retry on signal interruption
+                    _log.error("Unexpected flock error for %s: %s", key, exc)
+                    raise SegmentHistoryLockTimeout(key, total_budget) from exc
         yield
     finally:
         for fh in held:
