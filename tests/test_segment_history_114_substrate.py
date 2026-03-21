@@ -228,7 +228,8 @@ class TestRollJsonlSource(unittest.TestCase):
 
 
 class TestRollJournalSource(unittest.TestCase):
-    def test_roll_removes_source(self) -> None:
+    def test_roll_preserves_source_for_deferred_deletion(self) -> None:
+        """Journal source is NOT deleted by _roll_journal_source — caller defers deletion."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             source = repo / "journal" / "2026" / "2026-03-19.md"
@@ -252,8 +253,8 @@ class TestRollJournalSource(unittest.TestCase):
                 repo_root=repo,
             )
 
-            # Source removed
-            self.assertFalse(source.exists())
+            # Source preserved for deferred deletion after commit
+            self.assertTrue(source.exists())
             # Payload preserved exact bytes
             self.assertEqual(payload_path.read_text(encoding="utf-8"), "entry 1\nentry 2\n")
             self.assertEqual(stub["family"], "journal")

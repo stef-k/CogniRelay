@@ -90,6 +90,15 @@ def _check_write_time_rollover_locked(
                 "segment_history_pending_batch_residue",
                 f"A pending batch operation lists this source: {rel}",
             )
+        # Reconciliation may have truncated the source to remove
+        # already-rolled data.  Re-check size to avoid re-rolling a
+        # source that is now below the threshold.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        if size < rollover_bytes:
+            return
 
     history_dir = repo_root / config.history_dir
     stub_dir = repo_root / config.stub_dir

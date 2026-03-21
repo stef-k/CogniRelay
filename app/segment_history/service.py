@@ -381,6 +381,11 @@ def _roll_journal_source(
     Journal sources are day-bucketed files that are rolled as complete units.
     Unlike JSONL rollover, the entire file is moved without partial-line
     carry-forward (the day is complete).
+
+    The source file is **not** deleted by this function — the caller is
+    responsible for deferring deletion until after a successful git commit
+    so that a non-raising commit failure does not permanently lose the
+    original source file.
     """
     source_bytes = source_path.read_bytes()
 
@@ -403,9 +408,6 @@ def _roll_journal_source(
         summary=summary,
     )
     write_text_file(stub_path, json.dumps(stub, ensure_ascii=False, indent=2))
-
-    # Remove the hot day-bucket source (it's fully captured)
-    source_path.unlink(missing_ok=True)
 
     return stub, [payload_path, stub_path]
 
@@ -654,6 +656,121 @@ def _json_field_counts(
 # ===========================================================================
 # Phase 8: Residue detection and manifest reconciliation
 # ===========================================================================
+def _truncate_reconciled_sources(
+    repo_root: Path,
+    family: str,
+    target_paths: list[str],
+    source_paths: list[str],
+    gm: Any,
+) -> None:
+    """Remove already-rolled data from source files after crash recovery.
+
+    After manifest reconciliation commits orphaned payloads and stubs, the
+    source files still contain the data that was rolled into those payloads.
+    Without truncation the source would either be permanently blocked from
+    re-rolling (duplicate-segment guard) or re-rolled into a duplicate
+    segment.
+
+    For each (payload, stub) pair in *target_paths*, reads the committed
+    payload content, checks whether the corresponding source file starts
+    with that content, and truncates the source to retain only the
+    post-payload portion (new appends that arrived after the crash).
+
+    For journal sources (family ``"journal"``), the source was fully
+    consumed by the roll, so it is deleted (matching normal journal roll
+    behaviour).
+    """
+    from app.storage import write_text_file as _write_text
+
+    # Build a map: source_path -> list of payload_path for all committed
+    # pairs.  We need to read stubs to find source_path associations.
+    source_payload_map: dict[str, list[Path]] = {}
+    for i in range(0, len(target_paths) - 1, 2):
+        payload_rel = target_paths[i]
+        stub_rel = target_paths[i + 1] if i + 1 < len(target_paths) else ""
+        if not payload_rel or not stub_rel:
+            continue
+        stub_path = repo_root / stub_rel
+        if not stub_path.is_file():
+            continue
+        try:
+            stub = json.loads(stub_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        sp = stub.get("source_path", "")
+        if sp:
+            source_payload_map.setdefault(sp, []).append(repo_root / payload_rel)
+
+    truncated_sources: list[Path] = []
+    for sp_rel in source_paths:
+        src = repo_root / sp_rel
+        if not src.is_file():
+            continue
+        payloads = source_payload_map.get(sp_rel, [])
+        if not payloads:
+            continue
+
+        if family == "journal":
+            # Journal sources are fully consumed — delete the source
+            # (matching _roll_journal_source behaviour).
+            try:
+                src.unlink()
+                truncated_sources.append(src)
+            except OSError:
+                _log.warning(
+                    "Could not delete reconciled journal source: %s",
+                    sp_rel,
+                )
+            continue
+
+        # JSONL sources: read the payload that was rolled from this source
+        # and strip it from the source's prefix.
+        try:
+            source_content = src.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        for pp in payloads:
+            if not pp.is_file():
+                continue
+            try:
+                payload_content = pp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if source_content.startswith(payload_content):
+                source_content = source_content[len(payload_content):]
+
+        # Write the truncated source (only post-roll appends remain).
+        try:
+            _write_text(src, source_content)
+            truncated_sources.append(src)
+            _log.info(
+                "Truncated reconciled source to remove already-rolled data: %s",
+                sp_rel,
+            )
+        except OSError:
+            _log.warning(
+                "Could not truncate reconciled source: %s", sp_rel,
+            )
+
+    # Commit the truncated sources so git reflects the truncation.
+    if truncated_sources and gm is not None:
+        try:
+            from app.git_locking import repository_mutation_lock
+
+            with repository_mutation_lock(repo_root):
+                gm.commit_paths(
+                    truncated_sources,
+                    f"segment-history: truncate reconciled sources for {family}",
+                )
+        except Exception:
+            _log.warning(
+                "Could not commit truncated sources for %s", family,
+                exc_info=True,
+            )
+
+
+
 def _reconcile_manifest_residue(
     repo_root: Path,
     caller_family: str,
@@ -661,7 +778,7 @@ def _reconcile_manifest_residue(
     gm: Any,
     *,
     locked_source_paths: set[str] | None = None,
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     """Check for and reconcile a leftover manifest from a prior crash.
 
     When a manifest exists from a crashed operation, this function removes
@@ -671,11 +788,17 @@ def _reconcile_manifest_residue(
 
     When *locked_source_paths* is provided, reconciliation is only attempted
     if the manifest's ``source_paths`` overlap with the caller's held lock
-    set.  This prevents a concurrent operation on non-overlapping sources
-    from clobbering or prematurely removing another operation's manifest.
+    set **and** the caller holds locks on **all** of the manifest's sources.
+    This prevents concurrent operations with partial lock coverage from
+    both attempting recovery and competing over the manifest.
 
-    Returns None if no manifest exists, or a dict with a ``warning`` key
-    describing the reconciliation action taken.
+    After a successful recovery commit for ``maintenance`` or
+    ``write_time_rollover`` operations, source files are truncated to
+    remove the already-rolled data prefix, preventing duplicate segments
+    on subsequent rolls.
+
+    Returns None if no manifest exists, or a dict with ``warning`` and
+    ``reconciled_source_paths`` keys describing the reconciliation action.
     """
     from app.segment_history.manifest import read_manifest, remove_manifest
 
@@ -690,12 +813,14 @@ def _reconcile_manifest_residue(
         return None
 
     # If the caller provided its locked source set, only reconcile when
-    # the manifest's sources overlap.  Otherwise a concurrent operation
-    # on non-overlapping sources would either clobber the manifest or
-    # prematurely delete it before the owning operation finishes.
+    # the caller holds locks covering ALL of the manifest's sources.
+    # Partial overlap means another concurrent operation holds the
+    # remaining locks and could also attempt reconciliation — skipping
+    # prevents double-recovery commits and manifest clobber races.
     manifest_sources = set(manifest.get("source_paths", []))
-    if locked_source_paths is not None and not manifest_sources & locked_source_paths:
-        return None
+    if locked_source_paths is not None:
+        if not manifest_sources or not manifest_sources <= locked_source_paths:
+            return None
 
     recorded_op = manifest.get("operation", "unknown")
     family = manifest.get("family", "unknown")
@@ -792,6 +917,7 @@ def _reconcile_manifest_residue(
                 source_files.append(sf)
 
     recovered = False
+    reconciled_source_paths: set[str] = set()
     if existing_targets and gm is not None:
         try:
             from app.git_locking import repository_mutation_lock
@@ -807,6 +933,19 @@ def _reconcile_manifest_residue(
                 "Recovered %d orphaned files from crashed %s for %s",
                 len(existing_targets), recorded_op, family,
             )
+
+            # After successfully committing orphaned targets for a
+            # maintenance or write-time-rollover crash, truncate the
+            # source files to remove the already-rolled data prefix.
+            # Without this, the source retains stale data that would
+            # either be permanently blocked from re-rolling (F1) or
+            # duplicated by a subsequent write-time rollover (F2).
+            if recorded_op in ("maintenance", "write_time_rollover"):
+                _truncate_reconciled_sources(
+                    repo_root, family, target_paths,
+                    source_paths_list, gm,
+                )
+                reconciled_source_paths = set(source_paths_list)
         except Exception:
             _log.warning(
                 "Could not commit recovered files from crashed %s for %s — "
@@ -827,7 +966,10 @@ def _reconcile_manifest_residue(
         f"segment_history_manifest_residue:{recorded_op}:{family}:"
         f"{len(segment_ids)}:{action}"
     )
-    return {"warning": detail}
+    return {
+        "warning": detail,
+        "reconciled_source_paths": reconciled_source_paths,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1005,11 +1147,13 @@ def segment_history_maintenance_service(
                 repo_root, family, "maintenance", gm,
                 locked_source_paths=set(all_source_rels),
             )
+            reconciled_sources: set[str] = set()
             if residue:
                 warnings.append(_make_warning(
                     "segment_history_manifest_residue",
                     residue["warning"],
                 ))
+                reconciled_sources = residue.get("reconciled_source_paths", set())
 
             # Post-lock: recount eligible for selection_count.
             # Re-check rollover eligibility under lock so that a source
@@ -1100,11 +1244,15 @@ def segment_history_maintenance_service(
                     stub_dir = _stub_path_plan.parent
 
                     # Guard against duplicate segments after crash
-                    # recovery: if an existing stub already references
-                    # this source_path, a prior crashed roll was
-                    # committed by manifest reconciliation.  Skip the
-                    # re-roll to prevent data duplication.
-                    if stub_dir.is_dir():
+                    # recovery: if reconciliation just committed orphaned
+                    # targets for this source but truncation failed, an
+                    # existing stub already references this source_path.
+                    # Skip the re-roll to prevent data duplication.
+                    # This guard is scoped to sources that were actually
+                    # reconciled in this invocation — without this scope
+                    # the guard would permanently block re-rolling after
+                    # the first successful roll (F1).
+                    if rel in reconciled_sources and stub_dir.is_dir():
                         already_rolled = False
                         for existing in stub_dir.iterdir():
                             if not existing.name.endswith(".json"):
@@ -1197,15 +1345,13 @@ def segment_history_maintenance_service(
 
                 # 8. Git commit — inside source lock scope per spec
                 if all_created:
-                    # Include rolled sources even if deleted (journal unlinks originals);
-                    # git add on a deleted path stages the removal.
+                    from app.git_locking import repository_mutation_lock
+
                     commit_paths = all_created + rolled_sources
                     commit_message = (
                         f"segment-history: roll {family} {selection_count}"
                     )
                     try:
-                        from app.git_locking import repository_mutation_lock
-
                         with repository_mutation_lock(repo_root):
                             success = gm.commit_paths(commit_paths, commit_message)
                             if success:
@@ -1225,6 +1371,38 @@ def segment_history_maintenance_service(
                             f"Git commit failed for maintenance roll; "
                             f"at-risk segments: {rolled_segment_ids}",
                         ))
+
+                    # Delete journal source files only after a durable
+                    # commit ensures the payload is recoverable.  If the
+                    # commit failed, journal sources remain on disk as
+                    # fallback (matching the cold-store deferred-deletion
+                    # pattern).
+                    if durable and family == "journal":
+                        journal_delete_paths: list[Path] = []
+                        for src in rolled_sources:
+                            if src.is_file():
+                                try:
+                                    src.unlink()
+                                    journal_delete_paths.append(src)
+                                except OSError:
+                                    _log.warning(
+                                        "Could not delete journal source after commit: %s",
+                                        src,
+                                    )
+                        # Stage the source deletions in git.
+                        if journal_delete_paths:
+                            try:
+                                with repository_mutation_lock(repo_root):
+                                    gm.commit_paths(
+                                        journal_delete_paths,
+                                        "segment-history: remove rolled journal sources",
+                                    )
+                                    latest_commit = gm.latest_commit()
+                            except Exception:
+                                warnings.append(_make_warning(
+                                    "segment_history_cleanup_commit_failed",
+                                    "Git commit failed for journal source removal",
+                                ))
             except Exception:
                 # Rollback under lock: restore sources, remove created
                 # files, AND remove any partially-written target files
@@ -1510,6 +1688,7 @@ def segment_history_cold_store_service(
     hot_rollback: list[tuple[Path, bytes | None]] = []
     deferred_audit: list[dict[str, Any]] = []
     durable = True
+    cleanup_durable = True
     committed_files: list[str] = []
     latest_commit: str | None = None
 
@@ -1698,6 +1877,7 @@ def segment_history_cold_store_service(
                 # Delete hot payloads only after a durable commit ensures
                 # the cold .gz and mutated stubs are recoverable.  If the
                 # commit failed, hot payloads remain on disk as fallback.
+                cleanup_durable = True
                 if durable and deferred_hot_deletes:
                     hot_delete_paths: list[Path] = []
                     for hp, sid in deferred_hot_deletes:
@@ -1705,6 +1885,7 @@ def segment_history_cold_store_service(
                             hp.unlink()
                             hot_delete_paths.append(hp)
                         except OSError:
+                            cleanup_durable = False
                             warnings.append(_make_warning(
                                 "segment_history_hot_payload_remove_failed",
                                 f"Could not remove hot payload after cold-store: {sid}",
@@ -1720,9 +1901,12 @@ def segment_history_cold_store_service(
                                 )
                                 latest_commit = gm.latest_commit()
                         except Exception:
+                            cleanup_durable = False
                             warnings.append(_make_warning(
-                                "segment_history_git_commit_failed",
-                                "Git commit failed for hot-payload removal",
+                                "segment_history_cleanup_commit_failed",
+                                f"Git commit failed for hot-payload removal; "
+                                f"hot files deleted from disk but not staged in git; "
+                                f"affected segments: {cold_stored_ids}",
                             ))
             except Exception:
                 # Rollback under lock: restore stubs and hot payloads, remove
@@ -1773,11 +1957,12 @@ def segment_history_cold_store_service(
         "batch_limit_reached": batch_limit_reached,
         "cold_segment_ids": cold_stored_ids,
         "durable": durable,
+        "cleanup_durable": cleanup_durable,
         "committed_files": committed_files,
         "latest_commit": latest_commit,
         "warnings": warnings,
     }
-    if not durable:
+    if not durable or not cleanup_durable:
         result["at_risk_segment_ids"] = cold_stored_ids
     return result
 
@@ -2123,11 +2308,13 @@ def segment_history_cold_rehydrate_service(
                 # the hot payload and mutated stub are recoverable.  If
                 # the commit failed, cold payload remains as fallback.
                 cold_removed = False
+                cleanup_durable = True
                 if durable:
                     try:
                         cold_path.unlink()
                         cold_removed = True
                     except OSError:
+                        cleanup_durable = False
                         warnings.append(_make_warning(
                             "segment_history_cold_payload_remove_failed",
                             f"Could not remove cold payload after rehydrate: {segment_id}",
@@ -2143,9 +2330,13 @@ def segment_history_cold_rehydrate_service(
                                 )
                                 latest_commit = gm.latest_commit()
                         except Exception:
+                            cleanup_durable = False
                             warnings.append(_make_warning(
-                                "segment_history_git_commit_failed",
-                                "Git commit failed for cold-payload removal",
+                                "segment_history_cleanup_commit_failed",
+                                f"Git commit failed for cold-payload removal; "
+                                f"cold file deleted from disk but not staged in git; "
+                                f"affected segment: {segment_id}",
+                                segment_id=segment_id,
                             ))
 
                 # Remove manifest after successful commit.  On commit
@@ -2191,10 +2382,11 @@ def segment_history_cold_rehydrate_service(
         "removed_cold_payload_path": cold_payload_rel if cold_removed else None,
         "mutated_stub_path": stub_rel,
         "durable": durable,
+        "cleanup_durable": cleanup_durable,
         "committed_files": committed_files,
         "latest_commit": latest_commit,
         "warnings": warnings,
     }
-    if not durable:
+    if not durable or not cleanup_durable:
         result["at_risk_segment_ids"] = [segment_id]
     return result

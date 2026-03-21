@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.storage import write_text_file
 
 _log = logging.getLogger(__name__)
+
+_MANIFEST_LOCK_TIMEOUT: float = 10.0
+_MANIFEST_LOCK_POLL: float = 0.05
 
 SEGMENT_HISTORY_DIR_REL = ".cognirelay/segment-history"
 
@@ -53,6 +58,13 @@ def manifest_path(repo_root: Path, family: str = "") -> Path:
     return _manifest_dir(repo_root) / filename
 
 
+def _manifest_lock_path(repo_root: Path, family: str) -> Path:
+    """Return the advisory lock file path for the manifest of a family."""
+    d = _manifest_dir(repo_root)
+    suffix = f"{family}.manifest" if family else "manifest"
+    return d / f".{suffix}.lock"
+
+
 def write_manifest(
     repo_root: Path,
     *,
@@ -65,6 +77,11 @@ def write_manifest(
 ) -> Path:
     """Write a crash-recovery manifest before beginning mutations.
 
+    The clobber check and the write are serialized by an exclusive
+    per-family advisory file lock so that concurrent non-overlapping
+    operations cannot both pass the check and clobber each other's
+    manifest (TOCTOU prevention).
+
     If a manifest already exists for this family and its ``source_paths``
     do not overlap with the new operation's sources, raises
     :class:`ManifestOccupied` to prevent clobbering another operation's
@@ -74,27 +91,8 @@ def write_manifest(
 
     Returns the path to the written manifest.
     """
-    path = manifest_path(repo_root, family)
-
-    # Guard: refuse to clobber a manifest owned by a non-overlapping operation.
-    if path.is_file():
-        try:
-            existing_text = path.read_text(encoding="utf-8")
-            existing = json.loads(existing_text)
-            existing_sources = set(existing.get("source_paths", []))
-            new_sources = set(source_paths)
-            if existing_sources and not existing_sources & new_sources:
-                existing_op = existing.get("operation", "unknown")
-                raise ManifestOccupied(family, existing_op)
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            # Corrupt or unreadable manifest — safe to overwrite; the
-            # reconciliation path would have cleaned it up anyway.
-            pass
-
-    # Validate target_paths pairing: must be even-length with alternating
-    # [payload, stub, payload, stub, ...] entries.  The reconciliation
-    # logic relies on this convention to classify orphans vs. committed
-    # pairs — a violated pairing could cause silent data loss.
+    # Validate target_paths pairing before acquiring the lock — this is a
+    # caller bug, not a concurrency concern, so fail fast.
     effective_targets = target_paths or []
     if len(effective_targets) % 2 != 0:
         raise ValueError(
@@ -115,18 +113,54 @@ def write_manifest(
                 f"got: {payload_entry}"
             )
 
-    payload = {
-        "schema_type": "segment_history_manifest",
-        "schema_version": "1.0",
-        "operation": operation,
-        "family": family,
-        "source_paths": source_paths,
-        "segment_ids": segment_ids,
-        "target_paths": effective_targets,
-        "started_at": started_at or datetime.now(timezone.utc).isoformat(),
-    }
-    write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
-    return path
+    path = manifest_path(repo_root, family)
+    lock_path = _manifest_lock_path(repo_root, family)
+
+    # Serialize the clobber check and write with an exclusive file lock
+    # to prevent the TOCTOU where two concurrent non-overlapping
+    # operations both see no manifest and both write.
+    lock_file = lock_path.open("a")
+    try:
+        deadline = time.monotonic() + _MANIFEST_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    lock_file.close()
+                    raise ManifestOccupied(family, "lock_timeout") from None
+                time.sleep(_MANIFEST_LOCK_POLL)
+
+        # Guard: refuse to clobber a manifest owned by a non-overlapping operation.
+        if path.is_file():
+            try:
+                existing_text = path.read_text(encoding="utf-8")
+                existing = json.loads(existing_text)
+                existing_sources = set(existing.get("source_paths", []))
+                new_sources = set(source_paths)
+                if existing_sources and not existing_sources & new_sources:
+                    existing_op = existing.get("operation", "unknown")
+                    raise ManifestOccupied(family, existing_op)
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                # Corrupt or unreadable manifest — safe to overwrite; the
+                # reconciliation path would have cleaned it up anyway.
+                pass
+
+        payload = {
+            "schema_type": "segment_history_manifest",
+            "schema_version": "1.0",
+            "operation": operation,
+            "family": family,
+            "source_paths": source_paths,
+            "segment_ids": segment_ids,
+            "target_paths": effective_targets,
+            "started_at": started_at or datetime.now(timezone.utc).isoformat(),
+        }
+        write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        return path
+    finally:
+        lock_file.close()
 
 
 def read_manifest(repo_root: Path, family: str = "") -> dict | None:

@@ -465,8 +465,9 @@ class TestManifestPreservedOnCommitFailure(unittest.TestCase):
 class TestDuplicateSegmentGuard(unittest.TestCase):
     """Maintenance must skip sources that already have a rolled stub."""
 
-    def test_skip_already_rolled_source(self) -> None:
-        """If a stub already references a source, maintenance skips re-roll."""
+    def test_skip_already_rolled_source_after_reconciliation(self) -> None:
+        """After crash-recovery reconciliation, if source truncation failed,
+        the duplicate guard prevents re-rolling the same data."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
@@ -482,8 +483,7 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
             )
 
             # Simulate crash recovery: a stub already exists referencing
-            # this source (as if a prior crashed roll was committed by
-            # manifest reconciliation).
+            # this source AND a manifest exists (from a prior crash).
             hist = repo / "logs" / "history" / "api_audit"
             hist.mkdir(parents=True)
             idx = hist / "index"
@@ -503,6 +503,22 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
 
+            # Write a manifest as if a prior crash left it behind.
+            # The manifest's source_paths overlap with our locked set,
+            # so reconciliation will fire and set reconciled_sources.
+            from app.segment_history.manifest import write_manifest
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=[seg_id],
+                target_paths=[
+                    str(payload.relative_to(repo)),
+                    str((idx / f"{seg_id}.json").relative_to(repo)),
+                ],
+            )
+
             result = segment_history_maintenance_service(
                 family="api_audit",
                 repo_root=repo,
@@ -516,6 +532,58 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
             # Warning emitted about the skip
             codes = [w["code"] for w in result["warnings"]]
             self.assertIn("segment_history_already_rolled", codes)
+
+    def test_normal_reroll_after_first_successful_roll(self) -> None:
+        """After a successful first roll, the source can be re-rolled
+        normally without the duplicate guard blocking it (F1 fix)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            # Set up api_audit source with enough content
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            source = logs / "api_audit.jsonl"
+            source.write_text(
+                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
+            )
+
+            # A stub from a prior successful roll exists (no manifest).
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            payload = hist / f"{seg_id}.jsonl"
+            payload.write_text('{"ts":"2026-03-19T00:00:00Z"}\n')
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(payload.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 1, "byte_size": 30},
+            )
+            write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
+
+            # No manifest — this is normal operation, not crash recovery.
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            # Source should be re-rolled normally
+            self.assertEqual(result["rolled_count"], 1)
+            # No "already_rolled" warning
+            codes = [w["code"] for w in result["warnings"]]
+            self.assertNotIn("segment_history_already_rolled", codes)
 
 
 # -----------------------------------------------------------------------
@@ -1230,6 +1298,183 @@ class TestManifestClobberGuard(unittest.TestCase):
             )
             self.assertIsNotNone(result)
             self.assertIsNone(read_manifest(repo, "message_stream"))
+
+
+    def test_partial_overlap_skips_reconciliation(self) -> None:
+        """When the caller's locked set covers only SOME of the manifest's
+        source_paths, reconciliation is skipped to prevent double-recovery
+        by concurrent operations with partial lock coverage (F4)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="message_stream",
+                source_paths=[
+                    "messages/inbox/alice.jsonl",
+                    "messages/outbox/bob.jsonl",
+                ],
+                segment_ids=[
+                    "message_stream__inbox__alice__20260320T120000Z__0001",
+                    "message_stream__outbox__bob__20260320T120000Z__0001",
+                ],
+                target_paths=[],
+            )
+
+            # Caller only holds lock on alice — partial coverage
+            result = _reconcile_manifest_residue(
+                repo, "message_stream", "maintenance", None,
+                locked_source_paths={"messages/inbox/alice.jsonl"},
+            )
+            # Should skip — manifest still exists
+            self.assertIsNone(result)
+            self.assertIsNotNone(read_manifest(repo, "message_stream"))
+
+
+class TestReconciliationSourceTruncation(unittest.TestCase):
+    """After reconciliation commits orphaned targets, source files must be
+    truncated to remove the already-rolled data prefix (F6 fix)."""
+
+    def test_source_truncated_after_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            # Set up source with original content
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            source = logs / "api_audit.jsonl"
+            rolled_data = '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n'
+            new_data = '{"ts":"2026-03-20T00:00:00Z","event":"new"}\n'
+            source.write_text(rolled_data + new_data)
+
+            # Set up orphaned payload + stub from a prior crash
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            payload = hist / f"{seg_id}.jsonl"
+            payload.write_text(rolled_data)  # payload has the rolled prefix
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(payload.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 1, "byte_size": len(rolled_data)},
+            )
+            stub_path = idx / f"{seg_id}.json"
+            write_text_file(stub_path, json.dumps(stub))
+
+            # Write manifest referencing the orphaned files
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=[seg_id],
+                target_paths=[
+                    str(payload.relative_to(repo)),
+                    str(stub_path.relative_to(repo)),
+                ],
+            )
+
+            # Reconcile — should commit targets AND truncate source
+            result = _reconcile_manifest_residue(
+                repo, "api_audit", "maintenance", gm,
+                locked_source_paths={"logs/api_audit.jsonl"},
+            )
+            self.assertIsNotNone(result)
+
+            # Source should now contain only the new data
+            self.assertEqual(source.read_text(), new_data)
+
+            # reconciled_source_paths should be populated
+            self.assertIn("logs/api_audit.jsonl", result["reconciled_source_paths"])
+
+
+class TestCleanupDurable(unittest.TestCase):
+    """Cold-store and rehydrate responses must signal when the cleanup
+    commit (second commit for hot/cold payload deletion) fails (F5)."""
+
+    def test_cold_store_cleanup_durable_on_success(self) -> None:
+        """When both commits succeed, cleanup_durable is True."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+            settings.audit_log_cold_after_days = 0  # Immediately eligible
+
+            # Create a rolled segment to cold-store
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            payload = hist / f"{seg_id}.jsonl"
+            payload.write_text('{"ts":"2026-03-19T00:00:00Z"}\n')
+            stub_data = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(payload.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 1, "byte_size": 30},
+            )
+            write_text_file(idx / f"{seg_id}.json", json.dumps(stub_data))
+
+            result = segment_history_cold_store_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["durable"])
+            self.assertTrue(result["cleanup_durable"])
+            self.assertNotIn("at_risk_segment_ids", result)
+
+
+class TestDeferredJournalDeletion(unittest.TestCase):
+    """Journal source files are deleted only after a durable commit (F7)."""
+
+    def test_journal_source_survives_failed_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            # Set up a journal source
+            jdir = repo / "journal" / "2026"
+            jdir.mkdir(parents=True)
+            source = jdir / "2026-03-19.md"
+            source.write_text("entry 1\n")
+
+            class FailingGitManager(SimpleGitManagerStub):
+                def commit_paths(self, paths, msg):
+                    return False  # Non-raising failure
+
+            gm = FailingGitManager(repo)
+
+            result = segment_history_maintenance_service(
+                family="journal",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["durable"])
+            # Source must still exist after non-durable commit
+            self.assertTrue(source.exists())
 
 
 # -----------------------------------------------------------------------
