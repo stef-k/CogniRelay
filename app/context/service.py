@@ -19,7 +19,7 @@ from app.continuity import build_continuity_state
 from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
 from app.git_safety import safe_commit_new_file, safe_commit_updated_file, try_commit_file
-from app.storage import StorageError, append_jsonl, read_text_file, safe_path, write_text_file
+from app.storage import StorageError, read_text_file, safe_path, write_text_file
 
 _logger = logging.getLogger(__name__)
 
@@ -207,7 +207,8 @@ def append_record_service(
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     append_old_bytes = path.read_bytes() if path.exists() else None
-    append_jsonl(path, req.record)
+    from app.segment_history.append import locked_append_jsonl
+    locked_append_jsonl(path, req.record, repo_root=repo_root, gm=gm, settings=settings)
     committed = safe_commit_updated_file(
         path=path, gm=gm,
         commit_message=req.commit_message or f"append: {req.path}",

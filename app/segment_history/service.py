@@ -1055,7 +1055,7 @@ def segment_history_maintenance_service(
     batch_limit: int | None = None,
     now: datetime | None = None,
     audit: Callable[..., Any] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Discover, roll, and commit eligible sources for one family.
 
     Returns a response envelope with ``ok``, ``operation``, ``family``,
@@ -1475,6 +1475,9 @@ def segment_history_maintenance_service(
                                         "segment-history: remove rolled journal sources",
                                     )
                                     latest_commit = gm.latest_commit()
+                                    committed_files.extend(
+                                        str(p.relative_to(repo_root)) for p in journal_delete_paths
+                                    )
                             except Exception:
                                 warnings.append(_make_warning(
                                     "segment_history_cleanup_commit_failed",
@@ -1514,25 +1517,31 @@ def segment_history_maintenance_service(
                 remove_manifest(repo_root, family, expected_operation="maintenance")
 
     except ManifestOccupied as exc:
-        return {
-            "ok": False,
-            "operation": "segment_history_maintenance",
-            "family": family,
-            "error": {
-                "code": exc.code,
-                "detail": str(exc),
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "operation": "segment_history_maintenance",
+                "family": family,
+                "error": {
+                    "code": exc.code,
+                    "detail": str(exc),
+                },
             },
-        }
+        )
     except SegmentHistoryLockTimeout as exc:
-        return {
-            "ok": False,
-            "operation": "segment_history_maintenance",
-            "family": family,
-            "error": {
-                "code": "segment_history_source_lock_timeout",
-                "detail": str(exc),
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "operation": "segment_history_maintenance",
+                "family": family,
+                "error": {
+                    "code": "segment_history_source_lock_timeout",
+                    "detail": str(exc),
+                },
             },
-        }
+        )
 
     # 9. Emit deferred audit events (after source lock release to avoid
     #    self-deadlock when the audit callback triggers write-time rollover).
@@ -1570,12 +1579,14 @@ def segment_history_cold_store_service(
     segment_ids: list[str] | None = None,
     now: datetime | None = None,
     audit: Callable[..., Any] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Compress rolled segments into cold storage.
 
     Scans stub directory for eligible stubs (no ``cold_stored_at``, meets
     cold_after_days threshold), compresses the hot payload, mutates the stub,
     removes the hot rolled payload, and commits.
+
+    Returns ``dict[str, Any]`` on success or ``JSONResponse`` on error.
     """
     from app.segment_history.families import FAMILIES, _get_cold_after_days_setting
     from app.segment_history.locking import (
@@ -1895,6 +1906,7 @@ def segment_history_cold_store_service(
                             f"Hot payload file missing for segment: {seg_id}",
                             segment_id=seg_id,
                         ))
+                        selection_count -= 1
                         continue
 
                     # Compress
@@ -1907,7 +1919,7 @@ def segment_history_cold_store_service(
 
                     # Mutate stub: payload_path moves to cold location, add cold_stored_at
                     cold_rel = str(cold_path.relative_to(repo_root))
-                    cold_stored_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                    cold_stored_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                     updated_stub = _mutate_stub_cold(
                         stub, cold_rel, cold_stored_at
                     )
@@ -1987,6 +1999,9 @@ def segment_history_cold_store_service(
                                     f"segment-history: remove hot payloads {family}",
                                 )
                                 latest_commit = gm.latest_commit()
+                                committed_files.extend(
+                                    str(p.relative_to(repo_root)) for p in hot_delete_paths
+                                )
                         except Exception:
                             cleanup_durable = False
                             warnings.append(_make_warning(
@@ -2022,25 +2037,31 @@ def segment_history_cold_store_service(
                 remove_manifest(repo_root, family, expected_operation="cold_store")
 
     except ManifestOccupied as exc:
-        return {
-            "ok": False,
-            "operation": "segment_history_cold_store",
-            "family": family,
-            "error": {
-                "code": exc.code,
-                "detail": str(exc),
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "operation": "segment_history_cold_store",
+                "family": family,
+                "error": {
+                    "code": exc.code,
+                    "detail": str(exc),
+                },
             },
-        }
+        )
     except SegmentHistoryLockTimeout as exc:
-        return {
-            "ok": False,
-            "operation": "segment_history_cold_store",
-            "family": family,
-            "error": {
-                "code": "segment_history_source_lock_timeout",
-                "detail": str(exc),
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "operation": "segment_history_cold_store",
+                "family": family,
+                "error": {
+                    "code": "segment_history_source_lock_timeout",
+                    "detail": str(exc),
+                },
             },
-        }
+        )
 
     # Emit deferred audit events after source lock release.
     for evt in deferred_audit:
@@ -2503,6 +2524,7 @@ def segment_history_cold_rehydrate_service(
                                     f"segment-history: remove cold payload {family} {segment_id}",
                                 )
                                 latest_commit = gm.latest_commit()
+                                committed_files.append(str(cold_path.relative_to(repo_root)))
                         except Exception:
                             cleanup_durable = False
                             warnings.append(_make_warning(
@@ -2568,7 +2590,6 @@ def segment_history_cold_rehydrate_service(
         "removed_cold_payload_path": cold_payload_rel if cold_removed else None,
         "mutated_stub_path": stub_rel,
         "durable": durable,
-        "cleanup_durable": cleanup_durable,
         "committed_files": committed_files,
         "latest_commit": latest_commit,
         "warnings": warnings,

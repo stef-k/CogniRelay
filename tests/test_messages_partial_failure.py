@@ -100,7 +100,7 @@ class TestMessagesSendPartialFailure(unittest.TestCase):
             )
 
             with patch("app.main._services", return_value=(settings, gm)):
-                with patch("app.messages.service.append_jsonl_multi", side_effect=OSError("disk full")):
+                with patch("app.messages.service.locked_append_jsonl_multi", side_effect=OSError("disk full")):
                     with self.assertRaises(OSError):
                         messages_send(req=req, auth=_AuthStub())
 
@@ -224,7 +224,7 @@ class TestRelayForwardPartialFailure(unittest.TestCase):
             )
 
             with patch("app.main._services", return_value=(settings, gm)):
-                with patch("app.messages.service.append_jsonl_multi", side_effect=OSError("disk full")):
+                with patch("app.messages.service.locked_append_jsonl_multi", side_effect=OSError("disk full")):
                     with self.assertRaises(OSError):
                         relay_forward(req=req, auth=_AuthStub())
 
@@ -304,7 +304,7 @@ class TestReplayPartialFailure(unittest.TestCase):
             req = MessageReplayRequest(message_id=msg_id)
 
             with patch("app.main._services", return_value=(settings, gm)):
-                with patch("app.messages.service.append_jsonl_multi", side_effect=OSError("disk full")):
+                with patch("app.messages.service.locked_append_jsonl_multi", side_effect=OSError("disk full")):
                     with self.assertRaises(OSError):
                         replay_messages(req=req, auth=_AuthStub())
 
@@ -538,7 +538,7 @@ class TestCommitFailureGracefulDegradation(unittest.TestCase):
             original_state = (repo_root / "messages" / "state" / "delivery_index.json").read_text(encoding="utf-8")
 
             with patch("app.main._services", return_value=(settings, gm)):
-                with patch("app.messages.service.append_jsonl", side_effect=OSError("disk full")):
+                with patch("app.messages.service.locked_append_jsonl", side_effect=OSError("disk full")):
                     with self.assertRaises(OSError):
                         messages_ack(req=MessageAckRequest(message_id=msg_id, status="accepted"), auth=_AuthStub())
 

@@ -16,7 +16,8 @@ from app.auth import AuthContext
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.git_safety import try_commit_paths
 from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
-from app.storage import append_jsonl, append_jsonl_multi, safe_path, write_bytes_file, write_text_file
+from app.segment_history.append import locked_append_jsonl, locked_append_jsonl_multi
+from app.storage import safe_path, write_bytes_file, write_text_file
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
@@ -344,7 +345,7 @@ def messages_send_service(
     append_targets = _capture_append_targets(paths)
     state_rollback_plan = _capture_rollback_plan([_delivery_state_path(settings.repo_root)]) if should_track_delivery else []
     try:
-        append_jsonl_multi(paths, msg)
+        locked_append_jsonl_multi(paths, msg, repo_root=settings.repo_root, gm=gm, settings=settings)
         if should_track_delivery:
             state_path = _write_delivery_state(settings.repo_root, state)
             commit_paths.append(state_path)
@@ -421,7 +422,7 @@ def messages_ack_service(
     ack_append_targets = _capture_append_targets([ack_path])
     try:
         _write_delivery_state(repo_root, state)
-        append_jsonl(ack_path, ack_row)
+        locked_append_jsonl(ack_path, ack_row, repo_root=repo_root, gm=gm, settings=None, family="message_stream")
     except Exception:
         _restore_appends(ack_append_targets)
         _restore_rollback_plan(state_rollback_plan)
@@ -760,7 +761,7 @@ def relay_forward_service(
     thread_rel = f"messages/threads/{req.thread_id}.jsonl"
     rels = [relay_rel, inbox_rel, thread_rel]
     paths = [safe_path(settings.repo_root, r) for r in rels]
-    append_jsonl_multi(paths, msg)
+    locked_append_jsonl_multi(paths, msg, repo_root=settings.repo_root, gm=gm, settings=settings)
     warnings: list[str] = []
     if try_commit_paths(paths=paths, gm=gm, commit_message=f"relay: forward {msg['id']}"):
         committed_files.extend(rels)
@@ -879,7 +880,7 @@ def replay_messages_service(
     append_targets = _capture_append_targets(paths)
     state_rollback_plan = _capture_rollback_plan([state_path])
     try:
-        append_jsonl_multi(paths, replay_msg)
+        locked_append_jsonl_multi(paths, replay_msg, repo_root=settings.repo_root, gm=gm, settings=settings)
         _write_delivery_state(settings.repo_root, state)
     except Exception:
         _restore_rollback_plan(state_rollback_plan)

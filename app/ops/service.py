@@ -26,7 +26,7 @@ from app.models import (
     SegmentHistoryColdStoreRequest,
     SegmentHistoryMaintenanceRequest,
 )
-from app.storage import append_jsonl, safe_path
+from app.storage import safe_path
 
 _log = logging.getLogger(__name__)
 
@@ -150,10 +150,24 @@ def _load_ops_runs(
     return out, warnings
 
 
-def _append_ops_run(repo_root: Path, payload: dict[str, Any]) -> Path:
-    """Append an ops run record to the run log."""
+def _append_ops_run(
+    repo_root: Path, payload: dict[str, Any],
+    *, gm: Any = None, settings: Any = None,
+) -> Path:
+    """Append an ops run record to the run log.
+
+    Acquires the segment-history source lock for ``ops_runs`` and checks
+    write-time rollover eligibility when *gm* and *settings* are provided.
+    Falls back to lockless append on lock timeout.
+    """
+    from app.segment_history.append import locked_append_jsonl
+
     path = _ops_runs_path(repo_root)
-    append_jsonl(path, payload)
+    locked_append_jsonl(
+        path, payload,
+        repo_root=repo_root, gm=gm, settings=settings,
+        family="ops_runs",
+    )
     return path
 
 
@@ -790,7 +804,7 @@ def ops_run_service(
 
         if run_row is not None:
             try:
-                _append_ops_run(settings.repo_root, run_row)
+                _append_ops_run(settings.repo_root, run_row, settings=settings)
             except Exception:
                 _log.warning("failed to append ops run log for %s", run_id, exc_info=True)
 

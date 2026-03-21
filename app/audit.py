@@ -25,7 +25,8 @@ class WriteTimeRolloverError(Exception):
 
 
 def _check_write_time_rollover_locked(
-    path: Path, rollover_bytes: int, repo_root: Path, gm: Any
+    path: Path, rollover_bytes: int, repo_root: Path, gm: Any,
+    *, family: str = "api_audit",
 ) -> None:
     """Perform write-time rollover if threshold exceeded.
 
@@ -33,6 +34,9 @@ def _check_write_time_rollover_locked(
     function checks the file size, rolls the source if above threshold,
     commits, and cleans up the manifest — all without acquiring any
     additional segment-history source locks.
+
+    *family* defaults to ``"api_audit"`` for backward compatibility but
+    callers should pass the actual family explicitly.
 
     Raises :class:`WriteTimeRolloverError` on failure so the append is
     blocked (per spec, the triggering append must fail on rollover failure).
@@ -58,8 +62,6 @@ def _check_write_time_rollover_locked(
         _next_segment_id,
         _roll_jsonl_source,
     )
-
-    family = "api_audit"
     config = FAMILIES[family]
     now = datetime.now(timezone.utc)
     rel = str(path.relative_to(repo_root))

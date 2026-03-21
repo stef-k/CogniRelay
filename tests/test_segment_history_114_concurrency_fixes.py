@@ -1745,8 +1745,14 @@ class TestManifestOccupied(unittest.TestCase):
                 settings=_FakeSettings(),
                 gm=SimpleGitManagerStub(),
             )
-            self.assertFalse(result["ok"])
-            self.assertEqual(result["error"]["code"],
+            # C3 fix: maintenance error responses are now JSONResponse(409)
+            from starlette.responses import JSONResponse
+            self.assertIsInstance(result, JSONResponse)
+            self.assertEqual(result.status_code, 409)
+            import json as _json
+            body = _json.loads(result.body)
+            self.assertFalse(body["ok"])
+            self.assertEqual(body["error"]["code"],
                              "segment_history_manifest_occupied")
 
 

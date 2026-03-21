@@ -574,6 +574,9 @@ class OpsRunRequest(BaseModel):
         "continuity_retention_apply",
         "artifact_history_cold_store",
         "artifact_history_cold_rehydrate",
+        "segment_history_maintenance",
+        "segment_history_cold_store",
+        "segment_history_cold_rehydrate",
     ]
     dry_run: bool = False
     force: bool = False
@@ -781,20 +784,20 @@ class ArtifactHistoryColdRehydrateRequest(BaseModel):
 
 class SegmentHistoryMaintenanceRequest(BaseModel):
     """Host-local request for rolling active sources into history segments."""
-    family: str = Field(min_length=1, max_length=50)
+    family: Literal["journal", "api_audit", "ops_runs", "message_stream", "message_thread", "episodic"]
     batch_limit: Optional[int] = Field(default=None, gt=0)
 
 
 class SegmentHistoryColdStoreRequest(BaseModel):
     """Host-local request for cold-storing rolled segment-history payloads."""
-    family: str = Field(min_length=1, max_length=50)
+    family: Literal["journal", "api_audit", "ops_runs", "message_stream", "message_thread", "episodic"]
     batch_limit: Optional[int] = Field(default=None, gt=0)
     segment_ids: Optional[List[str]] = Field(default=None, max_length=500)
 
 
 class SegmentHistoryColdRehydrateRequest(BaseModel):
     """Host-local request for rehydrating one cold-stored segment-history payload."""
-    family: str = Field(min_length=1, max_length=50)
+    family: Literal["journal", "api_audit", "ops_runs", "message_stream", "message_thread", "episodic"]
     segment_id: str = Field(min_length=1, max_length=200)
 
 
