@@ -48,7 +48,11 @@ def _check_write_time_rollover(
         SegmentHistoryLockTimeout,
         segment_history_source_lock,
     )
-    from app.segment_history.manifest import read_manifest as _read_manifest
+    from app.segment_history.manifest import (
+        read_manifest as _read_manifest,
+        remove_manifest as _remove_manifest,
+        write_manifest as _write_manifest,
+    )
     from app.segment_history.service import (
         _derive_stream_key,
         _next_segment_id,
@@ -87,9 +91,24 @@ def _check_write_time_rollover(
             stub_dir = repo_root / config.stub_dir
             segment_id = _next_segment_id(family, stream_key, now, history_dir)
             payload_path = history_dir / f"{segment_id}.jsonl"
+            stub_path = stub_dir / f"{segment_id}.json"
 
             content = path.read_text(encoding="utf-8", errors="replace")
             summary = config.build_summary(content)
+
+            # Write crash-recovery manifest before mutations so that a
+            # process crash mid-roll leaves a signal for reconciliation.
+            _write_manifest(
+                repo_root,
+                operation="write_time_rollover",
+                family=family,
+                source_paths=[rel],
+                segment_ids=[segment_id],
+                target_paths=[
+                    str(payload_path.relative_to(repo_root)),
+                    str(stub_path.relative_to(repo_root)),
+                ],
+            )
 
             try:
                 result = _roll_jsonl_source(
@@ -104,13 +123,16 @@ def _check_write_time_rollover(
                     repo_root=repo_root,
                 )
             except WriteTimeRolloverError:
+                _remove_manifest(repo_root, family)
                 raise
             except Exception as exc:
+                _remove_manifest(repo_root, family)
                 raise WriteTimeRolloverError(
                     "segment_history_write_time_rollover_failed",
                     f"Write-time rollover local writes failed: {exc}",
                 ) from exc
             if result is None:
+                _remove_manifest(repo_root, family)
                 _log.warning("Write-time rollover skipped (partial line only) for %s", path)
                 return
             _stub, created = result
@@ -129,6 +151,8 @@ def _check_write_time_rollover(
                 except Exception:
                     _log.warning("Write-time rollover commit failed for %s", segment_id)
                     # Local writes succeeded; durable=false but append continues
+
+            _remove_manifest(repo_root, family)
     except SegmentHistoryLockTimeout as exc:
         raise WriteTimeRolloverError(
             "segment_history_source_lock_timeout",

@@ -638,6 +638,11 @@ def _reconcile_manifest_residue(
 ) -> dict[str, str] | None:
     """Check for and reconcile a leftover manifest from a prior crash.
 
+    When a manifest exists from a crashed operation, this function removes
+    orphaned target files (payloads/stubs/cold archives) listed in the
+    manifest's ``target_paths`` that are not yet committed to git.  This
+    prevents phantom files from accumulating after mid-batch crashes.
+
     Returns None if no manifest exists, or a dict with a ``warning`` key
     describing the reconciliation action taken.
     """
@@ -656,20 +661,42 @@ def _reconcile_manifest_residue(
     recorded_op = manifest.get("operation", "unknown")
     family = manifest.get("family", "unknown")
     segment_ids = manifest.get("segment_ids", [])
+    target_paths = manifest.get("target_paths", [])
 
-    # Best-effort: try to commit any files that were fully written
-    # before the crash.  If nothing to commit, just clean up.
     if segment_ids:
         _log.warning(
             "Found stale segment-history manifest (op=%s family=%s segments=%d). "
-            "Attempting best-effort cleanup.",
+            "Cleaning up orphaned target files.",
             recorded_op, family, len(segment_ids),
         )
 
+    # Best-effort: remove orphaned target files that were written during the
+    # crashed operation but never committed.  Each target_path is relative to
+    # repo_root.
+    removed_count = 0
+    for rel_path in target_paths:
+        if not rel_path:
+            continue
+        target = repo_root / rel_path
+        if target.is_file():
+            try:
+                target.unlink()
+                removed_count += 1
+                _log.info(
+                    "Removed orphaned residue file: %s (from %s manifest)",
+                    rel_path, recorded_op,
+                )
+            except OSError:
+                _log.warning(
+                    "Could not remove orphaned residue file: %s", rel_path,
+                )
+
     remove_manifest(repo_root, caller_family)
-    return {
-        "warning": f"segment_history_manifest_residue:{recorded_op}:{family}:{len(segment_ids)}"
-    }
+    detail = (
+        f"segment_history_manifest_residue:{recorded_op}:{family}:"
+        f"{len(segment_ids)}:cleaned={removed_count}"
+    )
+    return {"warning": detail}
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +824,7 @@ def segment_history_maintenance_service(
     rolled_segment_ids: list[str] = []
     all_created: list[Path] = []
     rolled_sources: list[Path] = []  # sources actually rolled (for git commit)
+    deferred_audit: list[dict[str, Any]] = []  # audit events emitted after lock release
     all_source_rels: list[str] = []
     lock_keys: list[str] = []
 
@@ -945,8 +973,10 @@ def segment_history_maintenance_service(
                 all_created.extend(created)
                 rolled_sources.append(src)
 
-                # Emit audit event
-                _emit_audit(audit, "segment_history_roll", {
+                # Defer audit event — emitting inside the source lock
+                # would self-deadlock when the audit callback triggers
+                # write-time rollover on the same source lock key.
+                deferred_audit.append({
                     "family": family,
                     "segment_id": segment_id,
                     "source_path": rel,
@@ -1001,7 +1031,12 @@ def segment_history_maintenance_service(
         remove_manifest(repo_root, family)
         raise
 
-    # 9. Remove manifest
+    # 9. Emit deferred audit events (after source lock release to avoid
+    #    self-deadlock when the audit callback triggers write-time rollover).
+    for evt in deferred_audit:
+        _emit_audit(audit, "segment_history_roll", evt)
+
+    # 10. Remove manifest
     remove_manifest(repo_root, family)
 
     return {
@@ -1227,6 +1262,7 @@ def segment_history_cold_store_service(
     created_cold_paths: list[Path] = []
     stub_rollback: list[tuple[Path, bytes | None]] = []
     hot_rollback: list[tuple[Path, bytes | None]] = []
+    deferred_audit: list[dict[str, Any]] = []
     durable = True
     committed_files: list[str] = []
     latest_commit: str | None = None
@@ -1364,8 +1400,8 @@ def segment_history_cold_store_service(
                 # Include hot_payload so git stages its deletion
                 commit_paths.extend([cold_path, stub_path, hot_payload])
 
-                # Emit audit event
-                _emit_audit(audit, "segment_history_cold_store", {
+                # Defer audit — same reason as maintenance (F1 self-lock).
+                deferred_audit.append({
                     "family": family,
                     "segment_id": seg_id,
                     "source_path": stub.get("source_path", ""),
@@ -1417,6 +1453,10 @@ def segment_history_cold_store_service(
         _remove_created_paths(created_cold_paths)
         remove_manifest(repo_root, family)
         raise
+
+    # Emit deferred audit events after source lock release.
+    for evt in deferred_audit:
+        _emit_audit(audit, "segment_history_cold_store", evt)
 
     remove_manifest(repo_root, family)
 
@@ -1634,59 +1674,70 @@ def segment_history_cold_rehydrate_service(
                     f"Cold payload is corrupt for segment: {segment_id}",
                 )
 
+            # Capture stub state for rollback before mutations begin.
+            stub_rollback = _capture_rollback_state([stub_path])
+
             # Write hot payload
             hot_path.parent.mkdir(parents=True, exist_ok=True)
-            write_bytes_file(hot_path, decompressed)
-
-            # Mutate stub: payload_path back to hot, remove cold_stored_at
-            hot_rel = str(hot_path.relative_to(repo_root))
-            updated_stub = _mutate_stub_rehydrate(stub, hot_rel)
-            write_text_file(
-                stub_path,
-                json.dumps(updated_stub, ensure_ascii=False, indent=2),
-            )
-
-            # Remove cold payload
-            cold_removed = True
             try:
-                cold_path.unlink()
-            except OSError:
-                cold_removed = False
-                warnings.append(_make_warning(
-                    "segment_history_cold_payload_remove_failed",
-                    f"Could not remove cold payload after rehydrate: {segment_id}",
-                    segment_id=segment_id,
-                ))
+                write_bytes_file(hot_path, decompressed)
 
-            # Git commit — inside source lock scope per spec
-            durable = True
-            committed_files: list[str] = []
-            latest_commit: str | None = None
+                # Mutate stub: payload_path back to hot, remove cold_stored_at
+                hot_rel = str(hot_path.relative_to(repo_root))
+                updated_stub = _mutate_stub_rehydrate(stub, hot_rel)
+                write_text_file(
+                    stub_path,
+                    json.dumps(updated_stub, ensure_ascii=False, indent=2),
+                )
 
-            commit_paths_list = [hot_path, stub_path, cold_path]
-            msg = f"segment-history: rehydrate {family} {segment_id}"
-            try:
-                from app.git_locking import repository_mutation_lock
+                # Remove cold payload
+                cold_removed = True
+                try:
+                    cold_path.unlink()
+                except OSError:
+                    cold_removed = False
+                    warnings.append(_make_warning(
+                        "segment_history_cold_payload_remove_failed",
+                        f"Could not remove cold payload after rehydrate: {segment_id}",
+                        segment_id=segment_id,
+                    ))
 
-                with repository_mutation_lock(repo_root):
-                    success = gm.commit_paths(commit_paths_list, msg)
-                    if success:
-                        latest_commit = gm.latest_commit()
-                        committed_files = [
-                            str(p.relative_to(repo_root)) for p in commit_paths_list
-                        ]
-                    else:
-                        durable = False
-                        warnings.append(_make_warning(
-                            "segment_history_git_commit_failed",
-                            "Git commit failed for rehydrate",
-                        ))
+                # Git commit — inside source lock scope per spec
+                durable = True
+                committed_files: list[str] = []
+                latest_commit: str | None = None
+
+                commit_paths_list = [hot_path, stub_path, cold_path]
+                msg = f"segment-history: rehydrate {family} {segment_id}"
+                try:
+                    from app.git_locking import repository_mutation_lock
+
+                    with repository_mutation_lock(repo_root):
+                        success = gm.commit_paths(commit_paths_list, msg)
+                        if success:
+                            latest_commit = gm.latest_commit()
+                            committed_files = [
+                                str(p.relative_to(repo_root)) for p in commit_paths_list
+                            ]
+                        else:
+                            durable = False
+                            warnings.append(_make_warning(
+                                "segment_history_git_commit_failed",
+                                "Git commit failed for rehydrate",
+                            ))
+                except Exception:
+                    durable = False
+                    warnings.append(_make_warning(
+                        "segment_history_git_commit_failed",
+                        "Git commit failed for rehydrate",
+                    ))
             except Exception:
-                durable = False
-                warnings.append(_make_warning(
-                    "segment_history_git_commit_failed",
-                    "Git commit failed for rehydrate",
-                ))
+                # Rollback: restore stub to pre-mutation state and remove
+                # the hot payload that was created, so the segment doesn't
+                # get stuck in an unrecoverable state.
+                _restore_rollback_state(stub_rollback)
+                _remove_created_paths([hot_path])
+                raise
     except SegmentHistoryLockTimeout as exc:
         return _error_response(
             409,
