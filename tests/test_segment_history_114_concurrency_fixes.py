@@ -905,5 +905,258 @@ class TestOrphanedPayloadCleanup(unittest.TestCase):
             self.assertEqual(len(committed), 1)
 
 
+# -----------------------------------------------------------------------
+# F-A: Maintenance rollback cleans orphaned target files from manifest
+# -----------------------------------------------------------------------
+class TestMaintenanceRollbackCleansOrphanedTargets(unittest.TestCase):
+    """When _roll_jsonl_source writes a payload but fails on the stub,
+    the rollback must remove the orphaned payload using the manifest's
+    target_paths — not just the all_created list (which only tracks
+    successful rolls).
+    """
+
+    def test_partial_roll_failure_cleans_orphaned_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            settings = _FakeSettings()
+            settings.audit_log_rollover_bytes = 10  # trigger rollover
+
+            # Create an eligible source
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            source.write_text('{"ts":"2026-03-20T00:00:00Z","event":"test","peer_id":"p"}\n' * 5)
+
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+
+            # Patch write_text_file to fail on the stub write (second call
+            # after the payload write).  The payload write is the first call
+            # with a path ending in .jsonl; the stub write is the first call
+            # ending in .json.
+            original_wtf = write_text_file
+            call_count = {"n": 0}
+
+            def _failing_wtf(path: Any, content: str) -> None:
+                call_count["n"] += 1
+                # Let the payload write succeed; fail the stub write
+                if str(path).endswith(".json") and "/index/" in str(path):
+                    raise OSError("Simulated disk full on stub write")
+                original_wtf(path, content)
+
+            with patch("app.segment_history.service.write_text_file", _failing_wtf):
+                with self.assertRaises(OSError):
+                    segment_history_maintenance_service(
+                        family="api_audit",
+                        repo_root=repo,
+                        settings=settings,
+                        gm=gm,
+                        now=now,
+                    )
+
+            # The orphaned payload should have been cleaned up by rollback
+            history_dir = repo / "logs" / "history" / "api_audit"
+            if history_dir.is_dir():
+                payloads = list(history_dir.glob("*.jsonl"))
+                self.assertEqual(
+                    payloads, [],
+                    f"Orphaned payload should have been removed: {payloads}",
+                )
+
+            # Source should be restored
+            self.assertTrue(source.exists())
+            self.assertGreater(source.stat().st_size, 0)
+
+            # Manifest should be removed
+            from app.segment_history.manifest import manifest_path
+            self.assertFalse(manifest_path(repo, "api_audit").exists())
+
+
+# -----------------------------------------------------------------------
+# F-A (write-time): Write-time rollover cleans orphaned targets on failure
+# -----------------------------------------------------------------------
+class TestWriteTimeRolloverCleansOrphanedTargets(unittest.TestCase):
+    """When write-time rollover writes a payload but fails on the stub,
+    the exception handler must remove the orphaned payload file.
+    """
+
+    def test_partial_roll_failure_cleans_orphaned_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            # Write enough to trigger rollover at 100 bytes
+            source.write_text('{"ts":"2026-03-20T00:00:00Z","event":"test","peer_id":"p"}\n' * 5)
+
+            from app.audit import WriteTimeRolloverError, _check_write_time_rollover
+
+            original_wtf = write_text_file
+
+            def _failing_wtf(path: Any, content: str) -> None:
+                if str(path).endswith(".json") and "/index/" in str(path):
+                    raise OSError("Simulated disk full on stub write")
+                original_wtf(path, content)
+
+            with patch("app.segment_history.service.write_text_file", _failing_wtf):
+                with self.assertRaises(WriteTimeRolloverError):
+                    _check_write_time_rollover(source, 100, repo, gm)
+
+            # No orphaned payload should remain
+            history_dir = repo / "logs" / "history" / "api_audit"
+            if history_dir.is_dir():
+                payloads = list(history_dir.glob("*.jsonl"))
+                self.assertEqual(
+                    payloads, [],
+                    f"Orphaned payload should have been removed: {payloads}",
+                )
+
+
+# -----------------------------------------------------------------------
+# F-B: Cold-store reconciliation removes orphaned .gz for unmutated stubs
+# -----------------------------------------------------------------------
+class TestColdStoreReconciliationUnmutatedStub(unittest.TestCase):
+    """When cold-store crashes between writing the .gz and mutating the
+    stub, reconciliation should remove the orphaned .gz rather than
+    committing it with a semantically stale stub.
+    """
+
+    def test_cold_gz_removed_when_stub_not_mutated(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            committed: list[list] = []
+
+            class _TrackingGM:
+                repo_root = repo
+
+                def commit_paths(self, paths: Any, _msg: str) -> bool:
+                    committed.append(list(paths))
+                    return True
+
+                def latest_commit(self) -> str:
+                    return "test-sha"
+
+            gm = _TrackingGM()
+
+            # Set up: hot payload + stub (not mutated — no cold_stored_at)
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            hot_payload = hist / "api_audit__api_audit__20260320T120000Z__0001.jsonl"
+            hot_payload.write_text('{"event":"test"}\n')
+
+            idx = hist / "index"
+            idx.mkdir()
+            stub_path = idx / "api_audit__api_audit__20260320T120000Z__0001.json"
+            stub = {
+                "schema_type": "segment_history_stub",
+                "segment_id": "api_audit__api_audit__20260320T120000Z__0001",
+                "source_path": "logs/api_audit.jsonl",
+                "payload_path": "logs/history/api_audit/api_audit__api_audit__20260320T120000Z__0001.jsonl",
+                # No cold_stored_at — stub was NOT mutated
+            }
+            stub_path.write_text(json.dumps(stub))
+
+            # Orphaned cold .gz (written by crashed cold-store)
+            cold_dir = hist / "cold"
+            cold_dir.mkdir()
+            cold_gz = cold_dir / "api_audit__api_audit__20260320T120000Z__0001.jsonl.gz"
+            cold_gz.write_bytes(b"fake-gz-data")
+
+            # Write cold-store manifest referencing cold_gz + stub
+            write_manifest(
+                repo,
+                operation="cold_store",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260320T120000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/cold/api_audit__api_audit__20260320T120000Z__0001.jsonl.gz",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260320T120000Z__0001.json",
+                ],
+            )
+
+            _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+
+            # The orphaned cold .gz should have been removed
+            self.assertFalse(
+                cold_gz.exists(),
+                "Orphaned cold .gz should be removed when stub is unmutated",
+            )
+            # The unmutated stub should still be committed (it's valid)
+            self.assertTrue(len(committed) >= 1)
+            # Verify the cold .gz was NOT in the committed paths
+            for commit_group in committed:
+                for p in commit_group:
+                    self.assertFalse(
+                        str(p).endswith(".gz"),
+                        f"Orphaned .gz should not be committed: {p}",
+                    )
+
+    def test_mutated_stub_commits_both(self) -> None:
+        """When the stub WAS mutated (has cold_stored_at), both .gz and stub
+        should be committed normally."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            committed: list[list] = []
+
+            class _TrackingGM:
+                repo_root = repo
+
+                def commit_paths(self, paths: Any, _msg: str) -> bool:
+                    committed.append(list(paths))
+                    return True
+
+                def latest_commit(self) -> str:
+                    return "test-sha"
+
+            gm = _TrackingGM()
+
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+
+            idx = hist / "index"
+            idx.mkdir()
+            stub_path = idx / "api_audit__api_audit__20260320T120000Z__0001.json"
+            stub = {
+                "schema_type": "segment_history_stub",
+                "segment_id": "api_audit__api_audit__20260320T120000Z__0001",
+                "source_path": "logs/api_audit.jsonl",
+                "payload_path": "logs/history/api_audit/cold/api_audit__api_audit__20260320T120000Z__0001.jsonl.gz",
+                "cold_stored_at": "2026-03-20T12:00:00Z",  # Mutated
+            }
+            stub_path.write_text(json.dumps(stub))
+
+            cold_dir = hist / "cold"
+            cold_dir.mkdir()
+            cold_gz = cold_dir / "api_audit__api_audit__20260320T120000Z__0001.jsonl.gz"
+            cold_gz.write_bytes(b"fake-gz-data")
+
+            write_manifest(
+                repo,
+                operation="cold_store",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260320T120000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/cold/api_audit__api_audit__20260320T120000Z__0001.jsonl.gz",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260320T120000Z__0001.json",
+                ],
+            )
+
+            _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+
+            # Both should be committed
+            self.assertTrue(cold_gz.exists())
+            self.assertTrue(len(committed) >= 1)
+            # Verify the cold .gz WAS committed
+            committed_strs = [str(p) for group in committed for p in group]
+            self.assertTrue(
+                any(s.endswith(".gz") for s in committed_strs),
+                "Mutated stub: .gz should be committed",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

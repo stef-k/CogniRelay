@@ -680,6 +680,14 @@ def _reconcile_manifest_residue(
     # between the payload write and the stub write — the source file is
     # still intact, so we remove the orphaned payload instead of
     # committing an unreferenced file.
+    #
+    # For cold-store manifests, the "payload" is a .gz cold archive and
+    # the stub might not have been mutated yet (crash between writing the
+    # .gz and mutating the stub).  If the stub exists but has not been
+    # mutated (no cold_stored_at), the cold .gz is unreferenced — remove
+    # it instead of committing semantically stale state.  The next
+    # cold-store run will re-process the segment cleanly.
+    is_cold_store = recorded_op == "cold_store"
     existing_targets: list[Path] = []
     orphaned_payloads: list[Path] = []
     for i in range(0, len(target_paths) - 1, 2):
@@ -688,6 +696,22 @@ def _reconcile_manifest_residue(
         payload_exists = bool(payload_rel) and (repo_root / payload_rel).is_file()
         stub_exists = bool(stub_rel) and (repo_root / stub_rel).is_file()
         if payload_exists and stub_exists:
+            # For cold-store: check whether the stub was actually mutated.
+            # If the stub still lacks cold_stored_at, the crash happened
+            # between writing the .gz and mutating the stub.  The cold .gz
+            # is unreferenced — remove it; the segment will be re-processed.
+            if is_cold_store:
+                try:
+                    stub_data = json.loads(
+                        (repo_root / stub_rel).read_text(encoding="utf-8")
+                    )
+                    if not stub_data.get("cold_stored_at"):
+                        orphaned_payloads.append(repo_root / payload_rel)
+                        # Stub is unchanged — still valid, just commit it
+                        existing_targets.append(repo_root / stub_rel)
+                        continue
+                except (json.JSONDecodeError, OSError):
+                    pass  # Fall through to default handling
             existing_targets.append(repo_root / payload_rel)
             existing_targets.append(repo_root / stub_rel)
         elif payload_exists and not stub_exists:
@@ -1113,10 +1137,25 @@ def segment_history_maintenance_service(
                             "Git commit failed for maintenance roll",
                         ))
             except Exception:
-                # Rollback under lock: restore sources, remove created, clean manifest
+                # Rollback under lock: restore sources, remove created
+                # files, AND remove any partially-written target files
+                # listed in the manifest that were not tracked in
+                # all_created (e.g. a payload written by _roll_jsonl_source
+                # before the stub write failed).
                 if source_rollback:
                     _restore_rollback_state(source_rollback)
                 _remove_created_paths(all_created)
+                # Clean up manifest target files not already in all_created
+                created_set = {str(p) for p in all_created}
+                for tp in planned_target_paths:
+                    full = repo_root / tp
+                    if str(full) not in created_set and full.is_file():
+                        try:
+                            full.unlink()
+                        except OSError:
+                            _log.warning(
+                                "Could not remove orphaned target during rollback: %s", tp,
+                            )
                 remove_manifest(repo_root, family)
                 raise
 

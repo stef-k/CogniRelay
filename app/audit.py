@@ -123,9 +123,23 @@ def _check_write_time_rollover_locked(
             repo_root=repo_root,
         )
     except WriteTimeRolloverError:
+        # Clean up any partially-written target files (e.g. payload
+        # written but stub write failed) before removing the manifest.
+        for tp in [payload_path, stub_path]:
+            if tp.is_file():
+                try:
+                    tp.unlink()
+                except OSError:
+                    pass
         _remove_manifest(repo_root, family)
         raise
     except Exception as exc:
+        for tp in [payload_path, stub_path]:
+            if tp.is_file():
+                try:
+                    tp.unlink()
+                except OSError:
+                    pass
         _remove_manifest(repo_root, family)
         raise WriteTimeRolloverError(
             "segment_history_write_time_rollover_failed",
