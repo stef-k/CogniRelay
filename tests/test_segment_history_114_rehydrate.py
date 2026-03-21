@@ -111,7 +111,7 @@ class TestRehydrateErrors(unittest.TestCase):
 
             result = segment_history_cold_rehydrate_service(
                 family="journal",
-                segment_id="journal__20260320T120000Z__0001",
+                segment_id="journal__2026__2026-03-20__20260320T120000Z__0001",
                 repo_root=repo,
                 gm=gm,
             )

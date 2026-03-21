@@ -1405,98 +1405,251 @@ def backup_create_service(
 def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
     """Validate segment-history artifacts in a restored backup.
 
-    Scans all 6 family stub directories, validates stub JSON structure,
-    checks hot/cold payload existence, and reports warnings for each issue.
+    Per spec, scans all 6 family stub directories, validates stub JSON
+    structure including ``segment_id``, ``source_path``, and ``summary``,
+    checks hot/cold payload existence, decompresses cold payloads for CRC
+    integrity, and verifies ``byte_size`` where applicable.
+
+    Returns the spec-mandated ``segment_history_validation`` response shape
+    with per-family rows.
     """
-    from app.segment_history.families import FAMILIES
+    from app.segment_history.families import FAMILIES, discover_active_sources
+    from app.segment_history.service import _validate_segment_id
 
-    total_stubs = 0
-    total_hot = 0
-    total_cold = 0
-    invalid_stubs: list[str] = []
-    missing_hot: list[str] = []
-    missing_cold: list[str] = []
-    warnings: list[str] = []
-
-    def _scan_stub_dir(stub_dir: Path, family_name: str) -> None:
-        nonlocal total_stubs, total_hot, total_cold
-        if not stub_dir.is_dir():
-            return
-        for entry in sorted(stub_dir.iterdir()):
-            if not entry.name.endswith(".json") or not entry.is_file():
-                continue
-
-            total_stubs += 1
-            rel = str(entry.relative_to(restore_root))
-
-            try:
-                stub = json.loads(entry.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                invalid_stubs.append(rel)
-                warnings.append(f"segment_history_invalid_stub:{rel}")
-                continue
-
-            if stub.get("schema_type") != "segment_history_stub":
-                invalid_stubs.append(rel)
-                warnings.append(f"segment_history_invalid_stub_type:{rel}")
-                continue
-
-            if stub.get("schema_version") != "1.0":
-                invalid_stubs.append(rel)
-                warnings.append(f"segment_history_stub_version_mismatch:{rel}")
-                continue
-
-            if stub.get("family") != family_name:
-                invalid_stubs.append(rel)
-                warnings.append(f"segment_history_stub_family_mismatch:{rel}")
-                continue
-
-            # Check payload
-            payload_rel = stub.get("payload_path", "")
-            cold_stored = stub.get("cold_stored_at")
-
-            if not cold_stored:
-                # Should have hot payload
-                total_hot += 1
-                if payload_rel:
-                    hot_path = restore_root / payload_rel
-                    if not hot_path.is_file():
-                        missing_hot.append(rel)
-                        warnings.append(f"segment_history_missing_hot_payload:{rel}")
-            else:
-                # Cold-stored: payload_path points to cold location
-                total_cold += 1
-                if payload_rel:
-                    cold_path = restore_root / payload_rel
-                    if not cold_path.is_file():
-                        missing_cold.append(rel)
-                        warnings.append(f"segment_history_missing_cold_payload:{rel}")
+    any_failure = False
+    families_results: list[dict[str, Any]] = []
 
     for family_name, config in FAMILIES.items():
+        active_sources_checked = 0
+        hot_stubs_checked = 0
+        cold_stubs_checked = 0
+        rolled_payloads_checked = 0
+        cold_payloads_checked = 0
+        family_warnings: list[dict[str, Any]] = []
+        has_failure = False
+
+        # Step 1: scan active source roots
+        try:
+            active_sources = discover_active_sources(family_name, restore_root)
+        except Exception:
+            active_sources = []
+        for src in active_sources:
+            active_sources_checked += 1
+            if not src.is_file():
+                has_failure = True
+                family_warnings.append({
+                    "code": "segment_history_active_source_missing",
+                    "detail": f"Active source not readable: {src.name}",
+                    "path": str(src.relative_to(restore_root)),
+                    "segment_id": None,
+                })
+
+        # Step 2: collect stub dirs for this family
+        stub_dirs: list[Path] = []
         if family_name == "journal":
-            # Journal uses year-based index dirs: journal/history/<year>/index/
             journal_history = restore_root / "journal" / "history"
             if journal_history.is_dir():
                 for year_dir in sorted(journal_history.iterdir()):
                     if year_dir.is_dir() and year_dir.name.isdigit():
-                        _scan_stub_dir(year_dir / "index", family_name)
+                        stub_dirs.append(year_dir / "index")
         elif family_name == "message_stream":
-            # message_stream has per-kind stub dirs
             for kind in ("inbox", "outbox", "relay", "acks"):
-                kind_stub_dir = restore_root / "messages" / "history" / kind / "index"
-                _scan_stub_dir(kind_stub_dir, family_name)
+                stub_dirs.append(
+                    restore_root / "messages" / "history" / kind / "index"
+                )
         else:
-            _scan_stub_dir(restore_root / config.stub_dir, family_name)
+            stub_dirs.append(restore_root / config.stub_dir)
+
+        # Step 3: scan stubs and validate
+        for stub_dir in stub_dirs:
+            if not stub_dir.is_dir():
+                continue
+            for entry in sorted(stub_dir.iterdir()):
+                if not entry.name.endswith(".json") or not entry.is_file():
+                    continue
+
+                rel = str(entry.relative_to(restore_root))
+
+                try:
+                    stub = json.loads(entry.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_invalid_stub",
+                        "detail": f"Stub not parseable: {rel}",
+                        "path": rel,
+                        "segment_id": None,
+                    })
+                    continue
+
+                # Validate required stub fields
+                if stub.get("schema_type") != "segment_history_stub":
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_invalid_stub_type",
+                        "detail": f"Wrong schema_type: {rel}",
+                        "path": rel,
+                        "segment_id": None,
+                    })
+                    continue
+
+                if stub.get("schema_version") != "1.0":
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_stub_version_mismatch",
+                        "detail": f"Unexpected schema_version: {rel}",
+                        "path": rel,
+                        "segment_id": None,
+                    })
+                    continue
+
+                if stub.get("family") != family_name:
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_stub_family_mismatch",
+                        "detail": f"Family mismatch in stub: {rel}",
+                        "path": rel,
+                        "segment_id": None,
+                    })
+                    continue
+
+                seg_id = stub.get("segment_id")
+                if not seg_id or not isinstance(seg_id, str):
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_stub_missing_segment_id",
+                        "detail": f"Missing or invalid segment_id: {rel}",
+                        "path": rel,
+                        "segment_id": None,
+                    })
+                    continue
+
+                if _validate_segment_id(family_name, seg_id) is None:
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_stub_invalid_segment_id",
+                        "detail": f"segment_id fails validation: {seg_id}",
+                        "path": rel,
+                        "segment_id": seg_id,
+                    })
+                    continue
+
+                if not stub.get("source_path"):
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_stub_missing_source_path",
+                        "detail": f"Missing source_path: {rel}",
+                        "path": rel,
+                        "segment_id": seg_id,
+                    })
+                    continue
+
+                if not isinstance(stub.get("summary"), dict):
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_stub_missing_summary",
+                        "detail": f"Missing or invalid summary: {rel}",
+                        "path": rel,
+                        "segment_id": seg_id,
+                    })
+                    continue
+
+                payload_rel = stub.get("payload_path", "")
+                cold_stored = stub.get("cold_stored_at")
+
+                if not cold_stored:
+                    # Hot stub
+                    hot_stubs_checked += 1
+                    if payload_rel:
+                        hot_path = restore_root / payload_rel
+                        rolled_payloads_checked += 1
+                        if not hot_path.is_file():
+                            has_failure = True
+                            family_warnings.append({
+                                "code": "segment_history_missing_hot_payload",
+                                "detail": f"Rolled payload missing: {payload_rel}",
+                                "path": rel,
+                                "segment_id": seg_id,
+                            })
+                    else:
+                        has_failure = True
+                        family_warnings.append({
+                            "code": "segment_history_stub_missing_payload_path",
+                            "detail": f"Hot stub has no payload_path: {rel}",
+                            "path": rel,
+                            "segment_id": seg_id,
+                        })
+                else:
+                    # Cold stub
+                    cold_stubs_checked += 1
+                    if not payload_rel:
+                        has_failure = True
+                        family_warnings.append({
+                            "code": "segment_history_stub_missing_payload_path",
+                            "detail": f"Cold stub has no payload_path: {rel}",
+                            "path": rel,
+                            "segment_id": seg_id,
+                        })
+                        continue
+
+                    cold_path = restore_root / payload_rel
+                    cold_payloads_checked += 1
+                    if not cold_path.is_file():
+                        has_failure = True
+                        family_warnings.append({
+                            "code": "segment_history_missing_cold_payload",
+                            "detail": f"Cold payload missing: {payload_rel}",
+                            "path": rel,
+                            "segment_id": seg_id,
+                        })
+                        continue
+
+                    # Decompress for CRC integrity check
+                    try:
+                        raw = cold_path.read_bytes()
+                        decompressed = gzip.decompress(raw)
+                    except Exception:
+                        has_failure = True
+                        family_warnings.append({
+                            "code": "segment_history_cold_payload_corrupt",
+                            "detail": f"Cold payload decompression failed: {payload_rel}",
+                            "path": rel,
+                            "segment_id": seg_id,
+                        })
+                        continue
+
+                    # Verify byte_size if present in summary
+                    summary_byte_size = stub.get("summary", {}).get("byte_size")
+                    if summary_byte_size is not None:
+                        if len(decompressed) != summary_byte_size:
+                            has_failure = True
+                            family_warnings.append({
+                                "code": "segment_history_cold_byte_size_mismatch",
+                                "detail": (
+                                    f"Decompressed size {len(decompressed)} != "
+                                    f"summary.byte_size {summary_byte_size}: {payload_rel}"
+                                ),
+                                "path": rel,
+                                "segment_id": seg_id,
+                            })
+
+        if has_failure:
+            any_failure = True
+
+        families_results.append({
+            "family": family_name,
+            "active_sources_checked": active_sources_checked,
+            "hot_stubs_checked": hot_stubs_checked,
+            "cold_stubs_checked": cold_stubs_checked,
+            "rolled_payloads_checked": rolled_payloads_checked,
+            "cold_payloads_checked": cold_payloads_checked,
+            "warnings": family_warnings,
+        })
 
     return {
-        "ok": not (invalid_stubs or missing_hot or missing_cold),
-        "total_stubs": total_stubs,
-        "hot_payloads": total_hot,
-        "cold_payloads": total_cold,
-        "invalid_stubs": invalid_stubs,
-        "missing_hot_payloads": missing_hot,
-        "missing_cold_payloads": missing_cold,
-        "warnings": warnings,
+        "ok": not any_failure,
+        "families_checked": len(families_results),
+        "families": families_results,
     }
 
 

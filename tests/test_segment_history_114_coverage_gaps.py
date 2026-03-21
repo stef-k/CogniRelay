@@ -444,7 +444,8 @@ class TestRestoreTestMessageStream(unittest.TestCase):
 
             result = _validate_segment_history(restore)
             self.assertTrue(result["ok"])
-            self.assertGreaterEqual(result["total_stubs"], 1)
+            total = sum(f["hot_stubs_checked"] + f["cold_stubs_checked"] for f in result["families"])
+            self.assertGreaterEqual(total, 1)
 
 
 # =========================================================================
@@ -488,7 +489,8 @@ class TestRestoreTestEpisodic(unittest.TestCase):
 
             result = _validate_segment_history(restore)
             self.assertTrue(result["ok"])
-            self.assertGreaterEqual(result["total_stubs"], 1)
+            total = sum(f["hot_stubs_checked"] + f["cold_stubs_checked"] for f in result["families"])
+            self.assertGreaterEqual(total, 1)
 
 
 # =========================================================================
@@ -534,7 +536,8 @@ class TestRestoreTestOpsRuns(unittest.TestCase):
 
             result = _validate_segment_history(restore)
             self.assertTrue(result["ok"])
-            self.assertGreaterEqual(result["total_stubs"], 1)
+            total = sum(f["hot_stubs_checked"] + f["cold_stubs_checked"] for f in result["families"])
+            self.assertGreaterEqual(total, 1)
 
 
 # =========================================================================
@@ -579,7 +582,8 @@ class TestRestoreTestMessageThread(unittest.TestCase):
 
             result = _validate_segment_history(restore)
             self.assertTrue(result["ok"])
-            self.assertGreaterEqual(result["total_stubs"], 1)
+            total = sum(f["hot_stubs_checked"] + f["cold_stubs_checked"] for f in result["families"])
+            self.assertGreaterEqual(total, 1)
 
 
 # =========================================================================

@@ -95,15 +95,10 @@ class TestValidateSegmentId(unittest.TestCase):
         self.assertEqual(ts, "20260320T120000Z")
         self.assertEqual(seq, 1)
 
-    def test_valid_without_stream_key(self) -> None:
-        # Old-style segment ID with no stream_key component
+    def test_invalid_without_stream_key(self) -> None:
+        # Segment ID with no stream_key component is rejected
         result = _validate_segment_id("journal", "journal__20260320T120000Z__0001")
-        self.assertIsNotNone(result)
-        family, stream_key, ts, seq = result
-        self.assertEqual(family, "journal")
-        self.assertEqual(stream_key, "")
-        self.assertEqual(ts, "20260320T120000Z")
-        self.assertEqual(seq, 1)
+        self.assertIsNone(result)
 
     def test_wrong_family(self) -> None:
         result = _validate_segment_id("api_audit", "journal__20260320T120000Z__0001")

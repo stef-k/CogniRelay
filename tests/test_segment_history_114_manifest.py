@@ -86,7 +86,7 @@ class TestManifestGitignore(unittest.TestCase):
                 source_paths=[],
                 segment_ids=[],
             )
-            gitignore = repo / ".cognirelay" / "segment-history" / ".gitignore"
+            gitignore = repo / ".cognirelay" / ".gitignore"
             self.assertTrue(gitignore.is_file())
             self.assertEqual(gitignore.read_text(encoding="utf-8").strip(), "*")
 

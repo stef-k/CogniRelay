@@ -147,10 +147,6 @@ def _validate_segment_id(family: str, segment_id: str) -> tuple[str, str, str, i
     remainder = segment_id[len(family) + 2:]  # after "family__"
     m = _SEGMENT_ID_TAIL_RE.match(remainder)
     if not m:
-        # Might not have a stream_key — try direct match for timestamp__seq
-        ts_seq_re = re.match(r"^(\d{8}T\d{6}Z)__(\d{4})$", remainder)
-        if ts_seq_re:
-            return family, "", ts_seq_re.group(1), int(ts_seq_re.group(2))
         return None
     stream_key, ts, seq_str = m.group(1), m.group(2), m.group(3)
     return family, stream_key, ts, int(seq_str)
@@ -756,7 +752,7 @@ def segment_history_maintenance_service(
             continue
         if size == 0:
             # Delete empty ack files outside atomic unit
-            if src.parent == repo_root / "messages" / "acks":
+            if family == "message_stream" and src.parent == repo_root / "messages" / "acks":
                 try:
                     src.unlink()
                     warnings.append(_make_warning(
@@ -1328,8 +1324,9 @@ def segment_history_cold_store_service(
 
                 # Mutate stub: payload_path moves to cold location, add cold_stored_at
                 cold_rel = str(cold_path.relative_to(repo_root))
+                cold_stored_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
                 updated_stub = _mutate_stub_cold(
-                    stub, cold_rel, _segment_timestamp_str(now)
+                    stub, cold_rel, cold_stored_at
                 )
                 write_text_file(
                     stub_path,

@@ -19,9 +19,10 @@ def _manifest_dir(repo_root: Path) -> Path:
     d = repo_root / SEGMENT_HISTORY_DIR_REL
     if not d.is_dir():
         d.mkdir(parents=True, exist_ok=True)
-        gitignore = d / ".gitignore"
-        if not gitignore.exists():
-            gitignore.write_text("*\n", encoding="utf-8")
+    # Ensure .cognirelay/ root is gitignored so no manifest or metadata leaks
+    cognirelay_gitignore = repo_root / ".cognirelay" / ".gitignore"
+    if not cognirelay_gitignore.exists():
+        cognirelay_gitignore.write_text("*\n", encoding="utf-8")
     return d
 
 

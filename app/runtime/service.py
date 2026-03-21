@@ -8,12 +8,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import logging
+
 from fastapi import HTTPException
 
-from app.audit import append_audit
+from app.audit import WriteTimeRolloverError, append_audit
 from app.config import sha256_token
 from app.discovery import handle_mcp_rpc_request as discovery_handle_mcp_rpc_request
 from app.storage import safe_path, write_text_file
+
+_log = logging.getLogger(__name__)
 
 RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
 
@@ -30,10 +34,16 @@ def audit_event(
     if not settings.audit_log_enabled:
         return
     rollover_bytes = getattr(settings, "audit_log_rollover_bytes", 0)
-    append_audit(
-        settings.repo_root, event, auth.peer_id if auth else "anonymous", detail,
-        rollover_bytes=rollover_bytes, gm=gm,
-    )
+    try:
+        append_audit(
+            settings.repo_root, event, auth.peer_id if auth else "anonymous", detail,
+            rollover_bytes=rollover_bytes, gm=gm,
+        )
+    except WriteTimeRolloverError as exc:
+        _log.warning(
+            "Write-time rollover failed for audit event %s: [%s] %s",
+            event, exc.code, exc.detail,
+        )
 
 
 def scope_for_path(path: str) -> str:
