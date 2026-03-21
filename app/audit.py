@@ -63,16 +63,29 @@ def _check_write_time_rollover_locked(
     rel = str(path.relative_to(repo_root))
     stream_key = _derive_stream_key(family, rel)
 
-    # Check for pending batch residue under lock
+    # Check for pending batch residue under lock.  If a stale manifest
+    # exists from a prior crash, attempt inline reconciliation so that
+    # audit appends are not permanently blocked once the file exceeds the
+    # rollover threshold.  Only raise if reconciliation fails and the
+    # manifest still references this source.
     try:
         mf = _read_manifest(repo_root, family)
     except ValueError:
         mf = None
     if mf is not None and rel in mf.get("source_paths", []):
-        raise WriteTimeRolloverError(
-            "segment_history_pending_batch_residue",
-            f"A pending batch operation lists this source: {rel}",
-        )
+        from app.segment_history.service import _reconcile_manifest_residue
+
+        _reconcile_manifest_residue(repo_root, family, "write_time_rollover", gm)
+        # Re-read after reconciliation — it removes the manifest on success
+        try:
+            mf = _read_manifest(repo_root, family)
+        except ValueError:
+            mf = None
+        if mf is not None and rel in mf.get("source_paths", []):
+            raise WriteTimeRolloverError(
+                "segment_history_pending_batch_residue",
+                f"A pending batch operation lists this source: {rel}",
+            )
 
     history_dir = repo_root / config.history_dir
     stub_dir = repo_root / config.stub_dir

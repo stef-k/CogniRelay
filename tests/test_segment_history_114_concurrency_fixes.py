@@ -581,5 +581,329 @@ class TestRehydrateManifestCheckUnderLock(unittest.TestCase):
             )
 
 
+# -----------------------------------------------------------------------
+# F8: Inline manifest reconciliation in write-time rollover
+# -----------------------------------------------------------------------
+class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
+    """Write-time rollover must reconcile stale manifests inline so that
+    audit appends are not permanently blocked once the file exceeds the
+    rollover threshold."""
+
+    def test_stale_manifest_reconciled_inline(self) -> None:
+        """append_audit reconciles a stale manifest instead of blocking."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            audit_file = logs / "api_audit.jsonl"
+            # Write enough data to exceed rollover threshold
+            audit_file.write_text('{"ts":"2026-03-19T00:00:00Z","event":"x"}\n' * 5)
+
+            # Plant a stale manifest that references this source
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            # Append should succeed — the stale manifest is reconciled inline
+            # (no targets exist on disk so manifest is simply removed)
+            append_audit(
+                repo, "test_event", "peer-1", {"k": "v"},
+                rollover_bytes=50, gm=gm,
+            )
+
+            # Manifest should be gone after reconciliation
+            self.assertIsNone(read_manifest(repo, "api_audit"))
+            # The audit line should have been written
+            content = audit_file.read_text()
+            self.assertIn("test_event", content)
+
+    def test_unreconcilable_manifest_still_blocks(self) -> None:
+        """If reconciliation fails (targets exist, commit fails), the append
+        is still blocked with WriteTimeRolloverError."""
+        from app.audit import WriteTimeRolloverError
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            class _FailingGM(SimpleGitManagerStub):
+                def commit_paths(self, _paths: list, _msg: str) -> bool:
+                    raise RuntimeError("git broken")
+
+            gm = _FailingGM(repo)
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            audit_file = logs / "api_audit.jsonl"
+            audit_file.write_text('{"ts":"2026-03-19T00:00:00Z","event":"x"}\n' * 5)
+
+            # Plant manifest WITH existing target files so reconciliation
+            # attempts a commit (which will fail).
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir(parents=True)
+            payload = hist / "api_audit__api_audit__20260319T000000Z__0001.jsonl"
+            stub = idx / "api_audit__api_audit__20260319T000000Z__0001.json"
+            payload.write_text("rolled data\n")
+            stub.write_text('{"schema_type":"segment_history_stub"}\n')
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            with self.assertRaises(WriteTimeRolloverError) as ctx:
+                append_audit(
+                    repo, "test_event", "peer-1", {"k": "v"},
+                    rollover_bytes=50, gm=gm,
+                )
+            self.assertIn("pending_batch_residue", ctx.exception.code)
+
+            # Manifest preserved for next retry
+            self.assertIsNotNone(read_manifest(repo, "api_audit"))
+
+
+# -----------------------------------------------------------------------
+# F9: Manifest preserved on reconciliation commit failure
+# -----------------------------------------------------------------------
+class TestReconciliationManifestPreservation(unittest.TestCase):
+    """_reconcile_manifest_residue must preserve the manifest when the
+    recovery commit fails, matching the maintenance/cold-store pattern."""
+
+    def test_manifest_preserved_on_commit_failure(self) -> None:
+        """Manifest survives when the recovery commit raises."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            class _FailingGM(SimpleGitManagerStub):
+                def commit_paths(self, _paths: list, _msg: str) -> bool:
+                    raise RuntimeError("git broken")
+
+            gm = _FailingGM(repo)
+
+            # Create target files so reconciliation attempts a commit
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir(parents=True)
+            payload = hist / "api_audit__api_audit__20260319T000000Z__0001.jsonl"
+            stub = idx / "api_audit__api_audit__20260319T000000Z__0001.json"
+            payload.write_text("rolled data\n")
+            stub.write_text('{"schema_type":"segment_history_stub"}\n')
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            result = _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+            self.assertIsNotNone(result)
+            self.assertIn("preserved=2", result["warning"])
+
+            # Manifest must still exist for the next retry
+            mf = read_manifest(repo, "api_audit")
+            self.assertIsNotNone(mf)
+
+    def test_manifest_removed_when_no_targets_exist(self) -> None:
+        """Manifest is removed when there are no target files to recover."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            result = _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+            self.assertIsNotNone(result)
+
+            # No targets on disk → manifest removed
+            self.assertIsNone(read_manifest(repo, "api_audit"))
+
+    def test_manifest_removed_on_successful_recovery(self) -> None:
+        """Manifest is removed when the recovery commit succeeds."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir(parents=True)
+            payload = hist / "api_audit__api_audit__20260319T000000Z__0001.jsonl"
+            stub = idx / "api_audit__api_audit__20260319T000000Z__0001.json"
+            payload.write_text("rolled data\n")
+            stub.write_text('{"schema_type":"segment_history_stub"}\n')
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            result = _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+            self.assertIsNotNone(result)
+            self.assertIn("recovered", result["warning"])
+
+            # Manifest removed on success
+            self.assertIsNone(read_manifest(repo, "api_audit"))
+
+
+# -----------------------------------------------------------------------
+# F10: Orphaned payload cleanup during reconciliation
+# -----------------------------------------------------------------------
+class TestOrphanedPayloadCleanup(unittest.TestCase):
+    """Reconciliation must remove orphaned payloads that have no companion
+    stub, since the source file is still intact in that crash scenario."""
+
+    def test_payload_without_stub_is_removed(self) -> None:
+        """A payload that exists without its companion stub is deleted."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            # Only the payload exists — no stub (crash between writes)
+            payload = hist / "api_audit__api_audit__20260319T000000Z__0001.jsonl"
+            payload.write_text("rolled data\n")
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+
+            # Orphaned payload should have been removed
+            self.assertFalse(payload.exists())
+            # Manifest removed (no valid targets to commit)
+            self.assertIsNone(read_manifest(repo, "api_audit"))
+
+    def test_both_payload_and_stub_are_committed(self) -> None:
+        """When both payload and stub exist, both are committed."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            committed: list[list] = []
+
+            class _TrackingGM(SimpleGitManagerStub):
+                def commit_paths(self, paths: list, msg: str) -> bool:
+                    committed.append(list(paths))
+                    return True
+
+            gm = _TrackingGM(repo)
+
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir(parents=True)
+            payload = hist / "api_audit__api_audit__20260319T000000Z__0001.jsonl"
+            stub = idx / "api_audit__api_audit__20260319T000000Z__0001.json"
+            payload.write_text("rolled data\n")
+            stub.write_text('{"schema_type":"segment_history_stub"}\n')
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+
+            # Both files should remain and have been committed
+            self.assertTrue(payload.exists())
+            self.assertTrue(stub.exists())
+            self.assertEqual(len(committed), 1)
+            committed_paths = {str(p) for p in committed[0]}
+            self.assertIn(str(payload), committed_paths)
+            self.assertIn(str(stub), committed_paths)
+
+    def test_stub_only_without_payload_is_committed(self) -> None:
+        """A stub without a payload is still committed (e.g. journal unlink)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            committed: list[list] = []
+
+            class _TrackingGM(SimpleGitManagerStub):
+                def commit_paths(self, paths: list, msg: str) -> bool:
+                    committed.append(list(paths))
+                    return True
+
+            gm = _TrackingGM(repo)
+
+            idx = repo / "logs" / "history" / "api_audit" / "index"
+            idx.mkdir(parents=True)
+            stub = idx / "api_audit__api_audit__20260319T000000Z__0001.json"
+            stub.write_text('{"schema_type":"segment_history_stub"}\n')
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/api_audit__api_audit__20260319T000000Z__0001.jsonl",
+                    "logs/history/api_audit/index/api_audit__api_audit__20260319T000000Z__0001.json",
+                ],
+            )
+
+            _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
+
+            self.assertTrue(stub.exists())
+            self.assertEqual(len(committed), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

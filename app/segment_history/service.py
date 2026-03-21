@@ -674,13 +674,41 @@ def _reconcile_manifest_residue(
     # deleting them.  Deletion would cause data loss when source files have
     # already been mutated (truncated/deleted) by the crashed operation —
     # the targets may be the only remaining copy of rolled data.
+    #
+    # Target paths are stored as interleaved pairs [payload, stub, ...].
+    # If a payload exists without its companion stub, the crash happened
+    # between the payload write and the stub write — the source file is
+    # still intact, so we remove the orphaned payload instead of
+    # committing an unreferenced file.
     existing_targets: list[Path] = []
-    for rel_path in target_paths:
-        if not rel_path:
-            continue
-        target = repo_root / rel_path
-        if target.is_file():
-            existing_targets.append(target)
+    orphaned_payloads: list[Path] = []
+    for i in range(0, len(target_paths) - 1, 2):
+        payload_rel = target_paths[i]
+        stub_rel = target_paths[i + 1] if i + 1 < len(target_paths) else ""
+        payload_exists = bool(payload_rel) and (repo_root / payload_rel).is_file()
+        stub_exists = bool(stub_rel) and (repo_root / stub_rel).is_file()
+        if payload_exists and stub_exists:
+            existing_targets.append(repo_root / payload_rel)
+            existing_targets.append(repo_root / stub_rel)
+        elif payload_exists and not stub_exists:
+            # Crash between payload write and stub write — source is
+            # intact, so clean up the orphaned payload.
+            orphaned_payloads.append(repo_root / payload_rel)
+        elif stub_exists:
+            existing_targets.append(repo_root / stub_rel)
+    # Handle odd trailing entry
+    if len(target_paths) % 2 == 1 and target_paths[-1]:
+        p = repo_root / target_paths[-1]
+        if p.is_file():
+            existing_targets.append(p)
+
+    # Remove orphaned payloads that have no companion stub
+    for op in orphaned_payloads:
+        try:
+            op.unlink()
+            _log.info("Removed orphaned payload without stub: %s", op)
+        except OSError:
+            _log.warning("Could not remove orphaned payload: %s", op)
 
     # Include source files so the recovery commit captures their current
     # state (possibly truncated by the crashed roll).
@@ -711,12 +739,18 @@ def _reconcile_manifest_residue(
         except Exception:
             _log.warning(
                 "Could not commit recovered files from crashed %s for %s — "
-                "preserving targets on disk for manual recovery",
+                "preserving manifest and targets on disk for next retry",
                 recorded_op, family,
                 exc_info=True,
             )
 
-    remove_manifest(repo_root, caller_family)
+    # Only remove the manifest when recovery succeeded or when there are
+    # no target files to recover.  Preserving it on commit failure lets
+    # the next reconciliation pass retry, matching the maintenance and
+    # cold-store pattern (F5).
+    if recovered or not existing_targets:
+        remove_manifest(repo_root, caller_family)
+
     action = "recovered" if recovered else f"preserved={len(existing_targets)}"
     detail = (
         f"segment_history_manifest_residue:{recorded_op}:{family}:"
