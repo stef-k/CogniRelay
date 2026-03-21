@@ -17,6 +17,9 @@ from typing import Any, Callable, NoReturn
 from fastapi import HTTPException
 
 from app.segment_history.utils import (
+    _FAMILY_PREFIX_STRIP,  # noqa: F401 — re-exported for backward compat
+    _derive_stream_key,
+    _make_warning,
     byte_size,
     count_lines,
     first_last_json_field,
@@ -42,16 +45,6 @@ SEGMENT_HISTORY_STUB_SCHEMA_VERSION = "1.0"
 # the timestamp component immediately before the seq.
 _SEGMENT_ID_TAIL_RE = re.compile(r"^(.+)__(\d{8}T\d{6}Z)__(\d{4})$")
 
-# Family-specific source-path prefix stripping for stream key derivation
-_FAMILY_PREFIX_STRIP: dict[str, str] = {
-    "journal": "journal/",
-    "api_audit": "logs/",
-    "ops_runs": "logs/",
-    "message_stream": "messages/",
-    "message_thread": "messages/threads/",
-    "episodic": "memory/episodic/",
-}
-
 # File extension used by each family for payloads
 _FAMILY_EXTENSION: dict[str, str] = {
     "journal": ".md",
@@ -70,40 +63,6 @@ def _segment_timestamp_str(dt: datetime) -> str:
     """Format a datetime as the canonical segment timestamp ``YYYYMMDDTHHMMSSZ``."""
     utc = dt.astimezone(timezone.utc)
     return utc.strftime("%Y%m%dT%H%M%SZ")
-
-
-# ---------------------------------------------------------------------------
-# Stream key derivation
-# ---------------------------------------------------------------------------
-def _derive_stream_key(family: str, source_path: str) -> str:
-    """Derive a per-family stream key from a source path.
-
-    Algorithm:
-    - Strip the family-specific prefix from the source path
-    - Replace remaining ``/`` with ``__``
-    - Remove the file extension
-
-    Examples::
-
-        journal/2026/2026-03-19.md       -> 2026__2026-03-19
-        logs/api_audit.jsonl             -> api_audit
-        messages/inbox/alice.jsonl       -> inbox__alice
-        messages/threads/t1.jsonl        -> t1
-        memory/episodic/observations.jsonl -> observations
-    """
-    prefix = _FAMILY_PREFIX_STRIP.get(family, "")
-    key = source_path
-    if prefix and key.startswith(prefix):
-        key = key[len(prefix) :]
-    # Remove file extension
-    dot = key.rfind(".")
-    if dot > 0:
-        key = key[:dot]
-    # Replace / with __
-    key = key.replace("/", "__")
-    if not key:
-        _log.warning("Empty stream key derived from path: %s (family=%s)", source_path, family)
-    return key
 
 
 # ---------------------------------------------------------------------------
@@ -182,25 +141,6 @@ def _validate_segment_id(family: str, segment_id: str) -> tuple[str, str, str, i
         return None
     stream_key, ts, seq_str = m.group(1), m.group(2), m.group(3)
     return family, stream_key, ts, int(seq_str)
-
-
-# ---------------------------------------------------------------------------
-# Structured warning helper
-# ---------------------------------------------------------------------------
-def _make_warning(
-    code: str,
-    detail: str,
-    *,
-    path: str | None = None,
-    segment_id: str | None = None,
-) -> dict[str, Any]:
-    """Build a structured warning object."""
-    return {
-        "code": code,
-        "detail": detail,
-        "path": path,
-        "segment_id": segment_id,
-    }
 
 
 # ---------------------------------------------------------------------------

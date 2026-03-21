@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from app.segment_history.utils import _derive_stream_key
+
 _log = logging.getLogger(__name__)
 
 
@@ -125,7 +127,6 @@ def locked_append_jsonl(
         SegmentHistoryLockTimeout,
         segment_history_source_lock,
     )
-    from app.segment_history.service import _derive_stream_key
 
     stream_key = _derive_stream_key(family, rel)
     lock_key = f"segment_history:{family}:{stream_key}"
@@ -196,7 +197,6 @@ def locked_append_jsonl_multi(
         SegmentHistoryLockTimeout,
         acquire_sorted_source_locks,
     )
-    from app.segment_history.service import _derive_stream_key
 
     for p in paths:
         rel = str(p.relative_to(repo_root))

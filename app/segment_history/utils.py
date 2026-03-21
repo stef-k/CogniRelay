@@ -9,7 +9,11 @@ and ``service.py`` — both can safely import from this module at top level.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
+from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -124,3 +128,68 @@ def parse_event_timestamp(ts_str: str) -> datetime:
     if len(ts_str) == 10:
         return datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+
+
+# ---------------------------------------------------------------------------
+# Stream key derivation (moved from service.py to break circular imports)
+# ---------------------------------------------------------------------------
+
+# Family-specific source-path prefix stripping for stream key derivation
+_FAMILY_PREFIX_STRIP: dict[str, str] = {
+    "journal": "journal/",
+    "api_audit": "logs/",
+    "ops_runs": "logs/",
+    "message_stream": "messages/",
+    "message_thread": "messages/threads/",
+    "episodic": "memory/episodic/",
+}
+
+
+def _derive_stream_key(family: str, source_path: str) -> str:
+    """Derive a per-family stream key from a source path.
+
+    Algorithm:
+    - Strip the family-specific prefix from the source path
+    - Replace remaining ``/`` with ``__``
+    - Remove the file extension
+
+    Examples::
+
+        journal/2026/2026-03-19.md       -> 2026__2026-03-19
+        logs/api_audit.jsonl             -> api_audit
+        messages/inbox/alice.jsonl       -> inbox__alice
+        messages/threads/t1.jsonl        -> t1
+        memory/episodic/observations.jsonl -> observations
+    """
+    prefix = _FAMILY_PREFIX_STRIP.get(family, "")
+    key = source_path
+    if prefix and key.startswith(prefix):
+        key = key[len(prefix) :]
+    # Remove file extension
+    dot = key.rfind(".")
+    if dot > 0:
+        key = key[:dot]
+    # Replace / with __
+    key = key.replace("/", "__")
+    if not key:
+        _log.warning("Empty stream key derived from path: %s (family=%s)", source_path, family)
+    return key
+
+
+# ---------------------------------------------------------------------------
+# Structured warning helper (moved from service.py to break circular imports)
+# ---------------------------------------------------------------------------
+def _make_warning(
+    code: str,
+    detail: str,
+    *,
+    path: str | None = None,
+    segment_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a structured warning object."""
+    return {
+        "code": code,
+        "detail": detail,
+        "path": path,
+        "segment_id": segment_id,
+    }

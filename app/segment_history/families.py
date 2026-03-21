@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.segment_history.utils import (
+    _make_warning,
     byte_size,
     count_lines,
     first_last_json_field,
@@ -395,8 +396,6 @@ def is_message_stream_max_hot_days_eligible(
 
     if newest_ts is None:
         if warnings is not None:
-            from app.segment_history.service import _make_warning
-
             warnings.append(
                 _make_warning(
                     "segment_history_missing_stream_timestamp",
@@ -412,8 +411,6 @@ def is_message_stream_max_hot_days_eligible(
         return age_days >= max_hot
     except (ValueError, TypeError):
         if warnings is not None:
-            from app.segment_history.service import _make_warning
-
             warnings.append(
                 _make_warning(
                     "segment_history_missing_stream_timestamp",
@@ -462,8 +459,6 @@ def is_message_thread_inactivity_eligible(
 
     if newest_ts is None:
         if warnings is not None:
-            from app.segment_history.service import _make_warning
-
             warnings.append(
                 _make_warning(
                     "segment_history_missing_thread_timestamp",
@@ -479,8 +474,6 @@ def is_message_thread_inactivity_eligible(
         return age_days >= inactivity
     except (ValueError, TypeError):
         if warnings is not None:
-            from app.segment_history.service import _make_warning
-
             warnings.append(
                 _make_warning(
                     "segment_history_missing_thread_timestamp",

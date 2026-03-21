@@ -19,12 +19,12 @@ from fastapi import HTTPException
 from tests.helpers import SimpleGitManagerStub
 
 from app.segment_history.service import (
-    _make_warning,
     _rehydrate_hot_path,
     segment_history_cold_rehydrate_service,
     segment_history_cold_store_service,
     segment_history_maintenance_service,
 )
+from app.segment_history.utils import _make_warning
 
 
 class _FakeSettings:
