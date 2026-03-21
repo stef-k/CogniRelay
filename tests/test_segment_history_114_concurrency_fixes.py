@@ -277,11 +277,11 @@ class TestWriteTimeRolloverManifest(unittest.TestCase):
 # -----------------------------------------------------------------------
 # F4: Manifest reconciliation cleans orphaned target files
 # -----------------------------------------------------------------------
-class TestManifestReconciliationCleansOrphans(unittest.TestCase):
-    """Reconciliation must remove orphaned target files listed in the manifest."""
+class TestManifestReconciliationRecoversOrphans(unittest.TestCase):
+    """Reconciliation must recover orphaned target files, not delete them."""
 
-    def test_orphaned_targets_removed(self) -> None:
-        """Target files from a crashed operation are removed during reconciliation."""
+    def test_orphaned_targets_recovered(self) -> None:
+        """Target files from a crashed operation are committed during reconciliation."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
@@ -308,11 +308,11 @@ class TestManifestReconciliationCleansOrphans(unittest.TestCase):
 
             result = _reconcile_manifest_residue(repo, "api_audit", "maintenance", gm)
             self.assertIsNotNone(result)
-            self.assertIn("cleaned=2", result["warning"])
+            self.assertIn("recovered", result["warning"])
 
-            # Orphaned files must be gone
-            self.assertFalse(orphan_payload.is_file())
-            self.assertFalse(orphan_stub.is_file())
+            # Orphaned files must still exist (committed, not deleted)
+            self.assertTrue(orphan_payload.is_file())
+            self.assertTrue(orphan_stub.is_file())
 
             # Manifest must be removed
             mf_path = manifest_path(repo, "api_audit")
@@ -334,7 +334,7 @@ class TestManifestReconciliationCleansOrphans(unittest.TestCase):
 
             result = _reconcile_manifest_residue(repo, "api_audit", "cold_store", gm)
             self.assertIsNotNone(result)
-            self.assertIn("cleaned=0", result["warning"])
+            self.assertIn("preserved=0", result["warning"])
 
     def test_manifest_without_target_paths(self) -> None:
         """Old manifests without target_paths still reconcile cleanly."""
@@ -350,7 +350,7 @@ class TestManifestReconciliationCleansOrphans(unittest.TestCase):
             )
             result = _reconcile_manifest_residue(repo, "journal", "maintenance", gm)
             self.assertIsNotNone(result)
-            self.assertIn("cleaned=0", result["warning"])
+            self.assertIn("preserved=0", result["warning"])
 
 
 if __name__ == "__main__":

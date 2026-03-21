@@ -666,35 +666,61 @@ def _reconcile_manifest_residue(
     if segment_ids:
         _log.warning(
             "Found stale segment-history manifest (op=%s family=%s segments=%d). "
-            "Cleaning up orphaned target files.",
+            "Attempting to recover orphaned target files.",
             recorded_op, family, len(segment_ids),
         )
 
-    # Best-effort: remove orphaned target files that were written during the
-    # crashed operation but never committed.  Each target_path is relative to
-    # repo_root.
-    removed_count = 0
+    # Recovery strategy: attempt to commit orphaned target files rather than
+    # deleting them.  Deletion would cause data loss when source files have
+    # already been mutated (truncated/deleted) by the crashed operation —
+    # the targets may be the only remaining copy of rolled data.
+    existing_targets: list[Path] = []
     for rel_path in target_paths:
         if not rel_path:
             continue
         target = repo_root / rel_path
         if target.is_file():
-            try:
-                target.unlink()
-                removed_count += 1
-                _log.info(
-                    "Removed orphaned residue file: %s (from %s manifest)",
-                    rel_path, recorded_op,
+            existing_targets.append(target)
+
+    # Include source files so the recovery commit captures their current
+    # state (possibly truncated by the crashed roll).
+    source_paths_list = manifest.get("source_paths", [])
+    source_files: list[Path] = []
+    for sp in source_paths_list:
+        if sp:
+            sf = repo_root / sp
+            if sf.is_file():
+                source_files.append(sf)
+
+    recovered = False
+    if existing_targets and gm is not None:
+        try:
+            from app.git_locking import repository_mutation_lock
+
+            commit_paths = existing_targets + source_files
+            with repository_mutation_lock(repo_root):
+                gm.commit_paths(
+                    commit_paths,
+                    f"segment-history: recover crashed {recorded_op} for {family}",
                 )
-            except OSError:
-                _log.warning(
-                    "Could not remove orphaned residue file: %s", rel_path,
-                )
+            recovered = True
+            _log.info(
+                "Recovered %d orphaned files from crashed %s for %s",
+                len(existing_targets), recorded_op, family,
+            )
+        except Exception:
+            _log.warning(
+                "Could not commit recovered files from crashed %s for %s — "
+                "preserving targets on disk for manual recovery",
+                recorded_op, family,
+                exc_info=True,
+            )
 
     remove_manifest(repo_root, caller_family)
+    action = "recovered" if recovered else f"preserved={len(existing_targets)}"
     detail = (
         f"segment_history_manifest_residue:{recorded_op}:{family}:"
-        f"{len(segment_ids)}:cleaned={removed_count}"
+        f"{len(segment_ids)}:{action}"
     )
     return {"warning": detail}
 
@@ -840,7 +866,7 @@ def segment_history_maintenance_service(
     committed_files: list[str] = []
     latest_commit: str | None = None
 
-    try:  # noqa: SIM105 — structured rollback requires bare except + re-raise
+    try:
         # 5. Acquire sorted source locks
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
             # Post-lock: recount eligible for selection_count
@@ -910,108 +936,120 @@ def segment_history_maintenance_service(
             # Capture source state for rollback
             source_rollback = _capture_rollback_state(locked_eligible)
 
-            # 7. Roll each eligible source under lock
-            for src, rel, segment_id, payload_path, _stub_path_plan in planned:
-                stream_key = _derive_stream_key(family, rel)
-                stub_dir = _stub_path_plan.parent
+            try:
+                # 7. Roll each eligible source under lock
+                for src, rel, segment_id, payload_path, _stub_path_plan in planned:
+                    stream_key = _derive_stream_key(family, rel)
+                    stub_dir = _stub_path_plan.parent
 
-                # Read content for summary
-                content = src.read_text(encoding="utf-8", errors="replace")
-                summary = config.build_summary(content)
+                    # Read content for summary
+                    content = src.read_text(encoding="utf-8", errors="replace")
+                    summary = config.build_summary(content)
 
-                # Add day field for journal summaries
-                if family == "journal":
-                    summary["day"] = src.stem
-                # Add stream_kind and stream_key for message_stream summaries;
-                # apply ack-specific overrides per spec.
-                elif family == "message_stream":
-                    sk_kind = _message_stream_kind_from_source(rel)
-                    summary["stream_kind"] = sk_kind
-                    summary["stream_key"] = stream_key
-                    from app.segment_history.families import fixup_message_stream_summary
-                    fixup_message_stream_summary(summary, content, sk_kind)
-                # Add thread_id for message_thread summaries
-                elif family == "message_thread":
-                    summary["thread_id"] = src.stem
+                    # Add day field for journal summaries
+                    if family == "journal":
+                        summary["day"] = src.stem
+                    # Add stream_kind and stream_key for message_stream summaries;
+                    # apply ack-specific overrides per spec.
+                    elif family == "message_stream":
+                        sk_kind = _message_stream_kind_from_source(rel)
+                        summary["stream_kind"] = sk_kind
+                        summary["stream_key"] = stream_key
+                        from app.segment_history.families import fixup_message_stream_summary
+                        fixup_message_stream_summary(summary, content, sk_kind)
+                    # Add thread_id for message_thread summaries
+                    elif family == "message_thread":
+                        summary["thread_id"] = src.stem
 
-                # Roll
-                if family == "journal":
-                    stub, created = _roll_journal_source(
-                        source_path=src,
-                        payload_path=payload_path,
-                        family=family,
-                        segment_id=segment_id,
-                        stream_key=stream_key,
-                        rolled_at=now,
-                        stub_dir=stub_dir,
-                        summary=summary,
-                        repo_root=repo_root,
-                    )
-                else:
-                    result = _roll_jsonl_source(
-                        source_path=src,
-                        payload_path=payload_path,
-                        family=family,
-                        segment_id=segment_id,
-                        stream_key=stream_key,
-                        rolled_at=now,
-                        stub_dir=stub_dir,
-                        summary=summary,
-                        repo_root=repo_root,
-                    )
-                    if result is None:
-                        selection_count -= 1
-                        warnings.append(_make_warning(
-                            "segment_history_only_partial_line",
-                            f"Source has only a partial unterminated line, skipping roll: {rel}",
-                            path=rel,
-                        ))
-                        continue
-                    stub, created = result
-
-                rolled_segment_ids.append(segment_id)
-                all_created.extend(created)
-                rolled_sources.append(src)
-
-                # Defer audit event — emitting inside the source lock
-                # would self-deadlock when the audit callback triggers
-                # write-time rollover on the same source lock key.
-                deferred_audit.append({
-                    "family": family,
-                    "segment_id": segment_id,
-                    "source_path": rel,
-                    "payload_path": str(payload_path.relative_to(repo_root)),
-                    "warning_count": len(warnings),
-                })
-
-            # 8. Git commit — inside source lock scope per spec
-            if all_created:
-                # Include rolled sources even if deleted (journal unlinks originals);
-                # git add on a deleted path stages the removal.
-                commit_paths = all_created + rolled_sources
-                commit_message = (
-                    f"segment-history: roll {family} {selection_count}"
-                )
-                try:
-                    from app.git_locking import repository_mutation_lock
-
-                    with repository_mutation_lock(repo_root):
-                        success = gm.commit_paths(commit_paths, commit_message)
-                        if success:
-                            latest_commit = gm.latest_commit()
-                            committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
-                        else:
-                            durable = False
+                    # Roll
+                    if family == "journal":
+                        stub, created = _roll_journal_source(
+                            source_path=src,
+                            payload_path=payload_path,
+                            family=family,
+                            segment_id=segment_id,
+                            stream_key=stream_key,
+                            rolled_at=now,
+                            stub_dir=stub_dir,
+                            summary=summary,
+                            repo_root=repo_root,
+                        )
+                    else:
+                        result = _roll_jsonl_source(
+                            source_path=src,
+                            payload_path=payload_path,
+                            family=family,
+                            segment_id=segment_id,
+                            stream_key=stream_key,
+                            rolled_at=now,
+                            stub_dir=stub_dir,
+                            summary=summary,
+                            repo_root=repo_root,
+                        )
+                        if result is None:
+                            selection_count -= 1
                             warnings.append(_make_warning(
-                                "segment_history_git_commit_failed",
-                                "Git commit failed for maintenance roll",
+                                "segment_history_only_partial_line",
+                                f"Source has only a partial unterminated line, skipping roll: {rel}",
+                                path=rel,
                             ))
-                except Exception:
-                    durable = False
-                    warnings.append(_make_warning(
-                        "segment_history_git_commit_failed",
-                        "Git commit failed for maintenance roll",
-                    ))
+                            continue
+                        stub, created = result
+
+                    rolled_segment_ids.append(segment_id)
+                    all_created.extend(created)
+                    rolled_sources.append(src)
+
+                    # Defer audit event — emitting inside the source lock
+                    # would self-deadlock when the audit callback triggers
+                    # write-time rollover on the same source lock key.
+                    deferred_audit.append({
+                        "family": family,
+                        "segment_id": segment_id,
+                        "source_path": rel,
+                        "payload_path": str(payload_path.relative_to(repo_root)),
+                        "warning_count": len(warnings),
+                    })
+
+                # 8. Git commit — inside source lock scope per spec
+                if all_created:
+                    # Include rolled sources even if deleted (journal unlinks originals);
+                    # git add on a deleted path stages the removal.
+                    commit_paths = all_created + rolled_sources
+                    commit_message = (
+                        f"segment-history: roll {family} {selection_count}"
+                    )
+                    try:
+                        from app.git_locking import repository_mutation_lock
+
+                        with repository_mutation_lock(repo_root):
+                            success = gm.commit_paths(commit_paths, commit_message)
+                            if success:
+                                latest_commit = gm.latest_commit()
+                                committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
+                            else:
+                                durable = False
+                                warnings.append(_make_warning(
+                                    "segment_history_git_commit_failed",
+                                    "Git commit failed for maintenance roll",
+                                ))
+                    except Exception:
+                        durable = False
+                        warnings.append(_make_warning(
+                            "segment_history_git_commit_failed",
+                            "Git commit failed for maintenance roll",
+                        ))
+            except Exception:
+                # Rollback under lock: restore sources, remove created, clean manifest
+                if source_rollback:
+                    _restore_rollback_state(source_rollback)
+                _remove_created_paths(all_created)
+                remove_manifest(repo_root, family)
+                raise
+
+            # Success: remove manifest inside lock scope to prevent
+            # stale-manifest reconciliation from deleting committed files.
+            remove_manifest(repo_root, family)
 
     except SegmentHistoryLockTimeout as exc:
         return {
@@ -1023,21 +1061,11 @@ def segment_history_maintenance_service(
                 "detail": str(exc),
             },
         }
-    except Exception:
-        # Rollback: restore source files to pre-roll state, then remove created
-        if source_rollback:
-            _restore_rollback_state(source_rollback)
-        _remove_created_paths(all_created)
-        remove_manifest(repo_root, family)
-        raise
 
     # 9. Emit deferred audit events (after source lock release to avoid
     #    self-deadlock when the audit callback triggers write-time rollover).
     for evt in deferred_audit:
         _emit_audit(audit, "segment_history_roll", evt)
-
-    # 10. Remove manifest
-    remove_manifest(repo_root, family)
 
     return {
         "ok": True,
@@ -1355,85 +1383,103 @@ def segment_history_cold_store_service(
             stub_rollback = _capture_rollback_state(rollback_stub_paths)
             hot_rollback = _capture_rollback_state(rollback_hot_paths)
 
-            for seg_id, stub, stub_path in validated:
-                payload_rel = stub.get("payload_path", "")
-                hot_payload = repo_root / payload_rel
+            try:
+                deferred_hot_deletes: list[tuple[Path, str]] = []
 
-                if not hot_payload.is_file():
-                    warnings.append(_make_warning(
-                        "segment_history_hot_payload_missing",
-                        f"Hot payload file missing for segment: {seg_id}",
-                        segment_id=seg_id,
-                    ))
-                    continue
+                for seg_id, stub, stub_path in validated:
+                    payload_rel = stub.get("payload_path", "")
+                    hot_payload = repo_root / payload_rel
 
-                # Compress
-                source_bytes = hot_payload.read_bytes()
-                compressed = _build_cold_gzip_bytes(source_bytes)
-                cold_path = _cold_payload_path(hot_payload)
-                cold_path.parent.mkdir(parents=True, exist_ok=True)
-                write_bytes_file(cold_path, compressed)
-                created_cold_paths.append(cold_path)
+                    if not hot_payload.is_file():
+                        warnings.append(_make_warning(
+                            "segment_history_hot_payload_missing",
+                            f"Hot payload file missing for segment: {seg_id}",
+                            segment_id=seg_id,
+                        ))
+                        continue
 
-                # Mutate stub: payload_path moves to cold location, add cold_stored_at
-                cold_rel = str(cold_path.relative_to(repo_root))
-                cold_stored_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-                updated_stub = _mutate_stub_cold(
-                    stub, cold_rel, cold_stored_at
-                )
-                write_text_file(
-                    stub_path,
-                    json.dumps(updated_stub, ensure_ascii=False, indent=2),
-                )
+                    # Compress
+                    source_bytes = hot_payload.read_bytes()
+                    compressed = _build_cold_gzip_bytes(source_bytes)
+                    cold_path = _cold_payload_path(hot_payload)
+                    cold_path.parent.mkdir(parents=True, exist_ok=True)
+                    write_bytes_file(cold_path, compressed)
+                    created_cold_paths.append(cold_path)
 
-                # Remove hot payload
-                try:
-                    hot_payload.unlink()
-                except OSError:
-                    warnings.append(_make_warning(
-                        "segment_history_hot_payload_remove_failed",
-                        f"Could not remove hot payload after cold-store: {seg_id}",
-                        segment_id=seg_id,
-                    ))
+                    # Mutate stub: payload_path moves to cold location, add cold_stored_at
+                    cold_rel = str(cold_path.relative_to(repo_root))
+                    cold_stored_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                    updated_stub = _mutate_stub_cold(
+                        stub, cold_rel, cold_stored_at
+                    )
+                    write_text_file(
+                        stub_path,
+                        json.dumps(updated_stub, ensure_ascii=False, indent=2),
+                    )
 
-                cold_stored_ids.append(seg_id)
-                # Include hot_payload so git stages its deletion
-                commit_paths.extend([cold_path, stub_path, hot_payload])
+                    cold_stored_ids.append(seg_id)
+                    # Include hot_payload so git stages its deletion
+                    commit_paths.extend([cold_path, stub_path, hot_payload])
+                    # Defer hot payload deletion until all writes succeed
+                    deferred_hot_deletes.append((hot_payload, seg_id))
 
-                # Defer audit — same reason as maintenance (F1 self-lock).
-                deferred_audit.append({
-                    "family": family,
-                    "segment_id": seg_id,
-                    "source_path": stub.get("source_path", ""),
-                    "cold_payload_path": cold_rel,
-                    "warning_count": len(warnings),
-                })
+                    # Defer audit — same reason as maintenance (F1 self-lock).
+                    deferred_audit.append({
+                        "family": family,
+                        "segment_id": seg_id,
+                        "source_path": stub.get("source_path", ""),
+                        "cold_payload_path": cold_rel,
+                        "warning_count": len(warnings),
+                    })
 
-            # Git commit — inside source lock scope per spec
-            if commit_paths:
-                msg = f"segment-history: cold-store {family} {selection_count}"
-                try:
-                    from app.git_locking import repository_mutation_lock
+                # All writes succeeded — delete hot payloads before commit
+                # so git stages their removal in the same commit.
+                for hp, sid in deferred_hot_deletes:
+                    try:
+                        hp.unlink()
+                    except OSError:
+                        warnings.append(_make_warning(
+                            "segment_history_hot_payload_remove_failed",
+                            f"Could not remove hot payload after cold-store: {sid}",
+                            segment_id=sid,
+                        ))
 
-                    with repository_mutation_lock(repo_root):
-                        success = gm.commit_paths(commit_paths, msg)
-                        if success:
-                            latest_commit = gm.latest_commit()
-                            committed_files = [
-                                str(p.relative_to(repo_root)) for p in commit_paths
-                            ]
-                        else:
-                            durable = False
-                            warnings.append(_make_warning(
-                                "segment_history_git_commit_failed",
-                                "Git commit failed for cold-store",
-                            ))
-                except Exception:
-                    durable = False
-                    warnings.append(_make_warning(
-                        "segment_history_git_commit_failed",
-                        "Git commit failed for cold-store",
-                    ))
+                # Git commit — inside source lock scope per spec
+                if commit_paths:
+                    msg = f"segment-history: cold-store {family} {selection_count}"
+                    try:
+                        from app.git_locking import repository_mutation_lock
+
+                        with repository_mutation_lock(repo_root):
+                            success = gm.commit_paths(commit_paths, msg)
+                            if success:
+                                latest_commit = gm.latest_commit()
+                                committed_files = [
+                                    str(p.relative_to(repo_root)) for p in commit_paths
+                                ]
+                            else:
+                                durable = False
+                                warnings.append(_make_warning(
+                                    "segment_history_git_commit_failed",
+                                    "Git commit failed for cold-store",
+                                ))
+                    except Exception:
+                        durable = False
+                        warnings.append(_make_warning(
+                            "segment_history_git_commit_failed",
+                            "Git commit failed for cold-store",
+                        ))
+            except Exception:
+                # Rollback under lock: restore stubs and hot payloads, remove
+                # cold .gz files, clean manifest.
+                _restore_rollback_state(stub_rollback)
+                _restore_rollback_state(hot_rollback)
+                _remove_created_paths(created_cold_paths)
+                remove_manifest(repo_root, family)
+                raise
+
+            # Success: remove manifest inside lock scope.
+            remove_manifest(repo_root, family)
 
     except SegmentHistoryLockTimeout as exc:
         return {
@@ -1445,20 +1491,10 @@ def segment_history_cold_store_service(
                 "detail": str(exc),
             },
         }
-    except Exception:
-        # Restore stubs and hot payloads to pre-cold-store state, then
-        # remove any cold .gz files that were created.
-        _restore_rollback_state(stub_rollback)
-        _restore_rollback_state(hot_rollback)
-        _remove_created_paths(created_cold_paths)
-        remove_manifest(repo_root, family)
-        raise
 
     # Emit deferred audit events after source lock release.
     for evt in deferred_audit:
         _emit_audit(audit, "segment_history_cold_store", evt)
-
-    remove_manifest(repo_root, family)
 
     return {
         "ok": True,
