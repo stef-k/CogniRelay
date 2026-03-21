@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -212,7 +213,7 @@ def _check_write_time_rollover_locked(
                     f"segment-history: roll {family} {stream_key}",
                 )
         except Exception:
-            _log.warning("Write-time rollover commit failed for %s", segment_id)
+            _log.warning("Write-time rollover commit failed for %s", segment_id, exc_info=True)
             # Local writes succeeded — leave the manifest so that the next
             # _reconcile_manifest_residue call can commit the orphaned files.
             # Per spec, the triggering append must fail when the git commit
@@ -355,6 +356,8 @@ def append_audit(
                 )
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
     except SegmentHistoryLockTimeout as exc:
         raise SegmentHistoryAppendError(
             "segment_history_source_lock_timeout",

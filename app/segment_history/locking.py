@@ -75,6 +75,10 @@ def _safe_lock_filename(lock_key: str) -> str:
 
     Uses SHA-256 of the key to avoid path-traversal issues with colon-separated
     keys like ``segment_history:journal:logs/journal/2026-03-20.jsonl``.
+
+    Lock files accumulate in the lock directory and are never cleaned up.
+    This is by design — lock files are empty advisory locks and their disk
+    footprint is negligible (one inode per unique source).
     """
     return hashlib.sha256(lock_key.encode("utf-8")).hexdigest() + ".lock"
 
@@ -91,9 +95,16 @@ def segment_history_source_lock(lock_key: str, *, lock_dir: Path, timeout: float
     lock_path = lock_dir / _safe_lock_filename(lock_key)
     try:
         lock_file = lock_path.open("a")
-    except OSError as exc:
-        _log.error("Cannot open lock file %s: %s", lock_path, exc)
-        raise LockInfrastructureError(f"Cannot open lock file {lock_path}: {exc}") from exc
+    except OSError:
+        # Invalidate cache and retry once — directory may have been removed
+        with _lock_dir_ready_guard:
+            _lock_dir_ready.discard(str(lock_dir))
+        _ensure_lock_dir(lock_dir)
+        try:
+            lock_file = lock_path.open("a")
+        except OSError as exc:
+            _log.error("Cannot open lock file %s after retry: %s", lock_path, exc)
+            raise LockInfrastructureError(f"Cannot open lock file {lock_path}: {exc}") from exc
     try:
         deadline = time.monotonic() + timeout
         while True:
@@ -115,7 +126,7 @@ def segment_history_source_lock(lock_key: str, *, lock_dir: Path, timeout: float
                     continue  # Retry on signal interruption
                 _log.error("Unexpected flock error for %s: %s", lock_key, exc)
                 lock_file.close()
-                raise SegmentHistoryLockTimeout(lock_key, timeout) from exc
+                raise LockInfrastructureError(f"Unexpected flock error for {lock_key}: {exc}") from exc
         yield
     finally:
         lock_file.close()
@@ -145,9 +156,16 @@ def acquire_sorted_source_locks(keys: list[str], *, lock_dir: Path, total_budget
             lock_path = lock_dir / _safe_lock_filename(key)
             try:
                 lock_file = lock_path.open("a")
-            except OSError as exc:
-                _log.error("Cannot open lock file %s: %s", lock_path, exc)
-                raise LockInfrastructureError(f"Cannot open lock file {lock_path}: {exc}") from exc
+            except OSError:
+                # Invalidate cache and retry once
+                with _lock_dir_ready_guard:
+                    _lock_dir_ready.discard(str(lock_dir))
+                _ensure_lock_dir(lock_dir)
+                try:
+                    lock_file = lock_path.open("a")
+                except OSError as exc:
+                    _log.error("Cannot open lock file %s after retry: %s", lock_path, exc)
+                    raise LockInfrastructureError(f"Cannot open lock file {lock_path}: {exc}") from exc
             held.append(lock_file)
             while True:
                 try:
@@ -165,7 +183,7 @@ def acquire_sorted_source_locks(keys: list[str], *, lock_dir: Path, total_budget
                     if exc.errno == errno.EINTR:
                         continue  # Retry on signal interruption
                     _log.error("Unexpected flock error for %s: %s", key, exc)
-                    raise SegmentHistoryLockTimeout(key, total_budget) from exc
+                    raise LockInfrastructureError(f"Unexpected flock error for {key}: {exc}") from exc
         yield
     finally:
         for fh in held:

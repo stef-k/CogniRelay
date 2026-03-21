@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -147,6 +148,8 @@ def locked_append_jsonl(
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
     except SegmentHistoryLockTimeout as exc:
         raise SegmentHistoryAppendError(
             "segment_history_source_lock_timeout",
@@ -179,6 +182,12 @@ def locked_append_jsonl_multi(
 
     Raises :class:`SegmentHistoryAppendError` on lock timeout or
     write-time rollover failure.
+
+    Note: partial multi-append is inherent to multi-file append operations.
+    When some files succeed and others fail, the ``SegmentHistoryAppendError``
+    with code ``segment_history_partial_multi_append`` reports which paths
+    were written.  Already-written records are NOT rolled back.  Callers
+    must tolerate this partial state.
     """
     from app.storage import append_jsonl_multi
 
@@ -243,6 +252,8 @@ def locked_append_jsonl_multi(
                 path_entry.parent.mkdir(parents=True, exist_ok=True)
                 with path_entry.open("a", encoding="utf-8") as f:
                     f.write(line)
+                    f.flush()
+                    os.fsync(f.fileno())
                 written_paths.append(str(path_entry))
     except SegmentHistoryLockTimeout as exc:
         raise SegmentHistoryAppendError(
@@ -281,7 +292,7 @@ def _check_and_rollover_locked(
     append must fail on rollover failure.
     """
     if gm is None or settings is None:
-        _log.debug(
+        _log.info(
             "Skipping write-time rollover check: gm=%s settings=%s",
             gm is not None,
             settings is not None,

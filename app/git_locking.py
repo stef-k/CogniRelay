@@ -61,9 +61,16 @@ def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
     lock_path = lock_dir / f"{_repo_lock_id(repo_root)}.lock"
     try:
         lock_file = lock_path.open("w")
-    except OSError as exc:
-        _log.error("Cannot open git lock file %s: %s", lock_path, exc)
-        raise GitLockInfrastructureError(f"Cannot open git lock file {lock_path}: {exc}") from exc
+    except OSError:
+        # Invalidate cache and retry once — directory may have been removed
+        with _lock_dir_ready_guard:
+            _lock_dir_ready.discard(str(lock_dir))
+        _ensure_lock_dir(lock_dir)
+        try:
+            lock_file = lock_path.open("w")
+        except OSError as exc:
+            _log.error("Cannot open git lock file %s after retry: %s", lock_path, exc)
+            raise GitLockInfrastructureError(f"Cannot open git lock file {lock_path}: {exc}") from exc
     try:
         # Blocking wait — no timeout per spec.  Source locks (30 s timeout)
         # bound concurrency; the git lock is only held during brief

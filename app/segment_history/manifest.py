@@ -43,7 +43,10 @@ def _manifest_dir(repo_root: Path) -> Path:
     # Ensure .cognirelay/ root is gitignored so no manifest or metadata leaks
     cognirelay_gitignore = repo_root / ".cognirelay" / ".gitignore"
     if not cognirelay_gitignore.exists():
-        cognirelay_gitignore.write_text("*\n", encoding="utf-8")
+        try:
+            write_text_file(cognirelay_gitignore, "*\n")
+        except OSError:
+            _log.debug("Concurrent .gitignore creation; safe to ignore")
     return d
 
 
@@ -184,10 +187,11 @@ def read_manifest(repo_root: Path, family: str = "") -> dict | None:
     exist.  Raises ValueError if the file exists but is corrupt.
     """
     path = manifest_path(repo_root, family)
-    if not path.is_file():
-        return None
     try:
         text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    try:
         data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("Manifest is not a JSON object")
