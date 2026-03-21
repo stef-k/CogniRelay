@@ -681,12 +681,25 @@ def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
     of files removed.  All errors are swallowed to guarantee graceful
     degradation — orphans that cannot be removed will be retried on the
     next pass.
+
+    Cross-references the current manifest's target_paths to avoid deleting
+    in-flight files from concurrent operations.
     """
     from app.segment_history.families import FAMILIES
 
     config = FAMILIES.get(family)
     if config is None:
         return 0
+
+    # Cross-reference manifest to avoid deleting in-flight files
+    from app.segment_history.manifest import read_manifest as _read_mf_orphan
+    manifest_targets: set[str] = set()
+    try:
+        mf = _read_mf_orphan(repo_root, family)
+        if mf is not None:
+            manifest_targets = set(mf.get("target_paths", []))
+    except ValueError:
+        pass  # Corrupt manifest — no targets to protect
 
     dirs_to_scan: list[Path] = []
     if family == "journal":
@@ -726,7 +739,7 @@ def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
             tracked: set[str] = set()
             dir_rel = str(d.relative_to(repo_root))
             cp = subprocess.run(
-                ["git", "ls-tree", "--name-only", "HEAD", "--", dir_rel + "/"],
+                ["git", "ls-tree", "-r", "--name-only", "HEAD", "--", dir_rel + "/"],
                 cwd=repo_root,
                 text=True,
                 capture_output=True,
@@ -738,6 +751,9 @@ def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
             for f in d.iterdir():
                 if f.is_file():
                     f_rel = str(f.relative_to(repo_root))
+                    if f_rel in manifest_targets:
+                        _log.debug("Skipping in-flight manifest target: %s", f_rel)
+                        continue
                     if f_rel not in tracked:
                         try:
                             f.unlink()
@@ -842,6 +858,21 @@ def _reconcile_manifest_residue(
         if not manifest_sources or not live_manifest_sources <= locked_source_paths:
             return None
 
+    # Validate required manifest fields before proceeding.
+    _required_manifest_fields = ("operation", "family", "target_paths", "source_paths", "segment_ids")
+    _missing_fields = [f for f in _required_manifest_fields if f not in manifest]
+    if _missing_fields:
+        _log.warning(
+            "Corrupt manifest for %s: missing required fields %s; removing and cleaning orphans",
+            caller_family, _missing_fields,
+        )
+        remove_manifest(repo_root, caller_family)
+        orphan_count = _cleanup_family_orphans(repo_root, caller_family)
+        detail = f"segment_history_manifest_schema_invalid: missing {_missing_fields}"
+        if orphan_count:
+            detail += f"; removed {orphan_count} orphaned files"
+        return {"warning": detail, "reconciled_source_paths": set(), "recovery_failed": False}
+
     recorded_op = manifest.get("operation", "unknown")
     family = manifest.get("family", "unknown")
     segment_ids = manifest.get("segment_ids", [])
@@ -865,7 +896,7 @@ def _reconcile_manifest_residue(
         except Exception:
             all_in_head = False  # git check failed — conservative path
         if all_in_head:
-            remove_manifest(repo_root, caller_family)
+            remove_manifest(repo_root, caller_family, expected_operation=recorded_op)
             # Truncate sources to remove already-committed rolled data
             if recorded_op in ("maintenance", "write_time_rollover"):
                 source_paths_list = manifest.get("source_paths", [])
@@ -1044,7 +1075,7 @@ def _reconcile_manifest_residue(
     # the next reconciliation pass retry, matching the maintenance and
     # cold-store pattern (F5).
     if recovered or not existing_targets:
-        remove_manifest(repo_root, caller_family)
+        remove_manifest(repo_root, caller_family, expected_operation=recorded_op)
 
     action = "recovered" if recovered else f"preserved={len(existing_targets)}"
     detail = f"segment_history_manifest_residue:{recorded_op}:{family}:{len(segment_ids)}:{action}"
