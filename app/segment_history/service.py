@@ -553,13 +553,13 @@ def _byte_size(content: str | bytes) -> int:
     return len(content)
 
 
-def _first_nonempty_line_preview(content: str, max_len: int = 200) -> str | None:
-    """Return the first non-empty line truncated to *max_len*, or None."""
+def _first_nonempty_line_preview(content: str, max_len: int = 200) -> str:
+    """Return the first non-empty line truncated to *max_len*, or empty string."""
     for line in content.split("\n"):
         stripped = line.strip()
         if stripped:
             return stripped[:max_len]
-    return None
+    return ""
 
 
 def _sample_json_field(
@@ -712,7 +712,10 @@ def segment_history_maintenance_service(
         check_rollover_eligible,
         discover_active_sources,
     )
-    from app.segment_history.locking import acquire_sorted_source_locks
+    from app.segment_history.locking import (
+        SegmentHistoryLockTimeout,
+        acquire_sorted_source_locks,
+    )
     from app.segment_history.manifest import remove_manifest, write_manifest
 
     if family not in FAMILIES:
@@ -763,7 +766,7 @@ def segment_history_maintenance_service(
                 except OSError:
                     pass
             continue
-        if check_rollover_eligible(src, family, settings, now):
+        if check_rollover_eligible(src, family, settings, now, warnings=warnings):
             eligible.append(src)
 
     # 3. Sort and apply batch limit
@@ -809,7 +812,7 @@ def segment_history_maintenance_service(
     committed_files: list[str] = []
     latest_commit: str | None = None
 
-    try:
+    try:  # noqa: SIM105 — structured rollback requires bare except + re-raise
         # 5. Acquire sorted source locks
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
             # Post-lock: recount eligible for selection_count
@@ -929,6 +932,7 @@ def segment_history_maintenance_service(
                         repo_root=repo_root,
                     )
                     if result is None:
+                        selection_count -= 1
                         warnings.append(_make_warning(
                             "segment_history_only_partial_line",
                             f"Source has only a partial unterminated line, skipping roll: {rel}",
@@ -979,6 +983,16 @@ def segment_history_maintenance_service(
                         "Git commit failed for maintenance roll",
                     ))
 
+    except SegmentHistoryLockTimeout as exc:
+        return {
+            "ok": False,
+            "operation": "segment_history_maintenance",
+            "family": family,
+            "error": {
+                "code": "segment_history_source_lock_timeout",
+                "detail": str(exc),
+            },
+        }
     except Exception:
         # Rollback: restore source files to pre-roll state, then remove created
         if source_rollback:
@@ -1026,7 +1040,10 @@ def segment_history_cold_store_service(
     removes the hot rolled payload, and commits.
     """
     from app.segment_history.families import FAMILIES, _get_cold_after_days_setting
-    from app.segment_history.locking import acquire_sorted_source_locks
+    from app.segment_history.locking import (
+        SegmentHistoryLockTimeout,
+        acquire_sorted_source_locks,
+    )
     from app.segment_history.manifest import remove_manifest, write_manifest
 
     if family not in FAMILIES:
@@ -1382,6 +1399,16 @@ def segment_history_cold_store_service(
                         "Git commit failed for cold-store",
                     ))
 
+    except SegmentHistoryLockTimeout as exc:
+        return {
+            "ok": False,
+            "operation": "segment_history_cold_store",
+            "family": family,
+            "error": {
+                "code": "segment_history_source_lock_timeout",
+                "detail": str(exc),
+            },
+        }
     except Exception:
         # Restore stubs and hot payloads to pre-cold-store state, then
         # remove any cold .gz files that were created.
@@ -1630,43 +1657,42 @@ def segment_history_cold_rehydrate_service(
                     f"Could not remove cold payload after rehydrate: {segment_id}",
                     segment_id=segment_id,
                 ))
+
+            # Git commit — inside source lock scope per spec
+            durable = True
+            committed_files: list[str] = []
+            latest_commit: str | None = None
+
+            commit_paths_list = [hot_path, stub_path, cold_path]
+            msg = f"segment-history: rehydrate {family} {segment_id}"
+            try:
+                from app.git_locking import repository_mutation_lock
+
+                with repository_mutation_lock(repo_root):
+                    success = gm.commit_paths(commit_paths_list, msg)
+                    if success:
+                        latest_commit = gm.latest_commit()
+                        committed_files = [
+                            str(p.relative_to(repo_root)) for p in commit_paths_list
+                        ]
+                    else:
+                        durable = False
+                        warnings.append(_make_warning(
+                            "segment_history_git_commit_failed",
+                            "Git commit failed for rehydrate",
+                        ))
+            except Exception:
+                durable = False
+                warnings.append(_make_warning(
+                    "segment_history_git_commit_failed",
+                    "Git commit failed for rehydrate",
+                ))
     except SegmentHistoryLockTimeout as exc:
         return _error_response(
             409,
             "segment_history_source_lock_timeout",
             str(exc),
         )
-
-    # Git commit
-    durable = True
-    committed_files: list[str] = []
-    latest_commit: str | None = None
-
-    # Include cold_path so git stages its deletion
-    commit_paths_list = [hot_path, stub_path, cold_path]
-    msg = f"segment-history: rehydrate {family} {segment_id}"
-    try:
-        from app.git_locking import repository_mutation_lock
-
-        with repository_mutation_lock(repo_root):
-            success = gm.commit_paths(commit_paths_list, msg)
-            if success:
-                latest_commit = gm.latest_commit()
-                committed_files = [
-                    str(p.relative_to(repo_root)) for p in commit_paths_list
-                ]
-            else:
-                durable = False
-                warnings.append(_make_warning(
-                    "segment_history_git_commit_failed",
-                    "Git commit failed for rehydrate",
-                ))
-    except Exception:
-        durable = False
-        warnings.append(_make_warning(
-            "segment_history_git_commit_failed",
-            "Git commit failed for rehydrate",
-        ))
 
     # Emit audit event
     _emit_audit(audit, "segment_history_cold_rehydrate", {

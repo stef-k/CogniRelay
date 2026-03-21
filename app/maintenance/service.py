@@ -1414,7 +1414,11 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
     with per-family rows.
     """
     from app.segment_history.families import FAMILIES, discover_active_sources
-    from app.segment_history.service import _validate_segment_id
+    from app.segment_history.service import (
+        _FAMILY_EXTENSION,
+        _rehydrate_hot_path,
+        _validate_segment_id,
+    )
 
     any_failure = False
     families_results: list[dict[str, Any]] = []
@@ -1571,6 +1575,19 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                                 "path": rel,
                                 "segment_id": seg_id,
                             })
+                        # Verify payload path suffix matches family contract
+                        expected_ext = _FAMILY_EXTENSION.get(family_name, ".jsonl")
+                        if not payload_rel.endswith(expected_ext):
+                            has_failure = True
+                            family_warnings.append({
+                                "code": "segment_history_payload_suffix_mismatch",
+                                "detail": (
+                                    f"Hot payload path suffix does not match "
+                                    f"family extension {expected_ext}: {payload_rel}"
+                                ),
+                                "path": rel,
+                                "segment_id": seg_id,
+                            })
                     else:
                         has_failure = True
                         family_warnings.append({
@@ -1603,6 +1620,24 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                             "segment_id": seg_id,
                         })
                         continue
+
+                    # Verify canonical hot restoration target derivation
+                    source_path_str = stub.get("source_path", "")
+                    try:
+                        _rehydrate_hot_path(
+                            family_name, seg_id, source_path_str, restore_root,
+                        )
+                    except Exception:
+                        has_failure = True
+                        family_warnings.append({
+                            "code": "segment_history_cold_derivation_failed",
+                            "detail": (
+                                f"Cannot derive canonical hot restoration target "
+                                f"from stub: {rel}"
+                            ),
+                            "path": rel,
+                            "segment_id": seg_id,
+                        })
 
                     # Decompress for CRC integrity check
                     try:

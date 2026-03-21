@@ -91,17 +91,25 @@ def _check_write_time_rollover(
             content = path.read_text(encoding="utf-8", errors="replace")
             summary = config.build_summary(content)
 
-            result = _roll_jsonl_source(
-                source_path=path,
-                payload_path=payload_path,
-                family=family,
-                segment_id=segment_id,
-                stream_key=stream_key,
-                rolled_at=now,
-                stub_dir=stub_dir,
-                summary=summary,
-                repo_root=repo_root,
-            )
+            try:
+                result = _roll_jsonl_source(
+                    source_path=path,
+                    payload_path=payload_path,
+                    family=family,
+                    segment_id=segment_id,
+                    stream_key=stream_key,
+                    rolled_at=now,
+                    stub_dir=stub_dir,
+                    summary=summary,
+                    repo_root=repo_root,
+                )
+            except WriteTimeRolloverError:
+                raise
+            except Exception as exc:
+                raise WriteTimeRolloverError(
+                    "segment_history_write_time_rollover_failed",
+                    f"Write-time rollover local writes failed: {exc}",
+                ) from exc
             if result is None:
                 _log.warning("Write-time rollover skipped (partial line only) for %s", path)
                 return

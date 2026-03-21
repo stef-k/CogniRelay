@@ -358,31 +358,132 @@ def is_journal_day_rollover_eligible(
 
 
 def is_message_stream_max_hot_days_eligible(
-    source_path: Path, settings: Any, now: datetime
+    source_path: Path, settings: Any, now: datetime,
+    *, warnings: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """Check if a message stream source exceeds max_hot_days based on mtime."""
+    """Check if a message stream source exceeds max_hot_days.
+
+    Per spec, the age trigger parses event timestamps (``sent_at`` then
+    ``ack_at``) from the file content and does **not** fall back to mtime.
+    If no parseable timestamp is found, returns ``False`` and emits the
+    ``segment_history_missing_stream_timestamp`` warning.
+    """
+    import json as _json
+
     max_hot = getattr(settings, "message_stream_max_hot_days", 14)
     try:
-        mtime = source_path.stat().st_mtime
+        content = source_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    mtime_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
-    age_days = (now - mtime_dt).total_seconds() / 86400
-    return age_days >= max_hot
+
+    newest_ts: str | None = None
+    for line in reversed(content.split("\n")):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        for fld in ("sent_at", "ack_at"):
+            val = row.get(fld)
+            if val and isinstance(val, str) and len(val) >= 10:
+                newest_ts = val
+                break
+        if newest_ts:
+            break
+
+    if newest_ts is None:
+        if warnings is not None:
+            from app.segment_history.service import _make_warning
+            warnings.append(_make_warning(
+                "segment_history_missing_stream_timestamp",
+                f"No parseable event timestamp in message_stream source: {source_path.name}",
+                path=str(source_path),
+            ))
+        return False
+
+    try:
+        if "T" in newest_ts and newest_ts.endswith("Z") and len(newest_ts) == 16:
+            ts_dt = datetime.strptime(newest_ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        elif len(newest_ts) == 10:
+            ts_dt = datetime.strptime(newest_ts, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        else:
+            ts_dt = datetime.fromisoformat(newest_ts.replace("Z", "+00:00"))
+        age_days = (now - ts_dt).total_seconds() / 86400
+        return age_days >= max_hot
+    except (ValueError, TypeError):
+        if warnings is not None:
+            from app.segment_history.service import _make_warning
+            warnings.append(_make_warning(
+                "segment_history_missing_stream_timestamp",
+                f"Unparseable event timestamp in message_stream source: {source_path.name}",
+                path=str(source_path),
+            ))
+        return False
 
 
 def is_message_thread_inactivity_eligible(
-    source_path: Path, settings: Any, now: datetime
+    source_path: Path, settings: Any, now: datetime,
+    *, warnings: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """Check if a message thread source exceeds inactivity_days based on mtime."""
+    """Check if a message thread source exceeds inactivity_days.
+
+    Per spec, the inactivity trigger parses ``sent_at`` from the file
+    content and does **not** fall back to mtime.  If no parseable
+    ``sent_at`` is found, returns ``False`` and emits the
+    ``segment_history_missing_thread_timestamp`` warning.
+    """
+    import json as _json
+
     inactivity = getattr(settings, "message_thread_inactivity_days", 30)
     try:
-        mtime = source_path.stat().st_mtime
+        content = source_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    mtime_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
-    age_days = (now - mtime_dt).total_seconds() / 86400
-    return age_days >= inactivity
+
+    newest_ts: str | None = None
+    for line in reversed(content.split("\n")):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        val = row.get("sent_at")
+        if val and isinstance(val, str) and len(val) >= 10:
+            newest_ts = val
+            break
+
+    if newest_ts is None:
+        if warnings is not None:
+            from app.segment_history.service import _make_warning
+            warnings.append(_make_warning(
+                "segment_history_missing_thread_timestamp",
+                f"No parseable sent_at in message_thread source: {source_path.name}",
+                path=str(source_path),
+            ))
+        return False
+
+    try:
+        if "T" in newest_ts and newest_ts.endswith("Z") and len(newest_ts) == 16:
+            ts_dt = datetime.strptime(newest_ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        elif len(newest_ts) == 10:
+            ts_dt = datetime.strptime(newest_ts, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        else:
+            ts_dt = datetime.fromisoformat(newest_ts.replace("Z", "+00:00"))
+        age_days = (now - ts_dt).total_seconds() / 86400
+        return age_days >= inactivity
+    except (ValueError, TypeError):
+        if warnings is not None:
+            from app.segment_history.service import _make_warning
+            warnings.append(_make_warning(
+                "segment_history_missing_thread_timestamp",
+                f"Unparseable sent_at in message_thread source: {source_path.name}",
+                path=str(source_path),
+            ))
+        return False
 
 
 def _is_jsonl_day_boundary_eligible(
@@ -438,7 +539,8 @@ def _is_jsonl_day_boundary_eligible(
 
 
 def check_rollover_eligible(
-    source_path: Path, family: str, settings: Any, now: datetime
+    source_path: Path, family: str, settings: Any, now: datetime,
+    *, warnings: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Check if a source file is eligible for rollover under its family's rules."""
     config = FAMILIES[family]
@@ -451,13 +553,17 @@ def check_rollover_eligible(
     if family == "message_thread":
         if is_size_rollover_eligible(source_path, family, settings):
             return True
-        return is_message_thread_inactivity_eligible(source_path, settings, now)
+        return is_message_thread_inactivity_eligible(
+            source_path, settings, now, warnings=warnings,
+        )
 
     # Message stream: size or max_hot_days (no day-boundary)
     if family == "message_stream":
         if is_size_rollover_eligible(source_path, family, settings):
             return True
-        return is_message_stream_max_hot_days_eligible(source_path, settings, now)
+        return is_message_stream_max_hot_days_eligible(
+            source_path, settings, now, warnings=warnings,
+        )
 
     # api_audit, ops_runs, episodic: size or day-boundary
     if config.has_size_rollover and is_size_rollover_eligible(source_path, family, settings):

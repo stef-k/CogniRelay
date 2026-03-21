@@ -306,7 +306,7 @@ class TestSummaryHelpers(unittest.TestCase):
 
     def test_first_nonempty_line(self) -> None:
         self.assertEqual(_first_nonempty_line_preview("\n\nhello\nworld"), "hello")
-        self.assertIsNone(_first_nonempty_line_preview("\n\n"))
+        self.assertEqual(_first_nonempty_line_preview("\n\n"), "")
 
     def test_first_nonempty_line_max_200(self) -> None:
         long_line = "x" * 300
