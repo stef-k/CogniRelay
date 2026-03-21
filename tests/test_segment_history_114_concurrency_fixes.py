@@ -1158,5 +1158,247 @@ class TestColdStoreReconciliationUnmutatedStub(unittest.TestCase):
             )
 
 
+# -----------------------------------------------------------------------
+# Finding 1: Manifest clobber guard — reconciliation skips non-overlapping
+# -----------------------------------------------------------------------
+class TestManifestClobberGuard(unittest.TestCase):
+    """Reconciliation must skip manifests whose source_paths do not overlap
+    with the caller's locked set.  Without this, concurrent operations on
+    the same family but different sources could clobber each other's
+    crash-recovery manifests."""
+
+    def test_non_overlapping_sources_skips_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="message_stream",
+                source_paths=["messages/inbox/alice.jsonl"],
+                segment_ids=["message_stream__inbox__alice__20260320T120000Z__0001"],
+                target_paths=[],
+            )
+
+            # Reconcile with a non-overlapping locked set
+            result = _reconcile_manifest_residue(
+                repo, "message_stream", "cold_store", None,
+                locked_source_paths={"messages/outbox/bob.jsonl"},
+            )
+            # Should have been skipped — manifest still exists
+            self.assertIsNone(result)
+            self.assertIsNotNone(read_manifest(repo, "message_stream"))
+
+    def test_overlapping_sources_reconciles(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="message_stream",
+                source_paths=["messages/inbox/alice.jsonl"],
+                segment_ids=["message_stream__inbox__alice__20260320T120000Z__0001"],
+                target_paths=[],
+            )
+
+            # Reconcile with an overlapping locked set
+            result = _reconcile_manifest_residue(
+                repo, "message_stream", "maintenance", None,
+                locked_source_paths={"messages/inbox/alice.jsonl", "messages/outbox/bob.jsonl"},
+            )
+            # Should have reconciled (no targets → manifest removed)
+            self.assertIsNotNone(result)
+            self.assertIsNone(read_manifest(repo, "message_stream"))
+
+    def test_no_locked_source_paths_reconciles_all(self) -> None:
+        """Backward compat: when locked_source_paths is None, always reconcile."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="message_stream",
+                source_paths=["messages/inbox/alice.jsonl"],
+                segment_ids=["message_stream__inbox__alice__20260320T120000Z__0001"],
+                target_paths=[],
+            )
+
+            result = _reconcile_manifest_residue(
+                repo, "message_stream", "maintenance", None,
+            )
+            self.assertIsNotNone(result)
+            self.assertIsNone(read_manifest(repo, "message_stream"))
+
+
+# -----------------------------------------------------------------------
+# Finding 2: Rehydrate crash-recovery — orphaned hot auto-cleanup
+# -----------------------------------------------------------------------
+class TestRehydrateOrphanedHotAutoClean(unittest.TestCase):
+    """Rehydrate must auto-clean orphaned hot files from a prior crash
+    instead of permanently returning 409."""
+
+    def test_orphaned_hot_auto_cleaned_rehydrate_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            family = "api_audit"
+
+            # Set up a cold-stored segment
+            seg_id = "api_audit__api_audit__20260320T120000Z__0001"
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+
+            hot_payload_content = b'{"event":"test"}\n'
+            compressed = _build_cold_gzip_bytes(hot_payload_content)
+            cold_dir = hist / "cold"
+            cold_dir.mkdir()
+            cold_path = cold_dir / f"{seg_id}.jsonl.gz"
+            cold_path.write_bytes(compressed)
+
+            stub_data = _create_stub(
+                family=family,
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260320T120000Z",
+                payload_path=f"logs/history/api_audit/cold/{seg_id}.jsonl.gz",
+                summary={"line_count": 1, "byte_size": 17},
+            )
+            stub_data["cold_stored_at"] = "2026-03-20T12:00:00Z"
+            stub_path = idx / f"{seg_id}.json"
+            stub_path.write_text(json.dumps(stub_data))
+
+            # Simulate crash residue: hot file exists from prior crash
+            hot_path = repo / "logs" / "history" / "api_audit" / f"{seg_id}.jsonl"
+            hot_path.write_text("orphaned-from-crash")
+
+            result = segment_history_cold_rehydrate_service(
+                family=family, segment_id=seg_id, repo_root=repo, gm=gm,
+            )
+            self.assertIsInstance(result, dict)
+            self.assertTrue(result["ok"])
+            # Verify warning about auto-cleanup
+            codes = [w["code"] for w in result.get("warnings", [])]
+            self.assertIn("segment_history_orphaned_hot_removed", codes)
+            # Hot file should now contain decompressed content (not orphan)
+            self.assertEqual(hot_path.read_bytes(), hot_payload_content)
+
+    def test_rehydrate_writes_crash_recovery_manifest(self) -> None:
+        """Rehydrate should write a manifest before mutations so that
+        crash recovery is possible."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            family = "api_audit"
+            seg_id = "api_audit__api_audit__20260320T120000Z__0001"
+
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+
+            hot_payload_content = b'{"event":"test"}\n'
+            compressed = _build_cold_gzip_bytes(hot_payload_content)
+            cold_dir = hist / "cold"
+            cold_dir.mkdir()
+            cold_path = cold_dir / f"{seg_id}.jsonl.gz"
+            cold_path.write_bytes(compressed)
+
+            stub_data = _create_stub(
+                family=family,
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260320T120000Z",
+                payload_path=f"logs/history/api_audit/cold/{seg_id}.jsonl.gz",
+                summary={"line_count": 1, "byte_size": 17},
+            )
+            stub_data["cold_stored_at"] = "2026-03-20T12:00:00Z"
+            stub_path = idx / f"{seg_id}.json"
+            stub_path.write_text(json.dumps(stub_data))
+
+            # Patch write_bytes_file to crash after writing hot payload
+            from app.segment_history import service as _svc
+
+            original_write = _svc.write_text_file
+            call_count = [0]
+
+            def crash_on_stub_write(path, content):
+                call_count[0] += 1
+                if "index" in str(path) and seg_id in str(path):
+                    # Manifest should already exist at this point
+                    mf = read_manifest(repo, family)
+                    assert mf is not None, "Manifest must exist before stub mutation"
+                    assert mf["operation"] == "rehydrate"
+                    raise RuntimeError("simulated crash")
+                return original_write(path, content)
+
+            with patch.object(_svc, "write_text_file", side_effect=crash_on_stub_write):
+                with self.assertRaises(RuntimeError):
+                    segment_history_cold_rehydrate_service(
+                        family=family, segment_id=seg_id, repo_root=repo,
+                        gm=SimpleGitManagerStub(repo),
+                    )
+
+            # After rollback, manifest should be removed
+            self.assertIsNone(read_manifest(repo, family))
+
+
+# -----------------------------------------------------------------------
+# Finding 3: In-batch segment ID deduplication
+# -----------------------------------------------------------------------
+class TestInBatchSegmentIdDedup(unittest.TestCase):
+    """_next_segment_id must account for IDs already reserved in the
+    current batch to prevent collisions before files are written."""
+
+    def test_reserved_ids_prevents_collision(self) -> None:
+        from app.segment_history.service import _next_segment_id
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+
+            id1 = _next_segment_id("api_audit", "api_audit", now, target)
+            self.assertTrue(id1.endswith("__0001"))
+
+            # Without reserved_ids, same call returns same ID
+            id2_no_reserve = _next_segment_id("api_audit", "api_audit", now, target)
+            self.assertEqual(id1, id2_no_reserve)
+
+            # With reserved_ids, the collision is avoided
+            id2_with_reserve = _next_segment_id(
+                "api_audit", "api_audit", now, target,
+                reserved_ids={id1},
+            )
+            self.assertTrue(id2_with_reserve.endswith("__0002"))
+            self.assertNotEqual(id1, id2_with_reserve)
+
+    def test_reserved_ids_stacks_with_disk(self) -> None:
+        from app.segment_history.service import _next_segment_id
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+
+            # Write a file on disk at seq 0001
+            id1 = _next_segment_id("api_audit", "api_audit", now, target)
+            (target / f"{id1}.jsonl").write_text("data")
+
+            # Without reserved_ids, gets 0002 from disk scan
+            id2 = _next_segment_id("api_audit", "api_audit", now, target)
+            self.assertTrue(id2.endswith("__0002"))
+
+            # With reserved_ids at 0003, gets 0004
+            reserved = {id2, id2.replace("__0002", "__0003")}
+            id4 = _next_segment_id(
+                "api_audit", "api_audit", now, target,
+                reserved_ids=reserved,
+            )
+            self.assertTrue(id4.endswith("__0004"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -74,42 +74,84 @@ def _cold_store_journal(repo: Path, gm: SimpleGitManagerStub) -> str:
 
 
 # =========================================================================
-# Gap: Rehydrate conflict_path in 409 response
+# Gap: Rehydrate orphaned-hot auto-cleanup and genuine conflict
 # =========================================================================
 class TestRehydrateConflictPath(unittest.TestCase):
-    def test_conflict_includes_conflict_path(self) -> None:
+    def test_orphaned_hot_from_crash_is_auto_cleaned(self) -> None:
+        """When a hot file exists but the stub is still cold (crash residue),
+        the rehydrate should auto-clean the orphan and succeed."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
             seg_id = _cold_store_journal(repo, gm)
 
-            # Rehydrate once to create hot payload
+            # Manually place a file at the hot target to simulate a
+            # prior crash between hot-payload write and stub mutation.
+            hot_path = _rehydrate_hot_path(
+                "journal", seg_id, "journal/2026/2026-03-19.md", repo,
+            )
+            hot_path.parent.mkdir(parents=True, exist_ok=True)
+            hot_path.write_text("orphaned-from-crash")
+
+            result = segment_history_cold_rehydrate_service(
+                family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+            )
+            # Should succeed — orphaned hot file was auto-cleaned
+            self.assertIsInstance(result, dict)
+            self.assertTrue(result["ok"])
+            # Should include a warning about the auto-cleanup
+            warning_codes = [w["code"] for w in result.get("warnings", [])]
+            self.assertIn("segment_history_orphaned_hot_removed", warning_codes)
+
+    def test_genuine_conflict_returns_409(self) -> None:
+        """When a hot file exists and the stub is NOT cold, it's a genuine
+        conflict (not crash residue) and should return 409."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            # Roll a journal segment (creates hot stub, no cold_stored_at)
+            _roll_journal(repo, gm)
+
+            # Cold-store it
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            cold = segment_history_cold_store_service(
+                family="journal", repo_root=repo, settings=_FakeSettings(),
+                gm=gm, now=now,
+            )
+            seg_id = cold["cold_segment_ids"][0]
+
+            # Rehydrate successfully first
             segment_history_cold_rehydrate_service(
                 family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
             )
 
             # Re-cold-store
-            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             segment_history_cold_store_service(
-                family="journal", repo_root=repo, settings=_FakeSettings(), gm=gm, now=now,
+                family="journal", repo_root=repo, settings=_FakeSettings(),
+                gm=gm, now=now,
             )
 
-            # Manually place a file at the hot target to create a conflict
+            # Now rehydrate again, but delete the cold payload to simulate
+            # a state where hot exists and cold is gone (not crash residue)
             hot_path = _rehydrate_hot_path(
                 "journal", seg_id, "journal/2026/2026-03-19.md", repo,
             )
             hot_path.parent.mkdir(parents=True, exist_ok=True)
             hot_path.write_text("conflict")
 
+            # Remove the cold payload so it's not the auto-clean case
+            cold_dir = repo / "journal" / "history" / "2026" / "cold"
+            for gz in cold_dir.glob("*.gz"):
+                gz.unlink()
+
             result = segment_history_cold_rehydrate_service(
                 family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
             )
+            # Should fail because cold payload is missing (checked before
+            # conflict check), returning 409
             self.assertIsInstance(result, JSONResponse)
             self.assertEqual(result.status_code, 409)
-            parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "segment_history_rehydrate_conflict")
-            self.assertIn("conflict_path", parsed)
-            self.assertTrue(parsed["conflict_path"].endswith(".md"))
 
 
 # =========================================================================

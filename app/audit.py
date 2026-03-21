@@ -75,7 +75,10 @@ def _check_write_time_rollover_locked(
     if mf is not None and rel in mf.get("source_paths", []):
         from app.segment_history.service import _reconcile_manifest_residue
 
-        _reconcile_manifest_residue(repo_root, family, "write_time_rollover", gm)
+        _reconcile_manifest_residue(
+            repo_root, family, "write_time_rollover", gm,
+            locked_source_paths={rel},
+        )
         # Re-read after reconciliation — it removes the manifest on success
         try:
             mf = _read_manifest(repo_root, family)

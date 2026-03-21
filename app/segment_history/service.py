@@ -99,14 +99,22 @@ def _derive_stream_key(family: str, source_path: str) -> str:
 # Segment ID allocation
 # ---------------------------------------------------------------------------
 def _next_segment_id(
-    family: str, stream_key: str, rolled_at: datetime, target_dir: Path
+    family: str,
+    stream_key: str,
+    rolled_at: datetime,
+    target_dir: Path,
+    *,
+    reserved_ids: set[str] | None = None,
 ) -> str:
     """Allocate the next segment ID for a family+stream at the given timestamp.
 
     Format: ``{family}__{stream_key}__{YYYYMMDDTHHMMSSZ}__{seq:04d}``
 
     Scans *target_dir* for existing segment files to determine the next
-    sequence number.
+    sequence number.  When *reserved_ids* is provided, also skips
+    sequence numbers already claimed by other allocations in the same
+    batch (prevents in-batch collisions when files haven't been written
+    to disk yet).
     """
     ts = _segment_timestamp_str(rolled_at)
     prefix = f"{family}__{stream_key}__{ts}__"
@@ -122,6 +130,19 @@ def _next_segment_id(
                     break
             if name.startswith(prefix):
                 tail = name[len(prefix):]
+                try:
+                    seq = int(tail)
+                    if seq > max_seq:
+                        max_seq = seq
+                except ValueError:
+                    continue
+
+    # Also account for IDs reserved by earlier allocations in the same
+    # batch that haven't been written to disk yet.
+    if reserved_ids:
+        for rid in reserved_ids:
+            if rid.startswith(prefix):
+                tail = rid[len(prefix):]
                 try:
                     seq = int(tail)
                     if seq > max_seq:
@@ -634,7 +655,12 @@ def _json_field_counts(
 # Phase 8: Residue detection and manifest reconciliation
 # ===========================================================================
 def _reconcile_manifest_residue(
-    repo_root: Path, caller_family: str, caller_op: str, gm: Any
+    repo_root: Path,
+    caller_family: str,
+    caller_op: str,
+    gm: Any,
+    *,
+    locked_source_paths: set[str] | None = None,
 ) -> dict[str, str] | None:
     """Check for and reconcile a leftover manifest from a prior crash.
 
@@ -642,6 +668,11 @@ def _reconcile_manifest_residue(
     orphaned target files (payloads/stubs/cold archives) listed in the
     manifest's ``target_paths`` that are not yet committed to git.  This
     prevents phantom files from accumulating after mid-batch crashes.
+
+    When *locked_source_paths* is provided, reconciliation is only attempted
+    if the manifest's ``source_paths`` overlap with the caller's held lock
+    set.  This prevents a concurrent operation on non-overlapping sources
+    from clobbering or prematurely removing another operation's manifest.
 
     Returns None if no manifest exists, or a dict with a ``warning`` key
     describing the reconciliation action taken.
@@ -656,6 +687,14 @@ def _reconcile_manifest_residue(
         return {"warning": "segment_history_manifest_unreadable_cleanup"}
 
     if manifest is None:
+        return None
+
+    # If the caller provided its locked source set, only reconcile when
+    # the manifest's sources overlap.  Otherwise a concurrent operation
+    # on non-overlapping sources would either clobber the manifest or
+    # prematurely delete it before the owning operation finishes.
+    manifest_sources = set(manifest.get("source_paths", []))
+    if locked_source_paths is not None and not manifest_sources & locked_source_paths:
         return None
 
     recorded_op = manifest.get("operation", "unknown")
@@ -924,7 +963,13 @@ def segment_history_maintenance_service(
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
             # 5a. Reconcile manifest residue inside lock scope to prevent
             #     concurrent callers from both attempting recovery commits.
-            residue = _reconcile_manifest_residue(repo_root, family, "maintenance", gm)
+            #     Only reconcile if the manifest's sources overlap with our
+            #     locked set — prevents clobbering a concurrent operation's
+            #     manifest on non-overlapping sources.
+            residue = _reconcile_manifest_residue(
+                repo_root, family, "maintenance", gm,
+                locked_source_paths=set(all_source_rels),
+            )
             if residue:
                 warnings.append(_make_warning(
                     "segment_history_manifest_residue",
@@ -964,11 +1009,15 @@ def segment_history_maintenance_service(
 
             selection_count = len(locked_eligible)
 
-            # 6. Pre-compute segment IDs and target paths for manifest
+            # 6. Pre-compute segment IDs and target paths for manifest.
+            #    Track reserved IDs so that two sources mapping to the same
+            #    (family, stream_key, timestamp) don't collide on seq number
+            #    before any files are written to disk.
             planned: list[tuple[Path, str, str, Path, Path]] = []  # (src, rel, seg_id, payload, stub)
             planned_source_rels: list[str] = []
             planned_segment_ids: list[str] = []
             planned_target_paths: list[str] = []
+            batch_reserved_ids: set[str] = set()
             for src in locked_eligible:
                 rel = str(src.relative_to(repo_root))
                 sk = _derive_stream_key(family, rel)
@@ -982,7 +1031,10 @@ def segment_history_maintenance_service(
                 else:
                     hist = repo_root / config.history_dir
                     sd = repo_root / config.stub_dir
-                seg_id = _next_segment_id(family, sk, now, hist)
+                seg_id = _next_segment_id(
+                    family, sk, now, hist, reserved_ids=batch_reserved_ids,
+                )
+                batch_reserved_ids.add(seg_id)
                 ext = _FAMILY_EXTENSION.get(family, ".jsonl")
                 pp = hist / f"{seg_id}{ext}"
                 sp = sd / f"{seg_id}.json"
@@ -1388,8 +1440,10 @@ def segment_history_cold_store_service(
 
     # Derive lock keys from source paths using _derive_stream_key
     lock_keys = []
+    cold_store_source_rels: list[str] = []
     for c in candidates:
         src_path = c[1].get("source_path", c[0])
+        cold_store_source_rels.append(src_path)
         sk = _derive_stream_key(family, src_path)
         lock_keys.append(f"segment_history:{family}:{sk}")
 
@@ -1409,7 +1463,13 @@ def segment_history_cold_store_service(
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
             # Reconcile manifest residue inside lock scope to prevent
             # concurrent callers from both attempting recovery commits.
-            residue = _reconcile_manifest_residue(repo_root, family, "cold_store", gm)
+            # Only reconcile if the manifest's sources overlap with our
+            # locked set — prevents clobbering a concurrent operation's
+            # manifest on non-overlapping sources.
+            residue = _reconcile_manifest_residue(
+                repo_root, family, "cold_store", gm,
+                locked_source_paths=set(cold_store_source_rels),
+            )
             if residue:
                 warnings.append(_make_warning(
                     "segment_history_manifest_residue",
@@ -1820,23 +1880,60 @@ def segment_history_cold_rehydrate_service(
                     f"reconciliation must complete first: {source_path_str}",
                 )
 
-            # Conflict check under lock: canonical hot target must not exist
+            # Conflict check under lock: canonical hot target must not exist.
+            # If the hot file exists but the stub still points to cold, this
+            # is an orphaned hot file from a prior crash (crash between
+            # hot-payload write and stub mutation).  Auto-clean the orphan
+            # so the rehydrate can proceed instead of permanently blocking.
             if hot_path.is_file():
-                hot_rel = str(hot_path.relative_to(repo_root))
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "ok": False,
-                        "operation": "segment_history_cold_rehydrate",
-                        "family": family,
-                        "segment_id": segment_id,
-                        "error": {
-                            "code": "segment_history_rehydrate_conflict",
-                            "detail": "target rolled payload already exists",
+                if stub.get("cold_stored_at") and cold_path.is_file():
+                    # Stub is still cold, cold payload intact — the orphan
+                    # is safe to remove.
+                    try:
+                        hot_path.unlink()
+                        _log.info(
+                            "Removed orphaned hot file from prior crash: %s",
+                            hot_path,
+                        )
+                        warnings.append(_make_warning(
+                            "segment_history_orphaned_hot_removed",
+                            f"Removed orphaned hot file from prior crash "
+                            f"for segment: {segment_id}",
+                            segment_id=segment_id,
+                        ))
+                    except OSError:
+                        hot_rel = str(hot_path.relative_to(repo_root))
+                        return JSONResponse(
+                            status_code=409,
+                            content={
+                                "ok": False,
+                                "operation": "segment_history_cold_rehydrate",
+                                "family": family,
+                                "segment_id": segment_id,
+                                "error": {
+                                    "code": "segment_history_rehydrate_conflict",
+                                    "detail": "target rolled payload already exists "
+                                              "and could not be removed",
+                                },
+                                "conflict_path": hot_rel,
+                            },
+                        )
+                else:
+                    hot_rel = str(hot_path.relative_to(repo_root))
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "ok": False,
+                            "operation": "segment_history_cold_rehydrate",
+                            "family": family,
+                            "segment_id": segment_id,
+                            "error": {
+                                "code": "segment_history_rehydrate_conflict",
+                                "detail": "target rolled payload already exists",
+                            },
+                            "conflict_path": hot_rel,
                         },
-                        "conflict_path": hot_rel,
-                    },
-                )
+                    )
 
             # Re-check cold payload under lock
             if not cold_path.is_file():
@@ -1858,6 +1955,25 @@ def segment_history_cold_rehydrate_service(
 
             # Capture stub state for rollback before mutations begin.
             stub_rollback = _capture_rollback_state([stub_path])
+
+            # Write crash-recovery manifest before mutations so that a
+            # process crash mid-rehydrate leaves a signal for the next
+            # rehydrate attempt to auto-clean the orphaned hot file
+            # (see conflict check above).
+            from app.segment_history.manifest import (
+                remove_manifest as _remove_rehydrate_manifest,
+                write_manifest as _write_rehydrate_manifest,
+            )
+
+            hot_rel_planned = str(hot_path.relative_to(repo_root))
+            _write_rehydrate_manifest(
+                repo_root,
+                operation="rehydrate",
+                family=family,
+                source_paths=[source_path_str],
+                segment_ids=[segment_id],
+                target_paths=[hot_rel_planned, str(stub_path.relative_to(repo_root))],
+            )
 
             # Write hot payload
             hot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1913,12 +2029,20 @@ def segment_history_cold_rehydrate_service(
                         "segment_history_git_commit_failed",
                         "Git commit failed for rehydrate",
                     ))
+
+                # Remove manifest after successful commit (or when git
+                # manager is unavailable).  On commit failure the manifest
+                # is preserved so the orphaned-hot auto-cleanup fires on
+                # the next rehydrate attempt.
+                if durable:
+                    _remove_rehydrate_manifest(repo_root, family)
             except Exception:
                 # Rollback: restore stub to pre-mutation state and remove
                 # the hot payload that was created, so the segment doesn't
                 # get stuck in an unrecoverable state.
                 _restore_rollback_state(stub_rollback)
                 _remove_created_paths([hot_path])
+                _remove_rehydrate_manifest(repo_root, family)
                 raise
     except SegmentHistoryLockTimeout as exc:
         return _error_response(
