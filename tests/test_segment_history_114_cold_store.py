@@ -8,6 +8,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from fastapi import HTTPException
+
 from tests.helpers import SimpleGitManagerStub
 
 from app.segment_history.service import (
@@ -160,17 +162,19 @@ class TestColdStoreSegmentFilter(unittest.TestCase):
             _setup_rolled_journal(repo, gm)
 
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
-            result = segment_history_cold_store_service(
-                family="journal",
-                repo_root=repo,
-                settings=_FakeSettings(),
-                gm=gm,
-                segment_ids=["nonexistent_id"],
-                now=now,
-            )
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_store_service(
+                    family="journal",
+                    repo_root=repo,
+                    settings=_FakeSettings(),
+                    gm=gm,
+                    segment_ids=["nonexistent_id"],
+                    now=now,
+                )
 
-            self.assertFalse(result["ok"])
-            self.assertEqual(result["error"]["code"], "segment_history_invalid_segment_id")
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertFalse(ctx.exception.detail["ok"])
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_invalid_segment_id")
 
     def test_filter_by_valid_missing_segment_ids(self) -> None:
         """Valid format but non-existent segment_id emits stub_not_found warning."""

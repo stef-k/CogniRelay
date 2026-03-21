@@ -16,7 +16,7 @@ from app.auth import AuthContext
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.git_safety import try_commit_paths
 from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
-from app.segment_history.append import locked_append_jsonl, locked_append_jsonl_multi
+from app.segment_history.append import SegmentHistoryAppendError, locked_append_jsonl, locked_append_jsonl_multi
 from app.storage import safe_path, write_bytes_file, write_text_file
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
@@ -761,7 +761,12 @@ def relay_forward_service(
     thread_rel = f"messages/threads/{req.thread_id}.jsonl"
     rels = [relay_rel, inbox_rel, thread_rel]
     paths = [safe_path(settings.repo_root, r) for r in rels]
-    locked_append_jsonl_multi(paths, msg, repo_root=settings.repo_root, gm=gm, settings=settings)
+    try:
+        locked_append_jsonl_multi(paths, msg, repo_root=settings.repo_root, gm=gm, settings=settings)
+    except SegmentHistoryAppendError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Relay forward append failed: {exc.detail}",
+        ) from exc
     warnings: list[str] = []
     if try_commit_paths(paths=paths, gm=gm, commit_message=f"relay: forward {msg['id']}"):
         committed_files.extend(rels)

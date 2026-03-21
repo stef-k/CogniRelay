@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException
 
 from tests.helpers import SimpleGitManagerStub
 
@@ -145,13 +145,13 @@ class TestRehydrateConflictPath(unittest.TestCase):
             for gz in cold_dir.glob("*.gz"):
                 gz.unlink()
 
-            result = segment_history_cold_rehydrate_service(
-                family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
-            )
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                )
             # Should fail because cold payload is missing (checked before
             # conflict check), returning 409
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
+            self.assertEqual(ctx.exception.status_code, 409)
 
 
 # =========================================================================
@@ -169,13 +169,12 @@ class TestRehydrateColdPayloadMissing(unittest.TestCase):
             for gz in cold_dir.glob("*.gz"):
                 gz.unlink()
 
-            result = segment_history_cold_rehydrate_service(
-                family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
-            )
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
-            parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "segment_history_cold_payload_missing")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_cold_payload_missing")
 
 
 # =========================================================================
@@ -193,13 +192,12 @@ class TestRehydrateColdPayloadCorrupt(unittest.TestCase):
             for gz in cold_dir.glob("*.gz"):
                 gz.write_bytes(b"not-valid-gzip-data")
 
-            result = segment_history_cold_rehydrate_service(
-                family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
-            )
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
-            parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "segment_history_cold_payload_corrupt")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_cold_payload_corrupt")
 
 
 # =========================================================================
@@ -211,16 +209,15 @@ class TestRehydrateFamilyMismatch(unittest.TestCase):
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
             # Pass an api_audit segment_id to a journal rehydrate call
-            result = segment_history_cold_rehydrate_service(
-                family="journal",
-                segment_id="api_audit__api_audit__20260320T120000Z__0001",
-                repo_root=repo,
-                gm=gm,
-            )
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 400)
-            parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "segment_history_invalid_segment_id")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal",
+                    segment_id="api_audit__api_audit__20260320T120000Z__0001",
+                    repo_root=repo,
+                    gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_invalid_segment_id")
 
 
 # =========================================================================
@@ -320,13 +317,12 @@ class TestPendingBatchResidueBlocksRehydrate(unittest.TestCase):
                 target_paths=[],
             )
 
-            result = segment_history_cold_rehydrate_service(
-                family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
-            )
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
-            parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "segment_history_pending_batch_residue")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal", segment_id=seg_id, repo_root=repo, gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_pending_batch_residue")
 
 
 # =========================================================================
@@ -726,13 +722,12 @@ class TestAmbiguousSegmentIdMultiDir(unittest.TestCase):
                     gzip.compress(b'{"sent_at":"2026-03-20T12:00:00Z"}\n')
                 )
 
-            result = segment_history_cold_rehydrate_service(
-                family="message_stream", segment_id=seg_id, repo_root=repo, gm=gm,
-            )
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
-            parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "segment_history_ambiguous_segment_id")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="message_stream", segment_id=seg_id, repo_root=repo, gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_ambiguous_segment_id")
 
 
 # =========================================================================
@@ -909,21 +904,20 @@ class TestRehydrateLockTimeout(unittest.TestCase):
             self.assertEqual(len(cs["cold_segment_ids"]), 1)
 
             # Now mock the lock to raise SegmentHistoryLockTimeout
-            with patch(
-                "app.segment_history.locking.segment_history_source_lock",
-                side_effect=SegmentHistoryLockTimeout("test_key", 30.0),
-            ):
-                resp = segment_history_cold_rehydrate_service(
-                    family="journal",
-                    segment_id=seg_id,
-                    repo_root=repo,
-                    gm=gm,
-                )
+            with self.assertRaises(HTTPException) as ctx:
+                with patch(
+                    "app.segment_history.locking.segment_history_source_lock",
+                    side_effect=SegmentHistoryLockTimeout("test_key", 30.0),
+                ):
+                    segment_history_cold_rehydrate_service(
+                        family="journal",
+                        segment_id=seg_id,
+                        repo_root=repo,
+                        gm=gm,
+                    )
 
-            self.assertIsInstance(resp, JSONResponse)
-            self.assertEqual(resp.status_code, 409)
-            body = json.loads(resp.body)
-            self.assertEqual(body["error"]["code"], "segment_history_source_lock_timeout")
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_source_lock_timeout")
 
 
 class TestInvalidFamily(unittest.TestCase):
@@ -946,29 +940,30 @@ class TestInvalidFamily(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             gm = SimpleGitManagerStub()
-            result = segment_history_cold_store_service(
-                family="bogus_family",
-                repo_root=repo,
-                settings=_FakeSettings(),
-                gm=gm,
-            )
-            self.assertFalse(result["ok"])
-            self.assertEqual(result["error"]["code"], "segment_history_invalid_family")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_store_service(
+                    family="bogus_family",
+                    repo_root=repo,
+                    settings=_FakeSettings(),
+                    gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertFalse(ctx.exception.detail["ok"])
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_invalid_family")
 
     def test_rehydrate_invalid_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             gm = SimpleGitManagerStub()
-            resp = segment_history_cold_rehydrate_service(
-                family="bogus_family",
-                segment_id="bogus__key__20260320T120000Z__0001",
-                repo_root=repo,
-                gm=gm,
-            )
-            self.assertIsInstance(resp, JSONResponse)
-            self.assertEqual(resp.status_code, 400)
-            body = json.loads(resp.body)
-            self.assertEqual(body["error"]["code"], "segment_history_invalid_family")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="bogus_family",
+                    segment_id="bogus__key__20260320T120000Z__0001",
+                    repo_root=repo,
+                    gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_invalid_family")
 
 
 class TestColdStoreRollbackRestoresStubs(unittest.TestCase):

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException
 
 from app.storage import write_bytes_file, write_text_file
 
@@ -1055,7 +1055,7 @@ def segment_history_maintenance_service(
     batch_limit: int | None = None,
     now: datetime | None = None,
     audit: Callable[..., Any] | None = None,
-) -> dict[str, Any] | JSONResponse:
+) -> dict[str, Any]:
     """Discover, roll, and commit eligible sources for one family.
 
     Returns a response envelope with ``ok``, ``operation``, ``family``,
@@ -1420,9 +1420,22 @@ def segment_history_maintenance_service(
                         "warning_count": len(warnings),
                     })
 
-                # 8. Git commit — inside source lock scope per spec
+                # 8. Git commit — one atomic unit per spec.
+                #    For journal, delete source files BEFORE the commit so
+                #    git stages the deletions in the same atomic unit.
                 if all_created:
                     from app.git_locking import repository_mutation_lock
+
+                    if family == "journal":
+                        for src in rolled_sources:
+                            if src.is_file():
+                                try:
+                                    src.unlink()
+                                except OSError:
+                                    _log.warning(
+                                        "Could not delete journal source before commit: %s",
+                                        src,
+                                    )
 
                     commit_paths = all_created + rolled_sources
                     commit_message = (
@@ -1448,44 +1461,6 @@ def segment_history_maintenance_service(
                             f"Git commit failed for maintenance roll; "
                             f"at-risk segments: {rolled_segment_ids}",
                         ))
-
-                    # Delete journal source files only after a durable
-                    # commit ensures the payload is recoverable.  If the
-                    # commit failed, journal sources remain on disk as
-                    # fallback (matching the cold-store deferred-deletion
-                    # pattern).
-                    if durable and family == "journal":
-                        journal_delete_paths: list[Path] = []
-                        for src in rolled_sources:
-                            if src.is_file():
-                                try:
-                                    src.unlink()
-                                    journal_delete_paths.append(src)
-                                except OSError:
-                                    _log.warning(
-                                        "Could not delete journal source after commit: %s",
-                                        src,
-                                    )
-                        # Stage the source deletions in git.
-                        if journal_delete_paths:
-                            try:
-                                with repository_mutation_lock(repo_root):
-                                    gm.commit_paths(
-                                        journal_delete_paths,
-                                        "segment-history: remove rolled journal sources",
-                                    )
-                                    latest_commit = gm.latest_commit()
-                                    committed_files.extend(
-                                        str(p.relative_to(repo_root)) for p in journal_delete_paths
-                                    )
-                            except Exception:
-                                warnings.append(_make_warning(
-                                    "segment_history_cleanup_commit_failed",
-                                    "Git commit failed for journal source removal; "
-                                    "sources deleted from disk but git index still "
-                                    "references them. This is cosmetic — payload "
-                                    "data is durable in the segment.",
-                                ))
             except Exception:
                 # Rollback under lock: restore sources, remove created
                 # files, AND remove any partially-written target files
@@ -1517,9 +1492,9 @@ def segment_history_maintenance_service(
                 remove_manifest(repo_root, family, expected_operation="maintenance")
 
     except ManifestOccupied as exc:
-        return JSONResponse(
+        raise HTTPException(
             status_code=409,
-            content={
+            detail={
                 "ok": False,
                 "operation": "segment_history_maintenance",
                 "family": family,
@@ -1530,9 +1505,9 @@ def segment_history_maintenance_service(
             },
         )
     except SegmentHistoryLockTimeout as exc:
-        return JSONResponse(
+        raise HTTPException(
             status_code=409,
-            content={
+            detail={
                 "ok": False,
                 "operation": "segment_history_maintenance",
                 "family": family,
@@ -1579,14 +1554,14 @@ def segment_history_cold_store_service(
     segment_ids: list[str] | None = None,
     now: datetime | None = None,
     audit: Callable[..., Any] | None = None,
-) -> dict[str, Any] | JSONResponse:
+) -> dict[str, Any]:
     """Compress rolled segments into cold storage.
 
     Scans stub directory for eligible stubs (no ``cold_stored_at``, meets
     cold_after_days threshold), compresses the hot payload, mutates the stub,
     removes the hot rolled payload, and commits.
 
-    Returns ``dict[str, Any]`` on success or ``JSONResponse`` on error.
+    Returns ``dict[str, Any]`` on success; raises ``HTTPException`` on error.
     """
     from app.segment_history.families import FAMILIES, _get_cold_after_days_setting
     from app.segment_history.locking import (
@@ -1600,15 +1575,18 @@ def segment_history_cold_store_service(
     )
 
     if family not in FAMILIES:
-        return {
-            "ok": False,
-            "operation": "segment_history_cold_store",
-            "family": family,
-            "error": {
-                "code": "segment_history_invalid_family",
-                "detail": f"Unknown family: {family}",
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "operation": "segment_history_cold_store",
+                "family": family,
+                "error": {
+                    "code": "segment_history_invalid_family",
+                    "detail": f"Unknown family: {family}",
+                },
             },
-        }
+        )
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -1622,15 +1600,18 @@ def segment_history_cold_store_service(
         for sid in segment_ids:
             parsed = _validate_segment_id(family, sid)
             if parsed is None:
-                return {
-                    "ok": False,
-                    "operation": "segment_history_cold_store",
-                    "family": family,
-                    "error": {
-                        "code": "segment_history_invalid_segment_id",
-                        "detail": f"Invalid segment ID format: {sid}",
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "ok": False,
+                        "operation": "segment_history_cold_store",
+                        "family": family,
+                        "error": {
+                            "code": "segment_history_invalid_segment_id",
+                            "detail": f"Invalid segment ID format: {sid}",
+                        },
                     },
-                }
+                )
 
     # 0b. Manifest reconciliation is deferred until inside the source lock
     #     to prevent concurrent callers from both attempting recovery commits.
@@ -1779,7 +1760,6 @@ def segment_history_cold_store_service(
     hot_rollback: list[tuple[Path, bytes | None]] = []
     deferred_audit: list[dict[str, Any]] = []
     durable = True
-    cleanup_durable = True
     committed_files: list[str] = []
     latest_commit: str | None = None
 
@@ -1943,10 +1923,22 @@ def segment_history_cold_store_service(
                         "warning_count": len(warnings),
                     })
 
-                # Git commit cold payloads + mutated stubs first (without
-                # deleting hot payloads) so that on crash the committed
-                # state has both cold .gz and hot originals — no data loss.
+                # Single git commit per spec — delete hot payloads BEFORE
+                # commit so git stages the deletions atomically.
+                # commit_paths already includes hot_payload per segment
+                # (added at line ~1933), so git will stage the deletion.
                 from app.git_locking import repository_mutation_lock
+
+                if deferred_hot_deletes:
+                    for hp, sid in deferred_hot_deletes:
+                        try:
+                            hp.unlink()
+                        except OSError:
+                            warnings.append(_make_warning(
+                                "segment_history_hot_payload_remove_failed",
+                                f"Could not remove hot payload before cold-store commit: {sid}",
+                                segment_id=sid,
+                            ))
 
                 if commit_paths:
                     msg = f"segment-history: cold-store {family} {selection_count}"
@@ -1972,44 +1964,6 @@ def segment_history_cold_store_service(
                             f"Git commit failed for cold-store; "
                             f"at-risk segments: {cold_stored_ids}",
                         ))
-
-                # Delete hot payloads only after a durable commit ensures
-                # the cold .gz and mutated stubs are recoverable.  If the
-                # commit failed, hot payloads remain on disk as fallback.
-                cleanup_durable = True
-                if durable and deferred_hot_deletes:
-                    hot_delete_paths: list[Path] = []
-                    for hp, sid in deferred_hot_deletes:
-                        try:
-                            hp.unlink()
-                            hot_delete_paths.append(hp)
-                        except OSError:
-                            cleanup_durable = False
-                            warnings.append(_make_warning(
-                                "segment_history_hot_payload_remove_failed",
-                                f"Could not remove hot payload after cold-store: {sid}",
-                                segment_id=sid,
-                            ))
-                    # Second commit to stage the hot-payload deletions.
-                    if hot_delete_paths:
-                        try:
-                            with repository_mutation_lock(repo_root):
-                                gm.commit_paths(
-                                    hot_delete_paths,
-                                    f"segment-history: remove hot payloads {family}",
-                                )
-                                latest_commit = gm.latest_commit()
-                                committed_files.extend(
-                                    str(p.relative_to(repo_root)) for p in hot_delete_paths
-                                )
-                        except Exception:
-                            cleanup_durable = False
-                            warnings.append(_make_warning(
-                                "segment_history_cleanup_commit_failed",
-                                f"Git commit failed for hot-payload removal; "
-                                f"hot files deleted from disk but not staged in git; "
-                                f"affected segments: {cold_stored_ids}",
-                            ))
             except Exception:
                 # Rollback under lock: restore stubs first, then hot
                 # payloads.  Only remove cold .gz and manifest if stub
@@ -2037,9 +1991,9 @@ def segment_history_cold_store_service(
                 remove_manifest(repo_root, family, expected_operation="cold_store")
 
     except ManifestOccupied as exc:
-        return JSONResponse(
+        raise HTTPException(
             status_code=409,
-            content={
+            detail={
                 "ok": False,
                 "operation": "segment_history_cold_store",
                 "family": family,
@@ -2050,9 +2004,9 @@ def segment_history_cold_store_service(
             },
         )
     except SegmentHistoryLockTimeout as exc:
-        return JSONResponse(
+        raise HTTPException(
             status_code=409,
-            content={
+            detail={
                 "ok": False,
                 "operation": "segment_history_cold_store",
                 "family": family,
@@ -2076,12 +2030,11 @@ def segment_history_cold_store_service(
         "batch_limit_reached": batch_limit_reached,
         "cold_segment_ids": cold_stored_ids,
         "durable": durable,
-        "cleanup_durable": cleanup_durable,
         "committed_files": committed_files,
         "latest_commit": latest_commit,
         "warnings": warnings,
     }
-    if not durable or not cleanup_durable:
+    if not durable:
         result["at_risk_segment_ids"] = cold_stored_ids
     return result
 
@@ -2096,14 +2049,14 @@ def segment_history_cold_rehydrate_service(
     repo_root: Path,
     gm: Any,
     audit: Callable[..., Any] | None = None,
-) -> dict[str, Any] | JSONResponse:
+) -> dict[str, Any]:
     """Decompress a single cold-stored segment back to hot storage.
 
     Locates the stub, validates cold state, decompresses the cold payload,
     writes the hot payload, mutates the stub, removes the cold payload, and
     commits.
 
-    Returns a structured envelope on both success and error (no HTTPException).
+    Raises ``HTTPException`` on error.
     """
     from app.segment_history.families import FAMILIES
     from app.segment_history.locking import (
@@ -2112,9 +2065,9 @@ def segment_history_cold_rehydrate_service(
     )
 
     if family not in FAMILIES:
-        return JSONResponse(
+        raise HTTPException(
             status_code=400,
-            content={
+            detail={
                 "ok": False,
                 "operation": "segment_history_cold_rehydrate",
                 "family": family,
@@ -2129,10 +2082,10 @@ def segment_history_cold_rehydrate_service(
     config = FAMILIES[family]
     warnings: list[dict[str, Any]] = []
 
-    def _error_response(status: int, code: str, detail: str) -> JSONResponse:
-        return JSONResponse(
+    def _error_response(status: int, code: str, detail: str) -> None:
+        raise HTTPException(
             status_code=status,
-            content={
+            detail={
                 "ok": False,
                 "operation": "segment_history_cold_rehydrate",
                 "family": family,
@@ -2173,9 +2126,9 @@ def segment_history_cold_rehydrate_service(
             stub_matches.append(candidate)
 
     if len(stub_matches) > 1:
-        return JSONResponse(
+        raise HTTPException(
             status_code=409,
-            content={
+            detail={
                 "ok": False,
                 "operation": "segment_history_cold_rehydrate",
                 "family": family,
@@ -2310,7 +2263,6 @@ def segment_history_cold_rehydrate_service(
                         "removed_cold_payload_path": None,
                         "mutated_stub_path": stub_rel,
                         "durable": recon_recovered,
-                        "cleanup_durable": recon_recovered,
                         "committed_files": [],
                         "latest_commit": None,
                         "warnings": warnings,
@@ -2371,9 +2323,9 @@ def segment_history_cold_rehydrate_service(
                         ))
                     except OSError:
                         hot_rel = str(hot_path.relative_to(repo_root))
-                        return JSONResponse(
+                        raise HTTPException(
                             status_code=409,
-                            content={
+                            detail={
                                 "ok": False,
                                 "operation": "segment_history_cold_rehydrate",
                                 "family": family,
@@ -2388,9 +2340,9 @@ def segment_history_cold_rehydrate_service(
                         )
                 else:
                     hot_rel = str(hot_path.relative_to(repo_root))
-                    return JSONResponse(
+                    raise HTTPException(
                         status_code=409,
-                        content={
+                        detail={
                             "ok": False,
                             "operation": "segment_history_cold_rehydrate",
                             "family": family,
@@ -2472,7 +2424,22 @@ def segment_history_cold_rehydrate_service(
 
                 from app.git_locking import repository_mutation_lock
 
+                # Single git commit per spec — delete cold payload BEFORE
+                # commit so git stages the deletion atomically.
+                cold_removed = False
+                try:
+                    cold_path.unlink()
+                    cold_removed = True
+                except OSError:
+                    warnings.append(_make_warning(
+                        "segment_history_cold_payload_remove_failed",
+                        f"Could not remove cold payload before rehydrate commit: {segment_id}",
+                        segment_id=segment_id,
+                    ))
+
                 commit_paths_list = [hot_path, stub_path]
+                if cold_removed:
+                    commit_paths_list.append(cold_path)
                 msg = f"segment-history: rehydrate {family} {segment_id}"
                 try:
                     with repository_mutation_lock(repo_root):
@@ -2498,42 +2465,6 @@ def segment_history_cold_rehydrate_service(
                         f"at-risk segment: {segment_id}",
                         segment_id=segment_id,
                     ))
-
-                # Remove cold payload only after durable commit ensures
-                # the hot payload and mutated stub are recoverable.  If
-                # the commit failed, cold payload remains as fallback.
-                cold_removed = False
-                cleanup_durable = True
-                if durable:
-                    try:
-                        cold_path.unlink()
-                        cold_removed = True
-                    except OSError:
-                        cleanup_durable = False
-                        warnings.append(_make_warning(
-                            "segment_history_cold_payload_remove_failed",
-                            f"Could not remove cold payload after rehydrate: {segment_id}",
-                            segment_id=segment_id,
-                        ))
-                    # Stage the cold-payload deletion in git.
-                    if cold_removed:
-                        try:
-                            with repository_mutation_lock(repo_root):
-                                gm.commit_paths(
-                                    [cold_path],
-                                    f"segment-history: remove cold payload {family} {segment_id}",
-                                )
-                                latest_commit = gm.latest_commit()
-                                committed_files.append(str(cold_path.relative_to(repo_root)))
-                        except Exception:
-                            cleanup_durable = False
-                            warnings.append(_make_warning(
-                                "segment_history_cleanup_commit_failed",
-                                f"Git commit failed for cold-payload removal; "
-                                f"cold file deleted from disk but not staged in git; "
-                                f"affected segment: {segment_id}",
-                                segment_id=segment_id,
-                            ))
 
                 # Remove manifest after successful commit.  On commit
                 # failure the manifest is preserved so the orphaned-hot
@@ -2594,6 +2525,6 @@ def segment_history_cold_rehydrate_service(
         "latest_commit": latest_commit,
         "warnings": warnings,
     }
-    if not durable or not cleanup_durable:
+    if not durable:
         result["at_risk_segment_ids"] = [segment_id]
     return result

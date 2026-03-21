@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -103,14 +102,32 @@ def _check_write_time_rollover_locked(
         if size < rollover_bytes:
             return
 
-    history_dir = repo_root / config.history_dir
-    stub_dir = repo_root / config.stub_dir
+    # message_stream requires per-kind directory routing (inbox/outbox/
+    # relay/acks); other families use the static config paths.
+    _stream_kind: str | None = None
+    if family == "message_stream":
+        from app.segment_history.service import (
+            _message_stream_history_dir,
+            _message_stream_kind_from_source,
+            _message_stream_stub_dir,
+        )
+        history_dir = _message_stream_history_dir(repo_root, rel)
+        stub_dir = _message_stream_stub_dir(repo_root, rel)
+        _stream_kind = _message_stream_kind_from_source(rel)
+    else:
+        history_dir = repo_root / config.history_dir
+        stub_dir = repo_root / config.stub_dir
     segment_id = _next_segment_id(family, stream_key, now, history_dir)
     payload_path = history_dir / f"{segment_id}.jsonl"
     stub_path = stub_dir / f"{segment_id}.json"
 
     content = path.read_text(encoding="utf-8", errors="replace")
     summary = config.build_summary(content)
+    if family == "message_stream" and _stream_kind is not None:
+        from app.segment_history.families import fixup_message_stream_summary
+        fixup_message_stream_summary(summary, content, _stream_kind)
+        summary["stream_kind"] = _stream_kind
+        summary["stream_key"] = stream_key
 
     # Write crash-recovery manifest before mutations so that a
     # process crash mid-roll leaves a signal for reconciliation.
@@ -171,7 +188,6 @@ def _check_write_time_rollover_locked(
     _stub, created = result
 
     # Commit with git serialization lock
-    commit_succeeded = False
     if gm is not None:
         from app.git_locking import repository_mutation_lock
 
@@ -182,18 +198,19 @@ def _check_write_time_rollover_locked(
                     commit_paths,
                     f"segment-history: roll {family} {stream_key}",
                 )
-            commit_succeeded = True
         except Exception:
             _log.warning("Write-time rollover commit failed for %s", segment_id)
-            # Local writes succeeded; leave the manifest so that the next
-            # _reconcile_manifest_residue call can commit the orphaned files
-            # instead of silently losing them on crash + repo restore.
+            # Local writes succeeded — leave the manifest so that the next
+            # _reconcile_manifest_residue call can commit the orphaned files.
+            # Per spec, the triggering append must fail when the git commit
+            # fails even though local writes are preserved for crash recovery.
+            raise WriteTimeRolloverError(
+                "segment_history_write_time_rollover_failed",
+                f"Write-time rollover git commit failed for {segment_id}; "
+                f"local writes preserved on disk for crash recovery",
+            )
 
-    # Only remove the manifest after a successful commit.  When the commit
-    # fails the manifest must survive so crash recovery can still find and
-    # commit the orphaned rolled payload, stub, and truncated source.
-    if commit_succeeded or gm is None:
-        _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
+    _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
 
 
 def _check_write_time_rollover(
@@ -262,14 +279,9 @@ def append_audit(
     (via atomic rename) while this call's open fd still points to the
     old inode.
 
-    When the source lock cannot be acquired within
-    :data:`_AUDIT_APPEND_LOCK_TIMEOUT` (e.g. because maintenance holds
-    it), the append falls back to a lockless write so that audit events
-    are not silently dropped for the duration of the maintenance window.
-
-    Raises :class:`WriteTimeRolloverError` if write-time rollover fails
-    (pending batch residue or rollover local write failure).  Lock
-    timeouts no longer propagate — the event is written regardless.
+    Raises :class:`~app.segment_history.append.SegmentHistoryAppendError`
+    on lock timeout or write-time rollover failure.  Callers that are
+    best-effort (e.g. ``audit_event``) must catch and degrade.
     """
     path = repo_root / "logs" / "api_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,53 +305,21 @@ def append_audit(
     lock_key = f"segment_history:api_audit:{stream_key}"
     lock_dir = repo_root / ".locks" / "segment_history"
 
+    from app.segment_history.append import SegmentHistoryAppendError
+
     try:
         with segment_history_source_lock(
             lock_key, lock_dir=lock_dir, timeout=_AUDIT_APPEND_LOCK_TIMEOUT,
         ):
             if rollover_bytes > 0 and gm is not None:
-                try:
-                    _check_write_time_rollover_locked(
-                        path, rollover_bytes, repo_root, gm,
-                    )
-                except WriteTimeRolloverError:
-                    # Rollover failed (pending batch residue, manifest
-                    # occupied, or I/O error).  Log and continue — the
-                    # file will grow beyond rollover_bytes, but the audit
-                    # event must still be written.  Dropping the event
-                    # would cause sustained audit loss until the manifest
-                    # is reconciled.
-                    _log.warning(
-                        "Write-time rollover failed; appending audit event "
-                        "without rollover for key %s",
-                        lock_key,
-                    )
+                _check_write_time_rollover_locked(
+                    path, rollover_bytes, repo_root, gm,
+                )
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
-            return  # Append succeeded under lock — done.
-    except SegmentHistoryLockTimeout:
-        # Lock held by a concurrent maintenance operation.  Fall back to
-        # a lockless append — accepts a race window (spanning the full
-        # _roll_jsonl_source execution: source read through carry-forward
-        # rename, typically ~50-200 ms of I/O) where the atomic rename
-        # could orphan this line, but this is strictly better than
-        # guaranteed event loss for the entire maintenance window
-        # (30-60+ seconds).
-        _log.debug(
-            "Audit append falling back to lockless mode: source lock held "
-            "by concurrent operation for key %s",
-            lock_key,
-        )
-
-    # Fallback: lockless append via unbuffered O_APPEND write.
-    # O_APPEND guarantees atomic seek-to-end on each write(2) syscall.
-    # A single os.write() keeps the payload under PIPE_BUF (4096 on
-    # Linux) so the kernel will not split it, preventing interleaving
-    # with concurrent appenders.  Using os.write() directly (instead of
-    # Python's buffered TextIOWrapper) guarantees exactly one write(2)
-    # syscall.
-    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-    finally:
-        os.close(fd)
+    except SegmentHistoryLockTimeout as exc:
+        raise SegmentHistoryAppendError(
+            "segment_history_source_lock_timeout", str(exc),
+        ) from exc
+    except WriteTimeRolloverError as exc:
+        raise SegmentHistoryAppendError(exc.code, exc.detail) from exc

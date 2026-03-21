@@ -7,24 +7,44 @@ or inactivity), write-time rollover is performed before the append.
 
 The helpers in this module centralise that logic so that every caller
 (api_audit, ops_runs, messages, episodic, journal) follows the same
-lock-acquire -> rollover-check -> append -> fallback path.
+lock-acquire -> rollover-check -> append path.
 
-Graceful degradation:
-- Lock timeout -> lockless ``O_APPEND`` write (never drops events).
-- Rollover failure -> log + append without rollover (never crashes).
-- Journal non-current-day -> reject with ``WriteTimeRolloverError``.
+Error propagation (per spec):
+- Lock timeout -> raise ``SegmentHistoryAppendError``.
+- Rollover failure -> raise ``SegmentHistoryAppendError``.
+- Journal non-current-day -> raise ``SegmentHistoryAppendError``.
+
+Best-effort callers (``audit_event``, ``_append_ops_run``) must catch
+``SegmentHistoryAppendError`` and degrade gracefully.  Primary-path callers
+let it propagate to their existing error handling.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 _log = logging.getLogger(__name__)
+
+
+class SegmentHistoryAppendError(Exception):
+    """Raised when a locked append cannot proceed.
+
+    Causes: source-lock timeout, write-time rollover failure (local write
+    or git commit), or journal non-current-day rejection.
+
+    Best-effort callers (``audit_event``, ``_append_ops_run``) must catch
+    this and degrade gracefully.  Primary-path callers let it propagate
+    to their existing error handling.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
 
 # ---------------------------------------------------------------------------
 # Path -> family reverse lookup
@@ -91,8 +111,8 @@ def locked_append_jsonl(
     Paths that do not belong to a segment-history family are passed through
     to a plain ``append_jsonl`` without locking.
 
-    On lock timeout, falls back to a lockless ``O_APPEND`` write.
-    On rollover failure, logs a warning and appends without rollover.
+    Raises :class:`SegmentHistoryAppendError` on lock timeout or
+    write-time rollover failure.
     """
     from app.storage import append_jsonl
 
@@ -117,6 +137,8 @@ def locked_append_jsonl(
     lock_key = f"segment_history:{family}:{stream_key}"
     lock_dir = repo_root / ".locks" / "segment_history"
 
+    from app.audit import WriteTimeRolloverError
+
     try:
         with segment_history_source_lock(
             lock_key, lock_dir=lock_dir, timeout=lock_timeout,
@@ -128,21 +150,12 @@ def locked_append_jsonl(
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
-            return  # Append succeeded under lock.
-    except SegmentHistoryLockTimeout:
-        _log.debug(
-            "Locked append falling back to lockless mode: source lock held "
-            "by concurrent operation for key %s",
-            lock_key,
-        )
-
-    # Fallback: lockless append via unbuffered O_APPEND write.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-    finally:
-        os.close(fd)
+    except SegmentHistoryLockTimeout as exc:
+        raise SegmentHistoryAppendError(
+            "segment_history_source_lock_timeout", str(exc),
+        ) from exc
+    except WriteTimeRolloverError as exc:
+        raise SegmentHistoryAppendError(exc.code, exc.detail) from exc
 
 
 def locked_append_jsonl_multi(
@@ -158,8 +171,10 @@ def locked_append_jsonl_multi(
 
     Acquires per-source locks for all paths that belong to segment-history
     families (in sorted order to prevent deadlocks), checks rollover for
-    each, then appends.  On lock timeout, falls back to lockless
-    ``append_jsonl_multi``.
+    each, then appends.
+
+    Raises :class:`SegmentHistoryAppendError` on lock timeout or
+    write-time rollover failure.
     """
     from app.storage import append_jsonl_multi
 
@@ -200,9 +215,8 @@ def locked_append_jsonl_multi(
     sh_entries.sort(key=lambda e: e[2])
     lock_dir = repo_root / ".locks" / "segment_history"
 
-    # Try locked append for each.  On lock timeout for any path, fall back
-    # to lockless append for ALL remaining segment-history paths (we cannot
-    # partially lock a multi-append without risking inconsistency).
+    from app.audit import WriteTimeRolloverError
+
     try:
         acquired: list[Any] = []
         try:
@@ -223,7 +237,6 @@ def locked_append_jsonl_multi(
                 path_entry.parent.mkdir(parents=True, exist_ok=True)
                 with path_entry.open("a", encoding="utf-8") as f:
                     f.write(line)
-            return  # All appends succeeded under lock.
         finally:
             # Release all acquired locks in reverse order.
             for ctx, _handle in reversed(acquired):
@@ -231,20 +244,12 @@ def locked_append_jsonl_multi(
                     ctx.__exit__(None, None, None)
                 except Exception:
                     pass
-    except SegmentHistoryLockTimeout:
-        _log.debug(
-            "Locked multi-append falling back to lockless mode for %d paths",
-            len(sh_entries),
-        )
-
-    # Fallback: lockless O_APPEND for all segment-history paths.
-    for path_entry, _fam_entry, _lk_entry in sh_entries:
-        path_entry.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(path_entry), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-        try:
-            os.write(fd, line.encode("utf-8"))
-        finally:
-            os.close(fd)
+    except SegmentHistoryLockTimeout as exc:
+        raise SegmentHistoryAppendError(
+            "segment_history_source_lock_timeout", str(exc),
+        ) from exc
+    except WriteTimeRolloverError as exc:
+        raise SegmentHistoryAppendError(exc.code, exc.detail) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -260,13 +265,12 @@ def _check_and_rollover_locked(
     """Check write-time rollover eligibility and perform rollover if needed.
 
     Must be called while holding the source lock for *path*.
-    Catches ``WriteTimeRolloverError`` internally — rollover failure must
-    never block the triggering append.
+    Lets ``WriteTimeRolloverError`` propagate — per spec the triggering
+    append must fail on rollover failure.
     """
     if gm is None or settings is None:
         return
 
-    from app.audit import WriteTimeRolloverError
     from app.segment_history.families import (
         FAMILIES,
         check_rollover_eligible,
@@ -299,16 +303,9 @@ def _check_and_rollover_locked(
         rb = _get_rollover_bytes_setting(family, settings)
         rollover_bytes = rb if rb is not None else 0
 
-    try:
-        _check_write_time_rollover_locked(
-            path, rollover_bytes, repo_root, gm, family=family,
-        )
-    except WriteTimeRolloverError:
-        _log.warning(
-            "Write-time rollover failed; appending without rollover "
-            "for family=%s path=%s",
-            family, path,
-        )
+    _check_write_time_rollover_locked(
+        path, rollover_bytes, repo_root, gm, family=family,
+    )
 
 
 def _reject_non_current_day_journal(path: Path) -> None:

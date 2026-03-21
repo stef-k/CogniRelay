@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException
 
 from tests.helpers import SimpleGitManagerStub
 
@@ -80,7 +80,7 @@ class TestRehydrateJournal(unittest.TestCase):
                 gm=gm,
             )
 
-            self.assertNotIsInstance(result, JSONResponse)
+            self.assertNotIsInstance(result, HTTPException)
             self.assertTrue(result["ok"])
             self.assertEqual(result["segment_id"], seg_id)
             # Response includes full rehydrate info
@@ -104,24 +104,22 @@ class TestRehydrateJournal(unittest.TestCase):
 
 class TestRehydrateErrors(unittest.TestCase):
     def test_stub_not_found(self) -> None:
-        """Rehydrate returns structured error envelope, not HTTPException."""
+        """Rehydrate raises HTTPException when stub is not found."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
 
-            result = segment_history_cold_rehydrate_service(
-                family="journal",
-                segment_id="journal__2026__2026-03-20__20260320T120000Z__0001",
-                repo_root=repo,
-                gm=gm,
-            )
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal",
+                    segment_id="journal__2026__2026-03-20__20260320T120000Z__0001",
+                    repo_root=repo,
+                    gm=gm,
+                )
 
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 404)
-            body = result.body
-            parsed = json.loads(body)
-            self.assertFalse(parsed["ok"])
-            self.assertEqual(parsed["error"]["code"], "segment_history_stub_not_found")
+            self.assertEqual(ctx.exception.status_code, 404)
+            self.assertFalse(ctx.exception.detail["ok"])
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_stub_not_found")
 
     def test_not_cold(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -143,35 +141,33 @@ class TestRehydrateErrors(unittest.TestCase):
             )
             seg_id = maint["rolled_segment_ids"][0]
 
-            result = segment_history_cold_rehydrate_service(
-                family="journal",
-                segment_id=seg_id,
-                repo_root=repo,
-                gm=gm,
-            )
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
+                )
 
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
-            parsed = json.loads(result.body)
-            self.assertEqual(parsed["error"]["code"], "segment_history_not_cold")
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_not_cold")
 
     def test_invalid_segment_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
 
-            result = segment_history_cold_rehydrate_service(
-                family="journal",
-                segment_id="invalid-id",
-                repo_root=repo,
-                gm=gm,
-            )
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="journal",
+                    segment_id="invalid-id",
+                    repo_root=repo,
+                    gm=gm,
+                )
 
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 400)
-            parsed = json.loads(result.body)
-            self.assertFalse(parsed["ok"])
-            self.assertEqual(parsed["error"]["code"], "segment_history_invalid_segment_id")
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertFalse(ctx.exception.detail["ok"])
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_invalid_segment_id")
 
     def test_rehydrate_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -204,7 +200,7 @@ class TestRehydrateErrors(unittest.TestCase):
                 repo_root=repo,
                 gm=gm,
             )
-            self.assertNotIsInstance(result, JSONResponse)
+            self.assertIsInstance(result, dict)
             self.assertTrue(result["ok"])
 
 

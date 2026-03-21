@@ -13,6 +13,7 @@ import logging
 from fastapi import HTTPException
 
 from app.audit import WriteTimeRolloverError, append_audit
+from app.segment_history.append import SegmentHistoryAppendError
 from app.config import sha256_token
 from app.discovery import handle_mcp_rpc_request as discovery_handle_mcp_rpc_request
 from app.storage import safe_path, write_text_file
@@ -39,10 +40,10 @@ def audit_event(
             settings.repo_root, event, auth.peer_id if auth else "anonymous", detail,
             rollover_bytes=rollover_bytes, gm=gm,
         )
-    except WriteTimeRolloverError as exc:
+    except (WriteTimeRolloverError, SegmentHistoryAppendError) as exc:
         _log.warning(
-            "Write-time rollover failed for audit event %s: [%s] %s",
-            event, exc.code, exc.detail,
+            "Audit append failed for event %s: [%s] %s",
+            event, getattr(exc, "code", "unknown"), str(exc),
         )
 
 

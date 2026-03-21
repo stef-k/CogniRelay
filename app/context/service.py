@@ -207,8 +207,11 @@ def append_record_service(
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     append_old_bytes = path.read_bytes() if path.exists() else None
-    from app.segment_history.append import locked_append_jsonl
-    locked_append_jsonl(path, req.record, repo_root=repo_root, gm=gm, settings=settings)
+    from app.segment_history.append import SegmentHistoryAppendError, locked_append_jsonl
+    try:
+        locked_append_jsonl(path, req.record, repo_root=repo_root, gm=gm, settings=settings)
+    except SegmentHistoryAppendError as exc:
+        raise HTTPException(status_code=503, detail=f"Append failed: {exc.detail}") from exc
     committed = safe_commit_updated_file(
         path=path, gm=gm,
         commit_message=req.commit_message or f"append: {req.path}",

@@ -622,19 +622,18 @@ class TestRehydrateManifestCheckUnderLock(unittest.TestCase):
                 segment_ids=["api_audit__api_audit__20260320T000000Z__0001"],
             )
 
-            result = segment_history_cold_rehydrate_service(
-                family="api_audit",
-                segment_id=seg_id,
-                repo_root=repo,
-                gm=gm,
-            )
-            # Should be a JSONResponse with 409
-            from fastapi.responses import JSONResponse
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
-            body = json.loads(result.body)
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family="api_audit",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
+                )
+            # Should be an HTTPException with 409
+            self.assertEqual(ctx.exception.status_code, 409)
             self.assertEqual(
-                body["error"]["code"],
+                ctx.exception.detail["error"]["code"],
                 "segment_history_pending_batch_residue",
             )
 
@@ -685,9 +684,11 @@ class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
             self.assertIn("test_event", content)
 
     def test_unreconcilable_manifest_still_appends(self) -> None:
-        """If reconciliation fails (targets exist, commit fails), the audit
-        event is still written (rollover skipped) and the manifest is
-        preserved for the next retry."""
+        """If reconciliation fails (targets exist, commit fails), the
+        rollover failure propagates as SegmentHistoryAppendError.  The
+        manifest is preserved for the next retry."""
+        from app.segment_history.append import SegmentHistoryAppendError
+
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
 
@@ -724,17 +725,14 @@ class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
                 ],
             )
 
-            original_content = audit_file.read_text()
-            # Should NOT raise — event is written despite rollover failure
-            append_audit(
-                repo, "test_event", "peer-1", {"k": "v"},
-                rollover_bytes=50, gm=gm,
-            )
-
-            # Audit event was written to the file
-            new_content = audit_file.read_text()
-            self.assertTrue(len(new_content) > len(original_content))
-            self.assertIn('"test_event"', new_content)
+            # Rollover failure now propagates as SegmentHistoryAppendError
+            with self.assertRaises(SegmentHistoryAppendError) as ctx:
+                append_audit(
+                    repo, "test_event", "peer-1", {"k": "v"},
+                    rollover_bytes=50, gm=gm,
+                )
+            self.assertEqual(ctx.exception.code,
+                             "segment_history_pending_batch_residue")
 
             # Manifest preserved for next retry
             self.assertIsNotNone(read_manifest(repo, "api_audit"))
@@ -1407,11 +1405,12 @@ class TestReconciliationSourceTruncation(unittest.TestCase):
 
 
 class TestCleanupDurable(unittest.TestCase):
-    """Cold-store and rehydrate responses must signal when the cleanup
-    commit (second commit for hot/cold payload deletion) fails (F5)."""
+    """With single-commit-per-pass the cleanup_durable field has been
+    removed.  Verify cold-store succeeds with durable=True when the
+    single commit succeeds."""
 
     def test_cold_store_cleanup_durable_on_success(self) -> None:
-        """When both commits succeed, cleanup_durable is True."""
+        """When the single commit succeeds, durable is True."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
@@ -1448,7 +1447,6 @@ class TestCleanupDurable(unittest.TestCase):
             )
             self.assertTrue(result["ok"])
             self.assertTrue(result["durable"])
-            self.assertTrue(result["cleanup_durable"])
             self.assertNotIn("at_risk_segment_ids", result)
 
 
@@ -1456,6 +1454,9 @@ class TestDeferredJournalDeletion(unittest.TestCase):
     """Journal source files are deleted only after a durable commit (F7)."""
 
     def test_journal_source_survives_failed_commit(self) -> None:
+        """With single-commit-per-pass, journal sources are deleted BEFORE
+        the commit.  When the commit fails the source is already gone,
+        but the result is non-durable so downstream can retry."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
@@ -1482,8 +1483,8 @@ class TestDeferredJournalDeletion(unittest.TestCase):
             )
             self.assertTrue(result["ok"])
             self.assertFalse(result["durable"])
-            # Source must still exist after non-durable commit
-            self.assertTrue(source.exists())
+            # Source is deleted before commit (single-commit-per-pass)
+            self.assertFalse(source.exists())
 
 
 # -----------------------------------------------------------------------
@@ -1739,20 +1740,18 @@ class TestManifestOccupied(unittest.TestCase):
                               "logs/history/api_audit/index/other_seg.json"],
             )
 
-            result = segment_history_maintenance_service(
-                family="api_audit",
-                repo_root=repo,
-                settings=_FakeSettings(),
-                gm=SimpleGitManagerStub(),
-            )
-            # C3 fix: maintenance error responses are now JSONResponse(409)
-            from starlette.responses import JSONResponse
-            self.assertIsInstance(result, JSONResponse)
-            self.assertEqual(result.status_code, 409)
-            import json as _json
-            body = _json.loads(result.body)
-            self.assertFalse(body["ok"])
-            self.assertEqual(body["error"]["code"],
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_maintenance_service(
+                    family="api_audit",
+                    repo_root=repo,
+                    settings=_FakeSettings(),
+                    gm=SimpleGitManagerStub(),
+                )
+            # C3 fix: maintenance error responses are now HTTPException(409)
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertFalse(ctx.exception.detail["ok"])
+            self.assertEqual(ctx.exception.detail["error"]["code"],
                              "segment_history_manifest_occupied")
 
 
@@ -1760,6 +1759,9 @@ class TestColdStoreDefersHotDeletion(unittest.TestCase):
     """F2-R14: Hot payloads survive when git commit fails."""
 
     def test_hot_payloads_survive_failed_commit(self) -> None:
+        """With single-commit-per-pass, hot payloads are deleted BEFORE
+        the cold-store commit.  When the commit fails the hot files are
+        already gone, but cold .gz + stub exist and durable=False."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             logs = repo / "logs"
@@ -1791,17 +1793,29 @@ class TestColdStoreDefersHotDeletion(unittest.TestCase):
             self.assertFalse(cs_result["durable"])
             self.assertIn("at_risk_segment_ids", cs_result)
 
-            # Hot payload must still exist (not deleted before commit)
+            # Hot payloads deleted before commit (single-commit-per-pass)
             hist = repo / "logs" / "history" / "api_audit"
             hot_files = list(hist.glob("*.jsonl"))
-            self.assertTrue(len(hot_files) > 0,
-                            "Hot payload should survive failed commit")
+            self.assertEqual(len(hot_files), 0,
+                             "Hot payloads are deleted before commit")
+
+            # Cold .gz and stub must exist
+            cold_files = list((hist / "cold").glob("*.gz"))
+            self.assertTrue(len(cold_files) > 0,
+                            "Cold .gz file must exist")
+            stub_files = list((hist / "index").glob("*.json"))
+            self.assertTrue(len(stub_files) > 0,
+                            "Stub file must exist")
 
 
 class TestRehydrateDefersRemoval(unittest.TestCase):
     """F3-R14: Cold payload survives when rehydrate git commit fails."""
 
     def test_cold_payload_survives_failed_commit(self) -> None:
+        """With single-commit-per-pass, cold payload is deleted BEFORE
+        the rehydrate commit.  When the commit fails the cold file is
+        already gone, but the hot payload + updated stub exist and
+        durable=False."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             logs = repo / "logs"
@@ -1840,11 +1854,17 @@ class TestRehydrateDefersRemoval(unittest.TestCase):
             self.assertFalse(rh["durable"])
             self.assertIn("at_risk_segment_ids", rh)
 
-            # Cold payload must still exist
+            # Cold payload deleted before commit (single-commit-per-pass)
             cold_dir = repo / "logs" / "history" / "api_audit" / "cold"
             cold_files = list(cold_dir.glob("*.gz"))
-            self.assertTrue(len(cold_files) > 0,
-                            "Cold payload should survive failed commit")
+            self.assertEqual(len(cold_files), 0,
+                             "Cold payload is deleted before commit")
+
+            # Hot payload must exist after rehydration
+            hist = repo / "logs" / "history" / "api_audit"
+            hot_files = list(hist.glob("*.jsonl"))
+            self.assertTrue(len(hot_files) > 0,
+                            "Hot payload must exist after rehydrate")
 
 
 class TestTargetPathsPairingValidation(unittest.TestCase):
@@ -2273,13 +2293,16 @@ class TestReviewRound16Fixes(unittest.TestCase):
     # R16-F4: Audit append lockless fallback
     # ---------------------------------------------------------------
     def test_audit_append_succeeds_when_lock_held(self):
-        """Audit event must be written even when source lock is held."""
+        """When source lock is held, append_audit raises
+        SegmentHistoryAppendError instead of falling back to lockless
+        write."""
+        from app.segment_history.append import SegmentHistoryAppendError
+        from app.segment_history.locking import segment_history_source_lock
+        from app.segment_history.service import _derive_stream_key
+
         repo = self._make_repo()
         source = repo / "logs" / "api_audit.jsonl"
         source.write_text("")
-
-        from app.segment_history.locking import segment_history_source_lock
-        from app.segment_history.service import _derive_stream_key
 
         rel = str(source.relative_to(repo))
         sk = _derive_stream_key("api_audit", rel)
@@ -2288,24 +2311,24 @@ class TestReviewRound16Fixes(unittest.TestCase):
 
         # Hold the lock (simulating maintenance) then try to append
         with segment_history_source_lock(lock_key, lock_dir=lock_dir):
-            # This should NOT raise — it should fall back to lockless append
-            append_audit(
-                repo, "test_event", "peer-1", {"msg": "during-maintenance"},
-                rollover_bytes=0, gm=None,
-            )
-
-        content = source.read_text(encoding="utf-8")
-        self.assertIn("test_event", content)
-        self.assertIn("during-maintenance", content)
+            with self.assertRaises(SegmentHistoryAppendError) as ctx:
+                append_audit(
+                    repo, "test_event", "peer-1", {"msg": "during-maintenance"},
+                    rollover_bytes=0, gm=None,
+                )
+            self.assertEqual(ctx.exception.code,
+                             "segment_history_source_lock_timeout")
 
     def test_audit_append_with_rollover_lockless_fallback(self):
-        """Audit append with rollover_bytes falls back on lock contention."""
+        """Audit append with rollover_bytes raises SegmentHistoryAppendError
+        on lock contention instead of falling back to lockless write."""
+        from app.segment_history.append import SegmentHistoryAppendError
+        from app.segment_history.locking import segment_history_source_lock
+        from app.segment_history.service import _derive_stream_key
+
         repo = self._make_repo()
         source = repo / "logs" / "api_audit.jsonl"
         source.write_text("")
-
-        from app.segment_history.locking import segment_history_source_lock
-        from app.segment_history.service import _derive_stream_key
 
         rel = str(source.relative_to(repo))
         sk = _derive_stream_key("api_audit", rel)
@@ -2314,13 +2337,13 @@ class TestReviewRound16Fixes(unittest.TestCase):
 
         # Hold the lock then append with rollover enabled
         with segment_history_source_lock(lock_key, lock_dir=lock_dir):
-            append_audit(
-                repo, "rollover_event", "peer-1", {"msg": "with-rollover"},
-                rollover_bytes=1024, gm=SimpleGitManagerStub(),
-            )
-
-        content = source.read_text(encoding="utf-8")
-        self.assertIn("rollover_event", content)
+            with self.assertRaises(SegmentHistoryAppendError) as ctx:
+                append_audit(
+                    repo, "rollover_event", "peer-1", {"msg": "with-rollover"},
+                    rollover_bytes=1024, gm=SimpleGitManagerStub(),
+                )
+            self.assertEqual(ctx.exception.code,
+                             "segment_history_source_lock_timeout")
 
     # ---------------------------------------------------------------
     # R16-F5: Non-durable rehydrate re-attempt triggers reconciliation
@@ -2418,18 +2441,17 @@ class TestReviewRound16Fixes(unittest.TestCase):
         )
         seg_id = result["rolled_segment_ids"][0]
 
-        reh = segment_history_cold_rehydrate_service(
-            family="api_audit",
-            segment_id=seg_id,
-            repo_root=repo,
-            gm=gm,
-        )
-        # Should be JSONResponse with 409
-        from fastapi.responses import JSONResponse
-        self.assertIsInstance(reh, JSONResponse)
-        self.assertEqual(reh.status_code, 409)
-        body = json.loads(reh.body)
-        self.assertEqual(body["error"]["code"], "segment_history_not_cold")
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            segment_history_cold_rehydrate_service(
+                family="api_audit",
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=gm,
+            )
+        # Should be HTTPException with 409
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_not_cold")
 
 
 # -----------------------------------------------------------------------
@@ -2559,7 +2581,10 @@ class TestAuditEventPreservedOnRolloverFailure(unittest.TestCase):
     fails (pending batch residue, ManifestOccupied, or I/O failure)."""
 
     def test_audit_event_written_despite_manifest_occupied(self) -> None:
-        """When ManifestOccupied blocks rollover, the event is still appended."""
+        """When ManifestOccupied blocks rollover, append_audit raises
+        SegmentHistoryAppendError instead of silently appending."""
+        from app.segment_history.append import SegmentHistoryAppendError
+
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
@@ -2582,15 +2607,14 @@ class TestAuditEventPreservedOnRolloverFailure(unittest.TestCase):
                 ],
             )
 
-            original_size = audit_file.stat().st_size
-            # Should NOT raise — event is written despite rollover failure
-            append_audit(
-                repo, "test_event", "peer-1", {"k": "v"},
-                rollover_bytes=50, gm=gm,
-            )
-            new_content = audit_file.read_text()
-            self.assertTrue(len(new_content) > original_size)
-            self.assertIn('"test_event"', new_content)
+            # Rollover failure now propagates as SegmentHistoryAppendError
+            with self.assertRaises(SegmentHistoryAppendError) as ctx:
+                append_audit(
+                    repo, "test_event", "peer-1", {"k": "v"},
+                    rollover_bytes=50, gm=gm,
+                )
+            self.assertEqual(ctx.exception.code,
+                             "segment_history_manifest_occupied")
 
 
 # -----------------------------------------------------------------------

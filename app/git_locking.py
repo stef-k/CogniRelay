@@ -1,9 +1,9 @@
 """Repository-level locking for git-backed mutation sequences.
 
-NOTE: Lock acquisition uses ``time.sleep()`` polling which blocks the
-calling thread-pool thread.  Under high concurrency, this can exhaust
-the ASGI thread pool and stall all endpoints.  A proper fix (async lock
-polling or a concurrency semaphore) is deferred to a separate issue.
+The git-commit serialization lock waits indefinitely (no timeout) per
+the segment-history spec.  Callers must never acquire the git lock
+before acquiring per-source locks — source locks have a 30 s timeout
+and are the only concurrency-bounding mechanism.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import fcntl
 import hashlib
 import logging
 import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -23,8 +22,6 @@ _thread_state = threading.local()
 _log = logging.getLogger(__name__)
 _lock_dir_ready_guard = threading.Lock()
 _lock_dir_ready: set[str] = set()
-_LOCK_TIMEOUT_SECONDS = 30.0
-_LOCK_POLL_INTERVAL = 0.05
 
 
 def _repo_lock_id(repo_root: Path) -> str:
@@ -60,17 +57,10 @@ def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
         _log.error("Cannot open git lock file %s: %s", lock_path, exc)
         raise HTTPException(status_code=503, detail="Git lock infrastructure unavailable") from exc
     try:
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        while True:
-            try:
-                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    lock_file.close()
-                    _log.error("Git mutation lock acquisition timed out for %s", repo_root)
-                    raise HTTPException(status_code=503, detail="Git lock acquisition timed out") from None
-                time.sleep(_LOCK_POLL_INTERVAL)
+        # Blocking wait — no timeout per spec.  Source locks (30 s timeout)
+        # bound concurrency; the git lock is only held during brief
+        # git-add/commit operations.
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
         yield
     finally:
         lock_file.close()
