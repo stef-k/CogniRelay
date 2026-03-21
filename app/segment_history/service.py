@@ -756,7 +756,15 @@ def _reconcile_manifest_residue(
         elif payload_exists and not stub_exists:
             # Crash between payload write and stub write — source is
             # intact, so clean up the orphaned payload.
-            orphaned_payloads.append(repo_root / payload_rel)
+            # Safety: never delete a .json stub file as an "orphaned payload".
+            if not payload_rel.endswith(".json"):
+                orphaned_payloads.append(repo_root / payload_rel)
+            else:
+                _log.warning(
+                    "Reconciliation: unexpected .json file in payload position, "
+                    "skipping deletion: %s", payload_rel,
+                )
+                existing_targets.append(repo_root / payload_rel)
         elif stub_exists:
             existing_targets.append(repo_root / stub_rel)
     # Handle odd trailing entry
@@ -866,7 +874,11 @@ def segment_history_maintenance_service(
         SegmentHistoryLockTimeout,
         acquire_sorted_source_locks,
     )
-    from app.segment_history.manifest import remove_manifest, write_manifest
+    from app.segment_history.manifest import (
+        ManifestOccupied,
+        remove_manifest,
+        write_manifest,
+    )
 
     if family not in FAMILIES:
         return {
@@ -891,28 +903,52 @@ def segment_history_maintenance_service(
     # 1. Discover active sources
     sources = discover_active_sources(family, repo_root)
 
-    # 2. Skip 0-byte sources; delete empty ack files with warning
+    # 2. Skip 0-byte sources; collect empty ack candidates for
+    #    lock-guarded deletion (prevents TOCTOU where a concurrent write
+    #    populates the file between the size check and the unlink).
     eligible: list[Path] = []
+    deferred_empty_ack_deletes: list[Path] = []
     for src in sources:
         try:
             size = src.stat().st_size
         except OSError:
             continue
         if size == 0:
-            # Delete empty ack files outside atomic unit
             if family == "message_stream" and src.parent == repo_root / "messages" / "acks":
-                try:
-                    src.unlink()
-                    warnings.append(_make_warning(
-                        "segment_history_empty_ack_deleted",
-                        f"Removed empty ack file: {src.name}",
-                        path=str(src),
-                    ))
-                except OSError:
-                    pass
+                deferred_empty_ack_deletes.append(src)
             continue
         if check_rollover_eligible(src, family, settings, now, warnings=warnings):
             eligible.append(src)
+
+    lock_dir = repo_root / ".locks" / "segment_history"
+
+    # Delete empty ack files under their source lock to prevent deleting
+    # a file that a concurrent writer just populated.
+    if deferred_empty_ack_deletes:
+        from app.segment_history.locking import segment_history_source_lock
+        for ack_src in deferred_empty_ack_deletes:
+            ack_rel = str(ack_src.relative_to(repo_root))
+            ack_sk = _derive_stream_key(family, ack_rel)
+            ack_lock_key = f"segment_history:{family}:{ack_sk}"
+            try:
+                with segment_history_source_lock(ack_lock_key, lock_dir=lock_dir):
+                    # Re-check under lock: only delete if still empty.
+                    try:
+                        ack_size = ack_src.stat().st_size
+                    except OSError:
+                        continue
+                    if ack_size == 0:
+                        try:
+                            ack_src.unlink()
+                            warnings.append(_make_warning(
+                                "segment_history_empty_ack_deleted",
+                                f"Removed empty ack file: {ack_src.name}",
+                                path=str(ack_src),
+                            ))
+                        except OSError:
+                            pass
+            except SegmentHistoryLockTimeout:
+                pass  # Skip this ack file; it'll be cleaned up next run.
 
     # 3. Sort and apply batch limit
     eligible.sort()
@@ -952,7 +988,6 @@ def segment_history_maintenance_service(
         lock_keys.append(f"segment_history:{family}:{stream_key}")
         all_source_rels.append(rel)
 
-    lock_dir = repo_root / ".locks" / "segment_history"
     source_rollback: list[tuple[Path, bytes | None]] = []
     durable = True
     committed_files: list[str] = []
@@ -1180,13 +1215,15 @@ def segment_history_maintenance_service(
                                 durable = False
                                 warnings.append(_make_warning(
                                     "segment_history_git_commit_failed",
-                                    "Git commit failed for maintenance roll",
+                                    f"Git commit failed for maintenance roll; "
+                                    f"at-risk segments: {rolled_segment_ids}",
                                 ))
                     except Exception:
                         durable = False
                         warnings.append(_make_warning(
                             "segment_history_git_commit_failed",
-                            "Git commit failed for maintenance roll",
+                            f"Git commit failed for maintenance roll; "
+                            f"at-risk segments: {rolled_segment_ids}",
                         ))
             except Exception:
                 # Rollback under lock: restore sources, remove created
@@ -1218,6 +1255,16 @@ def segment_history_maintenance_service(
             if durable:
                 remove_manifest(repo_root, family)
 
+    except ManifestOccupied as exc:
+        return {
+            "ok": False,
+            "operation": "segment_history_maintenance",
+            "family": family,
+            "error": {
+                "code": exc.code,
+                "detail": str(exc),
+            },
+        }
     except SegmentHistoryLockTimeout as exc:
         return {
             "ok": False,
@@ -1234,7 +1281,7 @@ def segment_history_maintenance_service(
     for evt in deferred_audit:
         _emit_audit(audit, "segment_history_roll", evt)
 
-    return {
+    result = {
         "ok": True,
         "operation": "segment_history_maintenance",
         "family": family,
@@ -1247,6 +1294,9 @@ def segment_history_maintenance_service(
         "latest_commit": latest_commit,
         "warnings": warnings,
     }
+    if not durable:
+        result["at_risk_segment_ids"] = rolled_segment_ids
+    return result
 
 
 # ===========================================================================
@@ -1274,7 +1324,11 @@ def segment_history_cold_store_service(
         SegmentHistoryLockTimeout,
         acquire_sorted_source_locks,
     )
-    from app.segment_history.manifest import remove_manifest, write_manifest
+    from app.segment_history.manifest import (
+        ManifestOccupied,
+        remove_manifest,
+        write_manifest,
+    )
 
     if family not in FAMILIES:
         return {
@@ -1611,24 +1665,14 @@ def segment_history_cold_store_service(
                         "warning_count": len(warnings),
                     })
 
-                # All writes succeeded — delete hot payloads before commit
-                # so git stages their removal in the same commit.
-                for hp, sid in deferred_hot_deletes:
-                    try:
-                        hp.unlink()
-                    except OSError:
-                        warnings.append(_make_warning(
-                            "segment_history_hot_payload_remove_failed",
-                            f"Could not remove hot payload after cold-store: {sid}",
-                            segment_id=sid,
-                        ))
+                # Git commit cold payloads + mutated stubs first (without
+                # deleting hot payloads) so that on crash the committed
+                # state has both cold .gz and hot originals — no data loss.
+                from app.git_locking import repository_mutation_lock
 
-                # Git commit — inside source lock scope per spec
                 if commit_paths:
                     msg = f"segment-history: cold-store {family} {selection_count}"
                     try:
-                        from app.git_locking import repository_mutation_lock
-
                         with repository_mutation_lock(repo_root):
                             success = gm.commit_paths(commit_paths, msg)
                             if success:
@@ -1640,14 +1684,46 @@ def segment_history_cold_store_service(
                                 durable = False
                                 warnings.append(_make_warning(
                                     "segment_history_git_commit_failed",
-                                    "Git commit failed for cold-store",
+                                    f"Git commit failed for cold-store; "
+                                    f"at-risk segments: {cold_stored_ids}",
                                 ))
                     except Exception:
                         durable = False
                         warnings.append(_make_warning(
                             "segment_history_git_commit_failed",
-                            "Git commit failed for cold-store",
+                            f"Git commit failed for cold-store; "
+                            f"at-risk segments: {cold_stored_ids}",
                         ))
+
+                # Delete hot payloads only after a durable commit ensures
+                # the cold .gz and mutated stubs are recoverable.  If the
+                # commit failed, hot payloads remain on disk as fallback.
+                if durable and deferred_hot_deletes:
+                    hot_delete_paths: list[Path] = []
+                    for hp, sid in deferred_hot_deletes:
+                        try:
+                            hp.unlink()
+                            hot_delete_paths.append(hp)
+                        except OSError:
+                            warnings.append(_make_warning(
+                                "segment_history_hot_payload_remove_failed",
+                                f"Could not remove hot payload after cold-store: {sid}",
+                                segment_id=sid,
+                            ))
+                    # Second commit to stage the hot-payload deletions.
+                    if hot_delete_paths:
+                        try:
+                            with repository_mutation_lock(repo_root):
+                                gm.commit_paths(
+                                    hot_delete_paths,
+                                    f"segment-history: remove hot payloads {family}",
+                                )
+                                latest_commit = gm.latest_commit()
+                        except Exception:
+                            warnings.append(_make_warning(
+                                "segment_history_git_commit_failed",
+                                "Git commit failed for hot-payload removal",
+                            ))
             except Exception:
                 # Rollback under lock: restore stubs and hot payloads, remove
                 # cold .gz files, clean manifest.
@@ -1663,6 +1739,16 @@ def segment_history_cold_store_service(
             if durable:
                 remove_manifest(repo_root, family)
 
+    except ManifestOccupied as exc:
+        return {
+            "ok": False,
+            "operation": "segment_history_cold_store",
+            "family": family,
+            "error": {
+                "code": exc.code,
+                "detail": str(exc),
+            },
+        }
     except SegmentHistoryLockTimeout as exc:
         return {
             "ok": False,
@@ -1678,7 +1764,7 @@ def segment_history_cold_store_service(
     for evt in deferred_audit:
         _emit_audit(audit, "segment_history_cold_store", evt)
 
-    return {
+    result = {
         "ok": True,
         "operation": "segment_history_cold_store",
         "family": family,
@@ -1691,6 +1777,9 @@ def segment_history_cold_store_service(
         "latest_commit": latest_commit,
         "warnings": warnings,
     }
+    if not durable:
+        result["at_risk_segment_ids"] = cold_stored_ids
+    return result
 
 
 # ===========================================================================
@@ -1961,19 +2050,25 @@ def segment_history_cold_rehydrate_service(
             # rehydrate attempt to auto-clean the orphaned hot file
             # (see conflict check above).
             from app.segment_history.manifest import (
+                ManifestOccupied as _ManifestOccupied,
                 remove_manifest as _remove_rehydrate_manifest,
                 write_manifest as _write_rehydrate_manifest,
             )
 
             hot_rel_planned = str(hot_path.relative_to(repo_root))
-            _write_rehydrate_manifest(
-                repo_root,
-                operation="rehydrate",
-                family=family,
-                source_paths=[source_path_str],
-                segment_ids=[segment_id],
-                target_paths=[hot_rel_planned, str(stub_path.relative_to(repo_root))],
-            )
+            try:
+                _write_rehydrate_manifest(
+                    repo_root,
+                    operation="rehydrate",
+                    family=family,
+                    source_paths=[source_path_str],
+                    segment_ids=[segment_id],
+                    target_paths=[hot_rel_planned, str(stub_path.relative_to(repo_root))],
+                )
+            except _ManifestOccupied as exc:
+                return _error_response(
+                    409, exc.code, str(exc),
+                )
 
             # Write hot payload
             hot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1988,28 +2083,18 @@ def segment_history_cold_rehydrate_service(
                     json.dumps(updated_stub, ensure_ascii=False, indent=2),
                 )
 
-                # Remove cold payload
-                cold_removed = True
-                try:
-                    cold_path.unlink()
-                except OSError:
-                    cold_removed = False
-                    warnings.append(_make_warning(
-                        "segment_history_cold_payload_remove_failed",
-                        f"Could not remove cold payload after rehydrate: {segment_id}",
-                        segment_id=segment_id,
-                    ))
-
-                # Git commit — inside source lock scope per spec
+                # Git commit hot payload + mutated stub first, keeping
+                # the cold payload on disk so a crash after commit failure
+                # leaves both cold and hot copies available for recovery.
                 durable = True
                 committed_files: list[str] = []
                 latest_commit: str | None = None
 
-                commit_paths_list = [hot_path, stub_path, cold_path]
+                from app.git_locking import repository_mutation_lock
+
+                commit_paths_list = [hot_path, stub_path]
                 msg = f"segment-history: rehydrate {family} {segment_id}"
                 try:
-                    from app.git_locking import repository_mutation_lock
-
                     with repository_mutation_lock(repo_root):
                         success = gm.commit_paths(commit_paths_list, msg)
                         if success:
@@ -2021,19 +2106,51 @@ def segment_history_cold_rehydrate_service(
                             durable = False
                             warnings.append(_make_warning(
                                 "segment_history_git_commit_failed",
-                                "Git commit failed for rehydrate",
+                                f"Git commit failed for rehydrate; "
+                                f"at-risk segment: {segment_id}",
+                                segment_id=segment_id,
                             ))
                 except Exception:
                     durable = False
                     warnings.append(_make_warning(
                         "segment_history_git_commit_failed",
-                        "Git commit failed for rehydrate",
+                        f"Git commit failed for rehydrate; "
+                        f"at-risk segment: {segment_id}",
+                        segment_id=segment_id,
                     ))
 
-                # Remove manifest after successful commit (or when git
-                # manager is unavailable).  On commit failure the manifest
-                # is preserved so the orphaned-hot auto-cleanup fires on
-                # the next rehydrate attempt.
+                # Remove cold payload only after durable commit ensures
+                # the hot payload and mutated stub are recoverable.  If
+                # the commit failed, cold payload remains as fallback.
+                cold_removed = False
+                if durable:
+                    try:
+                        cold_path.unlink()
+                        cold_removed = True
+                    except OSError:
+                        warnings.append(_make_warning(
+                            "segment_history_cold_payload_remove_failed",
+                            f"Could not remove cold payload after rehydrate: {segment_id}",
+                            segment_id=segment_id,
+                        ))
+                    # Stage the cold-payload deletion in git.
+                    if cold_removed:
+                        try:
+                            with repository_mutation_lock(repo_root):
+                                gm.commit_paths(
+                                    [cold_path],
+                                    f"segment-history: remove cold payload {family} {segment_id}",
+                                )
+                                latest_commit = gm.latest_commit()
+                        except Exception:
+                            warnings.append(_make_warning(
+                                "segment_history_git_commit_failed",
+                                "Git commit failed for cold-payload removal",
+                            ))
+
+                # Remove manifest after successful commit.  On commit
+                # failure the manifest is preserved so the orphaned-hot
+                # auto-cleanup fires on the next rehydrate attempt.
                 if durable:
                     _remove_rehydrate_manifest(repo_root, family)
             except Exception:
@@ -2063,7 +2180,7 @@ def segment_history_cold_rehydrate_service(
 
     stub_rel = str(stub_path.relative_to(repo_root))
 
-    return {
+    result = {
         "ok": True,
         "operation": "segment_history_cold_rehydrate",
         "family": family,
@@ -2078,3 +2195,6 @@ def segment_history_cold_rehydrate_service(
         "latest_commit": latest_commit,
         "warnings": warnings,
     }
+    if not durable:
+        result["at_risk_segment_ids"] = [segment_id]
+    return result

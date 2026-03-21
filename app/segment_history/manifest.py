@@ -14,6 +14,24 @@ _log = logging.getLogger(__name__)
 SEGMENT_HISTORY_DIR_REL = ".cognirelay/segment-history"
 
 
+class ManifestOccupied(Exception):
+    """Raised when a manifest already exists for a family and is owned by another operation.
+
+    This prevents concurrent operations on non-overlapping sources from
+    clobbering each other's crash-recovery manifests.
+    """
+
+    code: str = "segment_history_manifest_occupied"
+
+    def __init__(self, family: str, existing_op: str) -> None:
+        self.family = family
+        self.existing_op = existing_op
+        super().__init__(
+            f"Manifest slot for family '{family}' is occupied by a "
+            f"'{existing_op}' operation; back off and retry"
+        )
+
+
 def _manifest_dir(repo_root: Path) -> Path:
     """Return the manifest directory, creating it with .gitignore if needed."""
     d = repo_root / SEGMENT_HISTORY_DIR_REL
@@ -47,9 +65,56 @@ def write_manifest(
 ) -> Path:
     """Write a crash-recovery manifest before beginning mutations.
 
+    If a manifest already exists for this family and its ``source_paths``
+    do not overlap with the new operation's sources, raises
+    :class:`ManifestOccupied` to prevent clobbering another operation's
+    crash-recovery pointer.  When sources *do* overlap the caller is
+    assumed to hold the relevant source locks and the manifest is
+    overwritten (reconciliation already ran under those locks).
+
     Returns the path to the written manifest.
     """
     path = manifest_path(repo_root, family)
+
+    # Guard: refuse to clobber a manifest owned by a non-overlapping operation.
+    if path.is_file():
+        try:
+            existing_text = path.read_text(encoding="utf-8")
+            existing = json.loads(existing_text)
+            existing_sources = set(existing.get("source_paths", []))
+            new_sources = set(source_paths)
+            if existing_sources and not existing_sources & new_sources:
+                existing_op = existing.get("operation", "unknown")
+                raise ManifestOccupied(family, existing_op)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            # Corrupt or unreadable manifest — safe to overwrite; the
+            # reconciliation path would have cleaned it up anyway.
+            pass
+
+    # Validate target_paths pairing: must be even-length with alternating
+    # [payload, stub, payload, stub, ...] entries.  The reconciliation
+    # logic relies on this convention to classify orphans vs. committed
+    # pairs — a violated pairing could cause silent data loss.
+    effective_targets = target_paths or []
+    if len(effective_targets) % 2 != 0:
+        raise ValueError(
+            f"target_paths must have even length (payload/stub pairs), "
+            f"got {len(effective_targets)}"
+        )
+    for i in range(0, len(effective_targets), 2):
+        payload_entry = effective_targets[i]
+        stub_entry = effective_targets[i + 1] if i + 1 < len(effective_targets) else ""
+        if stub_entry and not stub_entry.endswith(".json"):
+            raise ValueError(
+                f"target_paths[{i + 1}] should be a stub (.json), "
+                f"got: {stub_entry}"
+            )
+        if payload_entry and payload_entry.endswith(".json"):
+            raise ValueError(
+                f"target_paths[{i}] should be a payload (not .json), "
+                f"got: {payload_entry}"
+            )
+
     payload = {
         "schema_type": "segment_history_manifest",
         "schema_version": "1.0",
@@ -57,7 +122,7 @@ def write_manifest(
         "family": family,
         "source_paths": source_paths,
         "segment_ids": segment_ids,
-        "target_paths": target_paths or [],
+        "target_paths": effective_targets,
         "started_at": started_at or datetime.now(timezone.utc).isoformat(),
     }
     write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))

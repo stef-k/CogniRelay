@@ -47,6 +47,7 @@ def _check_write_time_rollover_locked(
     # the common (no-rollover) path as fast as possible.
     from app.segment_history.families import FAMILIES
     from app.segment_history.manifest import (
+        ManifestOccupied as _ManifestOccupied,
         read_manifest as _read_manifest,
         remove_manifest as _remove_manifest,
         write_manifest as _write_manifest,
@@ -101,17 +102,20 @@ def _check_write_time_rollover_locked(
 
     # Write crash-recovery manifest before mutations so that a
     # process crash mid-roll leaves a signal for reconciliation.
-    _write_manifest(
-        repo_root,
-        operation="write_time_rollover",
-        family=family,
-        source_paths=[rel],
-        segment_ids=[segment_id],
-        target_paths=[
-            str(payload_path.relative_to(repo_root)),
-            str(stub_path.relative_to(repo_root)),
-        ],
-    )
+    try:
+        _write_manifest(
+            repo_root,
+            operation="write_time_rollover",
+            family=family,
+            source_paths=[rel],
+            segment_ids=[segment_id],
+            target_paths=[
+                str(payload_path.relative_to(repo_root)),
+                str(stub_path.relative_to(repo_root)),
+            ],
+        )
+    except _ManifestOccupied as exc:
+        raise WriteTimeRolloverError(exc.code, str(exc)) from exc
 
     try:
         result = _roll_jsonl_source(

@@ -1400,5 +1400,352 @@ class TestInBatchSegmentIdDedup(unittest.TestCase):
             self.assertTrue(id4.endswith("__0004"))
 
 
+# -----------------------------------------------------------------------
+# Review round 14 fixes
+# -----------------------------------------------------------------------
+
+
+class TestManifestOccupied(unittest.TestCase):
+    """F1-R14: write_manifest rejects clobber by non-overlapping operations."""
+
+    def test_clobber_rejected_non_overlapping(self) -> None:
+        """write_manifest raises ManifestOccupied when existing manifest has
+        non-overlapping source_paths."""
+        from app.segment_history.manifest import ManifestOccupied
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["seg1"],
+                target_paths=["logs/history/api_audit/seg1.jsonl",
+                              "logs/history/api_audit/index/seg1.json"],
+            )
+            with self.assertRaises(ManifestOccupied):
+                write_manifest(
+                    repo,
+                    operation="cold_store",
+                    family="api_audit",
+                    source_paths=["logs/other.jsonl"],
+                    segment_ids=["seg2"],
+                    target_paths=["logs/history/api_audit/seg2.jsonl",
+                                  "logs/history/api_audit/index/seg2.json"],
+                )
+
+    def test_overwrite_allowed_overlapping(self) -> None:
+        """write_manifest allows overwrite when sources overlap (same lock holder)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["seg1"],
+                target_paths=["logs/history/api_audit/seg1.jsonl",
+                              "logs/history/api_audit/index/seg1.json"],
+            )
+            # Same source — should not raise
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["seg1_new"],
+                target_paths=["logs/history/api_audit/seg1_new.jsonl",
+                              "logs/history/api_audit/index/seg1_new.json"],
+            )
+            mf = read_manifest(repo, "api_audit")
+            self.assertIsNotNone(mf)
+            self.assertEqual(mf["segment_ids"], ["seg1_new"])
+
+    def test_maintenance_returns_manifest_occupied_error(self) -> None:
+        """Maintenance returns structured error when manifest is occupied."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            source.write_text('{"ts":"2026-03-20T00:00:00Z","event":"test"}\n' * 5)
+
+            # Plant a manifest for a different source
+            write_manifest(
+                repo,
+                operation="cold_store",
+                family="api_audit",
+                source_paths=["logs/other.jsonl"],
+                segment_ids=["other_seg"],
+                target_paths=["logs/history/api_audit/other_seg.jsonl",
+                              "logs/history/api_audit/index/other_seg.json"],
+            )
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=SimpleGitManagerStub(),
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"],
+                             "segment_history_manifest_occupied")
+
+
+class TestColdStoreDefersHotDeletion(unittest.TestCase):
+    """F2-R14: Hot payloads survive when git commit fails."""
+
+    def test_hot_payloads_survive_failed_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"test"}\n' * 3)
+
+            gm = SimpleGitManagerStub()
+            settings = _FakeSettings()
+            now = datetime(2026, 3, 20, tzinfo=timezone.utc)
+
+            # Roll first
+            result = segment_history_maintenance_service(
+                family="api_audit", repo_root=repo, settings=settings,
+                gm=gm, now=now,
+            )
+            self.assertTrue(result["ok"])
+
+            # Make git commit fail for cold-store
+            class _FailingGM(SimpleGitManagerStub):
+                def commit_paths(self, paths: Any, msg: str) -> bool:
+                    return False
+
+            cs_result = segment_history_cold_store_service(
+                family="api_audit", repo_root=repo, settings=settings,
+                gm=_FailingGM(), now=now,
+            )
+            self.assertTrue(cs_result["ok"])
+            self.assertFalse(cs_result["durable"])
+            self.assertIn("at_risk_segment_ids", cs_result)
+
+            # Hot payload must still exist (not deleted before commit)
+            hist = repo / "logs" / "history" / "api_audit"
+            hot_files = list(hist.glob("*.jsonl"))
+            self.assertTrue(len(hot_files) > 0,
+                            "Hot payload should survive failed commit")
+
+
+class TestRehydrateDefersRemoval(unittest.TestCase):
+    """F3-R14: Cold payload survives when rehydrate git commit fails."""
+
+    def test_cold_payload_survives_failed_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"test"}\n' * 3)
+
+            gm = SimpleGitManagerStub()
+            settings = _FakeSettings()
+            now = datetime(2026, 3, 20, tzinfo=timezone.utc)
+
+            # Roll
+            result = segment_history_maintenance_service(
+                family="api_audit", repo_root=repo, settings=settings,
+                gm=gm, now=now,
+            )
+            seg_id = result["rolled_segment_ids"][0]
+
+            # Cold-store
+            cs = segment_history_cold_store_service(
+                family="api_audit", repo_root=repo, settings=settings,
+                gm=gm, now=now,
+            )
+            self.assertTrue(cs["ok"])
+
+            # Rehydrate with failing git commit
+            class _FailingGM(SimpleGitManagerStub):
+                def commit_paths(self, paths: Any, msg: str) -> bool:
+                    return False
+
+            rh = segment_history_cold_rehydrate_service(
+                family="api_audit", segment_id=seg_id,
+                repo_root=repo, gm=_FailingGM(),
+            )
+            self.assertTrue(rh["ok"])
+            self.assertFalse(rh["durable"])
+            self.assertIn("at_risk_segment_ids", rh)
+
+            # Cold payload must still exist
+            cold_dir = repo / "logs" / "history" / "api_audit" / "cold"
+            cold_files = list(cold_dir.glob("*.gz"))
+            self.assertTrue(len(cold_files) > 0,
+                            "Cold payload should survive failed commit")
+
+
+class TestTargetPathsPairingValidation(unittest.TestCase):
+    """F5-R14: write_manifest validates target_paths pairing."""
+
+    def test_odd_length_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            with self.assertRaises(ValueError):
+                write_manifest(
+                    repo,
+                    operation="test",
+                    family="api_audit",
+                    source_paths=["src.jsonl"],
+                    segment_ids=["seg1"],
+                    target_paths=["payload.jsonl", "stub.json", "orphan.jsonl"],
+                )
+
+    def test_stub_in_payload_position_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            with self.assertRaises(ValueError):
+                write_manifest(
+                    repo,
+                    operation="test",
+                    family="api_audit",
+                    source_paths=["src.jsonl"],
+                    segment_ids=["seg1"],
+                    target_paths=["stub.json", "payload.jsonl"],
+                )
+
+    def test_valid_pairing_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            write_manifest(
+                repo,
+                operation="test",
+                family="api_audit",
+                source_paths=["src.jsonl"],
+                segment_ids=["seg1"],
+                target_paths=["payload.jsonl", "stub.json"],
+            )
+            mf = read_manifest(repo, "api_audit")
+            self.assertIsNotNone(mf)
+
+
+class TestEmptyAckLockGuarded(unittest.TestCase):
+    """F6-R14: Empty ack deletion uses source lock to prevent TOCTOU."""
+
+    def test_nonempty_ack_survives(self) -> None:
+        """If ack file becomes non-empty before lock-guarded delete,
+        it must not be deleted."""
+        from contextlib import contextmanager
+        from app.segment_history.locking import segment_history_source_lock as _orig
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            acks = repo / "messages" / "acks"
+            acks.mkdir(parents=True)
+            ack_file = acks / "test.jsonl"
+            # Start empty
+            ack_file.write_text("")
+
+            @contextmanager
+            def _populating_lock(lock_key: str, *, lock_dir: Path, timeout: float = 30.0):
+                # Simulate a concurrent write between size check and lock
+                ack_file.write_text('{"msg":"arrived"}\n')
+                with _orig(lock_key, lock_dir=lock_dir, timeout=timeout):
+                    yield
+
+            with patch(
+                "app.segment_history.locking.segment_history_source_lock",
+                _populating_lock,
+            ):
+                segment_history_maintenance_service(
+                    family="message_stream",
+                    repo_root=repo,
+                    settings=_FakeSettings(),
+                    gm=SimpleGitManagerStub(),
+                )
+
+            # Ack file must survive (was populated before lock-guarded re-check)
+            self.assertTrue(ack_file.exists(),
+                            "Non-empty ack file should not be deleted")
+
+
+class TestAtRiskSegmentIds(unittest.TestCase):
+    """F7-R14: Non-durable responses identify at-risk segments."""
+
+    def test_maintenance_at_risk_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"test"}\n' * 3)
+
+            class _FailingGM(SimpleGitManagerStub):
+                def commit_paths(self, paths: Any, msg: str) -> bool:
+                    return False
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=_FailingGM(),
+                now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+            )
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["durable"])
+            self.assertIn("at_risk_segment_ids", result)
+            self.assertEqual(len(result["at_risk_segment_ids"]),
+                             len(result["rolled_segment_ids"]))
+
+    def test_cold_store_at_risk_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"test"}\n' * 3)
+
+            gm = SimpleGitManagerStub()
+            settings = _FakeSettings()
+            now = datetime(2026, 3, 20, tzinfo=timezone.utc)
+
+            # Roll first
+            segment_history_maintenance_service(
+                family="api_audit", repo_root=repo, settings=settings,
+                gm=gm, now=now,
+            )
+
+            class _FailingGM(SimpleGitManagerStub):
+                def commit_paths(self, paths: Any, msg: str) -> bool:
+                    return False
+
+            cs = segment_history_cold_store_service(
+                family="api_audit", repo_root=repo, settings=settings,
+                gm=_FailingGM(), now=now,
+            )
+            self.assertTrue(cs["ok"])
+            self.assertFalse(cs["durable"])
+            self.assertIn("at_risk_segment_ids", cs)
+
+    def test_no_at_risk_when_durable(self) -> None:
+        """Durable response should NOT have at_risk_segment_ids."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            logs = repo / "logs"
+            logs.mkdir()
+            source = logs / "api_audit.jsonl"
+            source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"test"}\n' * 3)
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=SimpleGitManagerStub(),
+                now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+            )
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["durable"])
+            self.assertNotIn("at_risk_segment_ids", result)
+
+
 if __name__ == "__main__":
     unittest.main()
