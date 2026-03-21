@@ -1443,10 +1443,21 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                 has_failure = True
                 family_warnings.append({
                     "code": "segment_history_active_source_missing",
-                    "detail": f"Active source not readable: {src.name}",
+                    "detail": f"Active source missing: {src.name}",
                     "path": str(src.relative_to(restore_root)),
                     "segment_id": None,
                 })
+            else:
+                try:
+                    src.open("rb").close()
+                except OSError:
+                    has_failure = True
+                    family_warnings.append({
+                        "code": "segment_history_active_source_unreadable",
+                        "detail": f"Active source present but unreadable: {src.name}",
+                        "path": str(src.relative_to(restore_root)),
+                        "segment_id": None,
+                    })
 
         # Step 2: collect stub dirs for this family
         stub_dirs: list[Path] = []

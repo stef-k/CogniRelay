@@ -25,7 +25,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _log = logging.getLogger(__name__)
 
@@ -82,17 +82,8 @@ def _family_for_path(rel: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Core locked append
 # ---------------------------------------------------------------------------
-_DEFAULT_LOCK_TIMEOUT: float = 2.0
-"""Short lock timeout for append paths.
-
-Using a short timeout (2 s) instead of the default 30 s prevents events
-from being silently dropped during the entire maintenance lock-hold window
-(which can exceed 60 s when git commits time out).  When the lock cannot be
-acquired within this budget, the append falls back to a lockless write —
-accepting a race window spanning the full ``_roll_jsonl_source`` execution
-(~50-200 ms of file I/O) where the atomic rename could orphan the appended
-line, but this is strictly better than guaranteed event loss.
-"""
+_DEFAULT_LOCK_TIMEOUT: float = 30.0
+"""Lock timeout for append paths, matching spec-required 30 s budget."""
 
 
 def locked_append_jsonl(
@@ -104,6 +95,7 @@ def locked_append_jsonl(
     settings: Any = None,
     family: str | None = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
+    audit: Callable[..., Any] | None = None,
 ) -> None:
     """Append one JSON-line record with source-lock and write-time rollover.
 
@@ -143,7 +135,7 @@ def locked_append_jsonl(
         with segment_history_source_lock(
             lock_key, lock_dir=lock_dir, timeout=lock_timeout,
         ):
-            _check_and_rollover_locked(path, family, repo_root, gm, settings)
+            _check_and_rollover_locked(path, family, repo_root, gm, settings, audit=audit)
             # Journal: reject appends to non-current-day files under lock.
             if family == "journal":
                 _reject_non_current_day_journal(path)
@@ -166,6 +158,7 @@ def locked_append_jsonl_multi(
     gm: Any = None,
     settings: Any = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
+    audit: Callable[..., Any] | None = None,
 ) -> None:
     """Append one JSON-line record to multiple files with source-lock protection.
 
@@ -190,7 +183,7 @@ def locked_append_jsonl_multi(
 
     from app.segment_history.locking import (
         SegmentHistoryLockTimeout,
-        segment_history_source_lock,
+        acquire_sorted_source_locks,
     )
     from app.segment_history.service import _derive_stream_key
 
@@ -214,36 +207,24 @@ def locked_append_jsonl_multi(
     # Sort by lock key to acquire in consistent order.
     sh_entries.sort(key=lambda e: e[2])
     lock_dir = repo_root / ".locks" / "segment_history"
+    lock_keys = [e[2] for e in sh_entries]
 
     from app.audit import WriteTimeRolloverError
 
     try:
-        acquired: list[Any] = []
-        try:
-            for path_entry, fam_entry, lk_entry in sh_entries:
-                ctx = segment_history_source_lock(
-                    lk_entry, lock_dir=lock_dir, timeout=lock_timeout,
-                )
-                lock_handle = ctx.__enter__()
-                acquired.append((ctx, lock_handle))
-
-            # All locks acquired — check rollover and append under locks.
-            for path_entry, fam_entry, _lk_entry in sh_entries:
+        with acquire_sorted_source_locks(
+            lock_keys, lock_dir=lock_dir, total_budget=lock_timeout,
+        ):
+            for path_entry, fam_entry, _lk in sh_entries:
                 _check_and_rollover_locked(
                     path_entry, fam_entry, repo_root, gm, settings,
+                    audit=audit,
                 )
                 if fam_entry == "journal":
                     _reject_non_current_day_journal(path_entry)
                 path_entry.parent.mkdir(parents=True, exist_ok=True)
                 with path_entry.open("a", encoding="utf-8") as f:
                     f.write(line)
-        finally:
-            # Release all acquired locks in reverse order.
-            for ctx, _handle in reversed(acquired):
-                try:
-                    ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
     except SegmentHistoryLockTimeout as exc:
         raise SegmentHistoryAppendError(
             "segment_history_source_lock_timeout", str(exc),
@@ -261,6 +242,7 @@ def _check_and_rollover_locked(
     repo_root: Path,
     gm: Any,
     settings: Any,
+    audit: Callable[..., Any] | None = None,
 ) -> None:
     """Check write-time rollover eligibility and perform rollover if needed.
 
@@ -304,7 +286,7 @@ def _check_and_rollover_locked(
         rollover_bytes = rb if rb is not None else 0
 
     _check_write_time_rollover_locked(
-        path, rollover_bytes, repo_root, gm, family=family,
+        path, rollover_bytes, repo_root, gm, family=family, audit=audit,
     )
 
 

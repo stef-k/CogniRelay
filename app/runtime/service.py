@@ -36,9 +36,14 @@ def audit_event(
         return
     rollover_bytes = getattr(settings, "audit_log_rollover_bytes", 0)
     try:
+        # Create audit callback for write-time rollover event emission.
+        # Re-entrancy guard in _emit_audit prevents infinite recursion.
+        def _audit_cb(evt: str, det: dict[str, Any]) -> None:
+            audit_event(settings, auth, evt, det, gm=gm)
+
         append_audit(
             settings.repo_root, event, auth.peer_id if auth else "anonymous", detail,
-            rollover_bytes=rollover_bytes, gm=gm,
+            rollover_bytes=rollover_bytes, gm=gm, audit=_audit_cb,
         )
     except (WriteTimeRolloverError, SegmentHistoryAppendError) as exc:
         _log.warning(

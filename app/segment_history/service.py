@@ -7,6 +7,8 @@ import io
 import json
 import logging
 import re
+import subprocess
+import threading
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -677,7 +679,7 @@ def _json_field_counts(
         except (json.JSONDecodeError, AttributeError):
             continue
     # Sort by count descending, take top limit
-    sorted_items = sorted(counts.items(), key=lambda x: -x[1])[:limit]
+    sorted_items = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:limit]
     return dict(sorted_items)
 
 
@@ -799,6 +801,107 @@ def _truncate_reconciled_sources(
 
 
 
+def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
+    """Remove untracked files from a family's target directories.
+
+    Scans the family's history, stub/index, and cold directories for files
+    that exist on disk but are not tracked in git HEAD.  Returns the count
+    of files removed.  All errors are swallowed to guarantee graceful
+    degradation — orphans that cannot be removed will be retried on the
+    next pass.
+    """
+    from app.segment_history.families import FAMILIES
+
+    config = FAMILIES.get(family)
+    if config is None:
+        return 0
+
+    dirs_to_scan: list[Path] = []
+    if family == "journal":
+        journal_history = repo_root / "journal" / "history"
+        if journal_history.is_dir():
+            for year_dir in journal_history.iterdir():
+                if year_dir.is_dir():
+                    dirs_to_scan.append(year_dir)
+                    for sub in ("index", "cold"):
+                        sd = year_dir / sub
+                        if sd.is_dir():
+                            dirs_to_scan.append(sd)
+    elif family == "message_stream":
+        for kind in ("inbox", "outbox", "relay", "acks"):
+            base = repo_root / "messages" / "history" / kind
+            if base.is_dir():
+                dirs_to_scan.append(base)
+            for sub in ("index", "cold"):
+                sd = base / sub
+                if sd.is_dir():
+                    dirs_to_scan.append(sd)
+    else:
+        for attr in ("history_dir", "stub_dir"):
+            val = getattr(config, attr, "")
+            if val:
+                d = repo_root / val
+                if d.is_dir():
+                    dirs_to_scan.append(d)
+        # Cold dir is typically <history_dir>/cold but derive from stub dir
+        cold = repo_root / config.stub_dir.replace("/index", "/cold")
+        if cold.is_dir() and cold not in dirs_to_scan:
+            dirs_to_scan.append(cold)
+
+    removed = 0
+    for d in dirs_to_scan:
+        try:
+            tracked: set[str] = set()
+            dir_rel = str(d.relative_to(repo_root))
+            cp = subprocess.run(
+                ["git", "ls-tree", "--name-only", "HEAD", "--", dir_rel + "/"],
+                cwd=repo_root, text=True, capture_output=True, check=False,
+            )
+            if cp.returncode == 0:
+                for line in cp.stdout.strip().splitlines():
+                    tracked.add(line.strip())
+            for f in d.iterdir():
+                if f.is_file():
+                    f_rel = str(f.relative_to(repo_root))
+                    if f_rel not in tracked:
+                        try:
+                            f.unlink()
+                            removed += 1
+                        except OSError:
+                            pass
+        except Exception:
+            pass  # Git or I/O failure — skip this dir gracefully
+    return removed
+
+
+def _all_targets_in_head(repo_root: Path, target_paths: list[str]) -> bool:
+    """Check whether all target paths are already committed in git HEAD.
+
+    Returns True only when every non-empty path in *target_paths* is tracked
+    in HEAD and has no uncommitted changes.  Returns False on any error or
+    when any path differs from HEAD.
+    """
+    paths_to_check = [p for p in target_paths if p]
+    if not paths_to_check:
+        return False
+    try:
+        cp = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--"] + paths_to_check,
+            cwd=repo_root, capture_output=True, check=False,
+        )
+        if cp.returncode != 0:
+            return False
+        # Also verify they are actually tracked (diff --quiet returns 0 for
+        # untracked files too).
+        cp2 = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--"] + paths_to_check,
+            cwd=repo_root, capture_output=True, check=False,
+        )
+        return cp2.returncode == 0
+    except Exception:
+        return False
+
+
 def _reconcile_manifest_residue(
     repo_root: Path,
     caller_family: str,
@@ -833,9 +936,13 @@ def _reconcile_manifest_residue(
     try:
         manifest = read_manifest(repo_root, caller_family)
     except ValueError:
-        # Corrupt manifest -- clean up
+        # Corrupt manifest -- clean up and scan for orphans
         remove_manifest(repo_root, caller_family)
-        return {"warning": "segment_history_manifest_unreadable_cleanup"}
+        orphan_count = _cleanup_family_orphans(repo_root, caller_family)
+        detail = "segment_history_manifest_unreadable_cleanup"
+        if orphan_count:
+            detail += f"; removed {orphan_count} orphaned files"
+        return {"warning": detail}
 
     if manifest is None:
         return None
@@ -861,6 +968,38 @@ def _reconcile_manifest_residue(
     family = manifest.get("family", "unknown")
     segment_ids = manifest.get("segment_ids", [])
     target_paths = manifest.get("target_paths", [])
+
+    # Log when caller_op differs from manifest's recorded_op.
+    if caller_op != recorded_op:
+        _log.info(
+            "Reconciling manifest op=%s during caller_op=%s for family=%s",
+            recorded_op, caller_op, caller_family,
+        )
+
+    # Stale-manifest detection: if every target is already in HEAD,
+    # the commit succeeded but the manifest was not cleaned up.
+    # Silently discard per spec (no warning).
+    if target_paths:
+        try:
+            all_in_head = _all_targets_in_head(repo_root, target_paths)
+        except Exception:
+            all_in_head = False  # git check failed — conservative path
+        if all_in_head:
+            remove_manifest(repo_root, caller_family)
+            # Truncate sources to remove already-committed rolled data
+            if recorded_op in ("maintenance", "write_time_rollover"):
+                source_paths_list = manifest.get("source_paths", [])
+                try:
+                    _truncate_reconciled_sources(
+                        repo_root, family, target_paths,
+                        source_paths_list, gm,
+                    )
+                except Exception:
+                    _log.warning(
+                        "Could not truncate sources during stale manifest cleanup",
+                        exc_info=True,
+                    )
+            return None  # silent discard, no warning per spec
 
     if segment_ids:
         _log.warning(
@@ -1029,18 +1168,32 @@ def _reconcile_manifest_residue(
 # ---------------------------------------------------------------------------
 # Audit event emission helper
 # ---------------------------------------------------------------------------
+_audit_reentrant_guard = threading.local()
+
+
 def _emit_audit(
     audit: Callable[..., Any] | None,
     event: str,
     detail: dict[str, Any],
 ) -> None:
-    """Call the audit callable if provided, swallowing errors."""
+    """Call the audit callable if provided, swallowing errors.
+
+    Uses a thread-local re-entrancy guard to prevent infinite recursion
+    when the audit callback itself triggers a write-time rollover that
+    would emit another audit event.
+    """
     if audit is None:
         return
+    if getattr(_audit_reentrant_guard, "active", False):
+        _log.debug("Suppressed re-entrant audit emission for %s", event)
+        return
+    _audit_reentrant_guard.active = True
     try:
         audit(event, detail)
     except Exception:
         _log.warning("Audit emission failed for event %s", event, exc_info=True)
+    finally:
+        _audit_reentrant_guard.active = False
 
 
 # ===========================================================================
@@ -1077,15 +1230,18 @@ def segment_history_maintenance_service(
     )
 
     if family not in FAMILIES:
-        return {
-            "ok": False,
-            "operation": "segment_history_maintenance",
-            "family": family,
-            "error": {
-                "code": "segment_history_invalid_family",
-                "detail": f"Unknown family: {family}",
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "operation": "segment_history_maintenance",
+                "family": family,
+                "error": {
+                    "code": "segment_history_invalid_family",
+                    "detail": f"Unknown family: {family}",
+                },
             },
-        }
+        )
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -1238,6 +1394,71 @@ def segment_history_maintenance_service(
                 # (leaving only carry-forward content below threshold).
                 if not check_rollover_eligible(src, family, settings, now, warnings=warnings):
                     continue
+
+                rel = str(src.relative_to(repo_root))
+
+                # Pre-filter: already-rolled duplicate detection.
+                # If a stub already references this source AND the source
+                # still starts with the rolled payload content, skip to
+                # prevent duplicate segments.
+                if family == "journal":
+                    _pf_stub_dir = repo_root / "journal" / "history" / _journal_year_from_source(rel) / "index"
+                elif family == "message_stream":
+                    _pf_stub_dir = _message_stream_stub_dir(repo_root, rel)
+                else:
+                    _pf_stub_dir = repo_root / config.stub_dir
+                _already_rolled = False
+                if _pf_stub_dir.is_dir():
+                    for existing in _pf_stub_dir.iterdir():
+                        if not existing.name.endswith(".json"):
+                            continue
+                        try:
+                            es = json.loads(existing.read_text(encoding="utf-8"))
+                            if es.get("source_path") != rel:
+                                continue
+                            existing_payload_rel = es.get("payload_path", "")
+                            if not existing_payload_rel:
+                                _already_rolled = True
+                                break
+                            existing_payload = repo_root / existing_payload_rel
+                            if not existing_payload.is_file():
+                                continue
+                            payload_content = existing_payload.read_text(
+                                encoding="utf-8", errors="replace",
+                            )
+                            source_content = src.read_text(
+                                encoding="utf-8", errors="replace",
+                            )
+                            if source_content.startswith(payload_content):
+                                _already_rolled = True
+                                break
+                        except (json.JSONDecodeError, OSError):
+                            continue
+                if _already_rolled:
+                    warnings.append(_make_warning(
+                        "segment_history_already_rolled",
+                        f"Source still contains already-rolled data "
+                        f"prefix, skipping to prevent duplicate: {rel}",
+                        path=rel,
+                    ))
+                    continue
+
+                # Pre-filter: partial-line check for JSONL families.
+                # If the source has no newline-terminated line, it cannot
+                # produce a rolled payload.
+                if family != "journal":
+                    try:
+                        _pf_content = src.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        _pf_content = ""
+                    if _pf_content and "\n" not in _pf_content:
+                        warnings.append(_make_warning(
+                            "segment_history_only_partial_line",
+                            f"Source has only a partial unterminated line, skipping roll: {rel}",
+                            path=rel,
+                        ))
+                        continue
+
                 locked_eligible.append(src)
 
             selection_count = len(locked_eligible)
@@ -1297,60 +1518,6 @@ def segment_history_maintenance_service(
                     stream_key = _derive_stream_key(family, rel)
                     stub_dir = _stub_path_plan.parent
 
-                    # Guard against duplicate segments after crash
-                    # recovery.  When reconciliation committed orphaned
-                    # targets for this source but truncation failed, an
-                    # existing stub already references this source_path.
-                    # The source still starts with the already-rolled
-                    # data prefix.  Detect this by finding a matching
-                    # stub AND verifying the source content starts with
-                    # the existing payload — only then skip the re-roll.
-                    #
-                    # The content-prefix check prevents permanently
-                    # blocking re-rolling after a normal successful roll
-                    # where truncation succeeded (F1-R15): in that case
-                    # the source contains only carry-forward + new data,
-                    # which does NOT start with the old payload.
-                    if stub_dir.is_dir():
-                        already_rolled = False
-                        for existing in stub_dir.iterdir():
-                            if not existing.name.endswith(".json"):
-                                continue
-                            try:
-                                es = json.loads(existing.read_text(encoding="utf-8"))
-                                if es.get("source_path") != rel:
-                                    continue
-                                # Found a stub referencing this source.
-                                # Check if the source still contains the
-                                # already-rolled data prefix.
-                                existing_payload_rel = es.get("payload_path", "")
-                                if not existing_payload_rel:
-                                    already_rolled = True
-                                    break
-                                existing_payload = repo_root / existing_payload_rel
-                                if not existing_payload.is_file():
-                                    continue
-                                payload_content = existing_payload.read_text(
-                                    encoding="utf-8", errors="replace",
-                                )
-                                source_content = src.read_text(
-                                    encoding="utf-8", errors="replace",
-                                )
-                                if source_content.startswith(payload_content):
-                                    already_rolled = True
-                                    break
-                            except (json.JSONDecodeError, OSError):
-                                continue
-                        if already_rolled:
-                            selection_count -= 1
-                            warnings.append(_make_warning(
-                                "segment_history_already_rolled",
-                                f"Source still contains already-rolled data "
-                                f"prefix, skipping to prevent duplicate: {rel}",
-                                path=rel,
-                            ))
-                            continue
-
                     # Read content for summary
                     content = src.read_text(encoding="utf-8", errors="replace")
                     summary = config.build_summary(content)
@@ -1396,13 +1563,12 @@ def segment_history_maintenance_service(
                             repo_root=repo_root,
                         )
                         if result is None:
-                            selection_count -= 1
-                            warnings.append(_make_warning(
-                                "segment_history_only_partial_line",
-                                f"Source has only a partial unterminated line, skipping roll: {rel}",
-                                path=rel,
-                            ))
-                            continue
+                            # Pre-filter should have caught this; treat as
+                            # unexpected mutation failure and trigger rollback.
+                            raise OSError(
+                                f"Unexpected partial-line-only source in "
+                                f"mutation loop (pre-filter missed): {rel}"
+                            )
                         stub, created = result
 
                     rolled_segment_ids.append(segment_id)
@@ -1742,14 +1908,25 @@ def segment_history_cold_store_service(
             "warnings": warnings,
         }
 
-    # Derive lock keys from source paths using _derive_stream_key
+    # Derive lock keys from source paths using _derive_stream_key.
+    # Skip candidates whose stub is missing source_path (malformed).
     lock_keys = []
     cold_store_source_rels: list[str] = []
+    valid_candidates: list[tuple[str, dict, Path]] = []
     for c in candidates:
-        src_path = c[1].get("source_path", c[0])
+        src_path = c[1].get("source_path")
+        if src_path is None:
+            warnings.append(_make_warning(
+                "segment_history_stub_invalid",
+                f"Stub missing source_path, skipping: {c[0]}",
+                segment_id=c[0],
+            ))
+            continue
+        valid_candidates.append(c)
         cold_store_source_rels.append(src_path)
         sk = _derive_stream_key(family, src_path)
         lock_keys.append(f"segment_history:{family}:{sk}")
+    candidates = valid_candidates
 
     lock_dir = repo_root / ".locks" / "segment_history"
     selection_count = 0
@@ -1834,6 +2011,15 @@ def segment_history_cold_store_service(
                         continue
                 except (ValueError, TypeError):
                     continue
+                # Verify hot payload exists before including in validated set
+                _hot_payload_rel = stub.get("payload_path", "")
+                if _hot_payload_rel and not (repo_root / _hot_payload_rel).is_file():
+                    warnings.append(_make_warning(
+                        "segment_history_hot_payload_missing",
+                        f"Hot payload file missing for segment: {seg_id}",
+                        segment_id=seg_id,
+                    ))
+                    continue
                 validated.append((seg_id, stub, stub_path))
 
             selection_count = len(validated)
@@ -1879,15 +2065,6 @@ def segment_history_cold_store_service(
                 for seg_id, stub, stub_path in validated:
                     payload_rel = stub.get("payload_path", "")
                     hot_payload = repo_root / payload_rel
-
-                    if not hot_payload.is_file():
-                        warnings.append(_make_warning(
-                            "segment_history_hot_payload_missing",
-                            f"Hot payload file missing for segment: {seg_id}",
-                            segment_id=seg_id,
-                        ))
-                        selection_count -= 1
-                        continue
 
                     # Compress
                     source_bytes = hot_payload.read_bytes()

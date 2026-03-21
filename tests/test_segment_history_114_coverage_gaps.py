@@ -344,11 +344,8 @@ class TestSettingsValidationExtended(unittest.TestCase):
     )
     def test_zero_rollover_bytes_raises(self) -> None:
         from app.config import get_settings
-        # _parse_int with minimum=1 still clamps to 1, but validation checks >= 1
-        # after clamping. So 0 → clamp to 1 → passes. This test verifies
-        # the overall pipeline works.
-        s = get_settings(force_reload=True)
-        self.assertGreaterEqual(s.audit_log_rollover_bytes, 1)
+        with self.assertRaises(SystemExit):
+            get_settings(force_reload=True)
 
     @patch.dict(
         os.environ,
@@ -357,9 +354,8 @@ class TestSettingsValidationExtended(unittest.TestCase):
     )
     def test_zero_max_hot_days_raises_or_clamps(self) -> None:
         from app.config import get_settings
-        # With minimum=1 in _parse_int, 0 clamps to 1
-        s = get_settings(force_reload=True)
-        self.assertGreaterEqual(s.message_stream_max_hot_days, 1)
+        with self.assertRaises(SystemExit):
+            get_settings(force_reload=True)
 
     @patch.dict(
         os.environ,
@@ -368,8 +364,8 @@ class TestSettingsValidationExtended(unittest.TestCase):
     )
     def test_zero_inactivity_days_raises_or_clamps(self) -> None:
         from app.config import get_settings
-        s = get_settings(force_reload=True)
-        self.assertGreaterEqual(s.message_thread_inactivity_days, 1)
+        with self.assertRaises(SystemExit):
+            get_settings(force_reload=True)
 
 
 # =========================================================================
@@ -927,14 +923,15 @@ class TestInvalidFamily(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             gm = SimpleGitManagerStub()
-            result = segment_history_maintenance_service(
-                family="bogus_family",
-                repo_root=repo,
-                settings=_FakeSettings(),
-                gm=gm,
-            )
-            self.assertFalse(result["ok"])
-            self.assertEqual(result["error"]["code"], "segment_history_invalid_family")
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_maintenance_service(
+                    family="bogus_family",
+                    repo_root=repo,
+                    settings=_FakeSettings(),
+                    gm=gm,
+                )
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(ctx.exception.detail["error"]["code"], "segment_history_invalid_family")
 
     def test_cold_store_invalid_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

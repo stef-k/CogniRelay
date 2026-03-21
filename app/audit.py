@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _log = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class WriteTimeRolloverError(Exception):
 def _check_write_time_rollover_locked(
     path: Path, rollover_bytes: int, repo_root: Path, gm: Any,
     *, family: str = "api_audit",
+    audit: Callable[..., Any] | None = None,
 ) -> None:
     """Perform write-time rollover if threshold exceeded.
 
@@ -128,6 +129,8 @@ def _check_write_time_rollover_locked(
         fixup_message_stream_summary(summary, content, _stream_kind)
         summary["stream_kind"] = _stream_kind
         summary["stream_key"] = stream_key
+    elif family == "message_thread":
+        summary["thread_id"] = path.stem
 
     # Write crash-recovery manifest before mutations so that a
     # process crash mid-roll leaves a signal for reconciliation.
@@ -212,6 +215,17 @@ def _check_write_time_rollover_locked(
 
     _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
 
+    # Emit segment_history_roll audit event for write-time rollovers.
+    if audit is not None:
+        from app.segment_history.service import _emit_audit
+        _emit_audit(audit, "segment_history_roll", {
+            "family": family,
+            "segment_id": segment_id,
+            "source_path": rel,
+            "payload_path": str(payload_path.relative_to(repo_root)),
+            "warning_count": 0,
+        })
+
 
 def _check_write_time_rollover(
     path: Path, rollover_bytes: int, repo_root: Path, gm: Any
@@ -270,6 +284,7 @@ guaranteed 100 % event loss.
 def append_audit(
     repo_root: Path, event: str, peer_id: str, detail: dict[str, Any],
     *, rollover_bytes: int = 0, gm: Any = None,
+    audit: Callable[..., Any] | None = None,
 ) -> None:
     """Append one structured API audit event to the repository log.
 
@@ -313,7 +328,7 @@ def append_audit(
         ):
             if rollover_bytes > 0 and gm is not None:
                 _check_write_time_rollover_locked(
-                    path, rollover_bytes, repo_root, gm,
+                    path, rollover_bytes, repo_root, gm, audit=audit,
                 )
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
