@@ -18,11 +18,22 @@ from app.storage import safe_path, write_text_file
 RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
 
 
-def audit_event(settings: Any, auth: Any, event: str, detail: dict[str, Any]) -> None:
-    """Write an audit event when audit logging is enabled."""
+def audit_event(
+    settings: Any, auth: Any, event: str, detail: dict[str, Any],
+    *, gm: Any = None,
+) -> None:
+    """Write an audit event when audit logging is enabled.
+
+    When *gm* is provided and ``audit_log_rollover_bytes`` > 0, triggers
+    write-time rollover of the audit log before appending.
+    """
     if not settings.audit_log_enabled:
         return
-    append_audit(settings.repo_root, event, auth.peer_id if auth else "anonymous", detail)
+    rollover_bytes = getattr(settings, "audit_log_rollover_bytes", 0)
+    append_audit(
+        settings.repo_root, event, auth.peer_id if auth else "anonymous", detail,
+        rollover_bytes=rollover_bytes, gm=gm,
+    )
 
 
 def scope_for_path(path: str) -> str:

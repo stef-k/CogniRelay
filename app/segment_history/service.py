@@ -744,7 +744,7 @@ def segment_history_maintenance_service(
             continue
         if size == 0:
             # Delete empty ack files outside atomic unit
-            if src.parent.name == "acks" and str(src.parent).endswith("messages/acks"):
+            if src.parent == repo_root / "messages" / "acks":
                 try:
                     src.unlink()
                     warnings.append(_make_warning(
@@ -783,6 +783,7 @@ def segment_history_maintenance_service(
     selection_count = 0
     rolled_segment_ids: list[str] = []
     all_created: list[Path] = []
+    rolled_sources: list[Path] = []  # sources actually rolled (for git commit)
     all_source_rels: list[str] = []
     lock_keys: list[str] = []
 
@@ -925,6 +926,7 @@ def segment_history_maintenance_service(
 
                 rolled_segment_ids.append(segment_id)
                 all_created.extend(created)
+                rolled_sources.append(src)
 
                 # Emit audit event
                 _emit_audit(audit, "segment_history_roll", {
@@ -949,9 +951,9 @@ def segment_history_maintenance_service(
     latest_commit: str | None = None
 
     if all_created:
-        commit_paths = all_created + [
-            src for src in eligible if src.is_file()
-        ]
+        # Include rolled sources even if deleted (journal unlinks originals);
+        # git add on a deleted path stages the removal.
+        commit_paths = all_created + rolled_sources
         commit_message = (
             f"segment-history: roll {family} {selection_count}"
         )
@@ -962,7 +964,7 @@ def segment_history_maintenance_service(
                 success = gm.commit_paths(commit_paths, commit_message)
                 if success:
                     latest_commit = gm.latest_commit()
-                    committed_files = [str(p.relative_to(repo_root)) for p in commit_paths if p.is_file()]
+                    committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
                 else:
                     durable = False
                     warnings.append(_make_warning(
@@ -1135,8 +1137,10 @@ def segment_history_cold_store_service(
         lock_keys.append(f"segment_history:{family}:{sk}")
 
     lock_dir = repo_root / ".locks" / "segment_history"
+    selection_count = 0
     cold_stored_ids: list[str] = []
     commit_paths: list[Path] = []
+    created_cold_paths: list[Path] = []
 
     try:
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
@@ -1230,11 +1234,12 @@ def segment_history_cold_store_service(
                 cold_path = _cold_payload_path(hot_payload)
                 cold_path.parent.mkdir(parents=True, exist_ok=True)
                 write_bytes_file(cold_path, compressed)
+                created_cold_paths.append(cold_path)
 
                 # Mutate stub: payload_path moves to cold location, add cold_stored_at
                 cold_rel = str(cold_path.relative_to(repo_root))
                 updated_stub = _mutate_stub_cold(
-                    stub, cold_rel, now.isoformat()
+                    stub, cold_rel, _segment_timestamp_str(now)
                 )
                 write_text_file(
                     stub_path,
@@ -1252,7 +1257,8 @@ def segment_history_cold_store_service(
                     ))
 
                 cold_stored_ids.append(seg_id)
-                commit_paths.extend([cold_path, stub_path])
+                # Include hot_payload so git stages its deletion
+                commit_paths.extend([cold_path, stub_path, hot_payload])
 
                 # Emit audit event
                 _emit_audit(audit, "segment_history_cold_store", {
@@ -1264,6 +1270,7 @@ def segment_history_cold_store_service(
                 })
 
     except Exception:
+        _remove_created_paths(created_cold_paths)
         remove_manifest(repo_root, family)
         raise
 
@@ -1282,7 +1289,7 @@ def segment_history_cold_store_service(
                 if success:
                     latest_commit = gm.latest_commit()
                     committed_files = [
-                        str(p.relative_to(repo_root)) for p in commit_paths if p.is_file()
+                        str(p.relative_to(repo_root)) for p in commit_paths
                     ]
                 else:
                     durable = False
@@ -1523,7 +1530,8 @@ def segment_history_cold_rehydrate_service(
     committed_files: list[str] = []
     latest_commit: str | None = None
 
-    commit_paths_list = [hot_path, stub_path]
+    # Include cold_path so git stages its deletion
+    commit_paths_list = [hot_path, stub_path, cold_path]
     msg = f"segment-history: rehydrate {family} {segment_id}"
     try:
         from app.git_locking import repository_mutation_lock
@@ -1533,7 +1541,7 @@ def segment_history_cold_rehydrate_service(
             if success:
                 latest_commit = gm.latest_commit()
                 committed_files = [
-                    str(p.relative_to(repo_root)) for p in commit_paths_list if p.is_file()
+                    str(p.relative_to(repo_root)) for p in commit_paths_list
                 ]
             else:
                 durable = False

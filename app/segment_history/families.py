@@ -326,19 +326,6 @@ def _get_cold_after_days_setting(family: str, settings: Any) -> int:
     return getattr(settings, mapping[family])
 
 
-def _get_retention_days_setting(family: str, settings: Any) -> int:
-    """Return the retention-days setting for a family."""
-    mapping = {
-        "journal": "journal_retention_days",
-        "api_audit": "audit_log_retention_days",
-        "ops_runs": "ops_run_retention_days",
-        "message_stream": "message_stream_retention_days",
-        "message_thread": "message_thread_retention_days",
-        "episodic": "episodic_retention_days",
-    }
-    return getattr(settings, mapping[family])
-
-
 def is_size_rollover_eligible(
     source_path: Path, family: str, settings: Any
 ) -> bool:

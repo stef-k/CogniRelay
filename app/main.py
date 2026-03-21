@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
@@ -263,6 +263,11 @@ def _services() -> tuple:
     )
     gm.ensure_repo(settings.auto_init_git)
     return settings, gm
+
+
+def _make_audit(settings: Any, gm: Any) -> Callable:
+    """Build an audit callback that forwards the git manager for write-time rollover."""
+    return lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail, gm=gm)
 
 
 def _schema_for_model(model_cls: Any) -> dict[str, Any]:
@@ -522,26 +527,26 @@ def contracts() -> dict:
 @app.get("/v1/governance/policy")
 def governance_policy() -> dict:
     """Return the machine-readable governance policy pack."""
-    settings, _ = _services()
+    settings, gm = _services()
     return governance_policy_service(repo_root=settings.repo_root)
 
 
 @app.get("/v1/ops/catalog")
 def ops_catalog(auth: AuthContext = Depends(require_auth)) -> dict:
     """Return the host-local operations catalog."""
-    settings, _ = _services()
-    return ops_catalog_service(settings=settings, auth=auth, audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail))
+    settings, gm = _services()
+    return ops_catalog_service(settings=settings, auth=auth, audit=_make_audit(settings, gm))
 
 
 @app.get("/v1/ops/status")
 def ops_status(limit: int = Query(default=50, ge=1, le=500), auth: AuthContext = Depends(require_auth)) -> dict:
     """Return recent host-local operations status entries."""
-    settings, _ = _services()
+    settings, gm = _services()
     return ops_status_service(
         repo_root=settings.repo_root,
         auth=auth,
         limit=limit,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
         max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
     )
 
@@ -549,12 +554,12 @@ def ops_status(limit: int = Query(default=50, ge=1, le=500), auth: AuthContext =
 @app.get("/v1/ops/schedule/export")
 def ops_schedule_export(format: str = Query(default="systemd"), auth: AuthContext = Depends(require_auth)) -> dict:
     """Export scheduler snippets for host-local maintenance jobs."""
-    settings, _ = _services()
+    settings, gm = _services()
     return ops_schedule_export_service(
         settings=settings,
         auth=auth,
         format=format,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -568,7 +573,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
         index_rebuild_incremental=index_rebuild_incremental,
         metrics=metrics,
         backup_create=backup_create,
@@ -586,7 +591,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             gm=gm,
             auth=auth,
             req=req,
-            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+            audit=_make_audit(settings, gm),
         ),
         continuity_cold_store_request_factory=ContinuityColdStoreRequest,
         continuity_cold_rehydrate=lambda req, auth: continuity_cold_rehydrate_service(
@@ -594,7 +599,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             gm=gm,
             auth=auth,
             req=req,
-            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+            audit=_make_audit(settings, gm),
         ),
         continuity_cold_rehydrate_request_factory=ContinuityColdRehydrateRequest,
         continuity_retention_apply=lambda req, auth: continuity_retention_apply_service(
@@ -604,7 +609,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             req=req,
             now=datetime.now(timezone.utc),
             retention_archive_days=settings.continuity_retention_archive_days,
-            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+            audit=_make_audit(settings, gm),
         ),
         continuity_retention_apply_request_factory=ContinuityRetentionApplyRequest,
         artifact_history_cold_store=lambda req, auth: artifact_history_cold_store_service(
@@ -612,7 +617,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             gm=gm,
             auth=auth,
             req=req,
-            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+            audit=_make_audit(settings, gm),
         ),
         artifact_history_cold_store_request_factory=ArtifactHistoryColdStoreRequest,
         artifact_history_cold_rehydrate=lambda req, auth: artifact_history_cold_rehydrate_service(
@@ -620,7 +625,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             gm=gm,
             auth=auth,
             req=req,
-            audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+            audit=_make_audit(settings, gm),
         ),
         artifact_history_cold_rehydrate_request_factory=ArtifactHistoryColdRehydrateRequest,
         segment_history_maintenance=lambda req, auth: segment_history_maintenance_service(
@@ -628,6 +633,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             repo_root=settings.repo_root,
             settings=settings,
             gm=gm,
+            audit=lambda event, detail: _audit(settings, auth, event, detail, gm=gm),
         ),
         segment_history_maintenance_request_factory=SegmentHistoryMaintenanceRequest,
         segment_history_cold_store=lambda req, auth: segment_history_cold_store_service(
@@ -636,6 +642,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             settings=settings,
             gm=gm,
             segment_ids=req.segment_ids,
+            audit=lambda event, detail: _audit(settings, auth, event, detail, gm=gm),
         ),
         segment_history_cold_store_request_factory=SegmentHistoryColdStoreRequest,
         segment_history_cold_rehydrate=lambda req, auth: segment_history_cold_rehydrate_service(
@@ -643,6 +650,7 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             segment_id=req.segment_id,
             repo_root=settings.repo_root,
             gm=gm,
+            audit=lambda event, detail: _audit(settings, auth, event, detail, gm=gm),
         ),
         segment_history_cold_rehydrate_request_factory=SegmentHistoryColdRehydrateRequest,
         load_token_config=load_token_config,
@@ -669,19 +677,19 @@ def write_file(req: WriteRequest, auth: AuthContext = Depends(require_auth)) -> 
         enforce_payload_limit=_enforce_payload_limit,
         scope_for_path=_scope_for_path,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/read")
 def read_file(path: str = Query(...), auth: AuthContext = Depends(require_auth)) -> dict:
     """Read a repository file by path after auth and path checks."""
-    settings, _ = _services()
+    settings, gm = _services()
     return read_file_service(
         repo_root=settings.repo_root,
         auth=auth,
         path=path,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -698,7 +706,7 @@ def append_record(req: AppendRequest, auth: AuthContext = Depends(require_auth))
         enforce_payload_limit=_enforce_payload_limit,
         scope_for_path=_scope_for_path,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -710,7 +718,7 @@ def index_rebuild(auth: AuthContext = Depends(require_auth)) -> dict:
         repo_root=settings.repo_root,
         gm=gm,
         auth=auth,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -722,38 +730,38 @@ def index_rebuild_incremental(auth: AuthContext = Depends(require_auth)) -> dict
         repo_root=settings.repo_root,
         gm=gm,
         auth=auth,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/index/status")
 def index_status(auth: AuthContext = Depends(require_auth)) -> dict:
     """Return the status of generated search index artifacts."""
-    settings, _ = _services()
+    settings, gm = _services()
     return index_status_service(repo_root=settings.repo_root, auth=auth)
 
 
 @app.post("/v1/search")
 def search(req: SearchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Search indexed repository content."""
-    settings, _ = _services()
+    settings, gm = _services()
     return search_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.post("/v1/recent")
 def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """List recent repository files without a search query."""
-    settings, _ = _services()
+    settings, gm = _services()
     return recent_list_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -766,19 +774,19 @@ def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(
         gm=gm,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.post("/v1/continuity/read")
 def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Read one continuity capsule by exact selector with optional fallback handling."""
-    settings, _ = _services()
+    settings, gm = _services()
     return continuity_read_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -793,7 +801,7 @@ def continuity_refresh_plan(req: ContinuityRefreshPlanRequest, auth: AuthContext
         req=req,
         now=datetime.now(timezone.utc),
         retention_archive_days=settings.continuity_retention_archive_days,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -808,19 +816,19 @@ def continuity_retention_plan(req: ContinuityRetentionPlanRequest, auth: AuthCon
         req=req,
         now=datetime.now(timezone.utc),
         retention_archive_days=settings.continuity_retention_archive_days,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.post("/v1/continuity/compare")
 def continuity_compare(req: ContinuityCompareRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Compare one active continuity capsule to a candidate capsule."""
-    settings, _ = _services()
+    settings, gm = _services()
     return continuity_compare_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -833,21 +841,21 @@ def continuity_revalidate(req: ContinuityRevalidateRequest, auth: AuthContext = 
         gm=gm,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.post("/v1/continuity/list")
 def continuity_list(req: ContinuityListRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """List active, fallback, and archived continuity capsule summaries."""
-    settings, _ = _services()
+    settings, gm = _services()
     return continuity_list_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
         retention_archive_days=settings.continuity_retention_archive_days,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -861,7 +869,7 @@ def continuity_archive(req: ContinuityArchiveRequest, auth: AuthContext = Depend
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -874,7 +882,7 @@ def continuity_delete(req: ContinuityDeleteRequest, auth: AuthContext = Depends(
         gm=gm,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -890,21 +898,21 @@ def coordination_handoff_create(req: CoordinationHandoffCreateRequest, auth: Aut
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/coordination/handoff/{handoff_id}")
 def coordination_handoff_read(handoff_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
     """Read one stored handoff artifact using sender/recipient/admin visibility."""
-    settings, _ = _services()
+    settings, gm = _services()
     return handoff_read_service(
         repo_root=settings.repo_root,
         auth=auth,
         handoff_id=handoff_id,
         enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -918,7 +926,7 @@ def coordination_handoffs_query(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """Query visible handoff artifacts for one sender and/or recipient identity."""
-    settings, _ = _services()
+    settings, gm = _services()
     try:
         req = CoordinationHandoffQueryRequest(
             recipient_peer=recipient_peer,
@@ -935,7 +943,7 @@ def coordination_handoffs_query(
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -956,7 +964,7 @@ def coordination_handoff_consume(
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -972,7 +980,7 @@ def coordination_shared_create(req: CoordinationSharedCreateRequest, auth: AuthC
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -987,7 +995,7 @@ def coordination_shared_query(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """Query visible shared coordination artifacts for bounded identity filters."""
-    settings, _ = _services()
+    settings, gm = _services()
     try:
         req = CoordinationSharedQueryRequest(
             owner_peer=owner_peer,
@@ -1005,21 +1013,21 @@ def coordination_shared_query(
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/coordination/shared/{shared_id}")
 def coordination_shared_read(shared_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
     """Read one shared coordination artifact using owner/participant/admin visibility."""
-    settings, _ = _services()
+    settings, gm = _services()
     return shared_read_service(
         repo_root=settings.repo_root,
         auth=auth,
         shared_id=shared_id,
         enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1040,7 +1048,7 @@ def coordination_shared_update(
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1056,7 +1064,7 @@ def coordination_reconciliation_open(req: CoordinationReconciliationOpenRequest,
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1075,7 +1083,7 @@ def coordination_reconciliations_query(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """Query visible reconciliation artifacts for bounded owner or claimant filters."""
-    settings, _ = _services()
+    settings, gm = _services()
     try:
         req = CoordinationReconciliationQueryRequest(
             owner_peer=owner_peer,
@@ -1097,21 +1105,21 @@ def coordination_reconciliations_query(
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/coordination/reconciliation/{reconciliation_id}")
 def coordination_reconciliation_read(reconciliation_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
     """Read one stored reconciliation artifact using owner/participant/admin visibility."""
-    settings, _ = _services()
+    settings, gm = _services()
     return reconciliation_read_service(
         repo_root=settings.repo_root,
         auth=auth,
         reconciliation_id=reconciliation_id,
         enforce_rate_limit=_enforce_rate_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1132,30 +1140,30 @@ def coordination_reconciliation_resolve(
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.post("/v1/context/retrieve")
 def context_retrieve(req: ContextRetrieveRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Build a continuation bundle for a task or subject."""
-    settings, _ = _services()
+    settings, gm = _services()
     return context_retrieve_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
         now=datetime.now(timezone.utc),
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 @app.get("/v1/peers")
 def peers_list(auth: AuthContext = Depends(require_auth)) -> dict:
     """List known peers from the repository registry."""
-    settings, _ = _services()
+    settings, gm = _services()
     return peers_list_service(
         repo_root=settings.repo_root,
         auth=auth,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1172,7 +1180,7 @@ def peers_register(req: PeerRegisterRequest, auth: AuthContext = Depends(require
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1190,19 +1198,19 @@ def peers_trust_transition(peer_id: str, req: PeerTrustTransitionRequest, auth: 
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/peers/{peer_id}/manifest")
 def peer_manifest(peer_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
     """Fetch and return a peer's advertised manifest."""
-    settings, _ = _services()
+    settings, gm = _services()
     return peer_manifest_service(
         repo_root=settings.repo_root,
         auth=auth,
         peer_id=peer_id,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1217,19 +1225,19 @@ def context_snapshot_create(req: ContextSnapshotRequest, auth: AuthContext = Dep
         req=req,
         now=datetime.now(timezone.utc),
         service_version=app.version,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/context/snapshot/{snapshot_id}")
 def context_snapshot_get(snapshot_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
     """Load a stored context snapshot by id."""
-    settings, _ = _services()
+    settings, gm = _services()
     return context_snapshot_get_service(
         repo_root=settings.repo_root,
         auth=auth,
         snapshot_id=snapshot_id,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1242,7 +1250,7 @@ def tasks_create(req: TaskCreateRequest, auth: AuthContext = Depends(require_aut
         gm=gm,
         auth=auth,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1256,7 +1264,7 @@ def tasks_update(task_id: str, req: TaskUpdateRequest, auth: AuthContext = Depen
         auth=auth,
         task_id=task_id,
         req=req,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1270,7 +1278,7 @@ def tasks_query(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """Query shared task records with optional filters."""
-    settings, _ = _services()
+    settings, gm = _services()
     return tasks_query_service(
         repo_root=settings.repo_root,
         auth=auth,
@@ -1279,7 +1287,7 @@ def tasks_query(
         collaborator=collaborator if isinstance(collaborator, str) else None,
         thread_id=thread_id if isinstance(thread_id, str) else None,
         limit=limit if isinstance(limit, int) else 100,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1293,7 +1301,7 @@ def docs_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(req
         auth=auth,
         req=req,
         run_git=_run_git,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1307,7 +1315,7 @@ def code_patch_propose(req: PatchProposeRequest, auth: AuthContext = Depends(req
         auth=auth,
         req=req,
         run_git=_run_git,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1322,7 +1330,7 @@ def docs_patch_apply(req: PatchApplyRequest, auth: AuthContext = Depends(require
         req=req,
         run_git=_run_git,
         read_commit_file=_read_commit_file,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1336,20 +1344,20 @@ def code_checks_run(req: CodeCheckRunRequest, auth: AuthContext = Depends(requir
         auth=auth,
         req=req,
         run_git=_run_git,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.post("/v1/code/merge")
 def code_merge(req: CodeMergeRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Merge one source ref into a target ref after required checks."""
-    settings, _ = _services()
+    settings, gm = _services()
     return code_merge_service(
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
         run_git=_run_git,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 @app.post("/v1/messages/send")
 def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_auth)) -> dict:
@@ -1366,7 +1374,7 @@ def messages_send(req: MessageSendRequest, auth: AuthContext = Depends(require_a
         verification_failure_count=_verification_failure_count,
         record_verification_failure=_record_verification_failure,
         parse_iso=_parse_iso,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1380,7 +1388,7 @@ def messages_ack(req: MessageAckRequest, auth: AuthContext = Depends(require_aut
         auth=auth,
         req=req,
         parse_iso=_parse_iso,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1393,7 +1401,7 @@ def messages_pending(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """List pending or terminal messages for a recipient."""
-    settings, _ = _services()
+    settings, gm = _services()
     return messages_pending_service(
         repo_root=settings.repo_root,
         auth=auth,
@@ -1402,20 +1410,20 @@ def messages_pending(
         include_terminal=include_terminal if isinstance(include_terminal, bool) else False,
         limit=limit if isinstance(limit, int) else 50,
         parse_iso=_parse_iso,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/messages/inbox")
 def messages_inbox(recipient: str = Query(...), limit: int = Query(default=20, ge=1, le=200), auth: AuthContext = Depends(require_auth)) -> dict:
     """Return inbox messages for a recipient."""
-    settings, _ = _services()
+    settings, gm = _services()
     return messages_inbox_service(
         repo_root=settings.repo_root,
         auth=auth,
         recipient=recipient,
         limit=limit,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
         max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
     )
 
@@ -1423,13 +1431,13 @@ def messages_inbox(recipient: str = Query(...), limit: int = Query(default=20, g
 @app.get("/v1/messages/thread")
 def messages_thread(thread_id: str = Query(...), limit: int = Query(default=100, ge=1, le=1000), auth: AuthContext = Depends(require_auth)) -> dict:
     """Return messages for one thread."""
-    settings, _ = _services()
+    settings, gm = _services()
     return messages_thread_service(
         repo_root=settings.repo_root,
         auth=auth,
         thread_id=thread_id,
         limit=limit,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
         max_jsonl_read_bytes=settings.max_jsonl_read_bytes,
     )
 
@@ -1448,7 +1456,7 @@ def relay_forward(req: RelayForwardRequest, auth: AuthContext = Depends(require_
         verify_signed_payload=verify_signed_payload_service,
         verification_failure_count=_verification_failure_count,
         record_verification_failure=_record_verification_failure,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1460,7 +1468,7 @@ def security_tokens_list(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """List issued tokens with optional status and peer filters."""
-    settings, _ = _services()
+    settings, gm = _services()
     return security_tokens_list_service(
         repo_root=settings.repo_root,
         auth=auth,
@@ -1484,7 +1492,7 @@ def security_tokens_issue(req: SecurityTokenIssueRequest, auth: AuthContext = De
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
         refresh_settings=lambda: get_settings(force_reload=True),
     )
 
@@ -1501,7 +1509,7 @@ def security_tokens_revoke(req: SecurityTokenRevokeRequest, auth: AuthContext = 
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
         refresh_settings=lambda: get_settings(force_reload=True),
     )
 
@@ -1519,7 +1527,7 @@ def security_tokens_rotate(req: SecurityTokenRotateRequest, auth: AuthContext = 
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
         refresh_settings=lambda: get_settings(force_reload=True),
     )
 @app.post("/v1/security/keys/rotate")
@@ -1534,7 +1542,7 @@ def security_keys_rotate(req: SecurityKeysRotateRequest, auth: AuthContext = Dep
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         settings=settings,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1551,14 +1559,14 @@ def messages_verify(req: MessageVerifyRequest, auth: AuthContext = Depends(requi
         enforce_payload_limit=_enforce_payload_limit,
         verification_failure_count=_verification_failure_count,
         record_verification_failure=_record_verification_failure,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.get("/v1/metrics")
 def metrics(auth: AuthContext = Depends(require_auth)) -> dict:
     """Return aggregated service metrics and alarm indicators."""
-    settings, _ = _services()
+    settings, gm = _services()
     return metrics_service(
         settings=settings,
         auth=auth,
@@ -1581,7 +1589,7 @@ def replay_messages(req: MessageReplayRequest, auth: AuthContext = Depends(requi
         auth=auth,
         req=req,
         parse_iso=_parse_iso,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1597,7 +1605,7 @@ def replication_pull(req: ReplicationPullRequest, auth: AuthContext = Depends(re
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         parse_iso=_parse_iso,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1613,7 +1621,7 @@ def replication_push(req: ReplicationPushRequest, auth: AuthContext = Depends(re
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         load_peers_registry=load_peers_registry,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1629,14 +1637,14 @@ def backup_create(req: BackupCreateRequest, auth: AuthContext = Depends(require_
         req=req,
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
 @app.post("/v1/backup/restore-test")
 def backup_restore_test(req: BackupRestoreTestRequest, auth: AuthContext = Depends(require_auth)) -> dict:
     """Validate that a backup archive can be restored safely."""
-    settings, _ = _services()
+    settings, gm = _services()
     return backup_restore_test_service(
         settings=settings,
         auth=auth,
@@ -1644,7 +1652,7 @@ def backup_restore_test(req: BackupRestoreTestRequest, auth: AuthContext = Depen
         enforce_rate_limit=_enforce_rate_limit,
         enforce_payload_limit=_enforce_payload_limit,
         rebuild_index=rebuild_index,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 
@@ -1658,7 +1666,7 @@ def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) 
         auth=auth,
         req=req,
         parse_iso=_parse_iso,
-        audit=lambda auth_ctx, event, detail: _audit(settings, auth_ctx, event, detail),
+        audit=_make_audit(settings, gm),
     )
 
 

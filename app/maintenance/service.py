@@ -1441,6 +1441,11 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                 warnings.append(f"segment_history_invalid_stub_type:{rel}")
                 continue
 
+            if stub.get("schema_version") != "1.0":
+                invalid_stubs.append(rel)
+                warnings.append(f"segment_history_stub_version_mismatch:{rel}")
+                continue
+
             if stub.get("family") != family_name:
                 invalid_stubs.append(rel)
                 warnings.append(f"segment_history_stub_family_mismatch:{rel}")
