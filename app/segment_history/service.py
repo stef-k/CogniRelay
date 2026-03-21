@@ -718,6 +718,17 @@ def segment_history_maintenance_service(
     from app.segment_history.locking import acquire_sorted_source_locks
     from app.segment_history.manifest import remove_manifest, write_manifest
 
+    if family not in FAMILIES:
+        return {
+            "ok": False,
+            "operation": "segment_history_maintenance",
+            "family": family,
+            "error": {
+                "code": "segment_history_invalid_family",
+                "detail": f"Unknown family: {family}",
+            },
+        }
+
     if now is None:
         now = datetime.now(timezone.utc)
 
@@ -955,7 +966,7 @@ def segment_history_maintenance_service(
         # git add on a deleted path stages the removal.
         commit_paths = all_created + rolled_sources
         commit_message = (
-            f"segment-history: roll {family} {selection_count}"
+            f"segment-history: roll {family} {len(rolled_segment_ids)}"
         )
         try:
             from app.git_locking import repository_mutation_lock
@@ -1018,6 +1029,17 @@ def segment_history_cold_store_service(
     from app.segment_history.families import FAMILIES, _get_cold_after_days_setting
     from app.segment_history.locking import acquire_sorted_source_locks
     from app.segment_history.manifest import remove_manifest, write_manifest
+
+    if family not in FAMILIES:
+        return {
+            "ok": False,
+            "operation": "segment_history_cold_store",
+            "family": family,
+            "error": {
+                "code": "segment_history_invalid_family",
+                "detail": f"Unknown family: {family}",
+            },
+        }
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -1141,6 +1163,8 @@ def segment_history_cold_store_service(
     cold_stored_ids: list[str] = []
     commit_paths: list[Path] = []
     created_cold_paths: list[Path] = []
+    stub_rollback: list[tuple[Path, bytes | None]] = []
+    hot_rollback: list[tuple[Path, bytes | None]] = []
 
     try:
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
@@ -1216,6 +1240,16 @@ def segment_history_cold_store_service(
                     target_paths=v_target_paths,
                 )
 
+            # Capture stub and hot-payload state for rollback
+            rollback_stub_paths = [sp for _, _, sp in validated]
+            rollback_hot_paths = [
+                repo_root / s.get("payload_path", "")
+                for _, s, _ in validated
+                if s.get("payload_path")
+            ]
+            stub_rollback = _capture_rollback_state(rollback_stub_paths)
+            hot_rollback = _capture_rollback_state(rollback_hot_paths)
+
             for seg_id, stub, stub_path in validated:
                 payload_rel = stub.get("payload_path", "")
                 hot_payload = repo_root / payload_rel
@@ -1270,6 +1304,10 @@ def segment_history_cold_store_service(
                 })
 
     except Exception:
+        # Restore stubs and hot payloads to pre-cold-store state, then
+        # remove any cold .gz files that were created.
+        _restore_rollback_state(stub_rollback)
+        _restore_rollback_state(hot_rollback)
         _remove_created_paths(created_cold_paths)
         remove_manifest(repo_root, family)
         raise
@@ -1341,7 +1379,25 @@ def segment_history_cold_rehydrate_service(
     Returns a structured envelope on both success and error (no HTTPException).
     """
     from app.segment_history.families import FAMILIES
-    from app.segment_history.locking import segment_history_source_lock
+    from app.segment_history.locking import (
+        SegmentHistoryLockTimeout,
+        segment_history_source_lock,
+    )
+
+    if family not in FAMILIES:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "operation": "segment_history_cold_rehydrate",
+                "family": family,
+                "segment_id": segment_id,
+                "error": {
+                    "code": "segment_history_invalid_family",
+                    "detail": f"Unknown family: {family}",
+                },
+            },
+        )
 
     config = FAMILIES[family]
     warnings: list[dict[str, Any]] = []
@@ -1464,66 +1520,73 @@ def segment_history_cold_rehydrate_service(
     lock_key = f"segment_history:{family}:{sk}"
     lock_dir = repo_root / ".locks" / "segment_history"
 
-    with segment_history_source_lock(lock_key, lock_dir=lock_dir):
-        # Conflict check under lock: canonical hot target must not exist
-        if hot_path.is_file():
-            hot_rel = str(hot_path.relative_to(repo_root))
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "ok": False,
-                    "operation": "segment_history_cold_rehydrate",
-                    "family": family,
-                    "segment_id": segment_id,
-                    "error": {
-                        "code": "segment_history_rehydrate_conflict",
-                        "detail": "target rolled payload already exists",
+    try:
+        with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+            # Conflict check under lock: canonical hot target must not exist
+            if hot_path.is_file():
+                hot_rel = str(hot_path.relative_to(repo_root))
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "ok": False,
+                        "operation": "segment_history_cold_rehydrate",
+                        "family": family,
+                        "segment_id": segment_id,
+                        "error": {
+                            "code": "segment_history_rehydrate_conflict",
+                            "detail": "target rolled payload already exists",
+                        },
+                        "conflict_path": hot_rel,
                     },
-                    "conflict_path": hot_rel,
-                },
+                )
+
+            # Re-check cold payload under lock
+            if not cold_path.is_file():
+                return _error_response(
+                    409,
+                    "segment_history_cold_payload_missing",
+                    f"Cold payload file missing for segment (under lock): {segment_id}",
+                )
+
+            compressed = cold_path.read_bytes()
+            try:
+                decompressed = _decompress_cold_payload(compressed)
+            except ValueError:
+                return _error_response(
+                    409,
+                    "segment_history_cold_payload_corrupt",
+                    f"Cold payload is corrupt for segment: {segment_id}",
+                )
+
+            # Write hot payload
+            hot_path.parent.mkdir(parents=True, exist_ok=True)
+            write_bytes_file(hot_path, decompressed)
+
+            # Mutate stub: payload_path back to hot, remove cold_stored_at
+            hot_rel = str(hot_path.relative_to(repo_root))
+            updated_stub = _mutate_stub_rehydrate(stub, hot_rel)
+            write_text_file(
+                stub_path,
+                json.dumps(updated_stub, ensure_ascii=False, indent=2),
             )
 
-        # Re-check cold payload under lock
-        if not cold_path.is_file():
-            return _error_response(
-                409,
-                "segment_history_cold_payload_missing",
-                f"Cold payload file missing for segment (under lock): {segment_id}",
-            )
-
-        compressed = cold_path.read_bytes()
-        try:
-            decompressed = _decompress_cold_payload(compressed)
-        except ValueError:
-            return _error_response(
-                409,
-                "segment_history_cold_payload_corrupt",
-                f"Cold payload is corrupt for segment: {segment_id}",
-            )
-
-        # Write hot payload
-        hot_path.parent.mkdir(parents=True, exist_ok=True)
-        write_bytes_file(hot_path, decompressed)
-
-        # Mutate stub: payload_path back to hot, remove cold_stored_at
-        hot_rel = str(hot_path.relative_to(repo_root))
-        updated_stub = _mutate_stub_rehydrate(stub, hot_rel)
-        write_text_file(
-            stub_path,
-            json.dumps(updated_stub, ensure_ascii=False, indent=2),
+            # Remove cold payload
+            cold_removed = True
+            try:
+                cold_path.unlink()
+            except OSError:
+                cold_removed = False
+                warnings.append(_make_warning(
+                    "segment_history_cold_payload_remove_failed",
+                    f"Could not remove cold payload after rehydrate: {segment_id}",
+                    segment_id=segment_id,
+                ))
+    except SegmentHistoryLockTimeout as exc:
+        return _error_response(
+            409,
+            "segment_history_source_lock_timeout",
+            str(exc),
         )
-
-        # Remove cold payload
-        cold_removed = True
-        try:
-            cold_path.unlink()
-        except OSError:
-            cold_removed = False
-            warnings.append(_make_warning(
-                "segment_history_cold_payload_remove_failed",
-                f"Could not remove cold payload after rehydrate: {segment_id}",
-                segment_id=segment_id,
-            ))
 
     # Git commit
     durable = True

@@ -837,5 +837,168 @@ class TestBatchRollbackOnFailure(unittest.TestCase):
             self.assertFalse(created.exists())
 
 
+class TestRehydrateLockTimeout(unittest.TestCase):
+    """H-NEW-1: SegmentHistoryLockTimeout in rehydrate returns 409."""
+
+    def test_rehydrate_lock_timeout_returns_structured_409(self) -> None:
+        from app.segment_history.locking import SegmentHistoryLockTimeout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            gm = SimpleGitManagerStub()
+
+            # Create a valid cold-stored stub
+            result = _roll_journal(repo, gm)
+            seg_id = result["rolled_segment_ids"][0]
+
+            # Cold-store it
+            cs = segment_history_cold_store_service(
+                family="journal",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                now=datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc),
+            )
+            self.assertTrue(cs["ok"])
+            self.assertEqual(len(cs["cold_segment_ids"]), 1)
+
+            # Now mock the lock to raise SegmentHistoryLockTimeout
+            with patch(
+                "app.segment_history.locking.segment_history_source_lock",
+                side_effect=SegmentHistoryLockTimeout("test_key", 30.0),
+            ):
+                resp = segment_history_cold_rehydrate_service(
+                    family="journal",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
+                )
+
+            self.assertIsInstance(resp, JSONResponse)
+            self.assertEqual(resp.status_code, 409)
+            body = json.loads(resp.body)
+            self.assertEqual(body["error"]["code"], "segment_history_source_lock_timeout")
+
+
+class TestInvalidFamily(unittest.TestCase):
+    """H-NEW-2: Invalid family returns structured error, not KeyError 500."""
+
+    def test_maintenance_invalid_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            gm = SimpleGitManagerStub()
+            result = segment_history_maintenance_service(
+                family="bogus_family",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "segment_history_invalid_family")
+
+    def test_cold_store_invalid_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            gm = SimpleGitManagerStub()
+            result = segment_history_cold_store_service(
+                family="bogus_family",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "segment_history_invalid_family")
+
+    def test_rehydrate_invalid_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            gm = SimpleGitManagerStub()
+            resp = segment_history_cold_rehydrate_service(
+                family="bogus_family",
+                segment_id="bogus__key__20260320T120000Z__0001",
+                repo_root=repo,
+                gm=gm,
+            )
+            self.assertIsInstance(resp, JSONResponse)
+            self.assertEqual(resp.status_code, 400)
+            body = json.loads(resp.body)
+            self.assertEqual(body["error"]["code"], "segment_history_invalid_family")
+
+
+class TestColdStoreRollbackRestoresStubs(unittest.TestCase):
+    """C-NEW-1: Cold-store rollback restores stubs and hot payloads on exception."""
+
+    def test_mid_loop_exception_restores_stubs_and_hot_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            gm = SimpleGitManagerStub()
+
+            # Create two rolled journal segments
+            _roll_journal(repo, gm, day="2026-03-18")
+            _roll_journal(repo, gm, day="2026-03-19")
+
+            # Find the stub files created
+            journal_history = repo / "journal" / "history"
+            stub_dirs = []
+            for year_dir in sorted(journal_history.iterdir()):
+                idx = year_dir / "index"
+                if idx.is_dir():
+                    stub_dirs.append(idx)
+
+            stubs_before: dict[str, str] = {}
+            hot_payloads_before: dict[str, bytes] = {}
+            for sd in stub_dirs:
+                for f in sorted(sd.iterdir()):
+                    if f.name.endswith(".json"):
+                        stub_data = json.loads(f.read_text())
+                        stubs_before[f.name] = f.read_text()
+                        pp = stub_data.get("payload_path", "")
+                        if pp:
+                            hp = repo / pp
+                            if hp.is_file():
+                                hot_payloads_before[pp] = hp.read_bytes()
+
+            self.assertGreaterEqual(len(stubs_before), 2)
+            self.assertGreaterEqual(len(hot_payloads_before), 2)
+
+            # Patch write_bytes_file to fail on the second cold .gz write
+            call_count = 0
+            original_write_bytes = __import__("app.storage", fromlist=["write_bytes_file"]).write_bytes_file
+
+            def failing_write_bytes(path, data):
+                nonlocal call_count
+                # Cold paths end in .gz — count those
+                if str(path).endswith(".gz"):
+                    call_count += 1
+                    if call_count >= 2:
+                        raise OSError("Simulated disk failure")
+                return original_write_bytes(path, data)
+
+            with patch("app.segment_history.service.write_bytes_file", side_effect=failing_write_bytes):
+                with self.assertRaises(OSError):
+                    segment_history_cold_store_service(
+                        family="journal",
+                        repo_root=repo,
+                        settings=_FakeSettings(),
+                        gm=gm,
+                        now=datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc),
+                    )
+
+            # Verify stubs are restored to pre-cold-store state
+            for sd in stub_dirs:
+                for f in sorted(sd.iterdir()):
+                    if f.name.endswith(".json") and f.name in stubs_before:
+                        self.assertEqual(
+                            f.read_text(), stubs_before[f.name],
+                            f"Stub {f.name} should be restored to pre-cold-store state",
+                        )
+
+            # Verify hot payloads are restored
+            for pp, expected_bytes in hot_payloads_before.items():
+                hp = repo / pp
+                self.assertTrue(hp.is_file(), f"Hot payload {pp} should be restored")
+                self.assertEqual(hp.read_bytes(), expected_bytes)
+
+
 if __name__ == "__main__":
     unittest.main()
