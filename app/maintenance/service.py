@@ -1629,6 +1629,7 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                             try:
                                 actual_size = hot_path.stat().st_size
                                 if actual_size != summary_byte_size:
+                                    has_failure = True
                                     family_warnings.append({
                                         "code": "segment_history_hot_payload_size_mismatch",
                                         "detail": (

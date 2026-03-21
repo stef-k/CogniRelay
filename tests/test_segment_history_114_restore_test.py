@@ -224,6 +224,34 @@ class TestValidateSegmentHistory(unittest.TestCase):
             codes = [w["code"] for w in api["warnings"]]
             self.assertIn("segment_history_stub_missing_summary", codes)
 
+    def test_hot_payload_byte_size_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            restore = Path(td)
+            stub_dir = restore / "logs" / "history" / "api_audit" / "index"
+            stub_dir.mkdir(parents=True)
+            history_dir = restore / "logs" / "history" / "api_audit"
+
+            seg_id = "api_audit__api_audit__20260320T120000Z__0001"
+            payload = history_dir / f"{seg_id}.jsonl"
+            payload.write_text('{"ts":"2026-03-20T12:00:00Z"}\n', encoding="utf-8")
+
+            stub = {
+                "schema_type": "segment_history_stub",
+                "schema_version": "1.0",
+                "family": "api_audit",
+                "segment_id": seg_id,
+                "source_path": "logs/api_audit.jsonl",
+                "payload_path": f"logs/history/api_audit/{seg_id}.jsonl",
+                "summary": {"byte_size": 9999},  # Wrong size
+            }
+            (stub_dir / f"{seg_id}.json").write_text(json.dumps(stub), encoding="utf-8")
+
+            result = _validate_segment_history(restore)
+            self.assertFalse(result["ok"])
+            api = _family_result(result, "api_audit")
+            codes = [w["code"] for w in api["warnings"]]
+            self.assertIn("segment_history_hot_payload_size_mismatch", codes)
+
     def test_cold_payload_decompression_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             restore = Path(td)

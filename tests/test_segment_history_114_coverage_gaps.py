@@ -524,7 +524,7 @@ class TestRestoreTestMessageStream(unittest.TestCase):
                     "first_event_at": "2026-03-20T12:00:00Z",
                     "last_event_at": "2026-03-20T12:00:00Z",
                     "line_count": 1,
-                    "byte_size": 52,
+                    "byte_size": 45,
                     "message_id_sample": ["m1"],
                     "thread_id_sample": [],
                 },
@@ -570,7 +570,7 @@ class TestRestoreTestEpisodic(unittest.TestCase):
                     "first_event_at": "2026-03-20T12:00:00Z",
                     "last_event_at": "2026-03-20T12:00:00Z",
                     "line_count": 1,
-                    "byte_size": 55,
+                    "byte_size": 54,
                     "subject_kind_counts": {"visual": 1},
                 },
             }
@@ -661,7 +661,7 @@ class TestRestoreTestMessageThread(unittest.TestCase):
                     "first_event_at": "2026-03-20T12:00:00Z",
                     "last_event_at": "2026-03-20T12:00:00Z",
                     "line_count": 1,
-                    "byte_size": 62,
+                    "byte_size": 61,
                     "participant_sample": ["alice", "bob"],
                 },
             }
