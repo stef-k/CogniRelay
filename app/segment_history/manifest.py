@@ -73,6 +73,7 @@ def write_manifest(
     source_paths: list[str],
     segment_ids: list[str],
     target_paths: list[str] | None = None,
+    cleanup_paths: list[str] | None = None,
     started_at: str | None = None,
 ) -> Path:
     """Write a crash-recovery manifest before beginning mutations.
@@ -155,6 +156,7 @@ def write_manifest(
             "source_paths": source_paths,
             "segment_ids": segment_ids,
             "target_paths": effective_targets,
+            "cleanup_paths": cleanup_paths or [],
             "started_at": started_at or datetime.now(timezone.utc).isoformat(),
         }
         write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2))

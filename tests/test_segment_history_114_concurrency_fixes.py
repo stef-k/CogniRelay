@@ -1992,5 +1992,427 @@ class TestAtRiskSegmentIds(unittest.TestCase):
             self.assertNotIn("at_risk_segment_ids", result)
 
 
+class TestReviewRound16Fixes(unittest.TestCase):
+    """Tests for review round 16 concurrency/crash-recovery fixes.
+
+    Covers:
+    - R16-F1: Summary byte_size computed from rolled_content (not full source)
+    - R16-F2: Cold-store manifest includes cleanup_paths for hot payloads
+    - R16-F3: Rehydrate manifest includes cleanup_paths for cold payloads
+    - R16-F4: Audit append falls back to lockless write on lock contention
+    - R16-F5: Non-durable rehydrate re-attempt triggers manifest reconciliation
+    """
+
+    def _make_repo(self) -> Path:
+        d = tempfile.mkdtemp()
+        repo = Path(d)
+        (repo / "logs").mkdir(parents=True)
+        (repo / "logs" / "history" / "api_audit" / "index").mkdir(parents=True)
+        (repo / ".locks" / "segment_history").mkdir(parents=True)
+        return repo
+
+    # ---------------------------------------------------------------
+    # R16-F1: byte_size accuracy with partial trailing lines
+    # ---------------------------------------------------------------
+    def test_byte_size_excludes_partial_trailing_line(self):
+        """Stub byte_size must reflect rolled payload, not full source."""
+        repo = self._make_repo()
+        logs = repo / "logs"
+        source = logs / "api_audit.jsonl"
+        # Write 2 complete lines + 1 partial (no trailing newline)
+        complete = '{"ts":"2026-01-01T00:00:00Z","event":"a"}\n'
+        partial = '{"ts":"2026-01-02T00:00:00Z","event":"b'  # no newline
+        source.write_text(complete * 2 + partial)
+
+        result = segment_history_maintenance_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=SimpleGitManagerStub(),
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["rolled_count"], 1)
+
+        # Find the stub and check byte_size matches the actual payload
+        stub_dir = repo / "logs" / "history" / "api_audit" / "index"
+        stubs = list(stub_dir.glob("*.json"))
+        self.assertEqual(len(stubs), 1)
+        stub = json.loads(stubs[0].read_text(encoding="utf-8"))
+        payload_path = repo / stub["payload_path"]
+        payload_bytes = payload_path.read_bytes()
+        self.assertEqual(stub["summary"]["byte_size"], len(payload_bytes))
+        # Source should retain the partial line
+        self.assertEqual(source.read_text(), partial)
+
+    def test_byte_size_correct_when_no_partial_line(self):
+        """byte_size is correct when source has no partial trailing line."""
+        repo = self._make_repo()
+        logs = repo / "logs"
+        source = logs / "api_audit.jsonl"
+        complete = '{"ts":"2026-01-01T00:00:00Z","event":"a"}\n'
+        source.write_text(complete * 3)
+
+        result = segment_history_maintenance_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=SimpleGitManagerStub(),
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(result["ok"])
+        stub_dir = repo / "logs" / "history" / "api_audit" / "index"
+        stubs = list(stub_dir.glob("*.json"))
+        self.assertEqual(len(stubs), 1)
+        stub = json.loads(stubs[0].read_text(encoding="utf-8"))
+        payload_path = repo / stub["payload_path"]
+        self.assertEqual(stub["summary"]["byte_size"], len(payload_path.read_bytes()))
+
+    # ---------------------------------------------------------------
+    # R16-F2: Cold-store manifest cleanup_paths for hot payloads
+    # ---------------------------------------------------------------
+    def test_cold_store_manifest_includes_hot_payload_in_cleanup_paths(self):
+        """Cold-store manifest must list hot payloads in cleanup_paths."""
+        repo = self._make_repo()
+        logs = repo / "logs"
+        source = logs / "api_audit.jsonl"
+        source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"a"}\n' * 3)
+
+        # Roll first
+        result = segment_history_maintenance_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=SimpleGitManagerStub(),
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(result["ok"])
+
+        # Now cold-store with a failing git commit to preserve manifest
+        class _FailCommitGM:
+            def commit_paths(self, _p: Any, _m: Any) -> bool:
+                return False
+            def latest_commit(self) -> str:
+                return "fake"
+
+        cs_result = segment_history_cold_store_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=_FailCommitGM(),
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(cs_result["ok"])
+        self.assertFalse(cs_result["durable"])
+
+        # Manifest should survive (non-durable) and include cleanup_paths
+        mf = read_manifest(repo, "api_audit")
+        self.assertIsNotNone(mf)
+        self.assertIn("cleanup_paths", mf)
+        self.assertTrue(len(mf["cleanup_paths"]) > 0)
+        # cleanup_paths should reference the hot payload (not .gz)
+        for cp in mf["cleanup_paths"]:
+            self.assertFalse(cp.endswith(".gz"), f"cleanup_path should be hot payload, got: {cp}")
+            self.assertTrue(cp.endswith(".jsonl"))
+
+    def test_cold_store_reconciliation_cleans_orphaned_hot_payload(self):
+        """Reconciliation after cold-store crash removes orphaned hot payloads."""
+        repo = self._make_repo()
+        logs = repo / "logs"
+        source = logs / "api_audit.jsonl"
+        source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"a"}\n' * 3)
+
+        # Roll
+        result = segment_history_maintenance_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=SimpleGitManagerStub(),
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        seg_id = result["rolled_segment_ids"][0]
+
+        # Find the hot payload and stub
+        stub_dir = repo / "logs" / "history" / "api_audit" / "index"
+        stub_file = stub_dir / f"{seg_id}.json"
+        stub = json.loads(stub_file.read_text(encoding="utf-8"))
+        hot_payload = repo / stub["payload_path"]
+        self.assertTrue(hot_payload.is_file())
+
+        # Simulate a cold-store crash: write the .gz, mutate stub, write
+        # manifest with cleanup_paths, but don't delete the hot payload.
+        from app.segment_history.service import (
+            _build_cold_gzip_bytes,
+            _cold_payload_path,
+            _mutate_stub_cold,
+        )
+        cold_path = _cold_payload_path(hot_payload)
+        cold_path.parent.mkdir(parents=True, exist_ok=True)
+        compressed = _build_cold_gzip_bytes(hot_payload.read_bytes())
+        write_bytes_file(cold_path, compressed)
+
+        cold_rel = str(cold_path.relative_to(repo))
+        updated = _mutate_stub_cold(stub, cold_rel, "2026-03-20T12:00:00Z")
+        write_text_file(stub_file, json.dumps(updated, ensure_ascii=False, indent=2))
+
+        hot_rel = stub["payload_path"]
+        write_manifest(
+            repo,
+            operation="cold_store",
+            family="api_audit",
+            source_paths=[stub["source_path"]],
+            segment_ids=[seg_id],
+            target_paths=[cold_rel, str(stub_file.relative_to(repo))],
+            cleanup_paths=[hot_rel],
+        )
+
+        # Hot payload is still on disk (simulating the crash)
+        self.assertTrue(hot_payload.is_file())
+
+        # Now run reconciliation
+        recon = _reconcile_manifest_residue(
+            repo, "api_audit", "cold_store", SimpleGitManagerStub(),
+            locked_source_paths={stub["source_path"]},
+        )
+        self.assertIsNotNone(recon)
+        # Hot payload should have been removed
+        self.assertFalse(hot_payload.is_file(), "Orphaned hot payload should be cleaned up")
+
+    # ---------------------------------------------------------------
+    # R16-F3: Rehydrate manifest cleanup_paths for cold payloads
+    # ---------------------------------------------------------------
+    def test_rehydrate_reconciliation_cleans_orphaned_cold_payload(self):
+        """Reconciliation after rehydrate crash removes orphaned cold payloads."""
+        repo = self._make_repo()
+        logs = repo / "logs"
+        source = logs / "api_audit.jsonl"
+        source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"a"}\n' * 3)
+
+        # Roll + cold-store
+        result = segment_history_maintenance_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=SimpleGitManagerStub(),
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        seg_id = result["rolled_segment_ids"][0]
+        cs = segment_history_cold_store_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=SimpleGitManagerStub(),
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(cs["ok"])
+
+        # Find the cold .gz and stub
+        stub_dir = repo / "logs" / "history" / "api_audit" / "index"
+        stub_file = stub_dir / f"{seg_id}.json"
+        stub = json.loads(stub_file.read_text(encoding="utf-8"))
+        cold_payload = repo / stub["payload_path"]
+        self.assertTrue(cold_payload.is_file())
+        self.assertTrue(cold_payload.name.endswith(".gz"))
+
+        # Simulate rehydrate crash: write hot payload, mutate stub,
+        # write manifest with cleanup_paths, but don't remove cold.
+        from app.segment_history.service import (
+            _mutate_stub_rehydrate,
+            _rehydrate_hot_path,
+            _decompress_cold_payload,
+        )
+        decompressed = _decompress_cold_payload(cold_payload.read_bytes())
+        hot_path = _rehydrate_hot_path(
+            "api_audit", seg_id, stub.get("source_path", ""), repo,
+        )
+        hot_path.parent.mkdir(parents=True, exist_ok=True)
+        write_bytes_file(hot_path, decompressed)
+        hot_rel = str(hot_path.relative_to(repo))
+        updated = _mutate_stub_rehydrate(stub, hot_rel)
+        write_text_file(stub_file, json.dumps(updated, ensure_ascii=False, indent=2))
+
+        cold_rel = str(cold_payload.relative_to(repo))
+        write_manifest(
+            repo,
+            operation="rehydrate",
+            family="api_audit",
+            source_paths=[stub.get("source_path", "")],
+            segment_ids=[seg_id],
+            target_paths=[hot_rel, str(stub_file.relative_to(repo))],
+            cleanup_paths=[cold_rel],
+        )
+        self.assertTrue(cold_payload.is_file())
+
+        # Reconcile
+        recon = _reconcile_manifest_residue(
+            repo, "api_audit", "rehydrate", SimpleGitManagerStub(),
+            locked_source_paths={stub.get("source_path", "")},
+        )
+        self.assertIsNotNone(recon)
+        self.assertFalse(cold_payload.is_file(), "Orphaned cold payload should be cleaned up")
+
+    # ---------------------------------------------------------------
+    # R16-F4: Audit append lockless fallback
+    # ---------------------------------------------------------------
+    def test_audit_append_succeeds_when_lock_held(self):
+        """Audit event must be written even when source lock is held."""
+        repo = self._make_repo()
+        source = repo / "logs" / "api_audit.jsonl"
+        source.write_text("")
+
+        from app.segment_history.locking import segment_history_source_lock
+        from app.segment_history.service import _derive_stream_key
+
+        rel = str(source.relative_to(repo))
+        sk = _derive_stream_key("api_audit", rel)
+        lock_key = f"segment_history:api_audit:{sk}"
+        lock_dir = repo / ".locks" / "segment_history"
+
+        # Hold the lock (simulating maintenance) then try to append
+        with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+            # This should NOT raise — it should fall back to lockless append
+            append_audit(
+                repo, "test_event", "peer-1", {"msg": "during-maintenance"},
+                rollover_bytes=0, gm=None,
+            )
+
+        content = source.read_text(encoding="utf-8")
+        self.assertIn("test_event", content)
+        self.assertIn("during-maintenance", content)
+
+    def test_audit_append_with_rollover_lockless_fallback(self):
+        """Audit append with rollover_bytes falls back on lock contention."""
+        repo = self._make_repo()
+        source = repo / "logs" / "api_audit.jsonl"
+        source.write_text("")
+
+        from app.segment_history.locking import segment_history_source_lock
+        from app.segment_history.service import _derive_stream_key
+
+        rel = str(source.relative_to(repo))
+        sk = _derive_stream_key("api_audit", rel)
+        lock_key = f"segment_history:api_audit:{sk}"
+        lock_dir = repo / ".locks" / "segment_history"
+
+        # Hold the lock then append with rollover enabled
+        with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+            append_audit(
+                repo, "rollover_event", "peer-1", {"msg": "with-rollover"},
+                rollover_bytes=1024, gm=SimpleGitManagerStub(),
+            )
+
+        content = source.read_text(encoding="utf-8")
+        self.assertIn("rollover_event", content)
+
+    # ---------------------------------------------------------------
+    # R16-F5: Non-durable rehydrate re-attempt triggers reconciliation
+    # ---------------------------------------------------------------
+    def test_rehydrate_reattempt_recovers_via_manifest(self):
+        """Re-attempting rehydrate on a non-durable hot segment succeeds."""
+        repo = self._make_repo()
+        logs = repo / "logs"
+        source = logs / "api_audit.jsonl"
+        source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"a"}\n' * 3)
+
+        # Roll + cold-store
+        gm = SimpleGitManagerStub()
+        result = segment_history_maintenance_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=gm,
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        seg_id = result["rolled_segment_ids"][0]
+        cs = segment_history_cold_store_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=gm,
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(cs["ok"])
+
+        # Find cold stub
+        stub_dir = repo / "logs" / "history" / "api_audit" / "index"
+        stub_file = stub_dir / f"{seg_id}.json"
+        stub = json.loads(stub_file.read_text(encoding="utf-8"))
+        cold_payload = repo / stub["payload_path"]
+
+        # Simulate non-durable rehydrate: write hot, mutate stub,
+        # preserve manifest (as if commit failed)
+        from app.segment_history.service import (
+            _decompress_cold_payload,
+            _mutate_stub_rehydrate,
+            _rehydrate_hot_path,
+        )
+        decompressed = _decompress_cold_payload(cold_payload.read_bytes())
+        hot_path = _rehydrate_hot_path(
+            "api_audit", seg_id, stub.get("source_path", ""), repo,
+        )
+        hot_path.parent.mkdir(parents=True, exist_ok=True)
+        write_bytes_file(hot_path, decompressed)
+        hot_rel = str(hot_path.relative_to(repo))
+        updated = _mutate_stub_rehydrate(stub, hot_rel)
+        write_text_file(stub_file, json.dumps(updated, ensure_ascii=False, indent=2))
+
+        cold_rel = str(cold_payload.relative_to(repo))
+        write_manifest(
+            repo,
+            operation="rehydrate",
+            family="api_audit",
+            source_paths=[stub.get("source_path", "")],
+            segment_ids=[seg_id],
+            target_paths=[hot_rel, str(stub_file.relative_to(repo))],
+            cleanup_paths=[cold_rel],
+        )
+
+        # Re-attempt rehydrate — should succeed via manifest reconciliation
+        # instead of returning 409 "already hot"
+        reh = segment_history_cold_rehydrate_service(
+            family="api_audit",
+            segment_id=seg_id,
+            repo_root=repo,
+            gm=gm,
+        )
+        # Should be a dict (success), not a JSONResponse (error)
+        self.assertIsInstance(reh, dict)
+        self.assertTrue(reh["ok"])
+        # Should include the recovery warning
+        warning_codes = [w["code"] for w in reh.get("warnings", [])]
+        self.assertIn("segment_history_rehydrate_recovered", warning_codes)
+
+    def test_rehydrate_genuine_hot_still_returns_409(self):
+        """Rehydrate of a genuinely hot segment (no manifest) still returns 409."""
+        repo = self._make_repo()
+        logs = repo / "logs"
+        source = logs / "api_audit.jsonl"
+        source.write_text('{"ts":"2026-01-01T00:00:00Z","event":"a"}\n' * 3)
+
+        # Roll only (no cold-store)
+        gm = SimpleGitManagerStub()
+        result = segment_history_maintenance_service(
+            family="api_audit",
+            repo_root=repo,
+            settings=_FakeSettings(),
+            gm=gm,
+            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+        )
+        seg_id = result["rolled_segment_ids"][0]
+
+        reh = segment_history_cold_rehydrate_service(
+            family="api_audit",
+            segment_id=seg_id,
+            repo_root=repo,
+            gm=gm,
+        )
+        # Should be JSONResponse with 409
+        from fastapi.responses import JSONResponse
+        self.assertIsInstance(reh, JSONResponse)
+        self.assertEqual(reh.status_code, 409)
+        body = json.loads(reh.body)
+        self.assertEqual(body["error"]["code"], "segment_history_not_cold")
+
+
 if __name__ == "__main__":
     unittest.main()

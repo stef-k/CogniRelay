@@ -338,6 +338,12 @@ def _roll_jsonl_source(
     if not rolled_content.strip():
         return None
 
+    # Correct byte_size to reflect the actual payload (excluding any
+    # carry-forward partial trailing line that the caller's summary
+    # may have included).
+    summary = dict(summary)
+    summary["byte_size"] = _byte_size(rolled_content)
+
     # Write payload
     payload_path.parent.mkdir(parents=True, exist_ok=True)
     write_text_file(payload_path, rolled_content)
@@ -946,6 +952,25 @@ def _reconcile_manifest_residue(
                     source_paths_list, gm,
                 )
                 reconciled_source_paths = set(source_paths_list)
+
+            # Remove cleanup_paths — files that the operation intended
+            # to delete after a successful commit (e.g. hot payloads
+            # after cold-store, cold payloads after rehydrate).  These
+            # files are not in target_paths (they're not being committed)
+            # but lingered because the crash happened before deletion.
+            for cp_rel in manifest.get("cleanup_paths", []):
+                cp = repo_root / cp_rel
+                if cp.is_file():
+                    try:
+                        cp.unlink()
+                        _log.info(
+                            "Removed cleanup path after recovery: %s",
+                            cp_rel,
+                        )
+                    except OSError:
+                        _log.warning(
+                            "Could not remove cleanup path: %s", cp_rel,
+                        )
         except Exception:
             _log.warning(
                 "Could not commit recovered files from crashed %s for %s — "
@@ -1772,10 +1797,16 @@ def segment_history_cold_store_service(
                 v_source_paths = [s.get("source_path", "") for _, s, _ in validated]
                 v_seg_ids = [sid for sid, _, _ in validated]
                 v_target_paths: list[str] = []
+                v_cleanup_paths: list[str] = []
                 for sid, s, sp in validated:
                     pp = s.get("payload_path", "")
                     cp = str(_cold_payload_path(repo_root / pp).relative_to(repo_root)) if pp else ""
                     v_target_paths.extend([cp, str(sp.relative_to(repo_root))])
+                    # Hot payload should be removed after a successful
+                    # commit — record it so reconciliation can clean up
+                    # orphaned hot payloads after a crash.
+                    if pp:
+                        v_cleanup_paths.append(pp)
                 write_manifest(
                     repo_root,
                     operation="cold_store",
@@ -1783,6 +1814,7 @@ def segment_history_cold_store_service(
                     source_paths=v_source_paths,
                     segment_ids=v_seg_ids,
                     target_paths=v_target_paths,
+                    cleanup_paths=v_cleanup_paths,
                 )
 
             # Capture stub and hot-payload state for rollback
@@ -2085,18 +2117,32 @@ def segment_history_cold_rehydrate_service(
             f"Cannot read stub for segment: {segment_id}",
         )
 
-    # Must be cold-stored
+    # Must be cold-stored — unless a rehydrate manifest exists for this
+    # segment (non-durable prior attempt), in which case we proceed to
+    # the under-lock reconciliation path.
     if not stub.get("cold_stored_at"):
-        return _error_response(
-            409,
-            "segment_history_not_cold",
-            "The requested segment is already hot and cannot be rehydrated.",
+        from app.segment_history.manifest import read_manifest as _pre_lock_read_mf
+        try:
+            _pre_mf = _pre_lock_read_mf(repo_root, family)
+        except ValueError:
+            _pre_mf = None
+        has_rehydrate_manifest = (
+            _pre_mf is not None
+            and _pre_mf.get("operation") == "rehydrate"
+            and segment_id in _pre_mf.get("segment_ids", [])
         )
+        if not has_rehydrate_manifest:
+            return _error_response(
+                409,
+                "segment_history_not_cold",
+                "The requested segment is already hot and cannot be rehydrated.",
+            )
+        # Fall through to lock scope for manifest reconciliation.
 
     cold_payload_rel = stub.get("payload_path", "")
     cold_path = repo_root / cold_payload_rel
 
-    if not cold_path.is_file():
+    if not cold_path.is_file() and stub.get("cold_stored_at"):
         return _error_response(
             409,
             "segment_history_cold_payload_missing",
@@ -2124,6 +2170,54 @@ def segment_history_cold_rehydrate_service(
                 )
 
             if not stub.get("cold_stored_at"):
+                # The stub says hot — but this may be a non-durable
+                # rehydrate from a prior attempt where the commit failed
+                # and the manifest was preserved.  If a rehydrate
+                # manifest exists referencing this segment, attempt
+                # reconciliation to commit the uncommitted state rather
+                # than permanently blocking re-attempts with a 409.
+                from app.segment_history.manifest import read_manifest as _read_mf_check
+                try:
+                    mf = _read_mf_check(repo_root, family)
+                except ValueError:
+                    mf = None
+                if (
+                    mf is not None
+                    and mf.get("operation") == "rehydrate"
+                    and segment_id in mf.get("segment_ids", [])
+                ):
+                    source_path_str_pre = stub.get("source_path", "")
+                    recon = _reconcile_manifest_residue(
+                        repo_root, family, "rehydrate", gm,
+                        locked_source_paths={source_path_str_pre},
+                    )
+                    if recon:
+                        warnings.append(_make_warning(
+                            "segment_history_rehydrate_recovered",
+                            f"Recovered non-durable rehydrate for "
+                            f"segment {segment_id} via manifest reconciliation",
+                            segment_id=segment_id,
+                        ))
+                    # After reconciliation the segment is now durably
+                    # hot — return success rather than 409.
+                    hot_rel = stub.get("payload_path", "")
+                    stub_rel = str(stub_path.relative_to(repo_root))
+                    return {
+                        "ok": True,
+                        "operation": "segment_history_cold_rehydrate",
+                        "family": family,
+                        "segment_id": segment_id,
+                        "stub_path": stub_rel,
+                        "cold_payload_path": None,
+                        "rehydrated_payload_path": hot_rel,
+                        "removed_cold_payload_path": None,
+                        "mutated_stub_path": stub_rel,
+                        "durable": True,
+                        "cleanup_durable": True,
+                        "committed_files": [],
+                        "latest_commit": None,
+                        "warnings": warnings,
+                    }
                 return _error_response(
                     409,
                     "segment_history_not_cold",
@@ -2249,6 +2343,7 @@ def segment_history_cold_rehydrate_service(
                     source_paths=[source_path_str],
                     segment_ids=[segment_id],
                     target_paths=[hot_rel_planned, str(stub_path.relative_to(repo_root))],
+                    cleanup_paths=[cold_payload_rel],
                 )
             except _ManifestOccupied as exc:
                 return _error_response(

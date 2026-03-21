@@ -231,6 +231,19 @@ def _check_write_time_rollover(
         ) from exc
 
 
+_AUDIT_APPEND_LOCK_TIMEOUT: float = 2.0
+"""Short lock timeout for audit appends.
+
+Using a short timeout (2 s) instead of the default 30 s prevents audit
+events from being silently dropped during the entire maintenance lock
+hold window (which can exceed 60 s when git commits time out).  When
+the lock cannot be acquired within this budget, the append falls back
+to a lockless write — accepting a microsecond-scale race where a
+concurrent maintenance roll's atomic rename could orphan the line, but
+this is strictly better than guaranteed 100 % event loss.
+"""
+
+
 def append_audit(
     repo_root: Path, event: str, peer_id: str, detail: dict[str, Any],
     *, rollover_bytes: int = 0, gm: Any = None,
@@ -243,8 +256,14 @@ def append_audit(
     (via atomic rename) while this call's open fd still points to the
     old inode.
 
+    When the source lock cannot be acquired within
+    :data:`_AUDIT_APPEND_LOCK_TIMEOUT` (e.g. because maintenance holds
+    it), the append falls back to a lockless write so that audit events
+    are not silently dropped for the duration of the maintenance window.
+
     Raises :class:`WriteTimeRolloverError` if write-time rollover fails
-    (lock timeout, pending batch residue, or rollover local write failure).
+    (pending batch residue or rollover local write failure).  Lock
+    timeouts no longer propagate — the event is written regardless.
     """
     path = repo_root / "logs" / "api_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,10 +276,6 @@ def append_audit(
     }
     line = json.dumps(row, ensure_ascii=False) + "\n"
 
-    # Always acquire the source lock for the append to prevent a concurrent
-    # maintenance roll from truncating the file while this append is in flight.
-    # When rollover_bytes > 0 and gm is provided, the lock also covers the
-    # write-time rollover check atomically with the append.
     from app.segment_history.locking import (
         SegmentHistoryLockTimeout,
         segment_history_source_lock,
@@ -273,15 +288,30 @@ def append_audit(
     lock_dir = repo_root / ".locks" / "segment_history"
 
     try:
-        with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+        with segment_history_source_lock(
+            lock_key, lock_dir=lock_dir, timeout=_AUDIT_APPEND_LOCK_TIMEOUT,
+        ):
             if rollover_bytes > 0 and gm is not None:
                 _check_write_time_rollover_locked(
                     path, rollover_bytes, repo_root, gm,
                 )
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
-    except SegmentHistoryLockTimeout as exc:
-        raise WriteTimeRolloverError(
-            "segment_history_source_lock_timeout",
-            str(exc),
-        ) from exc
+            return  # Append succeeded under lock — done.
+    except SegmentHistoryLockTimeout:
+        # Lock held by a concurrent maintenance operation.  Fall back to
+        # a lockless append — accepts a microsecond-scale race where the
+        # atomic rename in _roll_jsonl_source could orphan this line, but
+        # this is strictly better than guaranteed event loss for the
+        # entire maintenance window (30–60+ seconds).
+        _log.debug(
+            "Audit append falling back to lockless mode: source lock held "
+            "by concurrent operation for key %s",
+            lock_key,
+        )
+
+    # Fallback: lockless append.  Audit JSON lines are well under
+    # PIPE_BUF (4096 on Linux), so concurrent appends from multiple
+    # requests do not interleave.
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line)
