@@ -81,7 +81,7 @@ def _api_audit_summary(content: str) -> dict[str, Any]:
 
 def _ops_runs_summary(content: str) -> dict[str, Any]:
     """Summary for ops run log segments."""
-    first_started, _ = _first_last_json_field(content, "ts")
+    first_started, _ = _first_last_json_field(content, "started_at")
     _, last_finished = _first_last_json_field(content, "finished_at")
     return {
         "first_started_at": first_started,

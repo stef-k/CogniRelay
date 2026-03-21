@@ -263,6 +263,30 @@ def _validate_segment_history_settings(settings: Settings) -> None:
             errors.append(
                 f"{cold_name} ({cold_val}) must not exceed {ret_name} ({ret_val})"
             )
+    # Validate standalone *_DAYS settings (not part of cold/retention pairs)
+    standalone_days: list[tuple[str, int]] = [
+        ("message_stream_max_hot_days", settings.message_stream_max_hot_days),
+        ("message_thread_inactivity_days", settings.message_thread_inactivity_days),
+    ]
+    for name, val in standalone_days:
+        if val < 1:
+            errors.append(f"{name} ({val}) must be >= 1")
+    # Validate byte thresholds
+    byte_thresholds: list[tuple[str, int]] = [
+        ("audit_log_rollover_bytes", settings.audit_log_rollover_bytes),
+        ("ops_run_rollover_bytes", settings.ops_run_rollover_bytes),
+        ("message_stream_rollover_bytes", settings.message_stream_rollover_bytes),
+        ("message_thread_rollover_bytes", settings.message_thread_rollover_bytes),
+        ("episodic_rollover_bytes", settings.episodic_rollover_bytes),
+    ]
+    for name, val in byte_thresholds:
+        if val < 1:
+            errors.append(f"{name} ({val}) must be >= 1")
+    # Validate batch limit
+    if settings.segment_history_batch_limit < 1:
+        errors.append(
+            f"segment_history_batch_limit ({settings.segment_history_batch_limit}) must be >= 1"
+        )
     if errors:
         raise SystemExit(
             "Invalid segment-history settings:\n  " + "\n  ".join(errors)

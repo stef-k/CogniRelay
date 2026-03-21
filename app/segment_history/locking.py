@@ -17,6 +17,24 @@ _log = logging.getLogger(__name__)
 LOCK_TIMEOUT_SECONDS: float = 30.0
 _LOCK_POLL_INTERVAL: float = 0.05
 
+
+class SegmentHistoryLockTimeout(Exception):
+    """Raised when a segment-history source lock cannot be acquired in time.
+
+    Carries the structured error code ``segment_history_source_lock_timeout``
+    so that callers can surface it in response envelopes.
+    """
+
+    code: str = "segment_history_source_lock_timeout"
+
+    def __init__(self, lock_key: str, timeout: float) -> None:
+        self.lock_key = lock_key
+        self.timeout = timeout
+        super().__init__(
+            f"Segment-history lock acquisition timed out for {lock_key} "
+            f"after {timeout:.1f}s"
+        )
+
 _lock_dir_ready: set[str] = set()
 
 
@@ -58,7 +76,7 @@ def segment_history_source_lock(
     _ensure_lock_dir(lock_dir)
     lock_path = lock_dir / _safe_lock_filename(lock_key)
     try:
-        lock_file = lock_path.open("w")
+        lock_file = lock_path.open("a")
     except OSError as exc:
         _log.error("Cannot open lock file %s: %s", lock_path, exc)
         raise HTTPException(
@@ -79,10 +97,7 @@ def segment_history_source_lock(
                         lock_key,
                         timeout,
                     )
-                    raise HTTPException(
-                        status_code=503,
-                        detail="Segment-history lock acquisition timed out",
-                    ) from None
+                    raise SegmentHistoryLockTimeout(lock_key, timeout) from None
                 time.sleep(_LOCK_POLL_INTERVAL)
         yield
     finally:
@@ -111,13 +126,10 @@ def acquire_sorted_source_locks(
         for key in sorted_keys:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Segment-history batch lock budget exhausted",
-                )
+                raise SegmentHistoryLockTimeout(key, total_budget)
             lock_path = lock_dir / _safe_lock_filename(key)
             try:
-                lock_file = lock_path.open("w")
+                lock_file = lock_path.open("a")
             except OSError as exc:
                 _log.error("Cannot open lock file %s: %s", lock_path, exc)
                 raise HTTPException(
@@ -135,10 +147,7 @@ def acquire_sorted_source_locks(
                             "Batch lock budget exhausted acquiring %s",
                             key,
                         )
-                        raise HTTPException(
-                            status_code=503,
-                            detail="Segment-history batch lock budget exhausted",
-                        ) from None
+                        raise SegmentHistoryLockTimeout(key, total_budget) from None
                     time.sleep(_LOCK_POLL_INTERVAL)
         yield
     finally:

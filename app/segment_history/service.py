@@ -792,19 +792,11 @@ def segment_history_maintenance_service(
         lock_keys.append(f"segment_history:{family}:{stream_key}")
         all_source_rels.append(rel)
 
-    # 5. Write manifest
-    write_manifest(
-        repo_root,
-        operation="maintenance",
-        family=family,
-        source_paths=all_source_rels,
-        segment_ids=[],  # filled as we roll
-    )
-
     lock_dir = repo_root / ".locks" / "segment_history"
+    source_rollback: list[tuple[Path, bytes | None]] = []
 
     try:
-        # 6. Acquire sorted source locks
+        # 5. Acquire sorted source locks
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
             # Post-lock: recount eligible for selection_count
             locked_eligible: list[Path] = []
@@ -831,26 +823,52 @@ def segment_history_maintenance_service(
 
             selection_count = len(locked_eligible)
 
-            # 7. Roll each eligible source under lock
+            # 6. Pre-compute segment IDs and target paths for manifest
+            planned: list[tuple[Path, str, str, Path, Path]] = []  # (src, rel, seg_id, payload, stub)
+            planned_source_rels: list[str] = []
+            planned_segment_ids: list[str] = []
+            planned_target_paths: list[str] = []
             for src in locked_eligible:
                 rel = str(src.relative_to(repo_root))
-                stream_key = _derive_stream_key(family, rel)
-
-                # Determine history and stub dirs per family
+                sk = _derive_stream_key(family, rel)
                 if family == "journal":
                     year = _journal_year_from_source(rel)
-                    history_dir = repo_root / "journal" / "history" / year
-                    stub_dir = repo_root / "journal" / "history" / year / "index"
+                    hist = repo_root / "journal" / "history" / year
+                    sd = repo_root / "journal" / "history" / year / "index"
                 elif family == "message_stream":
-                    history_dir = _message_stream_history_dir(repo_root, rel)
-                    stub_dir = _message_stream_stub_dir(repo_root, rel)
+                    hist = _message_stream_history_dir(repo_root, rel)
+                    sd = _message_stream_stub_dir(repo_root, rel)
                 else:
-                    history_dir = repo_root / config.history_dir
-                    stub_dir = repo_root / config.stub_dir
-
-                segment_id = _next_segment_id(family, stream_key, now, history_dir)
+                    hist = repo_root / config.history_dir
+                    sd = repo_root / config.stub_dir
+                seg_id = _next_segment_id(family, sk, now, hist)
                 ext = _FAMILY_EXTENSION.get(family, ".jsonl")
-                payload_path = history_dir / f"{segment_id}{ext}"
+                pp = hist / f"{seg_id}{ext}"
+                sp = sd / f"{seg_id}.json"
+                planned.append((src, rel, seg_id, pp, sp))
+                planned_source_rels.append(rel)
+                planned_segment_ids.append(seg_id)
+                planned_target_paths.append(str(pp.relative_to(repo_root)))
+                planned_target_paths.append(str(sp.relative_to(repo_root)))
+
+            # Write manifest with frozen selected set under lock
+            if planned:
+                write_manifest(
+                    repo_root,
+                    operation="maintenance",
+                    family=family,
+                    source_paths=planned_source_rels,
+                    segment_ids=planned_segment_ids,
+                    target_paths=planned_target_paths,
+                )
+
+            # Capture source state for rollback
+            source_rollback = _capture_rollback_state(locked_eligible)
+
+            # 7. Roll each eligible source under lock
+            for src, rel, segment_id, payload_path, _stub_path_plan in planned:
+                stream_key = _derive_stream_key(family, rel)
+                stub_dir = _stub_path_plan.parent
 
                 # Read content for summary
                 content = src.read_text(encoding="utf-8", errors="replace")
@@ -918,7 +936,9 @@ def segment_history_maintenance_service(
                 })
 
     except Exception:
-        # Rollback: best-effort cleanup of created paths
+        # Rollback: restore source files to pre-roll state, then remove created
+        if source_rollback:
+            _restore_rollback_state(source_rollback)
         _remove_created_paths(all_created)
         remove_manifest(repo_root, family)
         raise
@@ -1107,17 +1127,6 @@ def segment_history_cold_store_service(
             "warnings": warnings,
         }
 
-    # Write manifest
-    source_paths = [c[1].get("source_path", "") for c in candidates]
-    seg_ids = [c[0] for c in candidates]
-    write_manifest(
-        repo_root,
-        operation="cold_store",
-        family=family,
-        source_paths=source_paths,
-        segment_ids=seg_ids,
-    )
-
     # Derive lock keys from source paths using _derive_stream_key
     lock_keys = []
     for c in candidates:
@@ -1131,9 +1140,9 @@ def segment_history_cold_store_service(
 
     try:
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
-            # Re-read stubs under lock and revalidate
+            # Re-read stubs under lock and revalidate (5 checks per spec)
             validated: list[tuple[str, dict, Path]] = []
-            for seg_id, _pre_lock_stub, stub_path in candidates:
+            for seg_id, pre_lock_stub, stub_path in candidates:
                 if not stub_path.is_file():
                     warnings.append(_make_warning(
                         "segment_history_stub_missing_under_lock",
@@ -1145,7 +1154,7 @@ def segment_history_cold_store_service(
                     stub = json.loads(stub_path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError):
                     warnings.append(_make_warning(
-                        "segment_history_stub_unreadable_under_lock",
+                        "segment_history_stub_unreadable",
                         f"Cannot read stub under lock: {seg_id}",
                         segment_id=seg_id,
                     ))
@@ -1153,9 +1162,55 @@ def segment_history_cold_store_service(
                 if stub.get("cold_stored_at"):
                     # Already cold-stored by another process
                     continue
+                # Check source_path identity
+                if stub.get("source_path") != pre_lock_stub.get("source_path"):
+                    warnings.append(_make_warning(
+                        "segment_history_stub_source_changed",
+                        f"Stub source_path changed under lock: {seg_id}",
+                        segment_id=seg_id,
+                    ))
+                    continue
+                # Re-check cold eligibility under lock
+                elig_field = config.cold_eligibility_field
+                summary = stub.get("summary", {})
+                elig_value = summary.get(elig_field)
+                if elig_value is None:
+                    elig_value = stub.get("rolled_at")
+                if elig_value:
+                    try:
+                        ts_str = str(elig_value)
+                        if "T" in ts_str and ts_str.endswith("Z") and len(ts_str) == 16:
+                            elig_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                        elif len(ts_str) == 10:
+                            elig_dt = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                        else:
+                            elig_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        age_days = (now - elig_dt).total_seconds() / 86400
+                        if age_days < cold_after_days:
+                            continue
+                    except (ValueError, TypeError):
+                        continue
                 validated.append((seg_id, stub, stub_path))
 
             selection_count = len(validated)
+
+            # Write manifest with frozen validated set under lock
+            if validated:
+                v_source_paths = [s.get("source_path", "") for _, s, _ in validated]
+                v_seg_ids = [sid for sid, _, _ in validated]
+                v_target_paths: list[str] = []
+                for sid, s, sp in validated:
+                    pp = s.get("payload_path", "")
+                    cp = str(_cold_payload_path(repo_root / pp).relative_to(repo_root)) if pp else ""
+                    v_target_paths.extend([cp, str(sp.relative_to(repo_root))])
+                write_manifest(
+                    repo_root,
+                    operation="cold_store",
+                    family=family,
+                    source_paths=v_source_paths,
+                    segment_ids=v_seg_ids,
+                    target_paths=v_target_paths,
+                )
 
             for seg_id, stub, stub_path in validated:
                 payload_rel = stub.get("payload_path", "")
@@ -1397,30 +1452,31 @@ def segment_history_cold_rehydrate_service(
 
     hot_path = _rehydrate_hot_path(family, segment_id, source_path_str, repo_root)
 
-    if hot_path.is_file():
-        hot_rel = str(hot_path.relative_to(repo_root))
-        return JSONResponse(
-            status_code=409,
-            content={
-                "ok": False,
-                "operation": "segment_history_cold_rehydrate",
-                "family": family,
-                "segment_id": segment_id,
-                "error": {
-                    "code": "segment_history_rehydrate_conflict",
-                    "detail": "target rolled payload already exists",
-                },
-                "conflict_path": hot_rel,
-            },
-        )
-
     # Lock key derived from source_path via _derive_stream_key
     sk = _derive_stream_key(family, source_path_str)
     lock_key = f"segment_history:{family}:{sk}"
     lock_dir = repo_root / ".locks" / "segment_history"
 
     with segment_history_source_lock(lock_key, lock_dir=lock_dir):
-        # Re-check state under lock
+        # Conflict check under lock: canonical hot target must not exist
+        if hot_path.is_file():
+            hot_rel = str(hot_path.relative_to(repo_root))
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "operation": "segment_history_cold_rehydrate",
+                    "family": family,
+                    "segment_id": segment_id,
+                    "error": {
+                        "code": "segment_history_rehydrate_conflict",
+                        "detail": "target rolled payload already exists",
+                    },
+                    "conflict_path": hot_rel,
+                },
+            )
+
+        # Re-check cold payload under lock
         if not cold_path.is_file():
             return _error_response(
                 409,

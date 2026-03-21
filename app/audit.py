@@ -11,6 +11,18 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 
+class WriteTimeRolloverError(Exception):
+    """Raised when write-time rollover fails and the append must not proceed.
+
+    Carries a stable ``code`` for structured error responses.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
+
+
 def _check_write_time_rollover(
     path: Path, rollover_bytes: int, repo_root: Path, gm: Any
 ) -> None:
@@ -18,6 +30,9 @@ def _check_write_time_rollover(
 
     Called before appending to the audit log. The check is a single stat()
     call — no lock acquisition unless rollover actually fires.
+
+    Raises :class:`WriteTimeRolloverError` on failure so the append is
+    blocked (per spec, the triggering append must fail on rollover failure).
     """
     try:
         size = path.stat().st_size
@@ -28,24 +43,39 @@ def _check_write_time_rollover(
 
     # Trigger rollover — import lazily to avoid circular imports and keep
     # the common (no-rollover) path as fast as possible.
+    from app.segment_history.families import FAMILIES
+    from app.segment_history.locking import (
+        SegmentHistoryLockTimeout,
+        segment_history_source_lock,
+    )
+    from app.segment_history.manifest import read_manifest as _read_manifest
+    from app.segment_history.service import (
+        _derive_stream_key,
+        _next_segment_id,
+        _roll_jsonl_source,
+    )
+
+    family = "api_audit"
+    config = FAMILIES[family]
+    now = datetime.now(timezone.utc)
+    rel = str(path.relative_to(repo_root))
+    stream_key = _derive_stream_key(family, rel)
+    lock_key = f"segment_history:{family}:{stream_key}"
+    lock_dir = repo_root / ".locks" / "segment_history"
+
     try:
-        from app.segment_history.families import FAMILIES
-        from app.segment_history.locking import segment_history_source_lock
-        from app.segment_history.service import (
-            _derive_stream_key,
-            _next_segment_id,
-            _roll_jsonl_source,
-        )
+        with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+            # Check for pending batch residue under lock
+            try:
+                mf = _read_manifest(repo_root, family)
+            except ValueError:
+                mf = None
+            if mf is not None and rel in mf.get("source_paths", []):
+                raise WriteTimeRolloverError(
+                    "segment_history_pending_batch_residue",
+                    f"A pending batch operation lists this source: {rel}",
+                )
 
-        family = "api_audit"
-        config = FAMILIES[family]
-        now = datetime.now(timezone.utc)
-        rel = str(path.relative_to(repo_root))
-        stream_key = _derive_stream_key(family, rel)
-        lock_key = f"segment_history:{family}:{stream_key}"
-        lock_dir = repo_root / ".locks" / "segment_history"
-
-        with segment_history_source_lock(lock_key, lock_dir=lock_dir, timeout=5.0):
             # Re-check under lock
             try:
                 if path.stat().st_size < rollover_bytes:
@@ -53,7 +83,6 @@ def _check_write_time_rollover(
             except OSError:
                 return
 
-            stream_key = _derive_stream_key(family, rel)
             history_dir = repo_root / config.history_dir
             stub_dir = repo_root / config.stub_dir
             segment_id = _next_segment_id(family, stream_key, now, history_dir)
@@ -78,18 +107,25 @@ def _check_write_time_rollover(
                 return
             _stub, created = result
 
-            # Best-effort commit
+            # Commit with git serialization lock
             if gm is not None:
+                from app.git_locking import repository_mutation_lock
+
                 try:
-                    commit_paths = created + [path]
-                    gm.commit_paths(
-                        commit_paths,
-                        f"segment-history: roll {family} {stream_key}",
-                    )
+                    with repository_mutation_lock(repo_root):
+                        commit_paths = created + [path]
+                        gm.commit_paths(
+                            commit_paths,
+                            f"segment-history: roll {family} {stream_key}",
+                        )
                 except Exception:
                     _log.warning("Write-time rollover commit failed for %s", segment_id)
-    except Exception:
-        _log.warning("Write-time rollover check failed for audit log", exc_info=True)
+                    # Local writes succeeded; durable=false but append continues
+    except SegmentHistoryLockTimeout as exc:
+        raise WriteTimeRolloverError(
+            "segment_history_source_lock_timeout",
+            str(exc),
+        ) from exc
 
 
 def append_audit(
@@ -100,6 +136,9 @@ def append_audit(
 
     When *rollover_bytes* > 0 and a *gm* (git manager) is provided,
     a cheap size check triggers write-time rollover before appending.
+
+    Raises :class:`WriteTimeRolloverError` if write-time rollover fails
+    (lock timeout, pending batch residue, or rollover local write failure).
     """
     path = repo_root / "logs" / "api_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
