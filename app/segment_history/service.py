@@ -788,13 +788,8 @@ def segment_history_maintenance_service(
     config = FAMILIES[family]
     warnings: list[dict[str, Any]] = []
 
-    # 0. Reconcile any leftover manifest residue
-    residue = _reconcile_manifest_residue(repo_root, family, "maintenance", gm)
-    if residue:
-        warnings.append(_make_warning(
-            "segment_history_manifest_residue",
-            residue["warning"],
-        ))
+    # 0. Manifest reconciliation is deferred until inside the source lock
+    #    to prevent concurrent callers from both attempting recovery commits.
 
     # 1. Discover active sources
     sources = discover_active_sources(family, repo_root)
@@ -869,7 +864,19 @@ def segment_history_maintenance_service(
     try:
         # 5. Acquire sorted source locks
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
-            # Post-lock: recount eligible for selection_count
+            # 5a. Reconcile manifest residue inside lock scope to prevent
+            #     concurrent callers from both attempting recovery commits.
+            residue = _reconcile_manifest_residue(repo_root, family, "maintenance", gm)
+            if residue:
+                warnings.append(_make_warning(
+                    "segment_history_manifest_residue",
+                    residue["warning"],
+                ))
+
+            # Post-lock: recount eligible for selection_count.
+            # Re-check rollover eligibility under lock so that a source
+            # already rolled by a concurrent write-time rollover becomes
+            # a deterministic no-op (spec requirement).
             locked_eligible: list[Path] = []
             for src in eligible:
                 if not src.is_file():
@@ -889,6 +896,11 @@ def segment_history_maintenance_service(
                     ))
                     continue
                 if size == 0:
+                    continue
+                # Re-check rollover eligibility under lock to handle the
+                # race where write-time rollover already rolled this source
+                # (leaving only carry-forward content below threshold).
+                if not check_rollover_eligible(src, family, settings, now, warnings=warnings):
                     continue
                 locked_eligible.append(src)
 
@@ -1142,13 +1154,8 @@ def segment_history_cold_store_service(
                     },
                 }
 
-    # 0b. Reconcile any leftover manifest residue
-    residue = _reconcile_manifest_residue(repo_root, family, "cold_store", gm)
-    if residue:
-        warnings.append(_make_warning(
-            "segment_history_manifest_residue",
-            residue["warning"],
-        ))
+    # 0b. Manifest reconciliation is deferred until inside the source lock
+    #     to prevent concurrent callers from both attempting recovery commits.
 
     # 1. Discover candidates by scanning stub dir
     candidates: list[tuple[str, dict, Path]] = []  # (segment_id, stub, stub_path)
@@ -1297,6 +1304,15 @@ def segment_history_cold_store_service(
 
     try:
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
+            # Reconcile manifest residue inside lock scope to prevent
+            # concurrent callers from both attempting recovery commits.
+            residue = _reconcile_manifest_residue(repo_root, family, "cold_store", gm)
+            if residue:
+                warnings.append(_make_warning(
+                    "segment_history_manifest_residue",
+                    residue["warning"],
+                ))
+
             # Re-read stubs under lock and revalidate (5 checks per spec)
             validated: list[tuple[str, dict, Path]] = []
             for seg_id, pre_lock_stub, stub_path in candidates:
@@ -1674,6 +1690,33 @@ def segment_history_cold_rehydrate_service(
 
     try:
         with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+            # Re-read and re-validate stub under lock to prevent TOCTOU:
+            # a concurrent rehydrate or cold-store could have mutated the
+            # stub between the pre-lock read and lock acquisition.
+            try:
+                stub = json.loads(stub_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return _error_response(
+                    409,
+                    "segment_history_stub_unreadable",
+                    f"Cannot read stub under lock for segment: {segment_id}",
+                )
+
+            if not stub.get("cold_stored_at"):
+                return _error_response(
+                    409,
+                    "segment_history_not_cold",
+                    "The requested segment is already hot and cannot be rehydrated.",
+                )
+
+            # Re-derive cold path from the authoritative under-lock stub
+            cold_payload_rel = stub.get("payload_path", "")
+            cold_path = repo_root / cold_payload_rel
+
+            # Re-derive source_path from the authoritative under-lock stub
+            source_path_str = stub.get("source_path", "")
+            hot_path = _rehydrate_hot_path(family, segment_id, source_path_str, repo_root)
+
             # Conflict check under lock: canonical hot target must not exist
             if hot_path.is_file():
                 hot_rel = str(hot_path.relative_to(repo_root))

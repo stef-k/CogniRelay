@@ -125,6 +125,7 @@ def _check_write_time_rollover_locked(
     _stub, created = result
 
     # Commit with git serialization lock
+    commit_succeeded = False
     if gm is not None:
         from app.git_locking import repository_mutation_lock
 
@@ -135,11 +136,18 @@ def _check_write_time_rollover_locked(
                     commit_paths,
                     f"segment-history: roll {family} {stream_key}",
                 )
+            commit_succeeded = True
         except Exception:
             _log.warning("Write-time rollover commit failed for %s", segment_id)
-            # Local writes succeeded; durable=false but append continues
+            # Local writes succeeded; leave the manifest so that the next
+            # _reconcile_manifest_residue call can commit the orphaned files
+            # instead of silently losing them on crash + repo restore.
 
-    _remove_manifest(repo_root, family)
+    # Only remove the manifest after a successful commit.  When the commit
+    # fails the manifest must survive so crash recovery can still find and
+    # commit the orphaned rolled payload, stub, and truncated source.
+    if commit_succeeded or gm is None:
+        _remove_manifest(repo_root, family)
 
 
 def _check_write_time_rollover(
@@ -206,30 +214,31 @@ def append_audit(
     }
     line = json.dumps(row, ensure_ascii=False) + "\n"
 
-    if rollover_bytes > 0 and gm is not None:
-        from app.segment_history.locking import (
-            SegmentHistoryLockTimeout,
-            segment_history_source_lock,
-        )
-        from app.segment_history.service import _derive_stream_key
+    # Always acquire the source lock for the append to prevent a concurrent
+    # maintenance roll from truncating the file while this append is in flight.
+    # When rollover_bytes > 0 and gm is provided, the lock also covers the
+    # write-time rollover check atomically with the append.
+    from app.segment_history.locking import (
+        SegmentHistoryLockTimeout,
+        segment_history_source_lock,
+    )
+    from app.segment_history.service import _derive_stream_key
 
-        rel = str(path.relative_to(repo_root))
-        stream_key = _derive_stream_key("api_audit", rel)
-        lock_key = f"segment_history:api_audit:{stream_key}"
-        lock_dir = repo_root / ".locks" / "segment_history"
+    rel = str(path.relative_to(repo_root))
+    stream_key = _derive_stream_key("api_audit", rel)
+    lock_key = f"segment_history:api_audit:{stream_key}"
+    lock_dir = repo_root / ".locks" / "segment_history"
 
-        try:
-            with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+    try:
+        with segment_history_source_lock(lock_key, lock_dir=lock_dir):
+            if rollover_bytes > 0 and gm is not None:
                 _check_write_time_rollover_locked(
                     path, rollover_bytes, repo_root, gm,
                 )
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(line)
-        except SegmentHistoryLockTimeout as exc:
-            raise WriteTimeRolloverError(
-                "segment_history_source_lock_timeout",
-                str(exc),
-            ) from exc
-    else:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(line)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(line)
+    except SegmentHistoryLockTimeout as exc:
+        raise WriteTimeRolloverError(
+            "segment_history_source_lock_timeout",
+            str(exc),
+        ) from exc
