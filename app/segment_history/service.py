@@ -702,6 +702,7 @@ def segment_history_maintenance_service(
     repo_root: Path,
     settings: Any,
     gm: Any,
+    batch_limit: int | None = None,
     now: datetime | None = None,
     audit: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
@@ -771,9 +772,11 @@ def segment_history_maintenance_service(
 
     # 3. Sort and apply batch limit
     eligible.sort()
-    batch_limit = getattr(settings, "segment_history_batch_limit", 500)
-    batch_limit_reached = len(eligible) > batch_limit
-    eligible = eligible[:batch_limit]
+    effective_batch_limit = getattr(settings, "segment_history_batch_limit", 500)
+    if batch_limit is not None:
+        effective_batch_limit = min(batch_limit, effective_batch_limit)
+    batch_limit_reached = len(eligible) > effective_batch_limit
+    eligible = eligible[:effective_batch_limit]
 
     if not eligible:
         return {
@@ -806,6 +809,9 @@ def segment_history_maintenance_service(
 
     lock_dir = repo_root / ".locks" / "segment_history"
     source_rollback: list[tuple[Path, bytes | None]] = []
+    durable = True
+    committed_files: list[str] = []
+    latest_commit: str | None = None
 
     try:
         # 5. Acquire sorted source locks
@@ -948,6 +954,35 @@ def segment_history_maintenance_service(
                     "warning_count": len(warnings),
                 })
 
+            # 8. Git commit — inside source lock scope per spec
+            if all_created:
+                # Include rolled sources even if deleted (journal unlinks originals);
+                # git add on a deleted path stages the removal.
+                commit_paths = all_created + rolled_sources
+                commit_message = (
+                    f"segment-history: roll {family} {selection_count}"
+                )
+                try:
+                    from app.git_locking import repository_mutation_lock
+
+                    with repository_mutation_lock(repo_root):
+                        success = gm.commit_paths(commit_paths, commit_message)
+                        if success:
+                            latest_commit = gm.latest_commit()
+                            committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
+                        else:
+                            durable = False
+                            warnings.append(_make_warning(
+                                "segment_history_git_commit_failed",
+                                "Git commit failed for maintenance roll",
+                            ))
+                except Exception:
+                    durable = False
+                    warnings.append(_make_warning(
+                        "segment_history_git_commit_failed",
+                        "Git commit failed for maintenance roll",
+                    ))
+
     except Exception:
         # Rollback: restore source files to pre-roll state, then remove created
         if source_rollback:
@@ -955,39 +990,6 @@ def segment_history_maintenance_service(
         _remove_created_paths(all_created)
         remove_manifest(repo_root, family)
         raise
-
-    # 8. Git commit
-    durable = True
-    committed_files: list[str] = []
-    latest_commit: str | None = None
-
-    if all_created:
-        # Include rolled sources even if deleted (journal unlinks originals);
-        # git add on a deleted path stages the removal.
-        commit_paths = all_created + rolled_sources
-        commit_message = (
-            f"segment-history: roll {family} {len(rolled_segment_ids)}"
-        )
-        try:
-            from app.git_locking import repository_mutation_lock
-
-            with repository_mutation_lock(repo_root):
-                success = gm.commit_paths(commit_paths, commit_message)
-                if success:
-                    latest_commit = gm.latest_commit()
-                    committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
-                else:
-                    durable = False
-                    warnings.append(_make_warning(
-                        "segment_history_git_commit_failed",
-                        "Git commit failed for maintenance roll",
-                    ))
-        except Exception:
-            durable = False
-            warnings.append(_make_warning(
-                "segment_history_git_commit_failed",
-                "Git commit failed for maintenance roll",
-            ))
 
     # 9. Remove manifest
     remove_manifest(repo_root, family)
@@ -1016,6 +1018,7 @@ def segment_history_cold_store_service(
     repo_root: Path,
     settings: Any,
     gm: Any,
+    batch_limit: int | None = None,
     segment_ids: list[str] | None = None,
     now: datetime | None = None,
     audit: Callable[..., Any] | None = None,
@@ -1048,7 +1051,22 @@ def segment_history_cold_store_service(
     cold_after_days = _get_cold_after_days_setting(family, settings)
     warnings: list[dict[str, Any]] = []
 
-    # 0. Reconcile any leftover manifest residue
+    # 0a. Validate segment_ids format upfront per spec
+    if segment_ids:
+        for sid in segment_ids:
+            parsed = _validate_segment_id(family, sid)
+            if parsed is None:
+                return {
+                    "ok": False,
+                    "operation": "segment_history_cold_store",
+                    "family": family,
+                    "error": {
+                        "code": "segment_history_invalid_segment_id",
+                        "detail": f"Invalid segment ID format: {sid}",
+                    },
+                }
+
+    # 0b. Reconcile any leftover manifest residue
     residue = _reconcile_manifest_residue(repo_root, family, "cold_store", gm)
     if residue:
         warnings.append(_make_warning(
@@ -1058,6 +1076,7 @@ def segment_history_cold_store_service(
 
     # 1. Discover candidates by scanning stub dir
     candidates: list[tuple[str, dict, Path]] = []  # (segment_id, stub, stub_path)
+    seen_segment_ids: set[str] = set()  # Track IDs encountered for stub_not_found warnings
 
     # Build the list of stub dirs to scan — multi-dir for journal and message_stream
     stub_dirs_to_scan: list[Path] = []
@@ -1091,50 +1110,80 @@ def segment_history_cold_store_service(
                 ))
                 continue
 
-            # Skip already cold-stored
+            seg_id = stub.get("segment_id", entry.stem)
+
+            # Skip already cold-stored — with warning if explicitly requested
             if stub.get("cold_stored_at"):
+                if segment_ids and seg_id in segment_ids:
+                    warnings.append(_make_warning(
+                        "segment_history_already_cold",
+                        f"Segment is already cold-stored: {seg_id}",
+                        segment_id=seg_id,
+                    ))
+                    seen_segment_ids.add(seg_id)
                 continue
+
+            # Filter by requested segment_ids
+            if segment_ids:
+                seen_segment_ids.add(seg_id)
+                if seg_id not in segment_ids:
+                    continue
 
             # Check cold eligibility
             elig_field = config.cold_eligibility_field
             summary = stub.get("summary", {})
             elig_value = summary.get(elig_field)
             if elig_value is None:
-                # Use rolled_at as fallback
-                elig_value = stub.get("rolled_at")
+                warnings.append(_make_warning(
+                    "segment_history_missing_cold_timestamp",
+                    f"Stub summary field '{elig_field}' is null, skipping cold eligibility: {seg_id}",
+                    segment_id=seg_id,
+                ))
+                continue
 
-            if elig_value:
-                try:
-                    # Parse timestamp - handle both ISO and compact formats
-                    ts_str = str(elig_value)
-                    if "T" in ts_str and ts_str.endswith("Z") and len(ts_str) == 16:
-                        # Compact: 20260320T120000Z
-                        elig_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            try:
+                # Parse timestamp - handle both ISO and compact formats
+                ts_str = str(elig_value)
+                if "T" in ts_str and ts_str.endswith("Z") and len(ts_str) == 16:
+                    # Compact: 20260320T120000Z
+                    elig_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                else:
+                    # Try ISO or date-only
+                    if len(ts_str) == 10:  # YYYY-MM-DD
+                        elig_dt = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
                     else:
-                        # Try ISO or date-only
-                        if len(ts_str) == 10:  # YYYY-MM-DD
-                            elig_dt = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                        else:
-                            elig_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    age_days = (now - elig_dt).total_seconds() / 86400
-                    if age_days < cold_after_days:
-                        continue
-                except (ValueError, TypeError):
+                        elig_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                age_days = (now - elig_dt).total_seconds() / 86400
+                if age_days < cold_after_days:
                     continue
-
-            seg_id = stub.get("segment_id", entry.stem)
-
-            # Filter by requested segment_ids
-            if segment_ids and seg_id not in segment_ids:
+            except (ValueError, TypeError):
+                if family == "journal":
+                    warnings.append(_make_warning(
+                        "segment_history_invalid_stub_summary",
+                        f"Invalid '{elig_field}' value in stub summary: {seg_id}",
+                        segment_id=seg_id,
+                    ))
                 continue
 
             candidates.append((seg_id, stub, entry))
 
+    # Emit warnings for explicitly requested segment_ids that were not found
+    if segment_ids:
+        for req_id in segment_ids:
+            if req_id not in seen_segment_ids:
+                warnings.append(_make_warning(
+                    "segment_history_stub_not_found",
+                    f"No stub found for requested segment: {req_id}",
+                    segment_id=req_id,
+                ))
+
     # Sort by segment_id, apply batch limit
     candidates.sort(key=lambda x: x[0])
-    batch_limit = getattr(settings, "segment_history_batch_limit", 500)
-    batch_limit_reached = len(candidates) > batch_limit
-    candidates = candidates[:batch_limit]
+    effective_batch_limit = getattr(settings, "segment_history_batch_limit", 500)
+    if batch_limit is not None:
+        effective_batch_limit = min(batch_limit, effective_batch_limit)
+    batch_limit_reached = len(candidates) > effective_batch_limit
+    candidates = candidates[:effective_batch_limit]
 
     if not candidates:
         return {
@@ -1165,6 +1214,9 @@ def segment_history_cold_store_service(
     created_cold_paths: list[Path] = []
     stub_rollback: list[tuple[Path, bytes | None]] = []
     hot_rollback: list[tuple[Path, bytes | None]] = []
+    durable = True
+    committed_files: list[str] = []
+    latest_commit: str | None = None
 
     try:
         with acquire_sorted_source_locks(lock_keys, lock_dir=lock_dir):
@@ -1203,21 +1255,25 @@ def segment_history_cold_store_service(
                 summary = stub.get("summary", {})
                 elig_value = summary.get(elig_field)
                 if elig_value is None:
-                    elig_value = stub.get("rolled_at")
-                if elig_value:
-                    try:
-                        ts_str = str(elig_value)
-                        if "T" in ts_str and ts_str.endswith("Z") and len(ts_str) == 16:
-                            elig_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-                        elif len(ts_str) == 10:
-                            elig_dt = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                        else:
-                            elig_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        age_days = (now - elig_dt).total_seconds() / 86400
-                        if age_days < cold_after_days:
-                            continue
-                    except (ValueError, TypeError):
+                    warnings.append(_make_warning(
+                        "segment_history_missing_cold_timestamp",
+                        f"Stub summary field '{elig_field}' is null under lock, skipping: {seg_id}",
+                        segment_id=seg_id,
+                    ))
+                    continue
+                try:
+                    ts_str = str(elig_value)
+                    if "T" in ts_str and ts_str.endswith("Z") and len(ts_str) == 16:
+                        elig_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                    elif len(ts_str) == 10:
+                        elig_dt = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    else:
+                        elig_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    age_days = (now - elig_dt).total_seconds() / 86400
+                    if age_days < cold_after_days:
                         continue
+                except (ValueError, TypeError):
+                    continue
                 validated.append((seg_id, stub, stub_path))
 
             selection_count = len(validated)
@@ -1303,6 +1359,32 @@ def segment_history_cold_store_service(
                     "warning_count": len(warnings),
                 })
 
+            # Git commit — inside source lock scope per spec
+            if commit_paths:
+                msg = f"segment-history: cold-store {family} {selection_count}"
+                try:
+                    from app.git_locking import repository_mutation_lock
+
+                    with repository_mutation_lock(repo_root):
+                        success = gm.commit_paths(commit_paths, msg)
+                        if success:
+                            latest_commit = gm.latest_commit()
+                            committed_files = [
+                                str(p.relative_to(repo_root)) for p in commit_paths
+                            ]
+                        else:
+                            durable = False
+                            warnings.append(_make_warning(
+                                "segment_history_git_commit_failed",
+                                "Git commit failed for cold-store",
+                            ))
+                except Exception:
+                    durable = False
+                    warnings.append(_make_warning(
+                        "segment_history_git_commit_failed",
+                        "Git commit failed for cold-store",
+                    ))
+
     except Exception:
         # Restore stubs and hot payloads to pre-cold-store state, then
         # remove any cold .gz files that were created.
@@ -1311,36 +1393,6 @@ def segment_history_cold_store_service(
         _remove_created_paths(created_cold_paths)
         remove_manifest(repo_root, family)
         raise
-
-    # Git commit
-    durable = True
-    committed_files: list[str] = []
-    latest_commit: str | None = None
-
-    if commit_paths:
-        msg = f"segment-history: cold-store {family} {selection_count}"
-        try:
-            from app.git_locking import repository_mutation_lock
-
-            with repository_mutation_lock(repo_root):
-                success = gm.commit_paths(commit_paths, msg)
-                if success:
-                    latest_commit = gm.latest_commit()
-                    committed_files = [
-                        str(p.relative_to(repo_root)) for p in commit_paths
-                    ]
-                else:
-                    durable = False
-                    warnings.append(_make_warning(
-                        "segment_history_git_commit_failed",
-                        "Git commit failed for cold-store",
-                    ))
-        except Exception:
-            durable = False
-            warnings.append(_make_warning(
-                "segment_history_git_commit_failed",
-                "Git commit failed for cold-store",
-            ))
 
     remove_manifest(repo_root, family)
 

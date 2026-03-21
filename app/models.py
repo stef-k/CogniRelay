@@ -782,11 +782,13 @@ class ArtifactHistoryColdRehydrateRequest(BaseModel):
 class SegmentHistoryMaintenanceRequest(BaseModel):
     """Host-local request for rolling active sources into history segments."""
     family: str = Field(min_length=1, max_length=50)
+    batch_limit: Optional[int] = Field(default=None, gt=0)
 
 
 class SegmentHistoryColdStoreRequest(BaseModel):
     """Host-local request for cold-storing rolled segment-history payloads."""
     family: str = Field(min_length=1, max_length=50)
+    batch_limit: Optional[int] = Field(default=None, gt=0)
     segment_ids: Optional[List[str]] = Field(default=None, max_length=500)
 
 

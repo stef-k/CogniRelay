@@ -152,7 +152,8 @@ class TestColdStoreIdempotent(unittest.TestCase):
 
 
 class TestColdStoreSegmentFilter(unittest.TestCase):
-    def test_filter_by_segment_ids(self) -> None:
+    def test_filter_by_invalid_segment_id_returns_400(self) -> None:
+        """Syntactically invalid segment_id is a deterministic 400 error."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
@@ -168,8 +169,31 @@ class TestColdStoreSegmentFilter(unittest.TestCase):
                 now=now,
             )
 
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "segment_history_invalid_segment_id")
+
+    def test_filter_by_valid_missing_segment_ids(self) -> None:
+        """Valid format but non-existent segment_id emits stub_not_found warning."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            _setup_rolled_journal(repo, gm)
+
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            valid_missing_id = "journal__2026__2026-03-19__20260320T120000Z__9999"
+            result = segment_history_cold_store_service(
+                family="journal",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=gm,
+                segment_ids=[valid_missing_id],
+                now=now,
+            )
+
             self.assertTrue(result["ok"])
             self.assertEqual(result["cold_stored_count"], 0)
+            codes = [w["code"] for w in result["warnings"]]
+            self.assertIn("segment_history_stub_not_found", codes)
 
 
 if __name__ == "__main__":
