@@ -954,6 +954,33 @@ def segment_history_maintenance_service(
                     stream_key = _derive_stream_key(family, rel)
                     stub_dir = _stub_path_plan.parent
 
+                    # Guard against duplicate segments after crash
+                    # recovery: if an existing stub already references
+                    # this source_path, a prior crashed roll was
+                    # committed by manifest reconciliation.  Skip the
+                    # re-roll to prevent data duplication.
+                    if stub_dir.is_dir():
+                        already_rolled = False
+                        for existing in stub_dir.iterdir():
+                            if not existing.name.endswith(".json"):
+                                continue
+                            try:
+                                es = json.loads(existing.read_text(encoding="utf-8"))
+                                if es.get("source_path") == rel:
+                                    already_rolled = True
+                                    break
+                            except (json.JSONDecodeError, OSError):
+                                continue
+                        if already_rolled:
+                            selection_count -= 1
+                            warnings.append(_make_warning(
+                                "segment_history_already_rolled",
+                                f"Source already has a rolled stub, "
+                                f"skipping to prevent duplicate: {rel}",
+                                path=rel,
+                            ))
+                            continue
+
                     # Read content for summary
                     content = src.read_text(encoding="utf-8", errors="replace")
                     summary = config.build_summary(content)
@@ -1059,9 +1086,12 @@ def segment_history_maintenance_service(
                 remove_manifest(repo_root, family)
                 raise
 
-            # Success: remove manifest inside lock scope to prevent
-            # stale-manifest reconciliation from deleting committed files.
-            remove_manifest(repo_root, family)
+            # Remove manifest only when the commit succeeded; when durable
+            # is False the manifest must survive so that the next
+            # _reconcile_manifest_residue call can re-commit the orphaned
+            # files (consistent with write-time rollover in audit.py).
+            if durable:
+                remove_manifest(repo_root, family)
 
     except SegmentHistoryLockTimeout as exc:
         return {
@@ -1494,8 +1524,11 @@ def segment_history_cold_store_service(
                 remove_manifest(repo_root, family)
                 raise
 
-            # Success: remove manifest inside lock scope.
-            remove_manifest(repo_root, family)
+            # Remove manifest only when the commit succeeded; preserving
+            # it on failure lets _reconcile_manifest_residue re-commit
+            # orphaned files on the next invocation.
+            if durable:
+                remove_manifest(repo_root, family)
 
     except SegmentHistoryLockTimeout as exc:
         return {
@@ -1663,27 +1696,8 @@ def segment_history_cold_rehydrate_service(
             f"Cold payload file missing for segment: {segment_id}",
         )
 
-    # Derive hot restoration target canonically from family/segment_id/source_path
+    # Derive lock key from source_path via _derive_stream_key
     source_path_str = stub.get("source_path", "")
-
-    # Check for pending batch residue — single-source ops must not proceed
-    # if the family manifest lists this source path.
-    from app.segment_history.manifest import read_manifest as _read_manifest
-    try:
-        mf = _read_manifest(repo_root, family)
-    except ValueError:
-        mf = None
-    if mf is not None and source_path_str in mf.get("source_paths", []):
-        return _error_response(
-            409,
-            "segment_history_pending_batch_residue",
-            f"A pending batch operation lists this source; "
-            f"reconciliation must complete first: {source_path_str}",
-        )
-
-    hot_path = _rehydrate_hot_path(family, segment_id, source_path_str, repo_root)
-
-    # Lock key derived from source_path via _derive_stream_key
     sk = _derive_stream_key(family, source_path_str)
     lock_key = f"segment_history:{family}:{sk}"
     lock_dir = repo_root / ".locks" / "segment_history"
@@ -1716,6 +1730,22 @@ def segment_history_cold_rehydrate_service(
             # Re-derive source_path from the authoritative under-lock stub
             source_path_str = stub.get("source_path", "")
             hot_path = _rehydrate_hot_path(family, segment_id, source_path_str, repo_root)
+
+            # Check for pending batch residue under lock — prevents
+            # TOCTOU where a manifest appears between pre-lock check
+            # and lock acquisition.
+            from app.segment_history.manifest import read_manifest as _read_manifest
+            try:
+                mf = _read_manifest(repo_root, family)
+            except ValueError:
+                mf = None
+            if mf is not None and source_path_str in mf.get("source_paths", []):
+                return _error_response(
+                    409,
+                    "segment_history_pending_batch_residue",
+                    f"A pending batch operation lists this source; "
+                    f"reconciliation must complete first: {source_path_str}",
+                )
 
             # Conflict check under lock: canonical hot target must not exist
             if hot_path.is_file():

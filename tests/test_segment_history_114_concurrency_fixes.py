@@ -353,5 +353,233 @@ class TestManifestReconciliationRecoversOrphans(unittest.TestCase):
             self.assertIn("preserved=0", result["warning"])
 
 
+# -----------------------------------------------------------------------
+# F5: Manifest preserved on git-commit failure (Finding 1 & 3)
+# -----------------------------------------------------------------------
+class TestManifestPreservedOnCommitFailure(unittest.TestCase):
+    """Manifest must survive when git commit fails so crash recovery works."""
+
+    def test_maintenance_preserves_manifest_on_commit_failure(self) -> None:
+        """When git commit fails, maintenance keeps the manifest for recovery."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            gm.commit_paths = lambda *a, **k: False  # simulate commit failure
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            (logs / "api_audit.jsonl").write_text(
+                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
+            )
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["durable"])
+            # Manifest must still exist for crash recovery
+            mf = read_manifest(repo, "api_audit")
+            self.assertIsNotNone(mf)
+            self.assertEqual(mf["operation"], "maintenance")
+
+    def test_cold_store_preserves_manifest_on_commit_failure(self) -> None:
+        """When git commit fails, cold-store keeps the manifest for recovery."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            # Set up a rolled stub + payload for cold-store
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            payload = hist / f"{seg_id}.jsonl"
+            payload.write_text('{"ts":"2026-03-19T00:00:00Z"}\n')
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(payload.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 1, "byte_size": 30},
+            )
+            write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
+
+            # Make commit fail
+            gm.commit_paths = lambda *a, **k: False
+
+            result = segment_history_cold_store_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["durable"])
+            # Manifest must still exist for crash recovery
+            mf = read_manifest(repo, "api_audit")
+            self.assertIsNotNone(mf)
+            self.assertEqual(mf["operation"], "cold_store")
+
+    def test_maintenance_removes_manifest_on_commit_success(self) -> None:
+        """When git commit succeeds, manifest is properly cleaned up."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            (logs / "api_audit.jsonl").write_text(
+                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
+            )
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["durable"])
+            # Manifest should be removed after successful commit
+            mf = read_manifest(repo, "api_audit")
+            self.assertIsNone(mf)
+
+
+# -----------------------------------------------------------------------
+# F6: Duplicate-segment guard after crash recovery (Finding 2)
+# -----------------------------------------------------------------------
+class TestDuplicateSegmentGuard(unittest.TestCase):
+    """Maintenance must skip sources that already have a rolled stub."""
+
+    def test_skip_already_rolled_source(self) -> None:
+        """If a stub already references a source, maintenance skips re-roll."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            # Set up api_audit source with enough content
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            source = logs / "api_audit.jsonl"
+            source.write_text(
+                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
+            )
+
+            # Simulate crash recovery: a stub already exists referencing
+            # this source (as if a prior crashed roll was committed by
+            # manifest reconciliation).
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            payload = hist / f"{seg_id}.jsonl"
+            payload.write_text('{"ts":"2026-03-19T00:00:00Z"}\n')
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(payload.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 1, "byte_size": 30},
+            )
+            write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            # Should have been skipped — no new segments rolled
+            self.assertEqual(result["rolled_count"], 0)
+            # Warning emitted about the skip
+            codes = [w["code"] for w in result["warnings"]]
+            self.assertIn("segment_history_already_rolled", codes)
+
+
+# -----------------------------------------------------------------------
+# F7: Rehydrate manifest check under lock (Finding 4)
+# -----------------------------------------------------------------------
+class TestRehydrateManifestCheckUnderLock(unittest.TestCase):
+    """Pending-batch-residue check must run inside the source lock."""
+
+    def test_rehydrate_blocks_on_manifest_residue(self) -> None:
+        """Rehydrate returns 409 when manifest lists the source path."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            # Set up a cold-stored segment
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            cold_dir = hist / "cold"
+            cold_dir.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            cold_data = _build_cold_gzip_bytes(b'{"ts":"2026-03-19T00:00:00Z"}\n')
+            cold_path = cold_dir / f"{seg_id}.jsonl.gz"
+            write_bytes_file(cold_path, cold_data)
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(cold_path.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 1, "byte_size": 30},
+            )
+            stub["cold_stored_at"] = "2026-03-20T00:00:00Z"
+            write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
+
+            # Write a manifest that lists this source (simulating a
+            # concurrent batch operation).
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260320T000000Z__0001"],
+            )
+
+            result = segment_history_cold_rehydrate_service(
+                family="api_audit",
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=gm,
+            )
+            # Should be a JSONResponse with 409
+            from fastapi.responses import JSONResponse
+            self.assertIsInstance(result, JSONResponse)
+            self.assertEqual(result.status_code, 409)
+            body = json.loads(result.body)
+            self.assertEqual(
+                body["error"]["code"],
+                "segment_history_pending_batch_residue",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
