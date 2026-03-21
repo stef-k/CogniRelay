@@ -10,10 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Set
 
-_log = logging.getLogger(__name__)
-
 from dotenv import load_dotenv
 
+_log = logging.getLogger(__name__)
 
 load_dotenv()
 

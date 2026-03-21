@@ -393,33 +393,36 @@ class TestSettingsValidationExtended(unittest.TestCase):
         {"COGNIRELAY_TOKENS": "test-token", "COGNIRELAY_AUDIT_LOG_ROLLOVER_BYTES": "0"},
         clear=False,
     )
-    def test_zero_rollover_bytes_raises(self) -> None:
+    def test_zero_rollover_bytes_clamped(self) -> None:
+        """Zero rollover_bytes is clamped to minimum=1024 by _parse_int."""
         from app.config import get_settings
 
-        with self.assertRaises(SystemExit):
-            get_settings(force_reload=True)
+        settings = get_settings(force_reload=True)
+        self.assertGreaterEqual(settings.audit_log_rollover_bytes, 1024)
 
     @patch.dict(
         os.environ,
         {"COGNIRELAY_TOKENS": "test-token", "COGNIRELAY_MESSAGE_STREAM_MAX_HOT_DAYS": "0"},
         clear=False,
     )
-    def test_zero_max_hot_days_raises_or_clamps(self) -> None:
+    def test_zero_max_hot_days_clamped(self) -> None:
+        """Zero max_hot_days is clamped to minimum=1 by _parse_int."""
         from app.config import get_settings
 
-        with self.assertRaises(SystemExit):
-            get_settings(force_reload=True)
+        settings = get_settings(force_reload=True)
+        self.assertGreaterEqual(settings.message_stream_max_hot_days, 1)
 
     @patch.dict(
         os.environ,
         {"COGNIRELAY_TOKENS": "test-token", "COGNIRELAY_MESSAGE_THREAD_INACTIVITY_DAYS": "0"},
         clear=False,
     )
-    def test_zero_inactivity_days_raises_or_clamps(self) -> None:
+    def test_zero_inactivity_days_clamped(self) -> None:
+        """Zero inactivity_days is clamped to minimum=1 by _parse_int."""
         from app.config import get_settings
 
-        with self.assertRaises(SystemExit):
-            get_settings(force_reload=True)
+        settings = get_settings(force_reload=True)
+        self.assertGreaterEqual(settings.message_thread_inactivity_days, 1)
 
 
 # =========================================================================

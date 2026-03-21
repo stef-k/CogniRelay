@@ -1,17 +1,19 @@
 """Repository-level locking for git-backed mutation sequences.
 
-The git-commit serialization lock waits indefinitely (no timeout) per
-the segment-history spec.  Callers must never acquire the git lock
-before acquiring per-source locks — source locks have a 30 s timeout
-and are the only concurrency-bounding mechanism.
+The git-commit serialization lock uses a safety timeout (default 60 s)
+to prevent system-wide deadlocks.  Callers must never acquire the git
+lock before acquiring per-source locks — source locks have a 30 s
+timeout and are the only concurrency-bounding mechanism.
 """
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -27,6 +29,13 @@ class GitLockInfrastructureError(RuntimeError):
 
     Callers translate this to the appropriate HTTP status.
     """
+
+
+class GitLockTimeout(RuntimeError):
+    """Raised when the repository mutation lock cannot be acquired within the timeout."""
+
+_GIT_LOCK_TIMEOUT: float = 60.0
+_GIT_LOCK_POLL: float = 0.1
 
 
 def _repo_lock_id(repo_root: Path) -> str:
@@ -72,10 +81,25 @@ def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
             _log.error("Cannot open git lock file %s after retry: %s", lock_path, exc)
             raise GitLockInfrastructureError(f"Cannot open git lock file {lock_path}: {exc}") from exc
     try:
-        # Blocking wait — no timeout per spec.  Source locks (30 s timeout)
-        # bound concurrency; the git lock is only held during brief
-        # git-add/commit operations.
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        deadline = time.monotonic() + _GIT_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    lock_file.close()
+                    raise GitLockTimeout(
+                        f"Repository mutation lock timed out after {_GIT_LOCK_TIMEOUT}s"
+                    ) from None
+                time.sleep(_GIT_LOCK_POLL)
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                lock_file.close()
+                raise GitLockInfrastructureError(
+                    f"Unexpected flock error on git lock: {exc}"
+                ) from exc
         yield
     finally:
         lock_file.close()

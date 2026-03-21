@@ -122,9 +122,12 @@ def _check_write_time_rollover_locked(
             _message_stream_stub_dir,
         )
 
+        _stream_kind = _message_stream_kind_from_source(rel)
         history_dir = _message_stream_history_dir(repo_root, rel)
         stub_dir = _message_stream_stub_dir(repo_root, rel)
-        _stream_kind = _message_stream_kind_from_source(rel)
+        if _stream_kind is None or history_dir is None or stub_dir is None:
+            _log.warning("Cannot determine stream kind for source %s; skipping rollover", rel)
+            return
     else:
         history_dir = repo_root / config.history_dir
         stub_dir = repo_root / config.stub_dir

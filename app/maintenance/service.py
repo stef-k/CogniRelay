@@ -1347,6 +1347,22 @@ def backup_create_service(
     if not include:
         include = ["memory", "messages", "tasks", "patches", "runs", "projects", "essays", "journal", "snapshots", "peers", "config", "logs"]
 
+    # Warn if custom prefixes may exclude cold storage directories
+    if req.include_prefixes:
+        cold_dir_prefixes = [
+            "logs/history", "messages/history", "journal/history",
+            "memory/episodic/history",
+        ]
+        missing_cold = [
+            p for p in cold_dir_prefixes
+            if not any(p.startswith(i) or i.startswith(p) for i in include)
+        ]
+        if missing_cold:
+            _logger.warning(
+                "Backup with custom prefixes may exclude cold storage directories: %s",
+                missing_cold,
+            )
+
     now = datetime.now(timezone.utc)
     backup_id = f"backup_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
     backup_rel = f"{BACKUPS_DIR_REL}/{backup_id}.tar.gz"
@@ -1435,8 +1451,15 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
         # Step 1: scan active source roots
         try:
             active_sources = discover_active_sources(family_name, restore_root)
-        except Exception:
+        except Exception as exc:
+            _logger.warning("discover_active_sources failed for family %s: %s", family_name, exc)
             active_sources = []
+            family_warnings.append({
+                "code": "segment_history_discover_sources_failed",
+                "detail": f"Could not discover active sources: {exc}",
+                "path": None,
+                "segment_id": None,
+            })
         for src in active_sources:
             active_sources_checked += 1
             if not src.is_file():
@@ -1449,7 +1472,8 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                 })
             else:
                 try:
-                    src.open("rb").close()
+                    with src.open("rb"):
+                        pass
                 except OSError:
                     has_failure = True
                     family_warnings.append({
@@ -1599,6 +1623,23 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                                 "path": rel,
                                 "segment_id": seg_id,
                             })
+                        # Verify byte_size matches actual file size
+                        summary_byte_size = stub.get("summary", {}).get("byte_size")
+                        if summary_byte_size is not None and hot_path.is_file():
+                            try:
+                                actual_size = hot_path.stat().st_size
+                                if actual_size != summary_byte_size:
+                                    family_warnings.append({
+                                        "code": "segment_history_hot_payload_size_mismatch",
+                                        "detail": (
+                                            f"Hot payload size {actual_size} != "
+                                            f"stub byte_size {summary_byte_size}"
+                                        ),
+                                        "path": rel,
+                                        "segment_id": seg_id,
+                                    })
+                            except OSError:
+                                pass  # stat failure already covered above
                     else:
                         has_failure = True
                         family_warnings.append({
@@ -1638,13 +1679,13 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
                         _rehydrate_hot_path(
                             family_name, seg_id, source_path_str, restore_root,
                         )
-                    except Exception:
+                    except Exception as exc:
                         has_failure = True
                         family_warnings.append({
                             "code": "segment_history_cold_derivation_failed",
                             "detail": (
                                 f"Cannot derive canonical hot restoration target "
-                                f"from stub: {rel}"
+                                f"from stub: {rel}: {exc}"
                             ),
                             "path": rel,
                             "segment_id": seg_id,
@@ -1692,11 +1733,26 @@ def _validate_segment_history(restore_root: Path) -> dict[str, Any]:
             "warnings": family_warnings,
         })
 
-    return {
+    # Check for stale crash-recovery manifests that survived the backup
+    cognirelay_dir = restore_root / ".cognirelay" / "segment-history"
+    stale_manifest_warnings: list[dict] = []
+    if cognirelay_dir.is_dir():
+        for mf in cognirelay_dir.glob("*.manifest.json"):
+            stale_manifest_warnings.append({
+                "code": "segment_history_stale_manifest",
+                "detail": f"Stale crash-recovery manifest found after restore: {mf.name}",
+                "path": str(mf.relative_to(restore_root)),
+                "segment_id": None,
+            })
+
+    result: dict = {
         "ok": not any_failure,
         "families_checked": len(families_results),
         "families": families_results,
     }
+    if stale_manifest_warnings:
+        result["stale_manifest_warnings"] = stale_manifest_warnings
+    return result
 
 
 def backup_restore_test_service(

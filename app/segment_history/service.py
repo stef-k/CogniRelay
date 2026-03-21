@@ -449,10 +449,11 @@ def _cold_payload_path(hot_payload_path: Path) -> Path:
 _MESSAGE_STREAM_KINDS = ("inbox", "outbox", "relay", "acks")
 
 
-def _message_stream_kind_from_source(source_rel: str) -> str:
+def _message_stream_kind_from_source(source_rel: str) -> str | None:
     """Extract the stream kind (inbox|outbox|relay|acks) from a message_stream source path.
 
     E.g. ``messages/inbox/alice.jsonl`` -> ``inbox``.
+    Returns ``None`` if the stream kind cannot be determined.
     """
     # source_rel is like messages/<kind>/<file>.jsonl
     parts = source_rel.split("/")
@@ -463,22 +464,26 @@ def _message_stream_kind_from_source(source_rel: str) -> str:
     kind = stream_key.split("__")[0]
     if kind not in _MESSAGE_STREAM_KINDS:
         _log.warning(
-            "Could not determine stream kind from source '%s', defaulting to 'inbox'",
+            "Could not determine stream kind from source '%s'; skipping",
             source_rel,
         )
-        return "inbox"
+        return None
     return kind
 
 
-def _message_stream_history_dir(repo_root: Path, source_rel: str) -> Path:
-    """Return the per-kind history dir for a message_stream source."""
+def _message_stream_history_dir(repo_root: Path, source_rel: str) -> Path | None:
+    """Return the per-kind history dir for a message_stream source, or None."""
     kind = _message_stream_kind_from_source(source_rel)
+    if kind is None:
+        return None
     return repo_root / "messages" / "history" / kind
 
 
-def _message_stream_stub_dir(repo_root: Path, source_rel: str) -> Path:
-    """Return the per-kind stub dir for a message_stream source."""
+def _message_stream_stub_dir(repo_root: Path, source_rel: str) -> Path | None:
+    """Return the per-kind stub dir for a message_stream source, or None."""
     kind = _message_stream_kind_from_source(source_rel)
+    if kind is None:
+        return None
     return repo_root / "messages" / "history" / kind / "index"
 
 
@@ -519,8 +524,10 @@ def _rehydrate_hot_path(family: str, segment_id: str, source_path: str, repo_roo
         return repo_root / "messages" / "history" / "threads" / filename
     if family == "episodic":
         return repo_root / "memory" / "episodic" / "history" / filename
-    # Fallback
-    return repo_root / filename
+    raise ValueError(
+        f"Unknown family '{family}' in _rehydrate_hot_path; "
+        f"all 6 known families are handled above"
+    )
 
 
 # Keep backward compatibility alias for tests
@@ -577,8 +584,6 @@ def _truncate_reconciled_sources(
     consumed by the roll, so it is deleted (matching normal journal roll
     behaviour).
     """
-    from app.storage import write_text_file as _write_text
-
     # Build a map: source_path -> list of payload_path for all committed
     # pairs.  We need to read stubs to find source_path associations.
     source_payload_map: dict[str, list[Path]] = {}
@@ -625,9 +630,10 @@ def _truncate_reconciled_sources(
             continue
 
         # JSONL sources: read the payload that was rolled from this source
-        # and strip it from the source's prefix.
+        # and strip it from the source's prefix.  Compare as bytes to
+        # avoid encoding ambiguity with errors="replace".
         try:
-            source_content = src.read_text(encoding="utf-8", errors="replace")
+            source_bytes = src.read_bytes()
         except OSError:
             continue
 
@@ -635,15 +641,16 @@ def _truncate_reconciled_sources(
             if not pp.is_file():
                 continue
             try:
-                payload_content = pp.read_text(encoding="utf-8", errors="replace")
+                payload_bytes = pp.read_bytes()
             except OSError:
                 continue
-            if source_content.startswith(payload_content):
-                source_content = source_content[len(payload_content) :]
+            if source_bytes.startswith(payload_bytes):
+                source_bytes = source_bytes[len(payload_bytes) :]
 
         # Write the truncated source (only post-roll appends remain).
         try:
-            _write_text(src, source_content)
+            from app.storage import write_bytes_file as _write_bytes_trunc
+            _write_bytes_trunc(src, source_bytes)
             truncated_sources.append(src)
             _log.info(
                 "Truncated reconciled source to remove already-rolled data: %s",
@@ -1339,6 +1346,9 @@ def segment_history_maintenance_service(
                     _pf_stub_dir = repo_root / "journal" / "history" / _journal_year_from_source(rel) / "index"
                 elif family == "message_stream":
                     _pf_stub_dir = _message_stream_stub_dir(repo_root, rel)
+                    if _pf_stub_dir is None:
+                        _log.warning("Skipping source with unknown stream kind: %s", rel)
+                        continue
                 else:
                     _pf_stub_dir = repo_root / config.stub_dir
                 _already_rolled = False
@@ -1421,6 +1431,9 @@ def segment_history_maintenance_service(
                 elif family == "message_stream":
                     hist = _message_stream_history_dir(repo_root, rel)
                     sd = _message_stream_stub_dir(repo_root, rel)
+                    if hist is None or sd is None:
+                        _log.warning("Skipping source with unknown stream kind during planning: %s", rel)
+                        continue
                 else:
                     hist = repo_root / config.history_dir
                     sd = repo_root / config.stub_dir
@@ -1472,11 +1485,12 @@ def segment_history_maintenance_service(
                     # apply ack-specific overrides per spec.
                     elif family == "message_stream":
                         sk_kind = _message_stream_kind_from_source(rel)
-                        summary["stream_kind"] = sk_kind
-                        summary["stream_key"] = stream_key
-                        from app.segment_history.families import fixup_message_stream_summary
+                        if sk_kind is not None:
+                            summary["stream_kind"] = sk_kind
+                            summary["stream_key"] = stream_key
+                            from app.segment_history.families import fixup_message_stream_summary
 
-                        fixup_message_stream_summary(summary, content, sk_kind)
+                            fixup_message_stream_summary(summary, content, sk_kind)
                     # Add thread_id for message_thread summaries
                     elif family == "message_thread":
                         summary["thread_id"] = src.stem
