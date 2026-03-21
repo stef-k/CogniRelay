@@ -238,9 +238,12 @@ Using a short timeout (2 s) instead of the default 30 s prevents audit
 events from being silently dropped during the entire maintenance lock
 hold window (which can exceed 60 s when git commits time out).  When
 the lock cannot be acquired within this budget, the append falls back
-to a lockless write — accepting a microsecond-scale race where a
-concurrent maintenance roll's atomic rename could orphan the line, but
-this is strictly better than guaranteed 100 % event loss.
+to a lockless write — accepting a race window spanning the full
+``_roll_jsonl_source`` execution (source read through carry-forward
+rename, typically ~5-20 ms of file I/O including two temp+fsync+rename
+sequences for the payload and stub) where the atomic rename could
+orphan this line, but this is strictly better than guaranteed 100 %
+event loss.
 """
 
 
@@ -292,18 +295,33 @@ def append_audit(
             lock_key, lock_dir=lock_dir, timeout=_AUDIT_APPEND_LOCK_TIMEOUT,
         ):
             if rollover_bytes > 0 and gm is not None:
-                _check_write_time_rollover_locked(
-                    path, rollover_bytes, repo_root, gm,
-                )
+                try:
+                    _check_write_time_rollover_locked(
+                        path, rollover_bytes, repo_root, gm,
+                    )
+                except WriteTimeRolloverError:
+                    # Rollover failed (pending batch residue, manifest
+                    # occupied, or I/O error).  Log and continue — the
+                    # file will grow beyond rollover_bytes, but the audit
+                    # event must still be written.  Dropping the event
+                    # would cause sustained audit loss until the manifest
+                    # is reconciled.
+                    _log.warning(
+                        "Write-time rollover failed; appending audit event "
+                        "without rollover for key %s",
+                        lock_key,
+                    )
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
             return  # Append succeeded under lock — done.
     except SegmentHistoryLockTimeout:
         # Lock held by a concurrent maintenance operation.  Fall back to
-        # a lockless append — accepts a microsecond-scale race where the
-        # atomic rename in _roll_jsonl_source could orphan this line, but
-        # this is strictly better than guaranteed event loss for the
-        # entire maintenance window (30–60+ seconds).
+        # a lockless append — accepts a race window (spanning the full
+        # _roll_jsonl_source execution: source read through carry-forward
+        # rename, typically ~5-20 ms of I/O) where the atomic rename
+        # could orphan this line, but this is strictly better than
+        # guaranteed event loss for the entire maintenance window
+        # (30-60+ seconds).
         _log.debug(
             "Audit append falling back to lockless mode: source lock held "
             "by concurrent operation for key %s",

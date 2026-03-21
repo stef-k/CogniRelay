@@ -1172,13 +1172,11 @@ def segment_history_maintenance_service(
                 repo_root, family, "maintenance", gm,
                 locked_source_paths=set(all_source_rels),
             )
-            reconciled_sources: set[str] = set()
             if residue:
                 warnings.append(_make_warning(
                     "segment_history_manifest_residue",
                     residue["warning"],
                 ))
-                reconciled_sources = residue.get("reconciled_source_paths", set())
 
             # Post-lock: recount eligible for selection_count.
             # Re-check rollover eligibility under lock so that a source
@@ -1269,22 +1267,45 @@ def segment_history_maintenance_service(
                     stub_dir = _stub_path_plan.parent
 
                     # Guard against duplicate segments after crash
-                    # recovery: if reconciliation just committed orphaned
+                    # recovery.  When reconciliation committed orphaned
                     # targets for this source but truncation failed, an
                     # existing stub already references this source_path.
-                    # Skip the re-roll to prevent data duplication.
-                    # This guard is scoped to sources that were actually
-                    # reconciled in this invocation — without this scope
-                    # the guard would permanently block re-rolling after
-                    # the first successful roll (F1).
-                    if rel in reconciled_sources and stub_dir.is_dir():
+                    # The source still starts with the already-rolled
+                    # data prefix.  Detect this by finding a matching
+                    # stub AND verifying the source content starts with
+                    # the existing payload — only then skip the re-roll.
+                    #
+                    # The content-prefix check prevents permanently
+                    # blocking re-rolling after a normal successful roll
+                    # where truncation succeeded (F1-R15): in that case
+                    # the source contains only carry-forward + new data,
+                    # which does NOT start with the old payload.
+                    if stub_dir.is_dir():
                         already_rolled = False
                         for existing in stub_dir.iterdir():
                             if not existing.name.endswith(".json"):
                                 continue
                             try:
                                 es = json.loads(existing.read_text(encoding="utf-8"))
-                                if es.get("source_path") == rel:
+                                if es.get("source_path") != rel:
+                                    continue
+                                # Found a stub referencing this source.
+                                # Check if the source still contains the
+                                # already-rolled data prefix.
+                                existing_payload_rel = es.get("payload_path", "")
+                                if not existing_payload_rel:
+                                    already_rolled = True
+                                    break
+                                existing_payload = repo_root / existing_payload_rel
+                                if not existing_payload.is_file():
+                                    continue
+                                payload_content = existing_payload.read_text(
+                                    encoding="utf-8", errors="replace",
+                                )
+                                source_content = src.read_text(
+                                    encoding="utf-8", errors="replace",
+                                )
+                                if source_content.startswith(payload_content):
                                     already_rolled = True
                                     break
                             except (json.JSONDecodeError, OSError):
@@ -1293,8 +1314,8 @@ def segment_history_maintenance_service(
                             selection_count -= 1
                             warnings.append(_make_warning(
                                 "segment_history_already_rolled",
-                                f"Source already has a rolled stub, "
-                                f"skipping to prevent duplicate: {rel}",
+                                f"Source still contains already-rolled data "
+                                f"prefix, skipping to prevent duplicate: {rel}",
                                 path=rel,
                             ))
                             continue
@@ -2191,18 +2212,28 @@ def segment_history_cold_rehydrate_service(
                         repo_root, family, "rehydrate", gm,
                         locked_source_paths={source_path_str_pre},
                     )
+                    # Determine whether reconciliation actually committed
+                    # the orphaned state.  If the commit failed, the
+                    # manifest is preserved and the segment is NOT
+                    # durably hot — report durable=False so the agent
+                    # knows recovery is still needed.
+                    recon_recovered = (
+                        recon is not None
+                        and "recovered" in recon.get("warning", "")
+                    )
                     if recon:
                         warnings.append(_make_warning(
-                            "segment_history_rehydrate_recovered",
-                            f"Recovered non-durable rehydrate for "
+                            "segment_history_rehydrate_recovered"
+                            if recon_recovered
+                            else "segment_history_rehydrate_recovery_pending",
+                            f"{'Recovered' if recon_recovered else 'Recovery pending for'} "
+                            f"non-durable rehydrate for "
                             f"segment {segment_id} via manifest reconciliation",
                             segment_id=segment_id,
                         ))
-                    # After reconciliation the segment is now durably
-                    # hot — return success rather than 409.
                     hot_rel = stub.get("payload_path", "")
                     stub_rel = str(stub_path.relative_to(repo_root))
-                    return {
+                    result_recon: dict[str, Any] = {
                         "ok": True,
                         "operation": "segment_history_cold_rehydrate",
                         "family": family,
@@ -2212,12 +2243,15 @@ def segment_history_cold_rehydrate_service(
                         "rehydrated_payload_path": hot_rel,
                         "removed_cold_payload_path": None,
                         "mutated_stub_path": stub_rel,
-                        "durable": True,
-                        "cleanup_durable": True,
+                        "durable": recon_recovered,
+                        "cleanup_durable": recon_recovered,
                         "committed_files": [],
                         "latest_commit": None,
                         "warnings": warnings,
                     }
+                    if not recon_recovered:
+                        result_recon["at_risk_segment_ids"] = [segment_id]
+                    return result_recon
                 return _error_response(
                     409,
                     "segment_history_not_cold",

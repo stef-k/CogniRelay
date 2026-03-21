@@ -470,27 +470,29 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
         the duplicate guard prevents re-rolling the same data."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
-            gm = SimpleGitManagerStub(repo)
             now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
             settings = _FakeSettings()
 
-            # Set up api_audit source with enough content
+            # The payload content that was already rolled.
+            rolled_line = '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n'
+            rolled_data = rolled_line * 20
+
+            # Simulate state AFTER a prior reconciliation already
+            # committed the recovery (no manifest) but source truncation
+            # failed — the source still contains the already-rolled
+            # data prefix.
             logs = repo / "logs"
             logs.mkdir(parents=True)
             source = logs / "api_audit.jsonl"
-            source.write_text(
-                '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
-            )
+            source.write_text(rolled_data)
 
-            # Simulate crash recovery: a stub already exists referencing
-            # this source AND a manifest exists (from a prior crash).
             hist = repo / "logs" / "history" / "api_audit"
             hist.mkdir(parents=True)
             idx = hist / "index"
             idx.mkdir()
             seg_id = "api_audit__api_audit__20260319T000000Z__0001"
             payload = hist / f"{seg_id}.jsonl"
-            payload.write_text('{"ts":"2026-03-19T00:00:00Z"}\n')
+            payload.write_text(rolled_data)
             stub = _create_stub(
                 family="api_audit",
                 segment_id=seg_id,
@@ -499,26 +501,14 @@ class TestDuplicateSegmentGuard(unittest.TestCase):
                 rolled_at="20260319T000000Z",
                 payload_path=str(payload.relative_to(repo)),
                 summary={"last_event_at": "2026-03-19T00:00:00Z",
-                         "line_count": 1, "byte_size": 30},
+                         "line_count": 20, "byte_size": len(rolled_data)},
             )
             write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
 
-            # Write a manifest as if a prior crash left it behind.
-            # The manifest's source_paths overlap with our locked set,
-            # so reconciliation will fire and set reconciled_sources.
-            from app.segment_history.manifest import write_manifest
-            write_manifest(
-                repo,
-                operation="maintenance",
-                family="api_audit",
-                source_paths=["logs/api_audit.jsonl"],
-                segment_ids=[seg_id],
-                target_paths=[
-                    str(payload.relative_to(repo)),
-                    str((idx / f"{seg_id}.json").relative_to(repo)),
-                ],
-            )
-
+            # No manifest — the prior reconciliation already removed it.
+            # Without the content-prefix guard, maintenance would re-roll
+            # the source into a duplicate segment.
+            gm = SimpleGitManagerStub(repo)
             result = segment_history_maintenance_service(
                 family="api_audit",
                 repo_root=repo,
@@ -694,11 +684,10 @@ class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
             content = audit_file.read_text()
             self.assertIn("test_event", content)
 
-    def test_unreconcilable_manifest_still_blocks(self) -> None:
-        """If reconciliation fails (targets exist, commit fails), the append
-        is still blocked with WriteTimeRolloverError."""
-        from app.audit import WriteTimeRolloverError
-
+    def test_unreconcilable_manifest_still_appends(self) -> None:
+        """If reconciliation fails (targets exist, commit fails), the audit
+        event is still written (rollover skipped) and the manifest is
+        preserved for the next retry."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
 
@@ -719,9 +708,9 @@ class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
             idx = hist / "index"
             idx.mkdir(parents=True)
             payload = hist / "api_audit__api_audit__20260319T000000Z__0001.jsonl"
-            stub = idx / "api_audit__api_audit__20260319T000000Z__0001.json"
+            stub_file = idx / "api_audit__api_audit__20260319T000000Z__0001.json"
             payload.write_text("rolled data\n")
-            stub.write_text('{"schema_type":"segment_history_stub"}\n')
+            stub_file.write_text('{"schema_type":"segment_history_stub"}\n')
 
             write_manifest(
                 repo,
@@ -735,12 +724,17 @@ class TestWriteTimeRolloverInlineReconciliation(unittest.TestCase):
                 ],
             )
 
-            with self.assertRaises(WriteTimeRolloverError) as ctx:
-                append_audit(
-                    repo, "test_event", "peer-1", {"k": "v"},
-                    rollover_bytes=50, gm=gm,
-                )
-            self.assertIn("pending_batch_residue", ctx.exception.code)
+            original_content = audit_file.read_text()
+            # Should NOT raise — event is written despite rollover failure
+            append_audit(
+                repo, "test_event", "peer-1", {"k": "v"},
+                rollover_bytes=50, gm=gm,
+            )
+
+            # Audit event was written to the file
+            new_content = audit_file.read_text()
+            self.assertTrue(len(new_content) > len(original_content))
+            self.assertIn('"test_event"', new_content)
 
             # Manifest preserved for next retry
             self.assertIsNotNone(read_manifest(repo, "api_audit"))
@@ -2412,6 +2406,270 @@ class TestReviewRound16Fixes(unittest.TestCase):
         self.assertEqual(reh.status_code, 409)
         body = json.loads(reh.body)
         self.assertEqual(body["error"]["code"], "segment_history_not_cold")
+
+
+# -----------------------------------------------------------------------
+# R17-F1: Rehydrate durable flag after failed reconciliation
+# -----------------------------------------------------------------------
+class TestRehydrateReconciliationDurability(unittest.TestCase):
+    """Rehydrate must report durable=False when manifest reconciliation
+    fails to commit the orphaned state from a prior non-durable attempt."""
+
+    def test_rehydrate_returns_not_durable_on_failed_reconciliation(self) -> None:
+        """When the recovery commit fails, durable must be False and
+        at_risk_segment_ids must include the segment."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            class _FailingGM(SimpleGitManagerStub):
+                def commit_paths(self, _paths: list, _msg: str) -> bool:
+                    raise RuntimeError("git broken")
+
+            gm = _FailingGM(repo)
+            seg_id = "api_audit__api_audit__20260320T120000Z__0001"
+            source_rel = "logs/api_audit.jsonl"
+            hot_rel = "logs/history/api_audit/" + seg_id + ".jsonl"
+            stub_rel = "logs/history/api_audit/index/" + seg_id + ".json"
+
+            # Create hot payload (from prior non-durable rehydrate)
+            hot_path = repo / hot_rel
+            hot_path.parent.mkdir(parents=True, exist_ok=True)
+            hot_path.write_text("rehydrated data\n")
+
+            # Create stub that says hot (prior rehydrate mutated it)
+            stub_path = repo / stub_rel
+            stub_path.parent.mkdir(parents=True, exist_ok=True)
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path=source_rel,
+                stream_key="api_audit",
+                rolled_at="20260320T120000Z",
+                payload_path=hot_rel,
+                summary={"last_event_at": "2026-03-20T00:00:00Z",
+                         "line_count": 1, "byte_size": 16},
+            )
+            write_text_file(stub_path, json.dumps(stub))
+
+            # Create a rehydrate manifest (non-durable prior attempt)
+            write_manifest(
+                repo,
+                operation="rehydrate",
+                family="api_audit",
+                source_paths=[source_rel],
+                segment_ids=[seg_id],
+                target_paths=[hot_rel, stub_rel],
+            )
+
+            result = segment_history_cold_rehydrate_service(
+                family="api_audit",
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=gm,
+            )
+            # Result should be a dict (not JSONResponse)
+            self.assertIsInstance(result, dict)
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["durable"])
+            self.assertIn(seg_id, result["at_risk_segment_ids"])
+            # Recovery-pending warning emitted
+            codes = [w["code"] for w in result["warnings"]]
+            self.assertIn("segment_history_rehydrate_recovery_pending", codes)
+
+    def test_rehydrate_returns_durable_on_successful_reconciliation(self) -> None:
+        """When the recovery commit succeeds, durable must be True."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            seg_id = "api_audit__api_audit__20260320T120000Z__0001"
+            source_rel = "logs/api_audit.jsonl"
+            hot_rel = "logs/history/api_audit/" + seg_id + ".jsonl"
+            stub_rel = "logs/history/api_audit/index/" + seg_id + ".json"
+
+            hot_path = repo / hot_rel
+            hot_path.parent.mkdir(parents=True, exist_ok=True)
+            hot_path.write_text("rehydrated data\n")
+
+            stub_path = repo / stub_rel
+            stub_path.parent.mkdir(parents=True, exist_ok=True)
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path=source_rel,
+                stream_key="api_audit",
+                rolled_at="20260320T120000Z",
+                payload_path=hot_rel,
+                summary={"last_event_at": "2026-03-20T00:00:00Z",
+                         "line_count": 1, "byte_size": 16},
+            )
+            write_text_file(stub_path, json.dumps(stub))
+
+            write_manifest(
+                repo,
+                operation="rehydrate",
+                family="api_audit",
+                source_paths=[source_rel],
+                segment_ids=[seg_id],
+                target_paths=[hot_rel, stub_rel],
+            )
+
+            result = segment_history_cold_rehydrate_service(
+                family="api_audit",
+                segment_id=seg_id,
+                repo_root=repo,
+                gm=gm,
+            )
+            self.assertIsInstance(result, dict)
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["durable"])
+            self.assertNotIn("at_risk_segment_ids", result)
+            codes = [w["code"] for w in result["warnings"]]
+            self.assertIn("segment_history_rehydrate_recovered", codes)
+
+
+# -----------------------------------------------------------------------
+# R17-F2: Audit event preserved when rollover fails
+# -----------------------------------------------------------------------
+class TestAuditEventPreservedOnRolloverFailure(unittest.TestCase):
+    """Audit events must be written to disk even when write-time rollover
+    fails (pending batch residue, ManifestOccupied, or I/O failure)."""
+
+    def test_audit_event_written_despite_manifest_occupied(self) -> None:
+        """When ManifestOccupied blocks rollover, the event is still appended."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            audit_file = logs / "api_audit.jsonl"
+            audit_file.write_text('{"ts":"2026-03-19T00:00:00Z"}\n' * 5)
+
+            # Plant a manifest with non-overlapping sources to trigger
+            # ManifestOccupied during write-time rollover.
+            write_manifest(
+                repo,
+                operation="cold_store",
+                family="api_audit",
+                source_paths=["logs/other_source.jsonl"],
+                segment_ids=["api_audit__other__20260319T000000Z__0001"],
+                target_paths=[
+                    "logs/history/api_audit/cold/x.jsonl.gz",
+                    "logs/history/api_audit/index/x.json",
+                ],
+            )
+
+            original_size = audit_file.stat().st_size
+            # Should NOT raise — event is written despite rollover failure
+            append_audit(
+                repo, "test_event", "peer-1", {"k": "v"},
+                rollover_bytes=50, gm=gm,
+            )
+            new_content = audit_file.read_text()
+            self.assertTrue(len(new_content) > original_size)
+            self.assertIn('"test_event"', new_content)
+
+
+# -----------------------------------------------------------------------
+# R17-F4: Duplicate guard with content-prefix check
+# -----------------------------------------------------------------------
+class TestDuplicateGuardContentPrefix(unittest.TestCase):
+    """The duplicate-segment guard must fire even without a manifest when
+    the source still contains the already-rolled data prefix, and must
+    NOT fire when the source was properly truncated."""
+
+    def test_guard_fires_without_manifest_when_prefix_matches(self) -> None:
+        """No manifest, but source starts with existing payload → skip."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            rolled_data = '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            source = logs / "api_audit.jsonl"
+            source.write_text(rolled_data)
+
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            payload = hist / f"{seg_id}.jsonl"
+            payload.write_text(rolled_data)
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(payload.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 20, "byte_size": len(rolled_data)},
+            )
+            write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["rolled_count"], 0)
+            codes = [w["code"] for w in result["warnings"]]
+            self.assertIn("segment_history_already_rolled", codes)
+
+    def test_guard_does_not_fire_when_source_truncated(self) -> None:
+        """After proper truncation, source has only new data → re-roll allowed."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            now = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+            settings = _FakeSettings()
+
+            rolled_data = '{"ts":"2026-03-19T00:00:00Z","event":"old"}\n' * 20
+            new_data = '{"ts":"2026-03-20T00:00:00Z","event":"new"}\n' * 20
+
+            logs = repo / "logs"
+            logs.mkdir(parents=True)
+            source = logs / "api_audit.jsonl"
+            # Source contains only new data (properly truncated)
+            source.write_text(new_data)
+
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            idx = hist / "index"
+            idx.mkdir()
+            seg_id = "api_audit__api_audit__20260319T000000Z__0001"
+            payload = hist / f"{seg_id}.jsonl"
+            payload.write_text(rolled_data)
+            stub = _create_stub(
+                family="api_audit",
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260319T000000Z",
+                payload_path=str(payload.relative_to(repo)),
+                summary={"last_event_at": "2026-03-19T00:00:00Z",
+                         "line_count": 20, "byte_size": len(rolled_data)},
+            )
+            write_text_file(idx / f"{seg_id}.json", json.dumps(stub))
+
+            result = segment_history_maintenance_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=settings,
+                gm=gm,
+                now=now,
+            )
+            self.assertTrue(result["ok"])
+            # Should re-roll the new data
+            self.assertGreater(result["rolled_count"], 0)
+            codes = [w["code"] for w in result["warnings"]]
+            self.assertNotIn("segment_history_already_rolled", codes)
 
 
 if __name__ == "__main__":
