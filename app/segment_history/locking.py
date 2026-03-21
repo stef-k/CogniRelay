@@ -1,10 +1,18 @@
-"""Per-source advisory file locking for segment-history mutation sequences."""
+"""Per-source advisory file locking for segment-history mutation sequences.
+
+NOTE: Lock acquisition uses ``time.sleep()`` polling which blocks the
+calling thread-pool thread.  Under high concurrency (40+ concurrent
+segment-history requests), this can exhaust the ASGI thread pool and
+stall all endpoints.  A proper fix (async lock polling or a concurrency
+semaphore) is deferred to a separate issue.
+"""
 
 from __future__ import annotations
 
 import fcntl
 import hashlib
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,14 +43,16 @@ class SegmentHistoryLockTimeout(Exception):
             f"after {timeout:.1f}s"
         )
 
+_lock_dir_ready_guard = threading.Lock()
 _lock_dir_ready: set[str] = set()
 
 
 def _ensure_lock_dir(lock_dir: Path) -> None:
     """Create the lock directory once per unique path, per process lifetime."""
     key = str(lock_dir)
-    if key in _lock_dir_ready:
-        return
+    with _lock_dir_ready_guard:
+        if key in _lock_dir_ready:
+            return
     try:
         lock_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -51,7 +61,8 @@ def _ensure_lock_dir(lock_dir: Path) -> None:
             status_code=503,
             detail="Segment-history lock infrastructure unavailable",
         ) from exc
-    _lock_dir_ready.add(key)
+    with _lock_dir_ready_guard:
+        _lock_dir_ready.add(key)
 
 
 def _safe_lock_filename(lock_key: str) -> str:

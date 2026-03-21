@@ -1,4 +1,10 @@
-"""Repository-level locking for git-backed mutation sequences."""
+"""Repository-level locking for git-backed mutation sequences.
+
+NOTE: Lock acquisition uses ``time.sleep()`` polling which blocks the
+calling thread-pool thread.  Under high concurrency, this can exhaust
+the ASGI thread pool and stall all endpoints.  A proper fix (async lock
+polling or a concurrency semaphore) is deferred to a separate issue.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ from fastapi import HTTPException
 
 _thread_state = threading.local()
 _log = logging.getLogger(__name__)
+_lock_dir_ready_guard = threading.Lock()
 _lock_dir_ready: set[str] = set()
 _LOCK_TIMEOUT_SECONDS = 30.0
 _LOCK_POLL_INTERVAL = 0.05
@@ -29,14 +36,16 @@ def _repo_lock_id(repo_root: Path) -> str:
 def _ensure_lock_dir(lock_dir: Path) -> None:
     """Create the lock directory once per unique path and process lifetime."""
     key = str(lock_dir)
-    if key in _lock_dir_ready:
-        return
+    with _lock_dir_ready_guard:
+        if key in _lock_dir_ready:
+            return
     try:
         lock_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         _log.error("Cannot create git lock directory %s: %s", lock_dir, exc)
         raise HTTPException(status_code=503, detail="Git lock infrastructure unavailable") from exc
-    _lock_dir_ready.add(key)
+    with _lock_dir_ready_guard:
+        _lock_dir_ready.add(key)
 
 
 @contextmanager

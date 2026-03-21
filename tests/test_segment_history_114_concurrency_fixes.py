@@ -1233,6 +1233,12 @@ class TestManifestClobberGuard(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
 
+            # Source must exist on disk for the lock-coverage check to
+            # consider it "live" and require lock coverage.
+            inbox = repo / "messages" / "inbox"
+            inbox.mkdir(parents=True)
+            (inbox / "alice.jsonl").write_text("")
+
             write_manifest(
                 repo,
                 operation="maintenance",
@@ -1296,10 +1302,19 @@ class TestManifestClobberGuard(unittest.TestCase):
 
     def test_partial_overlap_skips_reconciliation(self) -> None:
         """When the caller's locked set covers only SOME of the manifest's
-        source_paths, reconciliation is skipped to prevent double-recovery
+        *live* source_paths, reconciliation is skipped to prevent double-recovery
         by concurrent operations with partial lock coverage (F4)."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
+
+            # Both sources must exist on disk so the lock-coverage check
+            # considers them "live" and requires coverage for both.
+            inbox = repo / "messages" / "inbox"
+            inbox.mkdir(parents=True)
+            (inbox / "alice.jsonl").write_text("")
+            outbox = repo / "messages" / "outbox"
+            outbox.mkdir(parents=True)
+            (outbox / "bob.jsonl").write_text("")
 
             write_manifest(
                 repo,
@@ -1710,7 +1725,10 @@ class TestManifestOccupied(unittest.TestCase):
             source = logs / "api_audit.jsonl"
             source.write_text('{"ts":"2026-03-20T00:00:00Z","event":"test"}\n' * 5)
 
-            # Plant a manifest for a different source
+            # Plant a manifest for a different source.  The source must
+            # exist on disk so the lock-coverage check considers it "live"
+            # and refuses to reconcile without covering locks.
+            (logs / "other.jsonl").write_text("")
             write_manifest(
                 repo,
                 operation="cold_store",
@@ -2670,6 +2688,233 @@ class TestDuplicateGuardContentPrefix(unittest.TestCase):
             self.assertGreater(result["rolled_count"], 0)
             codes = [w["code"] for w in result["warnings"]]
             self.assertNotIn("segment_history_already_rolled", codes)
+
+
+# -----------------------------------------------------------------------
+# R18: Concurrency/crash-recovery review fixes
+# -----------------------------------------------------------------------
+class TestF1StuckManifestDeletedSource(unittest.TestCase):
+    """F1: Manifest reconciliation must proceed when a source has been
+    deleted from disk after a crash (was previously permanently stuck)."""
+
+    def test_reconciles_when_all_sources_deleted(self) -> None:
+        """All manifest sources are gone — reconciliation should proceed."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["api_audit__api_audit__20260320T120000Z__0001"],
+                target_paths=[],
+            )
+
+            # Source does NOT exist on disk (simulating post-crash deletion)
+            result = _reconcile_manifest_residue(
+                repo, "api_audit", "maintenance", None,
+                locked_source_paths=set(),
+            )
+            # Reconciliation should proceed (not return None)
+            self.assertIsNotNone(result)
+            # Manifest should be cleaned up
+            self.assertIsNone(read_manifest(repo, "api_audit"))
+
+    def test_reconciles_when_some_sources_deleted(self) -> None:
+        """Some sources deleted, caller holds locks on remaining live ones."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            # Only alice exists; bob was deleted after crash
+            inbox = repo / "messages" / "inbox"
+            inbox.mkdir(parents=True)
+            (inbox / "alice.jsonl").write_text("")
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="message_stream",
+                source_paths=[
+                    "messages/inbox/alice.jsonl",
+                    "messages/outbox/bob.jsonl",
+                ],
+                segment_ids=[
+                    "message_stream__inbox__alice__20260320T120000Z__0001",
+                    "message_stream__outbox__bob__20260320T120000Z__0001",
+                ],
+                target_paths=[],
+            )
+
+            # Caller holds lock on alice (the only live source)
+            result = _reconcile_manifest_residue(
+                repo, "message_stream", "maintenance", None,
+                locked_source_paths={"messages/inbox/alice.jsonl"},
+            )
+            self.assertIsNotNone(result)
+            self.assertIsNone(read_manifest(repo, "message_stream"))
+
+    def test_still_skips_when_live_sources_not_locked(self) -> None:
+        """Live sources not covered by locks — must still skip."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+
+            inbox = repo / "messages" / "inbox"
+            inbox.mkdir(parents=True)
+            (inbox / "alice.jsonl").write_text("")
+            # bob is deleted — doesn't count
+            # alice is live but not in locked set
+
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="message_stream",
+                source_paths=[
+                    "messages/inbox/alice.jsonl",
+                    "messages/outbox/bob.jsonl",
+                ],
+                segment_ids=["seg1", "seg2"],
+                target_paths=[],
+            )
+
+            result = _reconcile_manifest_residue(
+                repo, "message_stream", "maintenance", None,
+                locked_source_paths=set(),  # no locks held
+            )
+            self.assertIsNone(result)
+            self.assertIsNotNone(read_manifest(repo, "message_stream"))
+
+
+class TestF2RehydrateRollbackPreservesManifest(unittest.TestCase):
+    """F2: When stub rollback fails during rehydrate, the manifest must
+    be preserved so reconciliation can recover on the next attempt."""
+
+    def test_manifest_preserved_on_stub_rollback_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+
+            # Set up a cold-stored segment
+            family = "api_audit"
+            seg_id = "api_audit__api_audit__20260320T120000Z__0001"
+            hist = repo / "logs" / "history" / "api_audit"
+            hist.mkdir(parents=True)
+            cold_dir = hist / "cold"
+            cold_dir.mkdir()
+            stub_dir = hist / "index"
+            stub_dir.mkdir()
+
+            payload_content = b'{"ts":"2026-03-20T00:00:00Z","event":"old"}\n'
+            compressed = _build_cold_gzip_bytes(payload_content)
+            cold_path = cold_dir / f"{seg_id}.jsonl.gz"
+            cold_path.write_bytes(compressed)
+
+            stub = _create_stub(
+                family=family,
+                segment_id=seg_id,
+                source_path="logs/api_audit.jsonl",
+                stream_key="api_audit",
+                rolled_at="20260320T120000Z",
+                payload_path=str(cold_path.relative_to(repo)),
+                summary={"line_count": 1, "byte_size": len(payload_content)},
+            )
+            stub["cold_stored_at"] = "2026-03-20T13:00:00Z"
+            stub_path = stub_dir / f"{seg_id}.json"
+            write_text_file(stub_path, json.dumps(stub))
+
+            # Make commit_paths raise to trigger rollback, AND make
+            # write_bytes_file fail during stub restore to simulate
+            # stub rollback failure.
+            original_write_bytes = write_bytes_file
+            call_count = {"n": 0}
+
+            def failing_write_bytes(path: Path, data: bytes) -> None:
+                call_count["n"] += 1
+                # First calls are the rehydrate hot-path write;
+                # the rollback restore call comes later.
+                if "index" in str(path) and call_count["n"] > 1:
+                    raise OSError("simulated disk failure during rollback")
+                original_write_bytes(path, data)
+
+            def failing_commit(paths: Any, msg: str) -> bool:
+                raise RuntimeError("simulated commit failure")
+
+            gm.commit_paths = failing_commit
+
+            with patch("app.segment_history.service.write_bytes_file", failing_write_bytes):
+                try:
+                    segment_history_cold_rehydrate_service(
+                        family=family,
+                        segment_id=seg_id,
+                        repo_root=repo,
+                        gm=gm,
+                    )
+                except RuntimeError:
+                    pass
+
+            # The manifest should be PRESERVED (not removed) because
+            # stub rollback failed
+            mf = read_manifest(repo, family)
+            self.assertIsNotNone(mf)
+            self.assertEqual(mf["operation"], "rehydrate")
+
+
+class TestF4RemoveManifestExpectedOperation(unittest.TestCase):
+    """F4: remove_manifest with expected_operation only removes
+    matching manifests and acquires the advisory lock."""
+
+    def test_removes_matching_operation(self) -> None:
+        from app.segment_history.manifest import remove_manifest
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            write_manifest(
+                repo,
+                operation="maintenance",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["seg1"],
+                target_paths=[],
+            )
+            result = remove_manifest(
+                repo, "api_audit", expected_operation="maintenance",
+            )
+            self.assertTrue(result)
+            self.assertIsNone(read_manifest(repo, "api_audit"))
+
+    def test_does_not_remove_mismatched_operation(self) -> None:
+        from app.segment_history.manifest import remove_manifest
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            write_manifest(
+                repo,
+                operation="cold_store",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["seg1"],
+                target_paths=[],
+            )
+            result = remove_manifest(
+                repo, "api_audit", expected_operation="maintenance",
+            )
+            self.assertFalse(result)
+            # Manifest must still be there
+            self.assertIsNotNone(read_manifest(repo, "api_audit"))
+
+    def test_removes_unconditionally_without_expected_operation(self) -> None:
+        from app.segment_history.manifest import remove_manifest
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            write_manifest(
+                repo,
+                operation="cold_store",
+                family="api_audit",
+                source_paths=["logs/api_audit.jsonl"],
+                segment_ids=["seg1"],
+                target_paths=[],
+            )
+            result = remove_manifest(repo, "api_audit")
+            self.assertTrue(result)
+            self.assertIsNone(read_manifest(repo, "api_audit"))
 
 
 if __name__ == "__main__":

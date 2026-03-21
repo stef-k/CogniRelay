@@ -143,6 +143,19 @@ def write_manifest(
                 if existing_sources and not existing_sources & new_sources:
                     existing_op = existing.get("operation", "unknown")
                     raise ManifestOccupied(family, existing_op)
+                # Sources overlap — caller holds relevant locks and
+                # reconciliation already ran.  Warn if non-overlapping
+                # sources from the old manifest lose crash-recovery info.
+                lost_sources = existing_sources - new_sources
+                if lost_sources:
+                    _log.warning(
+                        "Manifest clobber for family '%s': overwriting "
+                        "manifest whose sources %s are not covered by "
+                        "new operation; crash-recovery for those sources "
+                        "depends on reconciliation",
+                        family,
+                        sorted(lost_sources),
+                    )
             except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 # Corrupt or unreadable manifest — safe to overwrite; the
                 # reconciliation path would have cleaned it up anyway.
@@ -184,13 +197,47 @@ def read_manifest(repo_root: Path, family: str = "") -> dict | None:
         raise ValueError(f"Corrupt manifest at {path}: {exc}") from exc
 
 
-def remove_manifest(repo_root: Path, family: str = "") -> bool:
-    """Remove the manifest file if it exists.  Returns True if removed."""
+def remove_manifest(
+    repo_root: Path,
+    family: str = "",
+    *,
+    expected_operation: str | None = None,
+) -> bool:
+    """Remove the manifest file if it exists.
+
+    Acquires the per-family advisory lock to prevent removing a manifest
+    that a concurrent :func:`write_manifest` just created for a different
+    operation.
+
+    When *expected_operation* is provided, the manifest is only removed if
+    its ``operation`` field matches.  This prevents one operation from
+    accidentally removing another operation's crash-recovery pointer.
+
+    Returns True if removed.
+    """
     path = manifest_path(repo_root, family)
-    if path.is_file():
+    lock_path = _manifest_lock_path(repo_root, family)
+    try:
+        lock_file = lock_path.open("a")
+    except OSError as exc:
+        _log.warning("Could not open manifest lock for removal %s: %s", path, exc)
+        return False
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if not path.is_file():
+            return False
+        if expected_operation is not None:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if data.get("operation") != expected_operation:
+                    return False
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                pass  # corrupt — safe to remove
         try:
             path.unlink()
             return True
         except OSError as exc:
             _log.warning("Could not remove manifest %s: %s", path, exc)
+    finally:
+        lock_file.close()
     return False

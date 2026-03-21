@@ -446,6 +446,28 @@ def _restore_rollback_state(state: list[tuple[Path, bytes | None]]) -> None:
             _log.exception("Rollback restore failed for %s", p)
 
 
+def _try_restore_rollback_state(state: list[tuple[Path, bytes | None]]) -> bool:
+    """Restore files to their captured state, returning True if all succeeded.
+
+    Unlike :func:`_restore_rollback_state`, this variant reports whether
+    every individual restore succeeded so the caller can decide whether
+    to remove crash-recovery manifests (safe only when rollback is clean).
+    """
+    all_ok = True
+    for p, old_bytes in state:
+        try:
+            if old_bytes is None:
+                if p.exists():
+                    p.unlink()
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                write_bytes_file(p, old_bytes)
+        except Exception:
+            _log.exception("Rollback restore failed for %s", p)
+            all_ok = False
+    return all_ok
+
+
 def _remove_created_paths(paths: list[Path]) -> None:
     """Remove paths that were created during a failed operation."""
     for p in paths:
@@ -819,13 +841,20 @@ def _reconcile_manifest_residue(
         return None
 
     # If the caller provided its locked source set, only reconcile when
-    # the caller holds locks covering ALL of the manifest's sources.
-    # Partial overlap means another concurrent operation holds the
-    # remaining locks and could also attempt reconciliation — skipping
-    # prevents double-recovery commits and manifest clobber races.
+    # the caller holds locks covering ALL of the manifest's *live* sources.
+    # Sources that no longer exist on disk (deleted after a crash) are
+    # treated as implicitly covered — they cannot be locked and must not
+    # block reconciliation, as the manifest exists precisely for this
+    # recovery scenario.
+    # Partial overlap on live sources means another concurrent operation
+    # holds the remaining locks and could also attempt reconciliation —
+    # skipping prevents double-recovery commits and manifest clobber races.
     manifest_sources = set(manifest.get("source_paths", []))
     if locked_source_paths is not None:
-        if not manifest_sources or not manifest_sources <= locked_source_paths:
+        live_manifest_sources = {
+            s for s in manifest_sources if (repo_root / s).is_file()
+        }
+        if not manifest_sources or not live_manifest_sources <= locked_source_paths:
             return None
 
     recorded_op = manifest.get("operation", "unknown")
@@ -1099,12 +1128,14 @@ def segment_history_maintenance_service(
             ack_lock_key = f"segment_history:{family}:{ack_sk}"
             try:
                 with segment_history_source_lock(ack_lock_key, lock_dir=lock_dir):
-                    # Re-check under lock: only delete if still empty.
+                    # Re-check under lock: read content instead of stat
+                    # to narrow the TOCTOU window against non-segment-
+                    # history writers that bypass source locks.
                     try:
-                        ack_size = ack_src.stat().st_size
+                        ack_content = ack_src.read_bytes()
                     except OSError:
                         continue
-                    if ack_size == 0:
+                    if len(ack_content) == 0:
                         try:
                             ack_src.unlink()
                             warnings.append(_make_warning(
@@ -1447,7 +1478,10 @@ def segment_history_maintenance_service(
                             except Exception:
                                 warnings.append(_make_warning(
                                     "segment_history_cleanup_commit_failed",
-                                    "Git commit failed for journal source removal",
+                                    "Git commit failed for journal source removal; "
+                                    "sources deleted from disk but git index still "
+                                    "references them. This is cosmetic — payload "
+                                    "data is durable in the segment.",
                                 ))
             except Exception:
                 # Rollback under lock: restore sources, remove created
@@ -1469,7 +1503,7 @@ def segment_history_maintenance_service(
                             _log.warning(
                                 "Could not remove orphaned target during rollback: %s", tp,
                             )
-                remove_manifest(repo_root, family)
+                remove_manifest(repo_root, family, expected_operation="maintenance")
                 raise
 
             # Remove manifest only when the commit succeeded; when durable
@@ -1477,7 +1511,7 @@ def segment_history_maintenance_service(
             # _reconcile_manifest_residue call can re-commit the orphaned
             # files (consistent with write-time rollover in audit.py).
             if durable:
-                remove_manifest(repo_root, family)
+                remove_manifest(repo_root, family, expected_operation="maintenance")
 
     except ManifestOccupied as exc:
         return {
@@ -1962,19 +1996,30 @@ def segment_history_cold_store_service(
                                 f"affected segments: {cold_stored_ids}",
                             ))
             except Exception:
-                # Rollback under lock: restore stubs and hot payloads, remove
-                # cold .gz files, clean manifest.
-                _restore_rollback_state(stub_rollback)
+                # Rollback under lock: restore stubs first, then hot
+                # payloads.  Only remove cold .gz and manifest if stub
+                # rollback succeeded — otherwise the stubs still point
+                # to cold paths and removing the .gz would leave the
+                # segments permanently inaccessible.
+                stub_ok = _try_restore_rollback_state(stub_rollback)
                 _restore_rollback_state(hot_rollback)
-                _remove_created_paths(created_cold_paths)
-                remove_manifest(repo_root, family)
+                if stub_ok:
+                    _remove_created_paths(created_cold_paths)
+                    remove_manifest(repo_root, family, expected_operation="cold_store")
+                else:
+                    _log.warning(
+                        "Preserving cold .gz and manifest for %s: stub "
+                        "rollback failed; cold paths retained as recovery "
+                        "source",
+                        family,
+                    )
                 raise
 
             # Remove manifest only when the commit succeeded; preserving
             # it on failure lets _reconcile_manifest_residue re-commit
             # orphaned files on the next invocation.
             if durable:
-                remove_manifest(repo_root, family)
+                remove_manifest(repo_root, family, expected_operation="cold_store")
 
     except ManifestOccupied as exc:
         return {
@@ -2472,14 +2517,26 @@ def segment_history_cold_rehydrate_service(
                 # failure the manifest is preserved so the orphaned-hot
                 # auto-cleanup fires on the next rehydrate attempt.
                 if durable:
-                    _remove_rehydrate_manifest(repo_root, family)
+                    _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
             except Exception:
                 # Rollback: restore stub to pre-mutation state and remove
-                # the hot payload that was created, so the segment doesn't
-                # get stuck in an unrecoverable state.
-                _restore_rollback_state(stub_rollback)
+                # the hot payload that was created.  Only remove the
+                # manifest if stub rollback succeeded — if it failed,
+                # the stub is in an unknown state and the manifest must
+                # survive so reconciliation can recover on the next
+                # access instead of leaving the segment permanently
+                # inaccessible.
+                stub_ok = _try_restore_rollback_state(stub_rollback)
                 _remove_created_paths([hot_path])
-                _remove_rehydrate_manifest(repo_root, family)
+                if stub_ok:
+                    _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
+                else:
+                    _log.warning(
+                        "Preserving rehydrate manifest for %s: stub "
+                        "rollback failed; manifest will trigger "
+                        "reconciliation on next access",
+                        family,
+                    )
                 raise
     except SegmentHistoryLockTimeout as exc:
         return _error_response(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -147,7 +148,7 @@ def _check_write_time_rollover_locked(
                     tp.unlink()
                 except OSError:
                     pass
-        _remove_manifest(repo_root, family)
+        _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
         raise
     except Exception as exc:
         for tp in [payload_path, stub_path]:
@@ -156,13 +157,13 @@ def _check_write_time_rollover_locked(
                     tp.unlink()
                 except OSError:
                     pass
-        _remove_manifest(repo_root, family)
+        _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
         raise WriteTimeRolloverError(
             "segment_history_write_time_rollover_failed",
             f"Write-time rollover local writes failed: {exc}",
         ) from exc
     if result is None:
-        _remove_manifest(repo_root, family)
+        _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
         _log.warning("Write-time rollover skipped (partial line only) for %s", path)
         return
     _stub, created = result
@@ -190,7 +191,7 @@ def _check_write_time_rollover_locked(
     # fails the manifest must survive so crash recovery can still find and
     # commit the orphaned rolled payload, stub, and truncated source.
     if commit_succeeded or gm is None:
-        _remove_manifest(repo_root, family)
+        _remove_manifest(repo_root, family, expected_operation="write_time_rollover")
 
 
 def _check_write_time_rollover(
@@ -240,10 +241,10 @@ hold window (which can exceed 60 s when git commits time out).  When
 the lock cannot be acquired within this budget, the append falls back
 to a lockless write — accepting a race window spanning the full
 ``_roll_jsonl_source`` execution (source read through carry-forward
-rename, typically ~5-20 ms of file I/O including two temp+fsync+rename
-sequences for the payload and stub) where the atomic rename could
-orphan this line, but this is strictly better than guaranteed 100 %
-event loss.
+rename, typically ~50-200 ms of file I/O including two temp+fsync+rename
+sequences for the payload and stub plus git staging overhead) where the
+atomic rename could orphan this line, but this is strictly better than
+guaranteed 100 % event loss.
 """
 
 
@@ -318,7 +319,7 @@ def append_audit(
         # Lock held by a concurrent maintenance operation.  Fall back to
         # a lockless append — accepts a race window (spanning the full
         # _roll_jsonl_source execution: source read through carry-forward
-        # rename, typically ~5-20 ms of I/O) where the atomic rename
+        # rename, typically ~50-200 ms of I/O) where the atomic rename
         # could orphan this line, but this is strictly better than
         # guaranteed event loss for the entire maintenance window
         # (30-60+ seconds).
@@ -328,8 +329,15 @@ def append_audit(
             lock_key,
         )
 
-    # Fallback: lockless append.  Audit JSON lines are well under
-    # PIPE_BUF (4096 on Linux), so concurrent appends from multiple
-    # requests do not interleave.
-    with path.open("a", encoding="utf-8") as f:
-        f.write(line)
+    # Fallback: lockless append via unbuffered O_APPEND write.
+    # O_APPEND guarantees atomic seek-to-end on each write(2) syscall.
+    # A single os.write() keeps the payload under PIPE_BUF (4096 on
+    # Linux) so the kernel will not split it, preventing interleaving
+    # with concurrent appenders.  Using os.write() directly (instead of
+    # Python's buffered TextIOWrapper) guarantees exactly one write(2)
+    # syscall.
+    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
