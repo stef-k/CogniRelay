@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Set
+
+_log = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
 
@@ -147,6 +150,10 @@ def _parse_int(value: str | None, default: int, minimum: int | None = None) -> i
     try:
         out = int(value.strip())
     except Exception:
+        _log.warning(
+            "Non-numeric value %r for config setting, using default %d",
+            value, default,
+        )
         return default
     if minimum is not None and out < minimum:
         return minimum
@@ -301,6 +308,11 @@ def get_settings(force_reload: bool = False) -> Settings:
 
     repo_root_raw = _env_first("COGNIRELAY_REPO_ROOT", "AMR_REPO_ROOT", default="./data_repo") or "./data_repo"
     repo_root = Path(repo_root_raw).expanduser().resolve()
+    if not repo_root.is_dir():
+        _log.warning(
+            "repo_root %s does not exist; it will be created on first write",
+            repo_root,
+        )
 
     key_store_raw = _env_first(
         "COGNIRELAY_KEY_STORE_PATH",
@@ -415,64 +427,64 @@ def get_settings(force_reload: bool = False) -> Settings:
         ),
         # Segment-history lifecycle (issue #114)
         journal_cold_after_days=_parse_int(
-            _env_first("COGNIRELAY_JOURNAL_COLD_AFTER_DAYS"), 30,
+            _env_first("COGNIRELAY_JOURNAL_COLD_AFTER_DAYS"), 30, minimum=1,
         ),
         journal_retention_days=_parse_int(
-            _env_first("COGNIRELAY_JOURNAL_RETENTION_DAYS"), 365,
+            _env_first("COGNIRELAY_JOURNAL_RETENTION_DAYS"), 365, minimum=1,
         ),
         audit_log_rollover_bytes=_parse_int(
-            _env_first("COGNIRELAY_AUDIT_LOG_ROLLOVER_BYTES"), 1_048_576,
+            _env_first("COGNIRELAY_AUDIT_LOG_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
         ),
         audit_log_cold_after_days=_parse_int(
-            _env_first("COGNIRELAY_AUDIT_LOG_COLD_AFTER_DAYS"), 30,
+            _env_first("COGNIRELAY_AUDIT_LOG_COLD_AFTER_DAYS"), 30, minimum=1,
         ),
         audit_log_retention_days=_parse_int(
-            _env_first("COGNIRELAY_AUDIT_LOG_RETENTION_DAYS"), 365,
+            _env_first("COGNIRELAY_AUDIT_LOG_RETENTION_DAYS"), 365, minimum=1,
         ),
         ops_run_rollover_bytes=_parse_int(
-            _env_first("COGNIRELAY_OPS_RUN_ROLLOVER_BYTES"), 1_048_576,
+            _env_first("COGNIRELAY_OPS_RUN_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
         ),
         ops_run_cold_after_days=_parse_int(
-            _env_first("COGNIRELAY_OPS_RUN_COLD_AFTER_DAYS"), 30,
+            _env_first("COGNIRELAY_OPS_RUN_COLD_AFTER_DAYS"), 30, minimum=1,
         ),
         ops_run_retention_days=_parse_int(
-            _env_first("COGNIRELAY_OPS_RUN_RETENTION_DAYS"), 365,
+            _env_first("COGNIRELAY_OPS_RUN_RETENTION_DAYS"), 365, minimum=1,
         ),
         message_stream_rollover_bytes=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_STREAM_ROLLOVER_BYTES"), 1_048_576,
+            _env_first("COGNIRELAY_MESSAGE_STREAM_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
         ),
         message_stream_max_hot_days=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_STREAM_MAX_HOT_DAYS"), 14,
+            _env_first("COGNIRELAY_MESSAGE_STREAM_MAX_HOT_DAYS"), 14, minimum=1,
         ),
         message_stream_cold_after_days=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_STREAM_COLD_AFTER_DAYS"), 30,
+            _env_first("COGNIRELAY_MESSAGE_STREAM_COLD_AFTER_DAYS"), 30, minimum=1,
         ),
         message_stream_retention_days=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_STREAM_RETENTION_DAYS"), 180,
+            _env_first("COGNIRELAY_MESSAGE_STREAM_RETENTION_DAYS"), 180, minimum=1,
         ),
         message_thread_rollover_bytes=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_THREAD_ROLLOVER_BYTES"), 2_097_152,
+            _env_first("COGNIRELAY_MESSAGE_THREAD_ROLLOVER_BYTES"), 2_097_152, minimum=1024,
         ),
         message_thread_inactivity_days=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_THREAD_INACTIVITY_DAYS"), 30,
+            _env_first("COGNIRELAY_MESSAGE_THREAD_INACTIVITY_DAYS"), 30, minimum=1,
         ),
         message_thread_cold_after_days=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_THREAD_COLD_AFTER_DAYS"), 60,
+            _env_first("COGNIRELAY_MESSAGE_THREAD_COLD_AFTER_DAYS"), 60, minimum=1,
         ),
         message_thread_retention_days=_parse_int(
-            _env_first("COGNIRELAY_MESSAGE_THREAD_RETENTION_DAYS"), 365,
+            _env_first("COGNIRELAY_MESSAGE_THREAD_RETENTION_DAYS"), 365, minimum=1,
         ),
         episodic_rollover_bytes=_parse_int(
-            _env_first("COGNIRELAY_EPISODIC_ROLLOVER_BYTES"), 1_048_576,
+            _env_first("COGNIRELAY_EPISODIC_ROLLOVER_BYTES"), 1_048_576, minimum=1024,
         ),
         episodic_cold_after_days=_parse_int(
-            _env_first("COGNIRELAY_EPISODIC_COLD_AFTER_DAYS"), 30,
+            _env_first("COGNIRELAY_EPISODIC_COLD_AFTER_DAYS"), 30, minimum=1,
         ),
         episodic_retention_days=_parse_int(
-            _env_first("COGNIRELAY_EPISODIC_RETENTION_DAYS"), 180,
+            _env_first("COGNIRELAY_EPISODIC_RETENTION_DAYS"), 180, minimum=1,
         ),
         segment_history_batch_limit=_parse_int(
-            _env_first("COGNIRELAY_SEGMENT_HISTORY_BATCH_LIMIT"), 500,
+            _env_first("COGNIRELAY_SEGMENT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
         ),
     )
     _validate_segment_history_settings(_cached)

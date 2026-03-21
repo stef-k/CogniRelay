@@ -243,6 +243,10 @@ def _journal_year_from_source(source_rel: str) -> str:
     stem = parts[-1].rsplit(".", 1)[0] if parts else ""
     if len(stem) >= 4:
         return stem[:4]
+    _log.warning(
+        "Could not extract year from journal source path '%s', using fallback '0000'",
+        source_rel,
+    )
     return "0000"
 
 
@@ -588,7 +592,11 @@ def _truncate_reconciled_sources(
             continue
         try:
             stub = json.loads(stub_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
+            _log.warning(
+                "Could not parse stub during source truncation for %s: %s; skipping",
+                stub_rel, exc,
+            )
             continue
         sp = stub.get("source_path", "")
         if sp:
@@ -922,8 +930,11 @@ def _reconcile_manifest_residue(
                         # Stub is unchanged — still valid, just commit it
                         existing_targets.append(repo_root / stub_rel)
                         continue
-                except (json.JSONDecodeError, OSError):
-                    pass  # Fall through to default handling
+                except (json.JSONDecodeError, OSError) as exc:
+                    _log.warning(
+                        "Stub parse failed during cold-store reconciliation for %s: %s",
+                        stub_rel, exc,
+                    )
             existing_targets.append(repo_root / payload_rel)
             existing_targets.append(repo_root / stub_rel)
         elif payload_exists and not stub_exists:
@@ -1019,11 +1030,12 @@ def _reconcile_manifest_residue(
                             "Could not remove cleanup path: %s",
                             cp_rel,
                         )
-        except Exception:
-            _log.warning(
-                "Could not commit recovered files from crashed %s for %s — preserving manifest and targets on disk for next retry",
+        except Exception as exc:
+            _log.error(
+                "Could not commit recovered files from crashed %s for %s (exception: %s) — preserving manifest and targets on disk for next retry",
                 recorded_op,
                 family,
+                type(exc).__name__,
                 exc_info=True,
             )
 

@@ -171,11 +171,13 @@ class TestSegmentHistorySettingsValidation(unittest.TestCase):
         },
         clear=False,
     )
-    def test_negative_value_causes_startup_refusal(self) -> None:
+    def test_negative_value_clamped_by_minimum(self) -> None:
+        """Negative values are clamped to the minimum by _parse_int before
+        _validate_segment_history_settings runs, so startup succeeds."""
         from app.config import get_settings
 
-        with self.assertRaises(SystemExit):
-            get_settings(force_reload=True)
+        settings = get_settings(force_reload=True)
+        self.assertGreaterEqual(settings.audit_log_rollover_bytes, 1024)
 
 
 if __name__ == "__main__":

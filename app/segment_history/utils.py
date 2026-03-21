@@ -169,6 +169,17 @@ def _derive_stream_key(family: str, source_path: str) -> str:
     dot = key.rfind(".")
     if dot > 0:
         key = key[:dot]
+    # Validate: if the original filename contains __ the stream key is
+    # ambiguous (cannot distinguish path separators from literal __).
+    basename = source_path.rsplit("/", 1)[-1] if "/" in source_path else source_path
+    name_dot = basename.rfind(".")
+    name_part = basename[:name_dot] if name_dot > 0 else basename
+    if "__" in name_part:
+        _log.warning(
+            "Source filename contains '__' which collides with path separator "
+            "in stream key derivation: %s (family=%s)",
+            source_path, family,
+        )
     # Replace / with __
     key = key.replace("/", "__")
     if not key:
