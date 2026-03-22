@@ -1,4 +1,9 @@
-"""Per-artifact advisory file locking for coordination mutation sequences."""
+"""Per-artifact advisory file locking for coordination mutation sequences.
+
+Raises domain exceptions (``ArtifactLockTimeout``,
+``ArtifactLockInfrastructureError``) so that callers can translate them
+into the appropriate HTTP semantics via ``lifecycle_warnings.make_lock_error``.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,29 @@ _LOCK_POLL_INTERVAL: float = 0.05
 
 _lock_dir_ready_guard = threading.Lock()
 _lock_dir_ready: set[str] = set()
+
+
+# ---------------------------------------------------------------------------
+# Domain exceptions — callers translate via lifecycle_warnings.make_lock_error
+# ---------------------------------------------------------------------------
+
+
+class ArtifactLockTimeout(Exception):
+    """Lock acquisition timed out for a specific artifact."""
+
+    def __init__(self, artifact_id: str, timeout: float) -> None:
+        self.artifact_id = artifact_id
+        self.timeout = timeout
+        super().__init__(f"Lock timed out for {artifact_id} after {timeout}s")
+
+
+class ArtifactLockInfrastructureError(Exception):
+    """Lock infrastructure is unavailable (directory/file creation failed)."""
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def purge_stale_lockfiles(lock_dir: Path) -> int:
@@ -59,7 +87,9 @@ def _ensure_lock_dir(lock_dir: Path) -> None:
             lock_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             _log.error("Cannot create lock directory %s: %s", lock_dir, exc)
-            raise HTTPException(status_code=503, detail="Coordination lock infrastructure unavailable") from exc
+            raise ArtifactLockInfrastructureError(
+                f"Cannot create lock directory {lock_dir}: {exc}"
+            ) from exc
         _lock_dir_ready.add(key)
 
 
@@ -75,8 +105,9 @@ def artifact_lock(
     descriptor is closed, including on exceptions.
 
     Raises ``HTTPException(400)`` if ``artifact_id`` contains path-traversal
-    characters.  Raises ``HTTPException(503)`` if the lock infrastructure
-    is unavailable or the lock cannot be acquired within the timeout.
+    characters.  Raises ``ArtifactLockTimeout`` on timeout and
+    ``ArtifactLockInfrastructureError`` on infrastructure failure — callers
+    translate these via ``lifecycle_warnings.make_lock_error``.
     """
     if not _SAFE_ID.fullmatch(artifact_id):
         raise HTTPException(status_code=400, detail="Invalid artifact id for locking")
@@ -87,7 +118,9 @@ def artifact_lock(
         lock_file = lock_path.open("w")
     except OSError as exc:
         _log.error("Cannot open lock file %s: %s", lock_path, exc)
-        raise HTTPException(status_code=503, detail="Coordination lock infrastructure unavailable") from exc
+        raise ArtifactLockInfrastructureError(
+            f"Cannot open lock file {lock_path}: {exc}"
+        ) from exc
     try:
         deadline = time.monotonic() + timeout
         while True:
@@ -98,9 +131,7 @@ def artifact_lock(
                 if time.monotonic() >= deadline:
                     lock_file.close()
                     _log.error("Lock acquisition timed out for artifact %s after %.1fs", artifact_id, timeout)
-                    raise HTTPException(
-                        status_code=503, detail="Coordination lock acquisition timed out"
-                    ) from None
+                    raise ArtifactLockTimeout(artifact_id, timeout) from None
                 time.sleep(_LOCK_POLL_INTERVAL)
         yield
     finally:

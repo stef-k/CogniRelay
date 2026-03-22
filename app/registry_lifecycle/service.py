@@ -25,7 +25,7 @@ from app.segment_history.locking import (
     SegmentHistoryLockTimeout,
     segment_history_source_lock,
 )
-from app.storage import safe_path, write_bytes_file, write_text_file
+from app.storage import build_cold_gzip_bytes, safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
 
@@ -1739,7 +1739,7 @@ def registry_history_cold_store_service(
                 raise HTTPException(status_code=409, detail="Registry-history cold payload already exists")
 
             try:
-                gzip_bytes = gzip.compress(source_bytes, mtime=0)
+                gzip_bytes = build_cold_gzip_bytes(source_bytes)
                 cold_payload_path.parent.mkdir(parents=True, exist_ok=True)
                 write_bytes_file(cold_payload_path, gzip_bytes)
                 updated_stub = dict(stub)
@@ -1794,6 +1794,7 @@ def registry_history_cold_store_service(
         "durable": True,
         "latest_commit": gm.latest_commit() if gm is not None else None,
         "warnings": [],
+        "recovery_warnings": [],
     }
 
 
@@ -1812,10 +1813,11 @@ def registry_history_cold_rehydrate_service(
         cold_stub_path = str(req.cold_stub_path)
         stub = _load_registry_history_stub(repo_root, cold_stub_path)
         source_payload_path = registry_history_payload_rel_from_cold(str(stub.get("payload_path") or ""))
+        family, _history_dir_rel = _validate_registry_history_payload_rel_path(source_payload_path)
     else:
         source_payload_path = str(req.source_payload_path)
-        _family, history_dir_rel = _validate_registry_history_payload_rel_path(source_payload_path)
-        stub_dir_rel = _REGISTRY_STUB_DIRS_BY_FAMILY[_family]
+        family, _history_dir_rel = _validate_registry_history_payload_rel_path(source_payload_path)
+        stub_dir_rel = _REGISTRY_STUB_DIRS_BY_FAMILY[family]
         cold_stub_path = f"{stub_dir_rel}/{Path(source_payload_path).name}"
         stub = _load_registry_history_stub(repo_root, cold_stub_path)
     cold_storage_path = str(stub.get("payload_path") or "")
@@ -1855,6 +1857,39 @@ def registry_history_cold_rehydrate_service(
                 raise
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=f"Invalid registry-history cold payload: {exc}") from exc
+
+            # Validate decompressed payload schema
+            _expected_type = _REGISTRY_SHARD_SCHEMA_TYPES_BY_FAMILY.get(family)
+            if payload.get("schema_type") != _expected_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_rehydrate",
+                        family=family,
+                        error_code="registry_history_cold_rehydrate_schema_mismatch",
+                        error_detail=f"Expected schema_type '{_expected_type}', got '{payload.get('schema_type')}'",
+                    ),
+                )
+            if payload.get("schema_version") != "1.0":
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_rehydrate",
+                        family=family,
+                        error_code="registry_history_cold_rehydrate_schema_version_mismatch",
+                        error_detail=f"Expected schema_version '1.0', got '{payload.get('schema_version')}'",
+                    ),
+                )
+            if not isinstance(payload.get("summary"), dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_rehydrate",
+                        family=family,
+                        error_code="registry_history_cold_rehydrate_invalid_summary",
+                        error_detail="Decompressed payload 'summary' must be a dict",
+                    ),
+                )
 
             updated_stub = dict(stub)
             updated_stub["payload_path"] = source_payload_path
@@ -1916,6 +1951,7 @@ def registry_history_cold_rehydrate_service(
         "durable": True,
         "latest_commit": gm.latest_commit() if gm is not None else None,
         "warnings": [],
+        "recovery_warnings": [],
     }
 
 

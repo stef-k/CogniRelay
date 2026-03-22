@@ -7,8 +7,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.storage import build_cold_gzip_bytes
 from app.segment_history.service import (
-    _build_cold_gzip_bytes,
     _capture_rollback_state,
     _cold_payload_path,
     _count_lines,
@@ -148,7 +148,7 @@ class TestStubOperations(unittest.TestCase):
 class TestGzipPrimitives(unittest.TestCase):
     def test_round_trip(self) -> None:
         original = b"line 1\nline 2\nline 3\n"
-        compressed = _build_cold_gzip_bytes(original)
+        compressed = build_cold_gzip_bytes(original)
         self.assertGreater(len(compressed), 0)
         decompressed = _decompress_cold_payload(compressed)
         self.assertEqual(decompressed, original)

@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from tests.helpers import SimpleGitManagerStub
 
 from app.audit import append_audit
 from app.segment_history.manifest import manifest_path, read_manifest, write_manifest
+from app.storage import build_cold_gzip_bytes
 from app.segment_history.service import (
-    _build_cold_gzip_bytes,
     _create_stub,
     _reconcile_manifest_residue,
     segment_history_cold_rehydrate_service,
@@ -145,7 +146,7 @@ class TestRehydrateRollback(unittest.TestCase):
         cold_dir = hist / "cold"
         cold_dir.mkdir()
         payload_content = b'{"ts":"2026-03-19T00:00:00Z","event":"old"}\n'
-        compressed = _build_cold_gzip_bytes(payload_content)
+        compressed = build_cold_gzip_bytes(payload_content)
         cold_path = cold_dir / f"{seg_id}.jsonl.gz"
         write_bytes_file(cold_path, compressed)
         cold_rel = str(cold_path.relative_to(repo))
@@ -395,8 +396,8 @@ class TestManifestPreservedOnCommitFailure(unittest.TestCase):
             self.assertIsNotNone(mf)
             self.assertEqual(mf["operation"], "maintenance")
 
-    def test_cold_store_preserves_manifest_on_commit_failure(self) -> None:
-        """When git commit fails, cold-store keeps the manifest for recovery."""
+    def test_cold_store_raises_500_on_commit_failure(self) -> None:
+        """When git commit fails, cold-store rolls back and raises HTTP 500."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             gm = SimpleGitManagerStub(repo)
@@ -425,19 +426,19 @@ class TestManifestPreservedOnCommitFailure(unittest.TestCase):
             # Make commit fail
             gm.commit_paths = lambda *a, **k: False
 
-            result = segment_history_cold_store_service(
-                family="api_audit",
-                repo_root=repo,
-                settings=settings,
-                gm=gm,
-                now=now,
-            )
-            self.assertTrue(result["ok"])
-            self.assertFalse(result["durable"])
-            # Manifest must still exist for crash recovery
+            with self.assertRaises(HTTPException) as cm:
+                segment_history_cold_store_service(
+                    family="api_audit",
+                    repo_root=repo,
+                    settings=settings,
+                    gm=gm,
+                    now=now,
+                )
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertEqual(cm.exception.detail["error"]["code"], "segment_history_cold_store_commit_failed")
+            # After rollback, manifest is cleaned up (successful rollback)
             mf = read_manifest(repo, "api_audit")
-            self.assertIsNotNone(mf)
-            self.assertEqual(mf["operation"], "cold_store")
+            self.assertIsNone(mf)
 
     def test_maintenance_removes_manifest_on_commit_success(self) -> None:
         """When git commit succeeds, manifest is properly cleaned up."""
@@ -597,7 +598,7 @@ class TestRehydrateManifestCheckUnderLock(unittest.TestCase):
             cold_dir = hist / "cold"
             cold_dir.mkdir()
             seg_id = "api_audit__api_audit__20260319T000000Z__0001"
-            cold_data = _build_cold_gzip_bytes(b'{"ts":"2026-03-19T00:00:00Z"}\n')
+            cold_data = build_cold_gzip_bytes(b'{"ts":"2026-03-19T00:00:00Z"}\n')
             cold_path = cold_dir / f"{seg_id}.jsonl.gz"
             write_bytes_file(cold_path, cold_data)
             stub = _create_stub(
@@ -1534,7 +1535,7 @@ class TestRehydrateOrphanedHotAutoClean(unittest.TestCase):
             idx.mkdir()
 
             hot_payload_content = b'{"event":"test"}\n'
-            compressed = _build_cold_gzip_bytes(hot_payload_content)
+            compressed = build_cold_gzip_bytes(hot_payload_content)
             cold_dir = hist / "cold"
             cold_dir.mkdir()
             cold_path = cold_dir / f"{seg_id}.jsonl.gz"
@@ -1585,7 +1586,7 @@ class TestRehydrateOrphanedHotAutoClean(unittest.TestCase):
             idx.mkdir()
 
             hot_payload_content = b'{"event":"test"}\n'
-            compressed = _build_cold_gzip_bytes(hot_payload_content)
+            compressed = build_cold_gzip_bytes(hot_payload_content)
             cold_dir = hist / "cold"
             cold_dir.mkdir()
             cold_path = cold_dir / f"{seg_id}.jsonl.gz"
@@ -1794,9 +1795,8 @@ class TestColdStoreDefersHotDeletion(unittest.TestCase):
     """F2-R14: Hot payloads survive when git commit fails."""
 
     def test_hot_payloads_survive_failed_commit(self) -> None:
-        """With single-commit-per-pass, hot payloads are deleted BEFORE
-        the cold-store commit.  When the commit fails the hot files are
-        already gone, but cold .gz + stub exist and durable=False."""
+        """Cold-store commit failure raises HTTP 500 and rolls back:
+        hot payloads are restored and cold .gz files are removed."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             logs = repo / "logs"
@@ -1823,37 +1823,33 @@ class TestColdStoreDefersHotDeletion(unittest.TestCase):
                 def commit_paths(self, paths: Any, msg: str) -> bool:
                     return False
 
-            cs_result = segment_history_cold_store_service(
-                family="api_audit",
-                repo_root=repo,
-                settings=settings,
-                gm=_FailingGM(),
-                now=now,
-            )
-            self.assertTrue(cs_result["ok"])
-            self.assertFalse(cs_result["durable"])
-            self.assertIn("at_risk_segment_ids", cs_result)
+            with self.assertRaises(HTTPException) as cm:
+                segment_history_cold_store_service(
+                    family="api_audit",
+                    repo_root=repo,
+                    settings=settings,
+                    gm=_FailingGM(),
+                    now=now,
+                )
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertEqual(cm.exception.detail["error"]["code"], "segment_history_cold_store_commit_failed")
 
-            # Hot payloads deleted before commit (single-commit-per-pass)
+            # After rollback, hot payloads should be restored
             hist = repo / "logs" / "history" / "api_audit"
             hot_files = list(hist.glob("*.jsonl"))
-            self.assertEqual(len(hot_files), 0, "Hot payloads are deleted before commit")
+            self.assertTrue(len(hot_files) > 0, "Hot payloads must be restored after rollback")
 
-            # Cold .gz and stub must exist
+            # Cold .gz files should be cleaned up
             cold_files = list((hist / "cold").glob("*.gz"))
-            self.assertTrue(len(cold_files) > 0, "Cold .gz file must exist")
-            stub_files = list((hist / "index").glob("*.json"))
-            self.assertTrue(len(stub_files) > 0, "Stub file must exist")
+            self.assertEqual(len(cold_files), 0, "Cold .gz files must be removed after rollback")
 
 
 class TestRehydrateDefersRemoval(unittest.TestCase):
     """F3-R14: Cold payload survives when rehydrate git commit fails."""
 
     def test_cold_payload_survives_failed_commit(self) -> None:
-        """With single-commit-per-pass, cold payload is deleted BEFORE
-        the rehydrate commit.  When the commit fails the cold file is
-        already gone, but the hot payload + updated stub exist and
-        durable=False."""
+        """Rehydrate commit failure raises HTTP 500 and rolls back:
+        the hot payload is removed and stub is restored."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             logs = repo / "logs"
@@ -1890,25 +1886,15 @@ class TestRehydrateDefersRemoval(unittest.TestCase):
                 def commit_paths(self, paths: Any, msg: str) -> bool:
                     return False
 
-            rh = segment_history_cold_rehydrate_service(
-                family="api_audit",
-                segment_id=seg_id,
-                repo_root=repo,
-                gm=_FailingGM(),
-            )
-            self.assertTrue(rh["ok"])
-            self.assertFalse(rh["durable"])
-            self.assertIn("at_risk_segment_ids", rh)
-
-            # Cold payload deleted before commit (single-commit-per-pass)
-            cold_dir = repo / "logs" / "history" / "api_audit" / "cold"
-            cold_files = list(cold_dir.glob("*.gz"))
-            self.assertEqual(len(cold_files), 0, "Cold payload is deleted before commit")
-
-            # Hot payload must exist after rehydration
-            hist = repo / "logs" / "history" / "api_audit"
-            hot_files = list(hist.glob("*.jsonl"))
-            self.assertTrue(len(hot_files) > 0, "Hot payload must exist after rehydrate")
+            with self.assertRaises(HTTPException) as cm:
+                segment_history_cold_rehydrate_service(
+                    family="api_audit",
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=_FailingGM(),
+                )
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertEqual(cm.exception.detail["error"]["code"], "segment_history_cold_rehydrate_commit_failed")
 
 
 class TestTargetPathsPairingValidation(unittest.TestCase):
@@ -2046,16 +2032,16 @@ class TestAtRiskSegmentIds(unittest.TestCase):
                 def commit_paths(self, paths: Any, msg: str) -> bool:
                     return False
 
-            cs = segment_history_cold_store_service(
-                family="api_audit",
-                repo_root=repo,
-                settings=settings,
-                gm=_FailingGM(),
-                now=now,
-            )
-            self.assertTrue(cs["ok"])
-            self.assertFalse(cs["durable"])
-            self.assertIn("at_risk_segment_ids", cs)
+            with self.assertRaises(HTTPException) as cm:
+                segment_history_cold_store_service(
+                    family="api_audit",
+                    repo_root=repo,
+                    settings=settings,
+                    gm=_FailingGM(),
+                    now=now,
+                )
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertEqual(cm.exception.detail["error"]["code"], "segment_history_cold_store_commit_failed")
 
     def test_no_at_risk_when_durable(self) -> None:
         """Durable response should NOT have at_risk_segment_ids."""
@@ -2157,8 +2143,8 @@ class TestReviewRound16Fixes(unittest.TestCase):
     # ---------------------------------------------------------------
     # R16-F2: Cold-store manifest cleanup_paths for hot payloads
     # ---------------------------------------------------------------
-    def test_cold_store_manifest_includes_hot_payload_in_cleanup_paths(self):
-        """Cold-store manifest must list hot payloads in cleanup_paths."""
+    def test_cold_store_commit_failure_raises_500_and_rolls_back(self):
+        """Cold-store commit failure raises HTTP 500, rolls back, and cleans manifest."""
         repo = self._make_repo()
         logs = repo / "logs"
         source = logs / "api_audit.jsonl"
@@ -2174,7 +2160,7 @@ class TestReviewRound16Fixes(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
-        # Now cold-store with a failing git commit to preserve manifest
+        # Now cold-store with a failing git commit
         class _FailCommitGM:
             def commit_paths(self, _p: Any, _m: Any) -> bool:
                 return False
@@ -2182,25 +2168,20 @@ class TestReviewRound16Fixes(unittest.TestCase):
             def latest_commit(self) -> str:
                 return "fake"
 
-        cs_result = segment_history_cold_store_service(
-            family="api_audit",
-            repo_root=repo,
-            settings=_FakeSettings(),
-            gm=_FailCommitGM(),
-            now=datetime(2026, 3, 20, tzinfo=timezone.utc),
-        )
-        self.assertTrue(cs_result["ok"])
-        self.assertFalse(cs_result["durable"])
+        with self.assertRaises(HTTPException) as cm:
+            segment_history_cold_store_service(
+                family="api_audit",
+                repo_root=repo,
+                settings=_FakeSettings(),
+                gm=_FailCommitGM(),
+                now=datetime(2026, 3, 20, tzinfo=timezone.utc),
+            )
+        self.assertEqual(cm.exception.status_code, 500)
+        self.assertEqual(cm.exception.detail["error"]["code"], "segment_history_cold_store_commit_failed")
 
-        # Manifest should survive (non-durable) and include cleanup_paths
+        # Manifest should be cleaned up after successful rollback
         mf = read_manifest(repo, "api_audit")
-        self.assertIsNotNone(mf)
-        self.assertIn("cleanup_paths", mf)
-        self.assertTrue(len(mf["cleanup_paths"]) > 0)
-        # cleanup_paths should reference the hot payload (not .gz)
-        for cp in mf["cleanup_paths"]:
-            self.assertFalse(cp.endswith(".gz"), f"cleanup_path should be hot payload, got: {cp}")
-            self.assertTrue(cp.endswith(".jsonl"))
+        self.assertIsNone(mf)
 
     def test_cold_store_reconciliation_cleans_orphaned_hot_payload(self):
         """Reconciliation after cold-store crash removes orphaned hot payloads."""
@@ -2229,14 +2210,14 @@ class TestReviewRound16Fixes(unittest.TestCase):
         # Simulate a cold-store crash: write the .gz, mutate stub, write
         # manifest with cleanup_paths, but don't delete the hot payload.
         from app.segment_history.service import (
-            _build_cold_gzip_bytes,
+            build_cold_gzip_bytes,
             _cold_payload_path,
             _mutate_stub_cold,
         )
 
         cold_path = _cold_payload_path(hot_payload)
         cold_path.parent.mkdir(parents=True, exist_ok=True)
-        compressed = _build_cold_gzip_bytes(hot_payload.read_bytes())
+        compressed = build_cold_gzip_bytes(hot_payload.read_bytes())
         write_bytes_file(cold_path, compressed)
 
         cold_rel = str(cold_path.relative_to(repo))
@@ -2914,7 +2895,7 @@ class TestF2RehydrateRollbackPreservesManifest(unittest.TestCase):
             stub_dir.mkdir()
 
             payload_content = b'{"ts":"2026-03-20T00:00:00Z","event":"old"}\n'
-            compressed = _build_cold_gzip_bytes(payload_content)
+            compressed = build_cold_gzip_bytes(payload_content)
             cold_path = cold_dir / f"{seg_id}.jsonl.gz"
             cold_path.write_bytes(compressed)
 
@@ -2958,7 +2939,7 @@ class TestF2RehydrateRollbackPreservesManifest(unittest.TestCase):
                         repo_root=repo,
                         gm=gm,
                     )
-                except RuntimeError:
+                except (RuntimeError, HTTPException):
                     pass
 
             # The manifest should be PRESERVED (not removed) because

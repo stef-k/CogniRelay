@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import logging
 import os
@@ -9,6 +11,36 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# Cold-store compression
+# ---------------------------------------------------------------------------
+
+#: Compression level used by all cold-store operations.  Level 9 maximises
+#: space savings for archival data that is rarely (if ever) decompressed.
+COLD_GZIP_LEVEL: int = 9
+
+
+def build_cold_gzip_bytes(source_bytes: bytes) -> bytes:
+    """Build deterministic gzip bytes for cold-store payloads.
+
+    Uses explicit ``GzipFile`` construction so the output is bit-identical
+    across invocations and Python implementations: *compresslevel=9*,
+    *filename=""*, *mtime=0*.
+
+    All lifecycle modules (continuity, registry, artifact, segment-history)
+    must use this single function so cold-store output is uniform.
+    """
+    buf = io.BytesIO()
+    with gzip.GzipFile(
+        fileobj=buf,
+        mode="wb",
+        filename="",
+        mtime=0,
+        compresslevel=COLD_GZIP_LEVEL,
+    ) as handle:
+        handle.write(source_bytes)
+    return buf.getvalue()
 
 
 def _try_fsync_directory(dir_path: Path) -> None:
