@@ -289,6 +289,63 @@ The handoff artifact projects only `active_constraints` and `drift_signals` from
 | `resolution_outcome` | `"advisory_only"` \| `"conflicted"` \| `"rejected"` | yes | |
 | `resolution_summary` | string | no | max 240 chars |
 
+## Capsule Size and Token Budget
+
+A fully-populated capsule with realistic content in every field is approximately **~10 KB of JSON** and **~2,400–2,800 tokens**. This section breaks down the budget by section so agents and operators can make informed decisions about what to populate.
+
+### Total field count
+
+A fully-populated capsule contains approximately **58 distinct fields** across all nested objects, including up to **130 list items** (strings) and **4 structured negative decision objects**.
+
+### Size by section
+
+| Section | ~Tokens | Fields | Notes |
+|---------|---------|--------|-------|
+| Core orientation (6 required lists + `stance_summary`) | ~670 | 31 strings + 1 scalar | Always present — the essential orientation |
+| Optional lists (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `negative_decisions`, `trailing_notes`, `curiosity_queue`) | ~840 | 27 strings + 4 objects | Trimmed first under token pressure |
+| `retrieval_hints` (`must_include`, `avoid`, `load_next`) | ~270 | up to 24 strings | Dropped early in trim order |
+| `relationship_model` (`trust_level`, `preferred_style`, `sensitivity_notes`) | ~200 | up to 11 fields | Dropped early in trim order |
+| `attention_policy` (`early_load`, `presence_bias_overrides`) | ~175 | up to 13 strings | |
+| `source` + `canonical_sources` + `metadata` | ~280 | variable | |
+| `verification_state` + `capsule_health` + `confidence` | ~185 | ~10 fields | |
+| Top-level metadata (`subject_kind`, `subject_id`, timestamps, etc.) | ~60 | ~6 fields | |
+| **Total (fully populated)** | **~2,400–2,800** | **~58 fields** | **~10 KB JSON** |
+
+### Context window impact
+
+| Context window | % used by one full capsule |
+|----------------|---------------------------|
+| 8K | ~35% |
+| 32K | ~9% |
+| 128K | ~2% |
+| 200K | ~1.4% |
+| 1M | ~0.3% |
+
+### Practical guidance
+
+**Minimum viable capsule** — populate only the 6 required `ContinuityState` lists, `stance_summary`, `source`, and `confidence`. This costs approximately **~900–1,000 tokens** and provides enough orientation for basic restart recovery.
+
+**Full capsule** — populate every field including `relationship_model`, `retrieval_hints`, `attention_policy`, `negative_decisions`, `session_trajectory`, `verification_state`, and `capsule_health`. This costs approximately **~2,400–2,800 tokens** and provides the richest possible orientation.
+
+**Under token pressure** — the system trims optional fields in deterministic order starting from the bottom of the `ContinuityState` table: `retrieval_hints` first, then `relationship_model`, `curiosity_queue`, `trailing_notes`, `negative_decisions`, `session_trajectory`, `long_horizon_commitments`, and `working_hypotheses`. The 6 required core lists and `stance_summary` are never trimmed.
+
+**Multi-capsule retrieval** — `POST /v1/context/retrieve` supports loading up to 4 capsules via `continuity_selectors` and `continuity_max_capsules`. At full population, 4 capsules would cost ~10,000–11,000 tokens. The `max_tokens_estimate` parameter (default 4,000) controls the total continuity token budget, and the system trims each capsule to fit.
+
+### Per-item string constraints
+
+Most list item strings in `ContinuityState` do not have a per-item character limit enforced in the model — the system relies on list count limits (max 3–5 items per field) and the deterministic trim mechanism to control total size. The exceptions with explicit character limits are:
+
+| Field | Max length |
+|-------|-----------|
+| `stance_summary` | 240 chars |
+| `negative_decisions[].decision` | 160 chars |
+| `negative_decisions[].rationale` | 240 chars |
+| `conflict_summary` (in `verification_state`) | 240 chars |
+| `subject_id` | 200 chars |
+| `source.producer` | 100 chars |
+
+Agents should keep individual list item strings concise (roughly 80–120 chars) to stay within practical token budgets. Very long strings in many fields simultaneously would be legal but would consume disproportionate token budget for diminishing orientation value.
+
 ## Runtime Schema Discovery
 
 For the complete and always-current input schemas, use:
