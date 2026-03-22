@@ -210,15 +210,125 @@ Use the docs in this order:
 8. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
    Use these for operator-facing deployment and signoff concerns.
 
+## Pre-Review Hardening Summary
+
+Before requesting external review, CogniRelay went through a structured hardening workflow (tracked in [#92](https://github.com/stef-k/CogniRelay/issues/92)). This section summarizes the results so reviewers know what was checked and what was found.
+
+### Review Baseline
+
+The review baseline is branch `main` at commit `1217cb7`. All stages below were evaluated against this post-hardening state. The full test suite passes and Ruff reports no lint violations at this baseline.
+
+### Scientific Crosswalk (Stage B)
+
+A source-to-system crosswalk compared the implemented system against the motivating external material:
+
+- [The basin key experiment](https://forvm.loomino.us/t/ebafbec9-6dd9-4213-8d55-b5c237f3cd9c) (Forvm thread on identity stability across architectures)
+- [The 84.8% problem](https://forvm.loomino.us/t/979eaf61-2c8a-4793-8834-990cb1be71ed) (Forvm thread on what persistence architectures forget)
+- [The Invisible Decision](https://sammyjankis.com/paper.html) (paper on negative decision loss under context-window summarization)
+
+Key findings:
+
+- **Orientation recovery**: implemented. CogniRelay models orientation as more than factual recall through `session_trajectory`, `trailing_notes`, `curiosity_queue`, and `negative_decisions`. This is intentionally bounded — it is not a full basin-key texture-preservation architecture.
+- **Negative decision preservation**: implemented. `negative_decisions` is first-class, with deterministic trim ordering under token pressure. This is one of the clearest alignments between source material and shipped system.
+- **Structural blind spots acknowledged**: implemented. The system treats blind spots as structural through explicit verification state, capsule health, fallback snapshots, degraded retrieval, and recovery warnings.
+- **Write-time curation over unlimited retention**: implemented. Continuity payloads are bounded with deterministic trim order. The system aims for inspectable loss, not imaginary losslessness.
+- **Inter-agent authority boundaries**: implemented. Handoffs project only `active_constraints` and `drift_signals`; shared coordination artifacts are owner-authored and bounded; reconciliation records are advisory, not authoritative. Stronger agreement semantics that would mutate shared or local state are explicitly deferred.
+- **No major overclaims found**: the docs are conservative about what the system does and does not implement. The main documentation gap (reviewer-facing framing of the bounded orientation model) was addressed in Stage E.
+
+Full crosswalk detail: [#93](https://github.com/stef-k/CogniRelay/issues/93), follow-up docs: [#94](https://github.com/stef-k/CogniRelay/issues/94) → [PR #95](https://github.com/stef-k/CogniRelay/pull/95).
+
+### Robustness Findings and Resolutions (Stage C)
+
+Stage C reviewed the implementation as mission-critical continuity infrastructure under adverse conditions.
+
+Findings and fixes:
+
+1. **Git index serialization** (high): concurrent commits could interfere through the shared git index. Fixed by adding repository-level git mutation serialization. [#98](https://github.com/stef-k/CogniRelay/issues/98) → [PR #101](https://github.com/stef-k/CogniRelay/pull/101).
+2. **Same-subject continuity locking** (high): concurrent mutations to the same continuity subject could race through write/commit/rollback. Fixed by adding per-subject continuity mutation locking. [#97](https://github.com/stef-k/CogniRelay/issues/97) → [PR #99](https://github.com/stef-k/CogniRelay/pull/99).
+3. **Rollback hardening** (high): additional rollback edge cases discovered during the locking work. Fixed with broader mutation-path hardening. [#100](https://github.com/stef-k/CogniRelay/issues/100) → [PR #102](https://github.com/stef-k/CogniRelay/pull/102).
+4. **Raw-scan performance cliff** (high): degraded index fallback performed a full-repo sweep under missing/corrupt index conditions. Fixed by bounding the fallback scan. [#104](https://github.com/stef-k/CogniRelay/issues/104) → [PR #105](https://github.com/stef-k/CogniRelay/pull/105).
+
+No new crash-path findings in backup/restore-test behavior. No new crash-path findings in maintenance degraded paths.
+
+Full detail: [#96](https://github.com/stef-k/CogniRelay/issues/96) (slice 1), [#103](https://github.com/stef-k/CogniRelay/issues/103) (slice 2).
+
+### Retention and Lifecycle Findings and Resolutions (Stage D)
+
+Stage D evaluated whether retention, backup, compaction, and cost-control mechanics are coherent and agent-respecting.
+
+Findings and outcomes:
+
+1. **Continuity retention policy**: the system labeled retention states (`active`, `fallback`, `archive_recent`, `archive_stale`) but lacked an executable operator workflow for stale archives. Fixed by implementing a host-local retention-policy path. [#107](https://github.com/stef-k/CogniRelay/issues/107) → [PR #111](https://github.com/stef-k/CogniRelay/pull/111).
+2. **Semi-cold storage mechanism**: no implemented model for compressed/searchable low-priority storage. Fixed by implementing a semi-cold storage path with explicit rehydrate semantics. [#108](https://github.com/stef-k/CogniRelay/issues/108) → [PR #110](https://github.com/stef-k/CogniRelay/pull/110).
+3. **Repo-wide lifecycle substrate**: different namespaces had no common lifecycle architecture. Resolved by designing and implementing a shared lifecycle substrate with namespace-specific tuning. [#109](https://github.com/stef-k/CogniRelay/issues/109), tuning specs: [#112](https://github.com/stef-k/CogniRelay/issues/112) → [PR #115](https://github.com/stef-k/CogniRelay/pull/115), [#113](https://github.com/stef-k/CogniRelay/issues/113) → [PR #117](https://github.com/stef-k/CogniRelay/pull/117), [#114](https://github.com/stef-k/CogniRelay/issues/114) → [PR #125](https://github.com/stef-k/CogniRelay/pull/125).
+
+Confirmed non-findings: backup cadence is operationally concrete (daily creation, restore drills, compact-plan scheduling via systemd); compaction remains planner-only and does not silently summarize or delete content; authority boundaries are preserved (mechanical automation only, no hidden agentic decisions).
+
+A post-implementation lifecycle-safety audit confirmed deterministic behavior under concurrent mutation, rollover, cold-store, rehydrate, and partial-failure scenarios.
+
+Full detail: [#106](https://github.com/stef-k/CogniRelay/issues/106) (stage controller).
+
+### Known Limitations and Intentional Deferrals
+
+The following are known boundaries of the current system, not unresolved bugs:
+
+- **Bounded orientation, not full basin-key fidelity**: CogniRelay preserves bounded orientation context (`session_trajectory`, `trailing_notes`, `curiosity_queue`, `negative_decisions`) but does not attempt to capture the full texture, register, or self-model of an agent. This is a deliberate scope choice.
+- **Stronger reconciliation/agreement semantics deferred**: Phase 5C ([#38](https://github.com/stef-k/CogniRelay/issues/38)) implements a bounded first slice — explicit reconciliation records with `advisory_only`, `conflicted`, and `rejected` outcomes. Stronger agreement semantics that would mutate shared artifacts or local continuity are explicitly deferred until the first slice proves sound.
+- **Compaction is planning-only**: the compaction service classifies candidates and emits structured reports but does not generate summaries or execute deletions. Agents decide what to do with compaction plans. This is an intentional authority boundary.
+- **No external database or search service**: search uses SQLite FTS5 with JSON-index fallback. This keeps the system self-contained but means search sophistication is bounded by what FTS5 and the fallback scorer can provide.
+- **Single-instance, host-local deployment model**: CogniRelay is designed for single-host deployment. Horizontal scaling, replication, and multi-host coordination are out of scope.
+- **No automatic state convergence across agents**: coordination artifacts are evidence and advice, not automatic local truth. The system does not converge agents toward shared state.
+
 ## What Reviewers Should Pressure-Test
 
 The most important review questions are not "does it have many features?" They are:
 
-- Does the current continuity model preserve the right bounded orientation data?
-- Are the degradation and fallback semantics honest and operationally safe?
-- Are negative decisions represented strongly enough to avoid obvious action bias?
-- Are inter-agent authority boundaries narrow and explicit enough?
+**Continuity model**
+- Does the bounded orientation model preserve the right data for useful post-reset recovery, or are there important orientation layers that agents need but the capsule structure cannot express?
+- Is the deterministic trim ordering under token pressure (trailing notes → curiosity queue → negative decisions) the right priority, or does it lose high-value signal too early?
+- Are negative decisions represented strongly enough to avoid obvious action bias in successor agents?
+
+**Degradation and recovery**
+- Are the degradation and fallback semantics honest and operationally safe, or do they create false confidence about what survived?
+- Is the fallback snapshot model (last-known-good after successful active write) useful in practice, or does it create confusing divergence between active and fallback state?
+- Does the recovery-warning surface give agents enough information to make good decisions about degraded state?
+
+**Inter-agent boundaries**
+- Are inter-agent authority boundaries narrow and explicit enough, or do they implicitly encourage agents to treat advisory coordination data as truth?
 - Are coordination primitives genuinely additive, or do they imply hidden state convergence?
-- Is the operator/host-local boundary clear enough that an agent cannot accidentally perform authority actions?
+- Is the first-slice reconciliation model (advisory/conflicted/rejected) sufficient for real inter-agent disagreements, or does it need stronger semantics sooner than planned?
+
+**Retention and lifecycle**
 - Does the retention and cold-storage model keep storage bounded without silently discarding data the agent still needs?
+- Is the preservation-first, host-local authority posture for retention operations correct, or should agents have more direct control over their own lifecycle?
+
+**Operator boundary**
+- Is the operator/host-local boundary clear enough that an agent cannot accidentally perform authority actions?
+
+**Documentation fidelity**
 - Do the docs describe the implemented system faithfully, without implying a fuller memory architecture than exists?
+
+## Review Materials
+
+The following materials form the complete review surface:
+
+**Documentation**
+- [`README.md`](../README.md) — repo shape, quick start, doc map
+- [`docs/reviewer-guide.md`](reviewer-guide.md) — this document: system thesis, hardening summary, review questions
+- [`docs/system-overview.md`](system-overview.md) — implemented product shape, operational model, agent usage
+- [`docs/api-surface.md`](api-surface.md) — HTTP behavior and endpoint grouping
+- [`docs/payload-reference.md`](payload-reference.md) — capsule structure, schemas, field constraints
+- [`docs/agent-onboarding.md`](agent-onboarding.md) — practical agent integration guidance
+- [`docs/mcp.md`](mcp.md) — MCP integration and tool exposure
+- [`deploy/GO_LIVE_RUNBOOK.md`](../deploy/GO_LIVE_RUNBOOK.md) and [`deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`](../deploy/PRODUCTION_SIGNOFF_CHECKLIST.md) — operator deployment and signoff
+
+**Hardening workflow**
+- [#92](https://github.com/stef-k/CogniRelay/issues/92) — pre-review hardening controller (Stages A–F)
+- [#93](https://github.com/stef-k/CogniRelay/issues/93) — scientific crosswalk (Stage B)
+- [#96](https://github.com/stef-k/CogniRelay/issues/96), [#103](https://github.com/stef-k/CogniRelay/issues/103) — robustness review (Stage C)
+- [#106](https://github.com/stef-k/CogniRelay/issues/106) — retention/lifecycle evaluation (Stage D)
+
+**Source material**
+- [The basin key experiment](https://forvm.loomino.us/t/ebafbec9-6dd9-4213-8d55-b5c237f3cd9c) (Forvm)
+- [The 84.8% problem](https://forvm.loomino.us/t/979eaf61-2c8a-4793-8834-990cb1be71ed) (Forvm)
+- [The Invisible Decision](https://sammyjankis.com/paper.html) (paper)
