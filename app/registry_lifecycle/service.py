@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.git_safety import try_commit_paths
+from app.lifecycle_warnings import make_warning
 from app.segment_history.locking import (
     LockInfrastructureError,
     segment_history_source_lock,
@@ -355,7 +356,7 @@ def delivery_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:delivery_index", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "delivery", "warning": "registry_head_lock_unavailable:delivery_index"}
+        return {"ok": False, "family": "delivery", "warnings": [make_warning("registry_head_lock_unavailable", "Lock infrastructure unavailable for delivery_index", path="delivery_index")]}
     with lock_ctx:
         return _delivery_maintenance_pass_locked(
             repo_root=repo_root, now=now,
@@ -447,6 +448,7 @@ def _delivery_maintenance_pass_locked(
             "idempotency_externalized": 0,
             "idempotency_pruned": 0,
             "shard_id": None,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -569,6 +571,13 @@ def _delivery_maintenance_pass_locked(
         "stub_path": stub_rel,
         "written_paths": written_rels,
         "warnings": warnings,
+        "audit_events": [{"event": "registry_delivery_maintenance", "detail": {
+            "family": "delivery",
+            "records_externalized": len(cut_records),
+            "idempotency_externalized": len(cut_idempotency),
+            "idempotency_pruned": len(idem_to_prune),
+            "shard_id": shard_id,
+        }}],
     }
 
 
@@ -588,7 +597,7 @@ def nonce_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:nonce_index", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "nonce", "warning": "registry_head_lock_unavailable:nonce_index"}
+        return {"ok": False, "family": "nonce", "warnings": [make_warning("registry_head_lock_unavailable", "Lock infrastructure unavailable for nonce_index", path="nonce_index")]}
     with lock_ctx:
         return _nonce_maintenance_pass_locked(
             repo_root=repo_root, now=now,
@@ -650,6 +659,7 @@ def _nonce_maintenance_pass_locked(
             "ok": True,
             "family": "nonce",
             "pruned": 0,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -684,6 +694,9 @@ def _nonce_maintenance_pass_locked(
         "pruned": len(prune_keys),
         "written_paths": [NONCE_INDEX_REL],
         "warnings": warnings,
+        "audit_events": [{"event": "registry_nonce_maintenance", "detail": {
+            "family": "nonce", "pruned": len(prune_keys),
+        }}],
     }
 
 
@@ -704,7 +717,7 @@ def peer_trust_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:peers_registry", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "peer_trust", "warning": "registry_head_lock_unavailable:peers_registry"}
+        return {"ok": False, "family": "peer_trust", "warnings": [make_warning("registry_head_lock_unavailable", "Lock infrastructure unavailable for peers_registry", path="peers_registry")]}
     with lock_ctx:
         return _peer_trust_maintenance_pass_locked(
             repo_root=repo_root, now=now,
@@ -832,6 +845,7 @@ def _peer_trust_maintenance_pass_locked(
             "family": "peer_trust",
             "transitions_externalized": 0,
             "shards_created": 0,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -904,6 +918,11 @@ def _peer_trust_maintenance_pass_locked(
         "shards": [{"peer_id": sr["peer_id"], "shard_id": sr["shard_id"], "transition_count": sr["transition_count"]} for sr in shard_results],
         "written_paths": written_rels,
         "warnings": warnings,
+        "audit_events": [{"event": "registry_peer_trust_maintenance", "detail": {
+            "family": "peer_trust",
+            "transitions_externalized": total_externalized,
+            "shards_created": len(shard_results),
+        }}],
     }
 
 
@@ -970,9 +989,11 @@ def externalize_superseded_push(
     )
 
     return {
+        "ok": True,
         "shard_id": shard_id,
         "shard_path": shard_rel,
         "stub_path": stub_rel,
+        "warnings": [],
     }
 
 
@@ -1032,9 +1053,11 @@ def externalize_superseded_pull(
     )
 
     return {
+        "ok": True,
         "shard_id": shard_id,
         "shard_path": shard_rel,
         "stub_path": stub_rel,
+        "warnings": [],
     }
 
 
@@ -1050,7 +1073,14 @@ def replication_state_prune_idempotency(
     try:
         lock_ctx = segment_history_source_lock("registry:replication_state", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "replication_state", "warning": "registry_head_lock_unavailable:replication_state"}
+        return {
+            "ok": False, "family": "replication_state",
+            "warnings": [make_warning(
+                "registry_head_lock_unavailable",
+                "Lock infrastructure unavailable for replication_state",
+                path="replication_state",
+            )],
+        }
     with lock_ctx:
         return _replication_state_prune_idempotency_locked(
             repo_root=repo_root, now=now,
@@ -1099,7 +1129,7 @@ def _replication_state_prune_idempotency_locked(
             prune_keys.append(key)
 
     if not prune_keys:
-        return {"ok": True, "family": "replication_state", "pruned": 0, "warnings": warnings}
+        return {"ok": True, "family": "replication_state", "pruned": 0, "written_paths": [], "warnings": warnings}
 
     for key in prune_keys:
         pull_idem.pop(key, None)
@@ -1132,6 +1162,9 @@ def _replication_state_prune_idempotency_locked(
         "pruned": len(prune_keys),
         "written_paths": [REPLICATION_STATE_REL],
         "warnings": warnings,
+        "audit_events": [{"event": "registry_replication_state_maintenance", "detail": {
+            "family": "replication_state", "pruned": len(prune_keys),
+        }}],
     }
 
 
@@ -1151,7 +1184,14 @@ def tombstone_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:replication_tombstones", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "replication_tombstones", "warning": "registry_head_lock_unavailable:replication_tombstones"}
+        return {
+            "ok": False, "family": "replication_tombstones",
+            "warnings": [make_warning(
+                "registry_head_lock_unavailable",
+                "Lock infrastructure unavailable for replication_tombstones",
+                path="replication_tombstones",
+            )],
+        }
     with lock_ctx:
         return _tombstone_maintenance_pass_locked(
             repo_root=repo_root, now=now, grace_days=grace_days, batch_limit=batch_limit,
@@ -1200,6 +1240,7 @@ def _tombstone_maintenance_pass_locked(
             "family": "replication_tombstones",
             "entries_externalized": 0,
             "shard_id": None,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -1296,6 +1337,11 @@ def _tombstone_maintenance_pass_locked(
         "stub_path": stub_rel,
         "written_paths": [shard_rel, stub_rel, REPLICATION_TOMBSTONES_REL],
         "warnings": warnings,
+        "audit_events": [{"event": "registry_tombstone_maintenance", "detail": {
+            "family": "replication_tombstones",
+            "entries_externalized": len(cut_entries),
+            "shard_id": shard_id,
+        }}],
     }
 
 
@@ -1402,7 +1448,7 @@ def registry_maintenance_service(
 
     # Git commit all written paths
     committed_files: list[str] = []
-    git_warnings: list[str] = []
+    durable = True
     if all_written and gm is not None:
         commit_paths = [safe_path(repo_root, rel) for rel in all_written]
         if try_commit_paths(
@@ -1412,20 +1458,41 @@ def registry_maintenance_service(
         ):
             committed_files = list(all_written)
         else:
-            git_warnings.append("registry_maintenance_not_durable: data written to disk but not committed to git")
+            durable = False
+            all_warnings.append(
+                make_warning(
+                    "registry_maintenance_not_durable",
+                    "Data written to disk but not committed to git",
+                )
+            )
 
-    all_warnings.extend(git_warnings)
+    any_family_failed = any(not r.get("ok", True) for r in results.values())
 
     response: dict[str, Any] = {
-        "ok": True,
+        "ok": not any_family_failed,
+        "durable": durable,
         "families": results,
         "committed_files": committed_files,
         "warnings": all_warnings if all_warnings else [],
     }
+    if not durable:
+        response["at_risk_paths"] = list(all_written)
     if gm is not None:
         response["latest_commit"] = gm.latest_commit()
 
     if audit and auth:
-        audit(auth, "registry_maintenance", {"families": list(results.keys()), "committed": len(committed_files)})
+        audit(auth, "registry_maintenance", {
+            "families": list(results.keys()),
+            "committed": len(committed_files),
+            "durable": durable,
+            "warning_count": len(all_warnings),
+        })
+        # Emit per-family audit events collected from family passes
+        for fam_name, fam_result in results.items():
+            for evt in fam_result.get("audit_events", []):
+                try:
+                    audit(auth, evt["event"], evt["detail"])
+                except Exception:
+                    _logger.warning("Failed to emit audit event for family %s", fam_name, exc_info=True)
 
     return response

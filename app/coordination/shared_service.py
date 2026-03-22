@@ -535,7 +535,11 @@ def shared_update_service(
                 "path": rel,
             },
         )
-    result: dict[str, Any] = {"ok": True, "shared": updated, "path": rel, "updated": True, "latest_commit": gm.latest_commit()}
-    if _update_warnings:
-        result["warnings"] = _update_warnings
-    return result
+    return {
+        "ok": True,
+        "shared": updated,
+        "path": rel,
+        "updated": True,
+        "latest_commit": gm.latest_commit(),
+        "warnings": _update_warnings,
+    }

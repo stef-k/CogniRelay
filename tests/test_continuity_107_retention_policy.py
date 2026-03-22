@@ -338,12 +338,14 @@ class TestContinuityRetentionPolicy(unittest.TestCase):
                 )
 
             result = out["job_result"]
-            self.assertTrue(result["ok"])
+            # ok is False because some items failed (4 failures out of 6 unique)
+            self.assertFalse(result["ok"])
             self.assertEqual(result["requested"], len(req_paths))
             self.assertEqual(result["unique_requested"], len(req_paths) - 1)
             self.assertEqual(result["processed"], len(req_paths) - 1)
             self.assertEqual(result["cold_stored"], 1)
             self.assertEqual(result["failed"], 4)
+            self.assertTrue(result["durable"])
             self.assertEqual(result["warnings"], [f"duplicate_source_archive_path:{cold_store_rel}"])
             self.assertEqual([row["source_archive_path"] for row in result["results"]], req_paths[0:1] + req_paths[2:])
             self.assertEqual(

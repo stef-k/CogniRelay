@@ -890,7 +890,7 @@ def _reconcile_manifest_residue_locked(
         detail = "segment_history_manifest_unreadable_cleanup"
         if orphan_count:
             detail += f"; removed {orphan_count} orphaned files"
-        return {"warning": detail}
+        return {"warning": detail, "reconciled_source_paths": set(), "recovery_failed": False}
 
     if manifest is None:
         return None
@@ -1346,6 +1346,14 @@ def segment_history_maintenance_service(
                         residue["warning"],
                     )
                 )
+                if residue.get("recovery_failed"):
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_manifest_recovery_failed",
+                            "Manifest reconciliation could not recover orphaned files; "
+                            "manual intervention may be required",
+                        )
+                    )
 
             # Post-lock: recount eligible for selection_count.
             # Re-check rollover eligibility under lock so that a source
@@ -1953,6 +1961,7 @@ def segment_history_cold_store_service(
             "cold_stored_count": 0,
             "batch_limit_reached": False,
             "cold_segment_ids": [],
+            "hot_payloads_removed": False,
             "durable": True,
             "committed_files": [],
             "latest_commit": None,
@@ -2014,6 +2023,14 @@ def segment_history_cold_store_service(
                         residue["warning"],
                     )
                 )
+                if residue.get("recovery_failed"):
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_manifest_recovery_failed",
+                            "Manifest reconciliation could not recover orphaned files; "
+                            "manual intervention may be required",
+                        )
+                    )
 
             # Re-read stubs under lock and revalidate (5 checks per spec)
             validated: list[tuple[str, dict, Path]] = []
@@ -2165,6 +2182,7 @@ def segment_history_cold_store_service(
                 # (added at line ~1933), so git will stage the deletion.
                 from app.git_locking import repository_mutation_lock
 
+                hot_payloads_removed = bool(deferred_hot_deletes)
                 if deferred_hot_deletes:
                     for hp, sid in deferred_hot_deletes:
                         try:
@@ -2309,6 +2327,7 @@ def segment_history_cold_store_service(
         "cold_stored_count": len(cold_stored_ids),
         "batch_limit_reached": batch_limit_reached,
         "cold_segment_ids": cold_stored_ids,
+        "hot_payloads_removed": hot_payloads_removed,
         "durable": durable,
         "committed_files": committed_files,
         "latest_commit": latest_commit,
@@ -2542,6 +2561,13 @@ def segment_history_cold_rehydrate_service(
                     }
                     if not recon_recovered:
                         result_recon["at_risk_segment_ids"] = [segment_id]
+                    _emit_audit(audit, "segment_history_cold_rehydrate", {
+                        "family": family,
+                        "segment_id": segment_id,
+                        "reconciliation_recovery": True,
+                        "durable": recon_recovered,
+                        "warning_count": len(warnings),
+                    })
                     return result_recon
                 _error_response(
                     409,
@@ -2710,6 +2736,15 @@ def segment_history_cold_rehydrate_service(
                         _make_warning(
                             "segment_history_cold_payload_remove_failed",
                             f"Could not remove cold payload before rehydrate commit: {segment_id}",
+                            segment_id=segment_id,
+                        )
+                    )
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_cold_orphan_retained",
+                            f"Cold payload remains tracked in git after rehydrate; "
+                            f"manual cleanup may be required: {cold_payload_rel}",
+                            path=cold_payload_rel,
                             segment_id=segment_id,
                         )
                     )
