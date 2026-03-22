@@ -4,7 +4,7 @@ This guide is for agents integrating with CogniRelay, whether starting cold or a
 
 ## What CogniRelay Offers You
 
-CogniRelay is a self-hosted service that preserves bounded orientation state across context-window resets, compaction boundaries, and handoffs to other agents. When you restart or lose context, it gives you back enough of what you were doing — constraints, drift signals, open questions, direction, and decisions you chose not to take — to resume usefully rather than starting blind.
+CogniRelay is a self-hosted service that preserves bounded orientation state across context-window resets, compaction boundaries, and handoffs to other agents. When you restart or lose context, it gives you back enough of what you were doing — constraints (`active_constraints`), drift signals (`drift_signals`), open loops (`open_loops`), stance (`stance_summary`), and decisions you chose not to take (`negative_decisions`) — to resume usefully rather than starting blind.
 
 It also provides:
 
@@ -26,11 +26,11 @@ If you are adding CogniRelay to an existing agent loop and want the smallest use
 1. `POST /v1/continuity/read` with your selector — returns your last persisted orientation capsule
 2. `POST /v1/context/retrieve` for your active task — returns a continuity-shaped context bundle including relevant memory, recent items, and any loaded capsule state
 
-Use the returned capsule to restore your constraints, drift signals, open questions, and direction before you begin working.
+Use the returned capsule to restore your constraints, drift signals, open loops, and stance before you begin working.
 
 **Before compaction or handoff (when you are about to lose context):**
 
-1. `POST /v1/continuity/upsert` with your current orientation — persists your active constraints, drift signals, open questions, current direction, and any negative decisions you want to survive the reset
+1. `POST /v1/continuity/upsert` with your current orientation — persists your active constraints, drift signals, open loops, stance summary, and any negative decisions you want to survive the reset
 
 This is enough for basic orientation recovery. Your next startup will retrieve what you persisted here.
 
@@ -90,5 +90,6 @@ Concretely:
 
 - [System Overview](system-overview.md) for the full product shape and endpoint guidance
 - [API Surface](api-surface.md) for the complete HTTP endpoint reference
+- [Payload Reference](payload-reference.md) for capsule structure, request/response schemas, and field constraints
 - [MCP Guide](mcp.md) if your runtime uses JSON-RPC tool protocols
 - [Reviewer Guide](reviewer-guide.md) for the system thesis, recovery model, and authority boundaries

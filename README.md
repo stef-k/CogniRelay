@@ -64,6 +64,7 @@ For the full cold-start endpoint sequence, see [System Overview: Agent Usage](do
 - [Reviewer Guide](docs/reviewer-guide.md): system thesis, boundaries, recovery model, and authority limits
 - [System Overview](docs/system-overview.md): implemented product shape and agent usage guidance
 - [API Surface](docs/api-surface.md): currently implemented HTTP behavior grouped by domain
+- [Payload Reference](docs/payload-reference.md): capsule structure, request/response schemas, and field constraints
 - [MCP Guide](docs/mcp.md): MCP bootstrap flow and tool mapping
 - [Go-live Runbook](deploy/GO_LIVE_RUNBOOK.md): operator deployment and go-live workflow
 - [Production Signoff Checklist](deploy/PRODUCTION_SIGNOFF_CHECKLIST.md): production verification and data-safety checks

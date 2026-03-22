@@ -47,7 +47,7 @@ CogniRelay is built from a small number of deliberately constrained building blo
 
 **Compaction as planning, not summarization.** The compaction service is an orchestrator that classifies candidates by age, size, memory class, and policy, then emits structured reports with action categories (summarize, archive, promote, keep, review). It does not generate summaries itself — the agent reads the plan and decides what to do. This keeps the system from making content decisions on the agent's behalf.
 
-**Four runtime dependencies.** The entire stack runs on FastAPI, uvicorn, Pydantic, and python-dotenv. No ORM, no external database, no cache or queue library. This keeps the operational surface minimal and the system easy to deploy, audit, and reason about.
+**Minimal runtime dependencies.** The entire stack runs on FastAPI, uvicorn, Pydantic, and python-dotenv. No ORM, no external database, no cache or queue library. This keeps the operational surface minimal and the system easy to deploy, audit, and reason about.
 
 ## The Core Model
 
@@ -57,12 +57,12 @@ CogniRelay treats continuity as a bounded orientation problem.
 
 Continuity capsules are meant to preserve enough of the agent's current direction to support a useful restart:
 
-- active constraints
-- drift signals
-- open questions and current direction
-- session trajectory
-- lower-commitment orientation fields such as trailing notes and curiosity queue
-- explicit negative decisions when the agent chooses to record them
+- active constraints (`active_constraints`)
+- drift signals (`drift_signals`)
+- open loops (`open_loops`) and stance summary (`stance_summary`)
+- session trajectory (`session_trajectory`)
+- lower-commitment orientation fields such as trailing notes (`trailing_notes`) and curiosity queue (`curiosity_queue`)
+- explicit negative decisions (`negative_decisions`) when the agent chooses to record them
 
 This is stronger than simple factual recall, but intentionally weaker than a full architecture for preserving every layer of texture or self-model.
 
@@ -203,9 +203,11 @@ Use the docs in this order:
    Use this for the implemented product shape, operational model, and agent usage guidance.
 5. `docs/api-surface.md`
    Use this for the currently implemented HTTP behavior and endpoint grouping.
-6. `docs/mcp.md`
+6. `docs/payload-reference.md`
+   Use this for capsule structure, request/response schemas, and field-level constraints.
+7. `docs/mcp.md`
    Use this if you care about MCP integration and tool exposure.
-7. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
+8. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
    Use these for operator-facing deployment and signoff concerns.
 
 ## What Reviewers Should Pressure-Test
