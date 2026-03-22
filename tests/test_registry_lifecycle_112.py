@@ -956,17 +956,19 @@ class TestRegistryMaintenanceOrchestrator(unittest.TestCase):
             "file_count": 10,
         }
 
-        # Patch _write_json to fail on the second call (stub write)
+        # Patch _write_json_exclusive to fail (stub write)
+        original_write_json_exclusive = __import__("app.registry_lifecycle.service", fromlist=["_write_json_exclusive"])._write_json_exclusive
+
         call_count = 0
 
-        def failing_write_json(path, data):
+        def failing_write_json_exclusive(path, data):
             nonlocal call_count
             call_count += 1
             if call_count == 2:
                 raise OSError("disk full")
-            write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+            original_write_json_exclusive(path, data)
 
-        with patch("app.registry_lifecycle.service._write_json", side_effect=failing_write_json):
+        with patch("app.registry_lifecycle.service._write_json_exclusive", side_effect=failing_write_json_exclusive):
             with self.assertRaises(OSError):
                 externalize_superseded_push(
                     repo_root=self.repo, now=self.now,
@@ -998,18 +1000,20 @@ class TestRegistryMaintenanceOrchestrator(unittest.TestCase):
         }
         _write_head(self.repo, DELIVERY_STATE_REL, state)
 
+        original_write_json_exclusive = __import__("app.registry_lifecycle.service", fromlist=["_write_json_exclusive"])._write_json_exclusive
+
         call_count = 0
 
-        def failing_write(path, data):
+        def failing_write_exclusive(path, data):
             nonlocal call_count
             call_count += 1
-            if call_count == 2:  # shard write
+            if call_count == 1:  # shard write (first exclusive write)
                 raise OSError("disk full")
-            write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+            original_write_json_exclusive(path, data)
 
         from unittest.mock import patch
-        with patch("app.registry_lifecycle.service._write_json", side_effect=failing_write):
-            with self.assertRaises(OSError):
+        with patch("app.registry_lifecycle.service._write_json_exclusive", side_effect=failing_write_exclusive):
+            with self.assertRaises((OSError, RuntimeError)):
                 delivery_maintenance_pass(
                     repo_root=self.repo, now=self.now,
                     terminal_retention_days=30, idempotency_retention_days=30,

@@ -63,7 +63,7 @@ def _ensure_lock_dir(lock_dir: Path) -> None:
 
 
 @contextmanager
-def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
+def _repo_file_lock(repo_root: Path, *, timeout: float = _GIT_LOCK_TIMEOUT) -> Generator[None, None, None]:
     """Acquire the per-repository advisory file lock."""
     lock_dir = repo_root / ".locks"
     _ensure_lock_dir(lock_dir)
@@ -81,7 +81,7 @@ def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
             _log.error("Cannot open git lock file %s after retry: %s", lock_path, exc)
             raise GitLockInfrastructureError(f"Cannot open git lock file {lock_path}: {exc}") from exc
     try:
-        deadline = time.monotonic() + _GIT_LOCK_TIMEOUT
+        deadline = time.monotonic() + timeout
         while True:
             try:
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -90,7 +90,7 @@ def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
                 if time.monotonic() >= deadline:
                     lock_file.close()
                     raise GitLockTimeout(
-                        f"Repository mutation lock timed out after {_GIT_LOCK_TIMEOUT}s"
+                        f"Repository mutation lock timed out after {timeout}s"
                     ) from None
                 time.sleep(_GIT_LOCK_POLL)
             except OSError as exc:
@@ -106,8 +106,13 @@ def _repo_file_lock(repo_root: Path) -> Generator[None, None, None]:
 
 
 @contextmanager
-def repository_mutation_lock(repo_root: Path) -> Generator[None, None, None]:
-    """Serialize git-backed mutations for one repository, including nested calls."""
+def repository_mutation_lock(repo_root: Path, *, timeout: float = _GIT_LOCK_TIMEOUT) -> Generator[None, None, None]:
+    """Serialize git-backed mutations for one repository, including nested calls.
+
+    *timeout* controls how long to wait for the underlying file lock.
+    Callers that are defense-in-depth (e.g. fallback snapshot writes) can
+    pass a shorter timeout to avoid thread-pool exhaustion under contention.
+    """
     resolved = repo_root.resolve()
     key = str(resolved)
     depths = getattr(_thread_state, "depths", None)
@@ -128,7 +133,7 @@ def repository_mutation_lock(repo_root: Path) -> Generator[None, None, None]:
                 depths.pop(key, None)
         return
 
-    with _repo_file_lock(resolved):
+    with _repo_file_lock(resolved, timeout=timeout):
         depths[key] = 1
         try:
             yield

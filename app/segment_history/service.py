@@ -9,6 +9,7 @@ import logging
 import re
 import subprocess
 import threading
+import time
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -762,6 +763,21 @@ def _cleanup_family_orphans(repo_root: Path, family: str) -> int:
                         _log.debug("Skipping in-flight manifest target: %s", f_rel)
                         continue
                     if f_rel not in tracked:
+                        # Grace period: skip files newer than 5 minutes
+                        # to avoid deleting in-flight payloads from
+                        # concurrent operations that have not yet
+                        # written their crash-recovery manifest.
+                        try:
+                            age_seconds = time.time() - f.stat().st_mtime
+                            if age_seconds < 300:
+                                _log.debug(
+                                    "Skipping recent orphan (%.0fs old): %s",
+                                    age_seconds,
+                                    f_rel,
+                                )
+                                continue
+                        except OSError:
+                            continue  # Cannot stat — skip safely
                         try:
                             f.unlink()
                             removed += 1
@@ -834,13 +850,42 @@ def _reconcile_manifest_residue(
     Returns None if no manifest exists, or a dict with ``warning`` and
     ``reconciled_source_paths`` keys describing the reconciliation action.
     """
-    from app.segment_history.manifest import read_manifest, remove_manifest
+    from app.segment_history.manifest import manifest_lock
+
+    # Acquire the manifest lock before reading so that a concurrent
+    # write_manifest cannot replace the manifest between our read and
+    # a subsequent remove, which would delete the fresh manifest and
+    # destroy the concurrent operation's crash-recovery pointer.
+    try:
+        lock_ctx = manifest_lock(repo_root, caller_family)
+    except (OSError, TimeoutError):
+        _log.warning("Could not acquire manifest lock for %s reconciliation; deferring", caller_family)
+        return None
+    with lock_ctx:
+        return _reconcile_manifest_residue_locked(
+            repo_root=repo_root,
+            caller_family=caller_family,
+            caller_op=caller_op,
+            gm=gm,
+            locked_source_paths=locked_source_paths,
+        )
+
+
+def _reconcile_manifest_residue_locked(
+    repo_root: Path,
+    caller_family: str,
+    caller_op: str,
+    gm: Any,
+    locked_source_paths: set[str] | None,
+) -> dict[str, Any] | None:
+    """Inner implementation, called under manifest lock."""
+    from app.segment_history.manifest import read_manifest, remove_manifest_unlocked
 
     try:
         manifest = read_manifest(repo_root, caller_family)
     except ValueError:
         # Corrupt manifest -- clean up and scan for orphans
-        remove_manifest(repo_root, caller_family)
+        remove_manifest_unlocked(repo_root, caller_family)
         orphan_count = _cleanup_family_orphans(repo_root, caller_family)
         detail = "segment_history_manifest_unreadable_cleanup"
         if orphan_count:
@@ -873,7 +918,7 @@ def _reconcile_manifest_residue(
             "Corrupt manifest for %s: missing required fields %s; removing and cleaning orphans",
             caller_family, _missing_fields,
         )
-        remove_manifest(repo_root, caller_family)
+        remove_manifest_unlocked(repo_root, caller_family)
         orphan_count = _cleanup_family_orphans(repo_root, caller_family)
         detail = f"segment_history_manifest_schema_invalid: missing {_missing_fields}"
         if orphan_count:
@@ -903,7 +948,7 @@ def _reconcile_manifest_residue(
         except Exception:
             all_in_head = False  # git check failed — conservative path
         if all_in_head:
-            remove_manifest(repo_root, caller_family, expected_operation=recorded_op)
+            remove_manifest_unlocked(repo_root, caller_family, expected_operation=recorded_op)
             # Truncate sources to remove already-committed rolled data
             if recorded_op in ("maintenance", "write_time_rollover"):
                 source_paths_list = manifest.get("source_paths", [])
@@ -1082,7 +1127,7 @@ def _reconcile_manifest_residue(
     # the next reconciliation pass retry, matching the maintenance and
     # cold-store pattern (F5).
     if recovered or not existing_targets:
-        remove_manifest(repo_root, caller_family, expected_operation=recorded_op)
+        remove_manifest_unlocked(repo_root, caller_family, expected_operation=recorded_op)
 
     action = "recovered" if recovered else f"preserved={len(existing_targets)}"
     detail = f"segment_history_manifest_residue:{recorded_op}:{family}:{len(segment_ids)}:{action}"

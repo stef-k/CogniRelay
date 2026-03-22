@@ -751,7 +751,10 @@ def _persist_fallback_snapshot(
         if old_bytes == new_bytes:
             return fallback_rel, "unchanged", None
         write_text_file(path, canonical)
-        with repository_mutation_lock(repo_root):
+        # Fallback snapshots are defense-in-depth; use a shorter git
+        # lock timeout (15 s) to reduce thread-pool exhaustion risk when
+        # the primary capsule write already consumed the full 60 s budget.
+        with repository_mutation_lock(repo_root, timeout=15.0):
             committed = gm.commit_file(path, f"continuity: update fallback {subject_kind} {subject_id}")
             if not committed:
                 raise RuntimeError("git commit produced no changes")
@@ -2567,12 +2570,12 @@ def continuity_archive_service(
         active_path = safe_path(repo_root, rel)
         active_bytes = active_path.read_bytes()
         write_text_file(archive_path, canonical_json(archive_payload))
-        # The active-path deletion must be staged before the git commit can atomically
-        # record the archive write plus active-file removal. If the commit step fails,
-        # restore the active capsule and discard the archive envelope immediately.
-        active_path.unlink()
+        # Both the archive write and the active-file deletion are performed
+        # inside the git lock so that a process crash before commit cannot
+        # leave the active capsule deleted without a durable archive.
         with repository_mutation_lock(repo_root):
             try:
+                active_path.unlink()
                 committed = gm.commit_paths(
                     [archive_path, active_path],
                     f"continuity: archive {req.subject_kind} {req.subject_id}",
@@ -2688,8 +2691,11 @@ def continuity_cold_store_service(
             )
             write_bytes_file(cold_payload_file, gzip_bytes)
             write_text_file(cold_stub_file, stub_text)
-            archive_path.unlink()
+            # Archive deletion and commit are inside the git lock so that a
+            # process crash before commit cannot leave the archive deleted
+            # without durable cold files.
             with repository_mutation_lock(repo_root):
+                archive_path.unlink()
                 committed = gm.commit_paths(
                     [cold_payload_file, cold_stub_file, archive_path],
                     f"continuity: cold-store {envelope['capsule']['subject_kind']} {envelope['capsule']['subject_id']}",
@@ -2802,9 +2808,12 @@ def continuity_cold_rehydrate_service(
         rehydrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         try:
             write_bytes_file(archive_path, archive_bytes)
-            cold_payload_file.unlink()
-            cold_stub_file.unlink()
+            # Cold file deletions and commit are inside the git lock so
+            # that a process crash before commit cannot leave cold files
+            # deleted without a durable rehydrated archive.
             with repository_mutation_lock(repo_root):
+                cold_payload_file.unlink()
+                cold_stub_file.unlink()
                 committed = gm.commit_paths(
                     [archive_path, cold_payload_file, cold_stub_file],
                     f"continuity: cold-rehydrate {capsule['subject_kind']} {capsule['subject_id']}",

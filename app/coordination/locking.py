@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import re
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,6 +20,7 @@ _SAFE_ID = re.compile(r"^[a-z0-9_]+$")
 LOCK_TIMEOUT_SECONDS: float = 30.0
 _LOCK_POLL_INTERVAL: float = 0.05
 
+_lock_dir_ready_guard = threading.Lock()
 _lock_dir_ready: set[str] = set()
 
 
@@ -44,16 +46,21 @@ def purge_stale_lockfiles(lock_dir: Path) -> int:
 
 
 def _ensure_lock_dir(lock_dir: Path) -> None:
-    """Create the lock directory once per unique path, per process lifetime."""
+    """Create the lock directory once per unique path, per process lifetime.
+
+    The check and mkdir are performed under the same guard to prevent
+    two threads from both attempting mkdir on the same path.
+    """
     key = str(lock_dir)
-    if key in _lock_dir_ready:
-        return
-    try:
-        lock_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _log.error("Cannot create lock directory %s: %s", lock_dir, exc)
-        raise HTTPException(status_code=503, detail="Coordination lock infrastructure unavailable") from exc
-    _lock_dir_ready.add(key)
+    with _lock_dir_ready_guard:
+        if key in _lock_dir_ready:
+            return
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _log.error("Cannot create lock directory %s: %s", lock_dir, exc)
+            raise HTTPException(status_code=503, detail="Coordination lock infrastructure unavailable") from exc
+        _lock_dir_ready.add(key)
 
 
 @contextmanager

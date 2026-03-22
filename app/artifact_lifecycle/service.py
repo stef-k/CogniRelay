@@ -27,6 +27,11 @@ from fastapi import HTTPException
 from app.auth import AuthContext
 from app.coordination.locking import artifact_lock
 from app.git_safety import try_commit_paths
+from app.segment_history.locking import (
+    LockInfrastructureError,
+    SegmentHistoryLockTimeout,
+    segment_history_source_lock,
+)
 from app.storage import safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
@@ -922,24 +927,29 @@ def _externalize_selected_family(
                     warnings.append(f"{family}_hot_changed:{artifact_id}")
                     return
 
-                _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
-                    repo_root=repo_root,
-                    family=family,
-                    schema_type=schema_type,
-                    artifact_id=artifact_id,
-                    source_rel=row["source_rel"],
-                    artifact=row["artifact"],
-                    summary=row["summary"],
-                    history_dir_rel=history_dir_rel,
-                    cut_at=row["cut_at"],
-                    reserved_ids=reserved_ids,
-                )
-                if not _write_pair_exclusive(
-                    safe_path(repo_root, payload_rel), payload,
-                    safe_path(repo_root, stub_rel), stub,
-                ):
-                    warnings.append(f"{collision_warning_prefix}:{artifact_id}")
-                    return
+                # Retry on O_EXCL collision (concurrent ID allocation)
+                _max_ext_retries = 3
+                for _ext_attempt in range(_max_ext_retries):
+                    _, payload_rel, stub_rel, payload, stub = _externalize_single_artifact(
+                        repo_root=repo_root,
+                        family=family,
+                        schema_type=schema_type,
+                        artifact_id=artifact_id,
+                        source_rel=row["source_rel"],
+                        artifact=row["artifact"],
+                        summary=row["summary"],
+                        history_dir_rel=history_dir_rel,
+                        cut_at=row["cut_at"],
+                        reserved_ids=reserved_ids,
+                    )
+                    if _write_pair_exclusive(
+                        safe_path(repo_root, payload_rel), payload,
+                        safe_path(repo_root, stub_rel), stub,
+                    ):
+                        break
+                    if _ext_attempt == _max_ext_retries - 1:
+                        warnings.append(f"{collision_warning_prefix}:{artifact_id}")
+                        return
                 if current_path.resolve() not in rollback_seen:
                     rollback_seen.add(current_path.resolve())
                     rollback_plan.append((current_path, current_bytes))
@@ -1174,42 +1184,53 @@ def artifact_history_cold_store_service(
     auth.require_write_path(stub_rel)
     auth.require_write_path(cold_storage_path)
 
-    payload = _load_artifact_history_payload(repo_root, source_payload_path)
-    stub = _load_artifact_history_stub(repo_root, stub_rel)
-    if stub.get("payload_path") != source_payload_path:
-        raise HTTPException(status_code=409, detail="Artifact-history stub does not point at the hot payload")
-    if stub.get("summary") != payload.get("summary") or stub.get("source_path") != payload.get("source_path"):
-        raise HTTPException(status_code=400, detail="Artifact-history stub does not match payload")
-    source_bytes = hot_payload_path.read_bytes()
-    if cold_payload_path.exists():
-        raise HTTPException(status_code=409, detail="Artifact-history cold payload already exists")
-
+    # Serialize concurrent cold-store/rehydrate operations on the same payload
+    lock_key = f"artifact_history_cold:{source_payload_path}"
+    lock_dir = repo_root / ".locks"
     try:
-        gzip_bytes = gzip.compress(source_bytes, mtime=0)
-        write_bytes_file(cold_payload_path, gzip_bytes)
-        updated_stub = dict(stub)
-        updated_stub["payload_path"] = cold_storage_path
-        _write_json(safe_path(repo_root, stub_rel), updated_stub)
-        hot_payload_path.unlink()
-        committed = bool(gm and try_commit_paths(
-            paths=[cold_payload_path, safe_path(repo_root, stub_rel), hot_payload_path],
-            gm=gm,
-            commit_message=f"artifact-history: cold-store {family} {payload['history_id']}",
-        ))
-        if gm is not None and not committed:
-            raise RuntimeError("Artifact-history cold-store commit produced no changes")
-    except Exception as exc:
-        cleanup_errors = _restore_failed_artifact_history_cold_store(
-            source_payload_path=hot_payload_path,
-            source_payload_bytes=source_bytes,
-            cold_payload_path=cold_payload_path,
-            stub_path=safe_path(repo_root, stub_rel),
-            original_stub=stub,
-        )
-        detail = f"Artifact-history cold-store failed: {exc}"
-        if cleanup_errors:
-            detail += f"; rollback failed for {', '.join(cleanup_errors)}"
-        raise HTTPException(status_code=500, detail=detail) from exc
+        lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
+    except LockInfrastructureError as exc:
+        raise HTTPException(status_code=503, detail="Artifact-history cold-store lock unavailable; retry") from exc
+    try:
+        with lock_ctx:
+            payload = _load_artifact_history_payload(repo_root, source_payload_path)
+            stub = _load_artifact_history_stub(repo_root, stub_rel)
+            if stub.get("payload_path") != source_payload_path:
+                raise HTTPException(status_code=409, detail="Artifact-history stub does not point at the hot payload")
+            if stub.get("summary") != payload.get("summary") or stub.get("source_path") != payload.get("source_path"):
+                raise HTTPException(status_code=400, detail="Artifact-history stub does not match payload")
+            source_bytes = hot_payload_path.read_bytes()
+            if cold_payload_path.exists():
+                raise HTTPException(status_code=409, detail="Artifact-history cold payload already exists")
+
+            try:
+                gzip_bytes = gzip.compress(source_bytes, mtime=0)
+                write_bytes_file(cold_payload_path, gzip_bytes)
+                updated_stub = dict(stub)
+                updated_stub["payload_path"] = cold_storage_path
+                _write_json(safe_path(repo_root, stub_rel), updated_stub)
+                hot_payload_path.unlink()
+                committed = bool(gm and try_commit_paths(
+                    paths=[cold_payload_path, safe_path(repo_root, stub_rel), hot_payload_path],
+                    gm=gm,
+                    commit_message=f"artifact-history: cold-store {family} {payload['history_id']}",
+                ))
+                if gm is not None and not committed:
+                    raise RuntimeError("Artifact-history cold-store commit produced no changes")
+            except Exception as exc:
+                cleanup_errors = _restore_failed_artifact_history_cold_store(
+                    source_payload_path=hot_payload_path,
+                    source_payload_bytes=source_bytes,
+                    cold_payload_path=cold_payload_path,
+                    stub_path=safe_path(repo_root, stub_rel),
+                    original_stub=stub,
+                )
+                detail = f"Artifact-history cold-store failed: {exc}"
+                if cleanup_errors:
+                    detail += f"; rollback failed for {', '.join(cleanup_errors)}"
+                raise HTTPException(status_code=500, detail=detail) from exc
+    except SegmentHistoryLockTimeout as exc:
+        raise HTTPException(status_code=503, detail="Artifact-history cold-store lock timed out; retry") from exc
 
     audit(
         auth,
@@ -1263,58 +1284,70 @@ def artifact_history_cold_rehydrate_service(
     stub_path = safe_path(repo_root, cold_stub_path)
     hot_payload_path = safe_path(repo_root, source_payload_path)
     cold_payload_path = safe_path(repo_root, cold_storage_path)
-    if hot_payload_path.exists():
-        raise HTTPException(status_code=409, detail="Artifact-history payload already exists")
-    if not cold_payload_path.exists() or not cold_payload_path.is_file():
-        raise HTTPException(status_code=404, detail="Artifact-history cold payload not found")
-    try:
-        cold_payload_bytes = cold_payload_path.read_bytes()
-        cold_stub_bytes = stub_path.read_bytes()
-        payload_bytes = gzip.decompress(cold_payload_bytes)
-        payload = json.loads(payload_bytes.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("payload is not an object")
-        if payload.get("history_id") != Path(source_payload_path).stem:
-            raise ValueError("history_id mismatch")
-        if payload.get("summary") != stub.get("summary") or payload.get("source_path") != stub.get("source_path"):
-            raise ValueError("stub/payload mismatch")
-        _load_artifact_history_payload_from_dict(payload=payload, payload_rel=source_payload_path)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid artifact-history cold payload: {exc}") from exc
 
-    updated_stub = dict(stub)
-    updated_stub["payload_path"] = source_payload_path
+    # Serialize concurrent cold-store/rehydrate operations on the same payload
+    lock_key = f"artifact_history_cold:{source_payload_path}"
+    lock_dir = repo_root / ".locks"
     try:
-        write_bytes_file(hot_payload_path, payload_bytes)
-        _write_json(stub_path, updated_stub)
-        cold_payload_path.unlink()
-        committed = bool(gm and try_commit_paths(
-            paths=[hot_payload_path, stub_path, cold_payload_path],
-            gm=gm,
-            commit_message=f"artifact-history: cold-rehydrate {payload['family']} {payload['history_id']}",
-        ))
-        if gm is not None and not committed:
-            raise RuntimeError("Artifact-history cold rehydrate commit produced no changes")
-    except Exception as exc:
-        rollback_errors: list[str] = []
-        try:
-            hot_payload_path.unlink(missing_ok=True)
-        except Exception as rollback_exc:
-            rollback_errors.append(f"remove restored payload: {rollback_exc}")
-        try:
-            write_bytes_file(cold_payload_path, cold_payload_bytes)
-        except Exception as rollback_exc:
-            rollback_errors.append(f"restore cold payload: {rollback_exc}")
-        try:
-            write_bytes_file(stub_path, cold_stub_bytes)
-        except Exception as rollback_exc:
-            rollback_errors.append(f"restore cold stub: {rollback_exc}")
-        detail = f"Artifact-history cold rehydrate failed: {exc}"
-        if rollback_errors:
-            detail += f"; rollback failed for {', '.join(rollback_errors)}"
-        raise HTTPException(status_code=500, detail=detail) from exc
+        lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
+    except LockInfrastructureError as exc:
+        raise HTTPException(status_code=503, detail="Artifact-history cold-rehydrate lock unavailable; retry") from exc
+    try:
+        with lock_ctx:
+            if hot_payload_path.exists():
+                raise HTTPException(status_code=409, detail="Artifact-history payload already exists")
+            if not cold_payload_path.exists() or not cold_payload_path.is_file():
+                raise HTTPException(status_code=404, detail="Artifact-history cold payload not found")
+            try:
+                cold_payload_bytes = cold_payload_path.read_bytes()
+                cold_stub_bytes = stub_path.read_bytes()
+                payload_bytes = gzip.decompress(cold_payload_bytes)
+                payload = json.loads(payload_bytes.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not an object")
+                if payload.get("history_id") != Path(source_payload_path).stem:
+                    raise ValueError("history_id mismatch")
+                if payload.get("summary") != stub.get("summary") or payload.get("source_path") != stub.get("source_path"):
+                    raise ValueError("stub/payload mismatch")
+                _load_artifact_history_payload_from_dict(payload=payload, payload_rel=source_payload_path)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid artifact-history cold payload: {exc}") from exc
+
+            updated_stub = dict(stub)
+            updated_stub["payload_path"] = source_payload_path
+            try:
+                write_bytes_file(hot_payload_path, payload_bytes)
+                _write_json(stub_path, updated_stub)
+                cold_payload_path.unlink()
+                committed = bool(gm and try_commit_paths(
+                    paths=[hot_payload_path, stub_path, cold_payload_path],
+                    gm=gm,
+                    commit_message=f"artifact-history: cold-rehydrate {payload['family']} {payload['history_id']}",
+                ))
+                if gm is not None and not committed:
+                    raise RuntimeError("Artifact-history cold rehydrate commit produced no changes")
+            except Exception as exc:
+                rollback_errors: list[str] = []
+                try:
+                    hot_payload_path.unlink(missing_ok=True)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"remove restored payload: {rollback_exc}")
+                try:
+                    write_bytes_file(cold_payload_path, cold_payload_bytes)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"restore cold payload: {rollback_exc}")
+                try:
+                    write_bytes_file(stub_path, cold_stub_bytes)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"restore cold stub: {rollback_exc}")
+                detail = f"Artifact-history cold rehydrate failed: {exc}"
+                if rollback_errors:
+                    detail += f"; rollback failed for {', '.join(rollback_errors)}"
+                raise HTTPException(status_code=500, detail=detail) from exc
+    except SegmentHistoryLockTimeout as exc:
+        raise HTTPException(status_code=503, detail="Artifact-history cold-rehydrate lock timed out; retry") from exc
 
     audit(
         auth,

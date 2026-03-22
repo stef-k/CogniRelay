@@ -7,8 +7,10 @@ import fcntl
 import json
 import logging
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Generator
 
 from app.storage import write_text_file
 
@@ -198,6 +200,73 @@ def read_manifest(repo_root: Path, family: str = "") -> dict | None:
         return data
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"Corrupt manifest at {path}: {exc}") from exc
+
+
+@contextmanager
+def manifest_lock(repo_root: Path, family: str) -> Generator[None, None, None]:
+    """Acquire the per-family manifest advisory lock.
+
+    Callers that need to read and then conditionally remove a manifest
+    under a single lock should use this context manager with
+    :func:`read_manifest` and :func:`remove_manifest_unlocked` instead
+    of calling :func:`remove_manifest` (which acquires its own lock).
+    """
+    lock_path = _manifest_lock_path(repo_root, family)
+    try:
+        lock_file = lock_path.open("a")
+    except OSError as exc:
+        _log.warning("Could not open manifest lock %s: %s", lock_path, exc)
+        raise
+    try:
+        deadline = time.monotonic() + _MANIFEST_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    lock_file.close()
+                    _log.warning("Manifest lock timeout for family %s", family)
+                    raise TimeoutError(f"Manifest lock timeout for family '{family}'")
+                time.sleep(_MANIFEST_LOCK_POLL)
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                lock_file.close()
+                raise
+        yield
+    finally:
+        lock_file.close()
+
+
+def remove_manifest_unlocked(
+    repo_root: Path,
+    family: str = "",
+    *,
+    expected_operation: str | None = None,
+) -> bool:
+    """Remove the manifest file without acquiring the advisory lock.
+
+    The caller must already hold the per-family manifest lock (e.g. via
+    :func:`manifest_lock`).  This prevents double-lock issues when the
+    caller needs to read and remove under a single lock hold.
+    """
+    path = manifest_path(repo_root, family)
+    if not path.is_file():
+        return False
+    if expected_operation is not None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("operation") != expected_operation:
+                return False
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            _log.debug("Corrupt manifest during removal check for %s; safe to remove", path)
+    try:
+        path.unlink()
+        return True
+    except OSError as exc:
+        _log.warning("Could not remove manifest %s: %s", path, exc)
+    return False
 
 
 def remove_manifest(

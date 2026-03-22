@@ -44,6 +44,7 @@ from app.continuity.service import (
     continuity_rel_path,
 )
 from app.git_safety import safe_commit_paths, try_commit_file, try_commit_paths
+from app.segment_history.locking import acquire_sorted_source_locks, segment_history_source_lock, SegmentHistoryLockTimeout, LockInfrastructureError
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest
 from app.registry_lifecycle.service import externalize_superseded_pull, externalize_superseded_push
 from app.storage import canonical_json, read_text_file, safe_path, write_bytes_file, write_text_file
@@ -910,200 +911,208 @@ def replication_pull_service(
     enforce_payload_limit(settings, req.model_dump(), "replication_pull")
     auth.require("admin:peers")
 
-    state = load_replication_state(settings.repo_root)
-    idempotency_key = (req.idempotency_key or "").strip() or None
-    idem_ref = f"{req.source_peer}|{idempotency_key}" if idempotency_key else None
-    if idem_ref:
-        previous = state.get("pull_idempotency", {}).get(idem_ref)
-        if isinstance(previous, dict):
-            return {
-                "ok": True,
-                "idempotent_replay": True,
-                "source_peer": req.source_peer,
-                "received_count": int(previous.get("received_count") or 0),
-                "changed_count": int(previous.get("changed_count") or 0),
-                "deleted_count": int(previous.get("deleted_count") or 0),
-                "conflict_count": int(previous.get("conflict_count") or 0),
-                "skipped_count": int(previous.get("skipped_count") or 0),
-                "committed_files": [],
-                "latest_commit": gm.latest_commit(),
-            }
-
-    committed_files: list[str] = []
-    rollback_plan: list[tuple[Path, bytes | None]] = []
-    seen_paths: set[Path] = set()
-    changed_paths: list[Path] = []
-    changed_rels: list[str] = []
-    changed = 0
-    deleted = 0
-    skipped = 0
-    conflicts = 0
-    tombstones = _load_replication_tombstones(settings.repo_root)
-    tomb_entries = tombstones.setdefault("entries", {})
-    if not isinstance(tomb_entries, dict):
-        tomb_entries = {}
-        tombstones["entries"] = tomb_entries
-
-    def track_change(path: Path, rel: str) -> None:
-        _capture_path_state(path, rollback_plan, seen_paths)
-        if path not in changed_paths:
-            changed_paths.append(path)
-            changed_rels.append(rel)
-
-    now = datetime.now(timezone.utc)
+    _lock_dir = settings.repo_root / ".locks"
     try:
-        for file_row in req.files:
-            top = Path(file_row.path).parts[0] if Path(file_row.path).parts else ""
-            if top not in REPLICATION_ALLOWED_PREFIXES:
-                raise HTTPException(status_code=400, detail=f"Replication path namespace not allowed: {file_row.path}")
-            auth.require_write_path(file_row.path)
+        with acquire_sorted_source_locks(
+            ["registry:replication_state", "registry:replication_tombstones"],
+            lock_dir=_lock_dir,
+        ):
+            state = load_replication_state(settings.repo_root)
+            idempotency_key = (req.idempotency_key or "").strip() or None
+            idem_ref = f"{req.source_peer}|{idempotency_key}" if idempotency_key else None
+            if idem_ref:
+                previous = state.get("pull_idempotency", {}).get(idem_ref)
+                if isinstance(previous, dict):
+                    return {
+                        "ok": True,
+                        "idempotent_replay": True,
+                        "source_peer": req.source_peer,
+                        "received_count": int(previous.get("received_count") or 0),
+                        "changed_count": int(previous.get("changed_count") or 0),
+                        "deleted_count": int(previous.get("deleted_count") or 0),
+                        "conflict_count": int(previous.get("conflict_count") or 0),
+                        "skipped_count": int(previous.get("skipped_count") or 0),
+                        "committed_files": [],
+                        "latest_commit": gm.latest_commit(),
+                    }
 
-            path = safe_path(settings.repo_root, file_row.path)
-            local_exists = path.exists() and path.is_file()
-            local_content = read_text_file(path) if local_exists else None
-            local_epoch = path.stat().st_mtime if local_exists else 0.0
-            remote_epoch = _parse_dt_or_epoch(file_row.modified_at, now.timestamp(), parse_iso=parse_iso)
+            committed_files: list[str] = []
+            rollback_plan: list[tuple[Path, bytes | None]] = []
+            seen_paths: set[Path] = set()
+            changed_paths: list[Path] = []
+            changed_rels: list[str] = []
+            changed = 0
+            deleted = 0
+            skipped = 0
+            conflicts = 0
+            tombstones = _load_replication_tombstones(settings.repo_root)
+            tomb_entries = tombstones.setdefault("entries", {})
+            if not isinstance(tomb_entries, dict):
+                tomb_entries = {}
+                tombstones["entries"] = tomb_entries
 
-            if file_row.deleted:
-                if req.conflict_policy == "target_wins" and local_exists:
-                    conflicts += 1
-                    skipped += 1
-                    continue
-                if req.conflict_policy == "error" and local_exists:
-                    raise HTTPException(status_code=409, detail=f"Replication conflict on delete: {file_row.path}")
+            def track_change(path: Path, rel: str) -> None:
+                _capture_path_state(path, rollback_plan, seen_paths)
+                if path not in changed_paths:
+                    changed_paths.append(path)
+                    changed_rels.append(rel)
 
-                if local_exists:
+            now = datetime.now(timezone.utc)
+            try:
+                for file_row in req.files:
+                    top = Path(file_row.path).parts[0] if Path(file_row.path).parts else ""
+                    if top not in REPLICATION_ALLOWED_PREFIXES:
+                        raise HTTPException(status_code=400, detail=f"Replication path namespace not allowed: {file_row.path}")
+                    auth.require_write_path(file_row.path)
+
+                    path = safe_path(settings.repo_root, file_row.path)
+                    local_exists = path.exists() and path.is_file()
+                    local_content = read_text_file(path) if local_exists else None
+                    local_epoch = path.stat().st_mtime if local_exists else 0.0
+                    remote_epoch = _parse_dt_or_epoch(file_row.modified_at, now.timestamp(), parse_iso=parse_iso)
+
+                    if file_row.deleted:
+                        if req.conflict_policy == "target_wins" and local_exists:
+                            conflicts += 1
+                            skipped += 1
+                            continue
+                        if req.conflict_policy == "error" and local_exists:
+                            raise HTTPException(status_code=409, detail=f"Replication conflict on delete: {file_row.path}")
+
+                        if local_exists:
+                            track_change(path, file_row.path)
+                            try:
+                                path.unlink()
+                                deleted += 1
+                                changed += 1
+                            except Exception as e:
+                                raise HTTPException(status_code=500, detail=f"Failed to delete replicated path {file_row.path}: {e}") from e
+                        else:
+                            skipped += 1
+
+                        tomb_entries[file_row.path] = {
+                            "tombstone_at": file_row.tombstone_at or now.isoformat(),
+                            "source_peer": req.source_peer,
+                            "idempotency_key": idempotency_key,
+                        }
+                        continue
+
+                    if file_row.content is None or file_row.sha256 is None:
+                        raise HTTPException(status_code=400, detail=f"Replication file payload requires content+sha256 for upsert: {file_row.path}")
+                    if _sha256_text(file_row.content) != file_row.sha256:
+                        raise HTTPException(status_code=400, detail=f"Replication sha256 mismatch for {file_row.path}")
+
+                    if req.mode == "upsert" and local_exists and local_content == file_row.content:
+                        skipped += 1
+                        continue
+
+                    should_write = True
+                    if local_exists and local_content != file_row.content:
+                        if req.conflict_policy == "target_wins":
+                            should_write = False
+                            conflicts += 1
+                        elif req.conflict_policy == "error":
+                            raise HTTPException(status_code=409, detail=f"Replication conflict on path: {file_row.path}")
+                        elif req.conflict_policy == "last_write_wins" and remote_epoch < local_epoch:
+                            should_write = False
+                            conflicts += 1
+
+                    if not should_write:
+                        skipped += 1
+                        continue
+
                     track_change(path, file_row.path)
-                    try:
-                        path.unlink()
-                        deleted += 1
-                        changed += 1
-                    except Exception as e:
-                        raise HTTPException(status_code=500, detail=f"Failed to delete replicated path {file_row.path}: {e}") from e
-                else:
-                    skipped += 1
+                    write_text_file(path, file_row.content)
+                    changed += 1
+                    tomb_entries.pop(file_row.path, None)
 
-                tomb_entries[file_row.path] = {
-                    "tombstone_at": file_row.tombstone_at or now.isoformat(),
-                    "source_peer": req.source_peer,
+                # Synchronous pre-write capture per #112: externalize superseded pull row
+                _pull_history_extra: list[str] = []
+                pull_by_source = state.setdefault("last_pull_by_source", {})
+                previous_pull = pull_by_source.get(req.source_peer)
+                if isinstance(previous_pull, dict) and previous_pull:
+                    try:
+                        ext_result = externalize_superseded_pull(
+                            repo_root=settings.repo_root,
+                            now=now,
+                            source_peer=req.source_peer,
+                            previous_row=previous_pull,
+                            hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
+                        )
+                        if ext_result:
+                            _pull_history_extra.extend([ext_result["shard_path"], ext_result["stub_path"]])
+                            # Update history_meta per #112
+                            hm = state.setdefault("history_meta", {})
+                            if not isinstance(hm, dict):
+                                hm = {}
+                                state["history_meta"] = hm
+                            rs = hm.setdefault("replication_state", {})
+                            if not isinstance(rs, dict):
+                                rs = {}
+                                hm["replication_state"] = rs
+                            rs["last_cut_at"] = now.isoformat()
+                            rs["last_cut_pull_count"] = rs.get("last_cut_pull_count", 0) + 1 if isinstance(rs.get("last_cut_pull_count"), int) else 1
+                    except Exception:
+                        _logger.error(
+                            "Failed to externalize superseded pull row for %s; row data will be lost on overwrite: %s",
+                            req.source_peer,
+                            json.dumps(previous_pull, ensure_ascii=False, default=str),
+                            exc_info=True,
+                        )
+
+                pull_by_source[req.source_peer] = {
+                    "pulled_at": now.isoformat(),
+                    "received_count": len(req.files),
+                    "changed_count": changed,
+                    "deleted_count": deleted,
+                    "conflict_count": conflicts,
+                    "mode": req.mode,
+                    "conflict_policy": req.conflict_policy,
                     "idempotency_key": idempotency_key,
                 }
-                continue
+                if idem_ref:
+                    pull_map = state.setdefault("pull_idempotency", {})
+                    if not isinstance(pull_map, dict):
+                        pull_map = {}
+                        state["pull_idempotency"] = pull_map
+                    pull_map[idem_ref] = {
+                        "at": now.isoformat(),
+                        "received_count": len(req.files),
+                        "changed_count": changed,
+                        "deleted_count": deleted,
+                        "conflict_count": conflicts,
+                        "skipped_count": skipped,
+                    }
 
-            if file_row.content is None or file_row.sha256 is None:
-                raise HTTPException(status_code=400, detail=f"Replication file payload requires content+sha256 for upsert: {file_row.path}")
-            if _sha256_text(file_row.content) != file_row.sha256:
-                raise HTTPException(status_code=400, detail=f"Replication sha256 mismatch for {file_row.path}")
+                tomb_path = safe_path(settings.repo_root, REPLICATION_TOMBSTONES_REL)
+                track_change(tomb_path, REPLICATION_TOMBSTONES_REL)
+                _write_replication_tombstones(settings.repo_root, tombstones)
 
-            if req.mode == "upsert" and local_exists and local_content == file_row.content:
-                skipped += 1
-                continue
+                # Track history shard/stub paths for rollback if head write fails.
+                # These files were just created by externalize_superseded_pull, so we
+                # record them with prior bytes=None so rollback *deletes* them rather
+                # than restoring the new content (which would orphan shards the head
+                # no longer references).
+                for extra_rel in _pull_history_extra:
+                    extra_path = safe_path(settings.repo_root, extra_rel)
+                    resolved = extra_path.resolve()
+                    if resolved not in seen_paths:
+                        seen_paths.add(resolved)
+                        rollback_plan.append((extra_path, None))
+                    if extra_path not in changed_paths:
+                        changed_paths.append(extra_path)
+                        changed_rels.append(extra_rel)
 
-            should_write = True
-            if local_exists and local_content != file_row.content:
-                if req.conflict_policy == "target_wins":
-                    should_write = False
-                    conflicts += 1
-                elif req.conflict_policy == "error":
-                    raise HTTPException(status_code=409, detail=f"Replication conflict on path: {file_row.path}")
-                elif req.conflict_policy == "last_write_wins" and remote_epoch < local_epoch:
-                    should_write = False
-                    conflicts += 1
-
-            if not should_write:
-                skipped += 1
-                continue
-
-            track_change(path, file_row.path)
-            write_text_file(path, file_row.content)
-            changed += 1
-            tomb_entries.pop(file_row.path, None)
-
-        # Synchronous pre-write capture per #112: externalize superseded pull row
-        _pull_history_extra: list[str] = []
-        pull_by_source = state.setdefault("last_pull_by_source", {})
-        previous_pull = pull_by_source.get(req.source_peer)
-        if isinstance(previous_pull, dict) and previous_pull:
-            try:
-                ext_result = externalize_superseded_pull(
-                    repo_root=settings.repo_root,
-                    now=now,
-                    source_peer=req.source_peer,
-                    previous_row=previous_pull,
-                    hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
-                )
-                if ext_result:
-                    _pull_history_extra.extend([ext_result["shard_path"], ext_result["stub_path"]])
-                    # Update history_meta per #112
-                    hm = state.setdefault("history_meta", {})
-                    if not isinstance(hm, dict):
-                        hm = {}
-                        state["history_meta"] = hm
-                    rs = hm.setdefault("replication_state", {})
-                    if not isinstance(rs, dict):
-                        rs = {}
-                        hm["replication_state"] = rs
-                    rs["last_cut_at"] = now.isoformat()
-                    rs["last_cut_pull_count"] = rs.get("last_cut_pull_count", 0) + 1 if isinstance(rs.get("last_cut_pull_count"), int) else 1
-            except Exception:
-                _logger.error(
-                    "Failed to externalize superseded pull row for %s; row data will be lost on overwrite: %s",
-                    req.source_peer,
-                    json.dumps(previous_pull, ensure_ascii=False, default=str),
-                    exc_info=True,
-                )
-
-        pull_by_source[req.source_peer] = {
-            "pulled_at": now.isoformat(),
-            "received_count": len(req.files),
-            "changed_count": changed,
-            "deleted_count": deleted,
-            "conflict_count": conflicts,
-            "mode": req.mode,
-            "conflict_policy": req.conflict_policy,
-            "idempotency_key": idempotency_key,
-        }
-        if idem_ref:
-            pull_map = state.setdefault("pull_idempotency", {})
-            if not isinstance(pull_map, dict):
-                pull_map = {}
-                state["pull_idempotency"] = pull_map
-            pull_map[idem_ref] = {
-                "at": now.isoformat(),
-                "received_count": len(req.files),
-                "changed_count": changed,
-                "deleted_count": deleted,
-                "conflict_count": conflicts,
-                "skipped_count": skipped,
-            }
-
-        tomb_path = safe_path(settings.repo_root, REPLICATION_TOMBSTONES_REL)
-        track_change(tomb_path, REPLICATION_TOMBSTONES_REL)
-        _write_replication_tombstones(settings.repo_root, tombstones)
-
-        # Track history shard/stub paths for rollback if head write fails.
-        # These files were just created by externalize_superseded_pull, so we
-        # record them with prior bytes=None so rollback *deletes* them rather
-        # than restoring the new content (which would orphan shards the head
-        # no longer references).
-        for extra_rel in _pull_history_extra:
-            extra_path = safe_path(settings.repo_root, extra_rel)
-            resolved = extra_path.resolve()
-            if resolved not in seen_paths:
-                seen_paths.add(resolved)
-                rollback_plan.append((extra_path, None))
-            if extra_path not in changed_paths:
-                changed_paths.append(extra_path)
-                changed_rels.append(extra_rel)
-
-        state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
-        track_change(state_path, REPLICATION_STATE_REL)
-        _write_replication_state(settings.repo_root, state)
-    except Exception as exc:
-        _restore_rollback_plan(rollback_plan)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=500, detail=f"Failed replication pull write for {req.source_peer}: {exc}") from exc
+                state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
+                track_change(state_path, REPLICATION_STATE_REL)
+                _write_replication_state(settings.repo_root, state)
+            except Exception as exc:
+                _restore_rollback_plan(rollback_plan)
+                if isinstance(exc, HTTPException):
+                    raise
+                raise HTTPException(status_code=500, detail=f"Failed replication pull write for {req.source_peer}: {exc}") from exc
+    except (SegmentHistoryLockTimeout, LockInfrastructureError) as lock_exc:
+        raise HTTPException(status_code=503, detail="Replication state lock unavailable; retry") from lock_exc
 
     if safe_commit_paths(
         rollback_plan=rollback_plan,
@@ -1228,58 +1237,63 @@ def replication_push_service(
         raise HTTPException(status_code=502, detail=f"Failed replication push: {e}") from e
 
     auth.require_write_path(REPLICATION_STATE_REL)
-    state = load_replication_state(settings.repo_root)
-
-    # Synchronous pre-write capture per #112: externalize superseded push row
-    push_now = datetime.now(timezone.utc)  # single timestamp for shard cut_at and state pushed_at
-    _history_extra_paths: list[str] = []
-    previous_push = state.get("last_push")
-    if isinstance(previous_push, dict) and previous_push:
-        try:
-            ext_result = externalize_superseded_push(
-                repo_root=settings.repo_root,
-                now=push_now,
-                previous_row=previous_push,
-                hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
-            )
-            if ext_result:
-                _history_extra_paths.extend([ext_result["shard_path"], ext_result["stub_path"]])
-                # Update history_meta per #112
-                hm = state.setdefault("history_meta", {})
-                if not isinstance(hm, dict):
-                    hm = {}
-                    state["history_meta"] = hm
-                rs = hm.setdefault("replication_state", {})
-                if not isinstance(rs, dict):
-                    rs = {}
-                    hm["replication_state"] = rs
-                rs["last_cut_at"] = push_now.isoformat()
-                rs["last_cut_push_count"] = rs.get("last_cut_push_count", 0) + 1 if isinstance(rs.get("last_cut_push_count"), int) else 1
-        except Exception:
-            _logger.error(
-                "Failed to externalize superseded push row; row data will be lost on overwrite: %s",
-                json.dumps(previous_push, ensure_ascii=False, default=str),
-                exc_info=True,
-            )
-
-    state["last_push"] = {
-        "pushed_at": push_now.isoformat(),
-        "target_url": target_url,
-        "file_count": len(files),
-        "by_prefix": by_prefix,
-        "idempotency_key": push_id,
-        "conflict_policy": req.conflict_policy,
-        "include_deleted": req.include_deleted,
-    }
-    committed_files = []
+    _push_lock_dir = settings.repo_root / ".locks"
     try:
-        state_path = _write_replication_state(settings.repo_root, state)
-    except Exception:
-        # Clean up shard/stub files created by externalize_superseded_push
-        # to avoid orphaned shards the head doesn't reference.
-        for p in _history_extra_paths:
-            safe_path(settings.repo_root, p).unlink(missing_ok=True)
-        raise
+        with segment_history_source_lock("registry:replication_state", lock_dir=_push_lock_dir):
+            state = load_replication_state(settings.repo_root)
+
+            # Synchronous pre-write capture per #112: externalize superseded push row
+            push_now = datetime.now(timezone.utc)  # single timestamp for shard cut_at and state pushed_at
+            _history_extra_paths: list[str] = []
+            previous_push = state.get("last_push")
+            if isinstance(previous_push, dict) and previous_push:
+                try:
+                    ext_result = externalize_superseded_push(
+                        repo_root=settings.repo_root,
+                        now=push_now,
+                        previous_row=previous_push,
+                        hot_retention_days=int(getattr(settings, "replication_history_hot_retention_days", 14)),
+                    )
+                    if ext_result:
+                        _history_extra_paths.extend([ext_result["shard_path"], ext_result["stub_path"]])
+                        # Update history_meta per #112
+                        hm = state.setdefault("history_meta", {})
+                        if not isinstance(hm, dict):
+                            hm = {}
+                            state["history_meta"] = hm
+                        rs = hm.setdefault("replication_state", {})
+                        if not isinstance(rs, dict):
+                            rs = {}
+                            hm["replication_state"] = rs
+                        rs["last_cut_at"] = push_now.isoformat()
+                        rs["last_cut_push_count"] = rs.get("last_cut_push_count", 0) + 1 if isinstance(rs.get("last_cut_push_count"), int) else 1
+                except Exception:
+                    _logger.error(
+                        "Failed to externalize superseded push row; row data will be lost on overwrite: %s",
+                        json.dumps(previous_push, ensure_ascii=False, default=str),
+                        exc_info=True,
+                    )
+
+            state["last_push"] = {
+                "pushed_at": push_now.isoformat(),
+                "target_url": target_url,
+                "file_count": len(files),
+                "by_prefix": by_prefix,
+                "idempotency_key": push_id,
+                "conflict_policy": req.conflict_policy,
+                "include_deleted": req.include_deleted,
+            }
+            committed_files = []
+            try:
+                state_path = _write_replication_state(settings.repo_root, state)
+            except Exception:
+                # Clean up shard/stub files created by externalize_superseded_push
+                # to avoid orphaned shards the head doesn't reference.
+                for p in _history_extra_paths:
+                    safe_path(settings.repo_root, p).unlink(missing_ok=True)
+                raise
+    except (SegmentHistoryLockTimeout, LockInfrastructureError) as lock_exc:
+        raise HTTPException(status_code=503, detail="Replication state lock unavailable; retry") from lock_exc
     warnings: list[str] = []
     if _history_extra_paths:
         push_commit_paths = [state_path] + [safe_path(settings.repo_root, p) for p in _history_extra_paths]

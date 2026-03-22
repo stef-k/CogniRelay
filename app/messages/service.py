@@ -17,6 +17,7 @@ from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.git_safety import try_commit_paths
 from app.models import MessageAckRequest, MessageReplayRequest, MessageSendRequest, RelayForwardRequest
 from app.segment_history.append import SegmentHistoryAppendError, locked_append_jsonl, locked_append_jsonl_multi
+from app.segment_history.locking import LockInfrastructureError, SegmentHistoryLockTimeout, segment_history_source_lock
 from app.storage import safe_path, write_bytes_file, write_text_file
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
@@ -198,162 +199,166 @@ def messages_send_service(
     if settings.require_signed_ingress and req.signed_envelope is None:
         raise HTTPException(status_code=400, detail="signed_envelope is required when strict signed ingress is enabled")
 
-    state = load_delivery_state(settings.repo_root)
-    if req.idempotency_key:
-        idem_key = _idempotency_scope_key(req.sender, req.recipient, req.idempotency_key)
-        existing_id = state.get("idempotency", {}).get(idem_key)
-        if existing_id:
-            existing = state.get("records", {}).get(existing_id)
-            if isinstance(existing, dict):
-                verification = None
-                if req.signed_envelope is not None:
-                    signed_payload = {
-                        "thread_id": req.thread_id,
-                        "sender": req.sender,
-                        "recipient": req.recipient,
-                        "subject": req.subject,
-                        "body_md": req.body_md,
-                        "priority": req.priority,
-                        "attachments": req.attachments,
-                        "idempotency_key": req.idempotency_key,
-                        "delivery": req.delivery.model_dump(),
-                    }
-                    verification = verify_signed_payload(
-                        settings=settings,
-                        gm=gm,
-                        auth=auth,
-                        payload=signed_payload,
-                        key_id=req.signed_envelope.key_id,
-                        nonce=req.signed_envelope.nonce,
-                        expires_at=req.signed_envelope.expires_at,
-                        signature=req.signed_envelope.signature,
-                        algorithm=req.signed_envelope.algorithm,
-                        consume_nonce=False,
-                        audit_event="messages_send_signature",
-                        verification_failure_count=verification_failure_count,
-                        record_verification_failure=record_verification_failure,
-                        audit=audit,
-                    )
-                    if not verification["valid"]:
-                        raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {verification['reason']}")
-
-                now = datetime.now(timezone.utc)
-                audit(auth, "message_send_idempotent_replay", {"idempotency_key": req.idempotency_key, "message_id": existing_id})
-                early_result: dict[str, Any] = {
-                    "ok": True,
-                    "idempotent_replay": True,
-                    "message": existing.get("message"),
-                    "delivery_state": delivery_record_view(existing, now, parse_iso=parse_iso),
-                    "signature_verification": verification,
-                    "committed_files": [],
-                    "latest_commit": gm.latest_commit(),
-                }
-                if state.get("warnings"):
-                    early_result["warnings"] = state["warnings"]
-                return early_result
-
-    signature_verification = None
-    committed_files: list[str] = []
-    if req.signed_envelope is not None:
-        signed_payload = {
-            "thread_id": req.thread_id,
-            "sender": req.sender,
-            "recipient": req.recipient,
-            "subject": req.subject,
-            "body_md": req.body_md,
-            "priority": req.priority,
-            "attachments": req.attachments,
-            "idempotency_key": req.idempotency_key,
-            "delivery": req.delivery.model_dump(),
-        }
-        signature_verification = verify_signed_payload(
-            settings=settings,
-            gm=gm,
-            auth=auth,
-            payload=signed_payload,
-            key_id=req.signed_envelope.key_id,
-            nonce=req.signed_envelope.nonce,
-            expires_at=req.signed_envelope.expires_at,
-            signature=req.signed_envelope.signature,
-            algorithm=req.signed_envelope.algorithm,
-            consume_nonce=req.signed_envelope.consume_nonce,
-            audit_event="messages_send_signature",
-            verification_failure_count=verification_failure_count,
-            record_verification_failure=record_verification_failure,
-            audit=audit,
-        )
-        if not signature_verification["valid"]:
-            raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {signature_verification['reason']}")
-        committed_files.extend(signature_verification.get("committed_files", []))
-
-    now = datetime.now(timezone.utc)
-    msg = {
-        "id": f"msg_{uuid4().hex[:12]}",
-        "thread_id": req.thread_id,
-        "from": req.sender,
-        "to": req.recipient,
-        "sent_at": now.isoformat(),
-        "subject": req.subject,
-        "body_md": req.body_md,
-        "priority": req.priority,
-        "attachments": req.attachments,
-        "idempotency_key": req.idempotency_key,
-        "delivery": req.delivery.model_dump(),
-    }
-
-    inbox_path_rel = f"messages/inbox/{req.recipient}.jsonl"
-    outbox_path_rel = f"messages/outbox/{req.sender}.jsonl"
-    thread_path_rel = f"messages/threads/{req.thread_id}.jsonl"
-
-    rels = [inbox_path_rel, outbox_path_rel, thread_path_rel]
-    paths = [safe_path(settings.repo_root, r) for r in rels]
-
-    should_track_delivery = bool(req.idempotency_key or req.delivery.requires_ack)
-    delivery_state = None
-    warnings: list[str] = list(state.get("warnings") or [])
-    if should_track_delivery:
-        ack_deadline = None
-        if req.delivery.requires_ack:
-            ack_deadline = (now + timedelta(seconds=req.delivery.ack_timeout_seconds)).isoformat()
-        status = "pending_ack" if req.delivery.requires_ack else "delivered"
-        record = {
-            "message_id": msg["id"],
-            "thread_id": req.thread_id,
-            "from": req.sender,
-            "to": req.recipient,
-            "subject": req.subject,
-            "idempotency_key": req.idempotency_key,
-            "status": status,
-            "requires_ack": req.delivery.requires_ack,
-            "ack_timeout_seconds": req.delivery.ack_timeout_seconds,
-            "max_retries": req.delivery.max_retries,
-            "retry_count": 0,
-            "sent_at": now.isoformat(),
-            "ack_deadline": ack_deadline,
-            "acks": [],
-            "last_error": None,
-            "message": msg,
-        }
-        state.setdefault("records", {})[msg["id"]] = record
-        if req.idempotency_key:
-            key = _idempotency_scope_key(req.sender, req.recipient, req.idempotency_key)
-            state.setdefault("idempotency", {})[key] = msg["id"]
-        delivery_state = delivery_record_view(record, now, parse_iso=parse_iso)
-
-    commit_paths = list(paths)
-    commit_rels = list(rels)
-    append_targets = _capture_append_targets(paths)
-    state_rollback_plan = _capture_rollback_plan([_delivery_state_path(settings.repo_root)]) if should_track_delivery else []
     try:
-        locked_append_jsonl_multi(paths, msg, repo_root=settings.repo_root, gm=gm, settings=settings)
-        if should_track_delivery:
-            state_path = _write_delivery_state(settings.repo_root, state)
-            commit_paths.append(state_path)
-            commit_rels.append(DELIVERY_STATE_REL)
-    except Exception:
-        _restore_rollback_plan(state_rollback_plan)
-        _restore_appends(append_targets)
-        raise
+        with segment_history_source_lock("registry:delivery_index", lock_dir=settings.repo_root / ".locks"):
+            state = load_delivery_state(settings.repo_root)
+            if req.idempotency_key:
+                idem_key = _idempotency_scope_key(req.sender, req.recipient, req.idempotency_key)
+                existing_id = state.get("idempotency", {}).get(idem_key)
+                if existing_id:
+                    existing = state.get("records", {}).get(existing_id)
+                    if isinstance(existing, dict):
+                        verification = None
+                        if req.signed_envelope is not None:
+                            signed_payload = {
+                                "thread_id": req.thread_id,
+                                "sender": req.sender,
+                                "recipient": req.recipient,
+                                "subject": req.subject,
+                                "body_md": req.body_md,
+                                "priority": req.priority,
+                                "attachments": req.attachments,
+                                "idempotency_key": req.idempotency_key,
+                                "delivery": req.delivery.model_dump(),
+                            }
+                            verification = verify_signed_payload(
+                                settings=settings,
+                                gm=gm,
+                                auth=auth,
+                                payload=signed_payload,
+                                key_id=req.signed_envelope.key_id,
+                                nonce=req.signed_envelope.nonce,
+                                expires_at=req.signed_envelope.expires_at,
+                                signature=req.signed_envelope.signature,
+                                algorithm=req.signed_envelope.algorithm,
+                                consume_nonce=False,
+                                audit_event="messages_send_signature",
+                                verification_failure_count=verification_failure_count,
+                                record_verification_failure=record_verification_failure,
+                                audit=audit,
+                            )
+                            if not verification["valid"]:
+                                raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {verification['reason']}")
+
+                        now = datetime.now(timezone.utc)
+                        audit(auth, "message_send_idempotent_replay", {"idempotency_key": req.idempotency_key, "message_id": existing_id})
+                        early_result: dict[str, Any] = {
+                            "ok": True,
+                            "idempotent_replay": True,
+                            "message": existing.get("message"),
+                            "delivery_state": delivery_record_view(existing, now, parse_iso=parse_iso),
+                            "signature_verification": verification,
+                            "committed_files": [],
+                            "latest_commit": gm.latest_commit(),
+                        }
+                        if state.get("warnings"):
+                            early_result["warnings"] = state["warnings"]
+                        return early_result
+
+            signature_verification = None
+            committed_files: list[str] = []
+            if req.signed_envelope is not None:
+                signed_payload = {
+                    "thread_id": req.thread_id,
+                    "sender": req.sender,
+                    "recipient": req.recipient,
+                    "subject": req.subject,
+                    "body_md": req.body_md,
+                    "priority": req.priority,
+                    "attachments": req.attachments,
+                    "idempotency_key": req.idempotency_key,
+                    "delivery": req.delivery.model_dump(),
+                }
+                signature_verification = verify_signed_payload(
+                    settings=settings,
+                    gm=gm,
+                    auth=auth,
+                    payload=signed_payload,
+                    key_id=req.signed_envelope.key_id,
+                    nonce=req.signed_envelope.nonce,
+                    expires_at=req.signed_envelope.expires_at,
+                    signature=req.signed_envelope.signature,
+                    algorithm=req.signed_envelope.algorithm,
+                    consume_nonce=req.signed_envelope.consume_nonce,
+                    audit_event="messages_send_signature",
+                    verification_failure_count=verification_failure_count,
+                    record_verification_failure=record_verification_failure,
+                    audit=audit,
+                )
+                if not signature_verification["valid"]:
+                    raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {signature_verification['reason']}")
+                committed_files.extend(signature_verification.get("committed_files", []))
+
+            now = datetime.now(timezone.utc)
+            msg = {
+                "id": f"msg_{uuid4().hex[:12]}",
+                "thread_id": req.thread_id,
+                "from": req.sender,
+                "to": req.recipient,
+                "sent_at": now.isoformat(),
+                "subject": req.subject,
+                "body_md": req.body_md,
+                "priority": req.priority,
+                "attachments": req.attachments,
+                "idempotency_key": req.idempotency_key,
+                "delivery": req.delivery.model_dump(),
+            }
+
+            inbox_path_rel = f"messages/inbox/{req.recipient}.jsonl"
+            outbox_path_rel = f"messages/outbox/{req.sender}.jsonl"
+            thread_path_rel = f"messages/threads/{req.thread_id}.jsonl"
+
+            rels = [inbox_path_rel, outbox_path_rel, thread_path_rel]
+            paths = [safe_path(settings.repo_root, r) for r in rels]
+
+            should_track_delivery = bool(req.idempotency_key or req.delivery.requires_ack)
+            delivery_state = None
+            warnings: list[str] = list(state.get("warnings") or [])
+            if should_track_delivery:
+                ack_deadline = None
+                if req.delivery.requires_ack:
+                    ack_deadline = (now + timedelta(seconds=req.delivery.ack_timeout_seconds)).isoformat()
+                status = "pending_ack" if req.delivery.requires_ack else "delivered"
+                record = {
+                    "message_id": msg["id"],
+                    "thread_id": req.thread_id,
+                    "from": req.sender,
+                    "to": req.recipient,
+                    "subject": req.subject,
+                    "idempotency_key": req.idempotency_key,
+                    "status": status,
+                    "requires_ack": req.delivery.requires_ack,
+                    "ack_timeout_seconds": req.delivery.ack_timeout_seconds,
+                    "max_retries": req.delivery.max_retries,
+                    "retry_count": 0,
+                    "sent_at": now.isoformat(),
+                    "ack_deadline": ack_deadline,
+                    "acks": [],
+                    "last_error": None,
+                    "message": msg,
+                }
+                state.setdefault("records", {})[msg["id"]] = record
+                if req.idempotency_key:
+                    key = _idempotency_scope_key(req.sender, req.recipient, req.idempotency_key)
+                    state.setdefault("idempotency", {})[key] = msg["id"]
+                delivery_state = delivery_record_view(record, now, parse_iso=parse_iso)
+
+            commit_paths = list(paths)
+            commit_rels = list(rels)
+            append_targets = _capture_append_targets(paths)
+            state_rollback_plan = _capture_rollback_plan([_delivery_state_path(settings.repo_root)]) if should_track_delivery else []
+            try:
+                locked_append_jsonl_multi(paths, msg, repo_root=settings.repo_root, gm=gm, settings=settings)
+                if should_track_delivery:
+                    state_path = _write_delivery_state(settings.repo_root, state)
+                    commit_paths.append(state_path)
+                    commit_rels.append(DELIVERY_STATE_REL)
+            except Exception:
+                _restore_rollback_plan(state_rollback_plan)
+                _restore_appends(append_targets)
+                raise
+    except (SegmentHistoryLockTimeout, LockInfrastructureError):
+        raise HTTPException(status_code=503, detail="Delivery state lock unavailable; retry")
 
     if try_commit_paths(paths=commit_paths, gm=gm, commit_message=f"messages: send {msg['id']}"):
         committed_files.extend(commit_rels)
@@ -388,45 +393,49 @@ def messages_ack_service(
     auth.require("write:messages")
     auth.require_write_path(DELIVERY_STATE_REL)
 
-    state = load_delivery_state(repo_root)
-    record = state.get("records", {}).get(req.message_id)
-    if not isinstance(record, dict):
-        raise HTTPException(status_code=404, detail="Tracked message not found")
-
-    now = datetime.now(timezone.utc)
-    ack_row = {
-        "ack_id": req.ack_id or f"ack_{uuid4().hex[:12]}",
-        "message_id": req.message_id,
-        "status": req.status,
-        "reason": req.reason,
-        "ack_at": now.isoformat(),
-        "by": auth.peer_id,
-    }
-    record.setdefault("acks", []).append(ack_row)
-
-    if req.status == "accepted":
-        record["status"] = "acked"
-    elif req.status == "rejected":
-        record["status"] = "dead_letter"
-        record["last_error"] = req.reason or "rejected"
-    else:
-        record["status"] = "pending_ack"
-        timeout = int(record.get("ack_timeout_seconds") or 300)
-        record["ack_deadline"] = (now + timedelta(seconds=timeout)).isoformat()
-
-    committed_files = []
-    ack_rel = f"messages/acks/{req.message_id}.jsonl"
-    state_path = _delivery_state_path(repo_root)
-    ack_path = safe_path(repo_root, ack_rel)
-    state_rollback_plan = _capture_rollback_plan([state_path])
-    ack_append_targets = _capture_append_targets([ack_path])
     try:
-        _write_delivery_state(repo_root, state)
-        locked_append_jsonl(ack_path, ack_row, repo_root=repo_root, gm=gm, settings=None, family="message_stream")
-    except Exception:
-        _restore_appends(ack_append_targets)
-        _restore_rollback_plan(state_rollback_plan)
-        raise
+        with segment_history_source_lock("registry:delivery_index", lock_dir=repo_root / ".locks"):
+            state = load_delivery_state(repo_root)
+            record = state.get("records", {}).get(req.message_id)
+            if not isinstance(record, dict):
+                raise HTTPException(status_code=404, detail="Tracked message not found")
+
+            now = datetime.now(timezone.utc)
+            ack_row = {
+                "ack_id": req.ack_id or f"ack_{uuid4().hex[:12]}",
+                "message_id": req.message_id,
+                "status": req.status,
+                "reason": req.reason,
+                "ack_at": now.isoformat(),
+                "by": auth.peer_id,
+            }
+            record.setdefault("acks", []).append(ack_row)
+
+            if req.status == "accepted":
+                record["status"] = "acked"
+            elif req.status == "rejected":
+                record["status"] = "dead_letter"
+                record["last_error"] = req.reason or "rejected"
+            else:
+                record["status"] = "pending_ack"
+                timeout = int(record.get("ack_timeout_seconds") or 300)
+                record["ack_deadline"] = (now + timedelta(seconds=timeout)).isoformat()
+
+            committed_files = []
+            ack_rel = f"messages/acks/{req.message_id}.jsonl"
+            state_path = _delivery_state_path(repo_root)
+            ack_path = safe_path(repo_root, ack_rel)
+            state_rollback_plan = _capture_rollback_plan([state_path])
+            ack_append_targets = _capture_append_targets([ack_path])
+            try:
+                _write_delivery_state(repo_root, state)
+                locked_append_jsonl(ack_path, ack_row, repo_root=repo_root, gm=gm, settings=None, family="message_stream")
+            except Exception:
+                _restore_appends(ack_append_targets)
+                _restore_rollback_plan(state_rollback_plan)
+                raise
+    except (SegmentHistoryLockTimeout, LockInfrastructureError):
+        raise HTTPException(status_code=503, detail="Delivery state lock unavailable; retry")
     warnings: list[str] = list(state.get("warnings") or [])
     if try_commit_paths(paths=[state_path, ack_path], gm=gm, commit_message=f"messages: ack {req.message_id}"):
         committed_files.extend([DELIVERY_STATE_REL, ack_rel])
@@ -798,99 +807,103 @@ def replay_messages_service(
     auth.require("write:messages")
     auth.require_write_path("messages/inbox/x.jsonl")
     auth.require_write_path(DELIVERY_STATE_REL)
-    state = load_delivery_state(settings.repo_root)
-    record = state.get("records", {}).get(req.message_id)
-    if not isinstance(record, dict):
-        raise HTTPException(status_code=404, detail="Tracked message not found")
-
-    now = datetime.now(timezone.utc)
-    effective = effective_delivery_status(record, now, parse_iso=parse_iso)
-    if not req.force and effective != "dead_letter":
-        raise HTTPException(status_code=409, detail=f"Replay requires dead_letter status; got {effective}")
-    retry_count = int(record.get("retry_count") or 0)
-    max_retries = int(record.get("max_retries") or 0)
-    if not req.force and retry_count >= max_retries:
-        raise HTTPException(status_code=409, detail=f"Replay retry limit reached ({retry_count}/{max_retries})")
-
-    original = record.get("message")
-    if not isinstance(original, dict):
-        original = {
-            "id": req.message_id,
-            "thread_id": record.get("thread_id"),
-            "from": record.get("from"),
-            "to": record.get("to"),
-            "subject": record.get("subject"),
-            "body_md": "",
-            "attachments": [],
-            "priority": "normal",
-            "delivery": {
-                "requires_ack": bool(record.get("requires_ack")),
-                "ack_timeout_seconds": int(record.get("ack_timeout_seconds") or req.ack_timeout_seconds),
-                "max_retries": max_retries,
-            },
-        }
-
-    new_message_id = f"msg_{uuid4().hex[:12]}"
-    replay_msg = dict(original)
-    replay_msg["id"] = new_message_id
-    replay_msg["replay_of"] = req.message_id
-    replay_msg["sent_at"] = now.isoformat()
-
-    sender = str(replay_msg.get("from") or record.get("from") or "unknown")
-    recipient = str(replay_msg.get("to") or record.get("to") or "unknown")
-    thread_id = str(replay_msg.get("thread_id") or record.get("thread_id") or "thread_unknown")
-    inbox_rel = f"messages/inbox/{recipient}.jsonl"
-    outbox_rel = f"messages/outbox/{sender}.jsonl"
-    thread_rel = f"messages/threads/{thread_id}.jsonl"
-    rels = [inbox_rel, outbox_rel, thread_rel]
-    for rel in rels:
-        auth.require_write_path(rel)
-    paths = [safe_path(settings.repo_root, r) for r in rels]
-    committed_files = []
-
-    if req.requires_ack:
-        ack_deadline = (now + timedelta(seconds=req.ack_timeout_seconds)).isoformat()
-        new_status = "pending_ack"
-    else:
-        ack_deadline = None
-        new_status = "delivered"
-
-    new_record = dict(record)
-    new_record.update(
-        {
-            "message_id": new_message_id,
-            "thread_id": thread_id,
-            "from": sender,
-            "to": recipient,
-            "status": new_status,
-            "requires_ack": req.requires_ack,
-            "ack_timeout_seconds": req.ack_timeout_seconds,
-            "retry_count": retry_count + 1,
-            "sent_at": now.isoformat(),
-            "ack_deadline": ack_deadline,
-            "acks": [],
-            "last_error": None,
-            "replay_of": req.message_id,
-            "message": replay_msg,
-        }
-    )
-    state.setdefault("records", {})[new_message_id] = new_record
-    record["status"] = "replayed"
-    record["replayed_to"] = new_message_id
-    record["updated_at"] = now.isoformat()
-    if req.reason:
-        record["replay_reason"] = req.reason
-
-    state_path = _delivery_state_path(settings.repo_root)
-    append_targets = _capture_append_targets(paths)
-    state_rollback_plan = _capture_rollback_plan([state_path])
     try:
-        locked_append_jsonl_multi(paths, replay_msg, repo_root=settings.repo_root, gm=gm, settings=settings)
-        _write_delivery_state(settings.repo_root, state)
-    except Exception:
-        _restore_rollback_plan(state_rollback_plan)
-        _restore_appends(append_targets)
-        raise
+        with segment_history_source_lock("registry:delivery_index", lock_dir=settings.repo_root / ".locks"):
+            state = load_delivery_state(settings.repo_root)
+            record = state.get("records", {}).get(req.message_id)
+            if not isinstance(record, dict):
+                raise HTTPException(status_code=404, detail="Tracked message not found")
+
+            now = datetime.now(timezone.utc)
+            effective = effective_delivery_status(record, now, parse_iso=parse_iso)
+            if not req.force and effective != "dead_letter":
+                raise HTTPException(status_code=409, detail=f"Replay requires dead_letter status; got {effective}")
+            retry_count = int(record.get("retry_count") or 0)
+            max_retries = int(record.get("max_retries") or 0)
+            if not req.force and retry_count >= max_retries:
+                raise HTTPException(status_code=409, detail=f"Replay retry limit reached ({retry_count}/{max_retries})")
+
+            original = record.get("message")
+            if not isinstance(original, dict):
+                original = {
+                    "id": req.message_id,
+                    "thread_id": record.get("thread_id"),
+                    "from": record.get("from"),
+                    "to": record.get("to"),
+                    "subject": record.get("subject"),
+                    "body_md": "",
+                    "attachments": [],
+                    "priority": "normal",
+                    "delivery": {
+                        "requires_ack": bool(record.get("requires_ack")),
+                        "ack_timeout_seconds": int(record.get("ack_timeout_seconds") or req.ack_timeout_seconds),
+                        "max_retries": max_retries,
+                    },
+                }
+
+            new_message_id = f"msg_{uuid4().hex[:12]}"
+            replay_msg = dict(original)
+            replay_msg["id"] = new_message_id
+            replay_msg["replay_of"] = req.message_id
+            replay_msg["sent_at"] = now.isoformat()
+
+            sender = str(replay_msg.get("from") or record.get("from") or "unknown")
+            recipient = str(replay_msg.get("to") or record.get("to") or "unknown")
+            thread_id = str(replay_msg.get("thread_id") or record.get("thread_id") or "thread_unknown")
+            inbox_rel = f"messages/inbox/{recipient}.jsonl"
+            outbox_rel = f"messages/outbox/{sender}.jsonl"
+            thread_rel = f"messages/threads/{thread_id}.jsonl"
+            rels = [inbox_rel, outbox_rel, thread_rel]
+            for rel in rels:
+                auth.require_write_path(rel)
+            paths = [safe_path(settings.repo_root, r) for r in rels]
+            committed_files = []
+
+            if req.requires_ack:
+                ack_deadline = (now + timedelta(seconds=req.ack_timeout_seconds)).isoformat()
+                new_status = "pending_ack"
+            else:
+                ack_deadline = None
+                new_status = "delivered"
+
+            new_record = dict(record)
+            new_record.update(
+                {
+                    "message_id": new_message_id,
+                    "thread_id": thread_id,
+                    "from": sender,
+                    "to": recipient,
+                    "status": new_status,
+                    "requires_ack": req.requires_ack,
+                    "ack_timeout_seconds": req.ack_timeout_seconds,
+                    "retry_count": retry_count + 1,
+                    "sent_at": now.isoformat(),
+                    "ack_deadline": ack_deadline,
+                    "acks": [],
+                    "last_error": None,
+                    "replay_of": req.message_id,
+                    "message": replay_msg,
+                }
+            )
+            state.setdefault("records", {})[new_message_id] = new_record
+            record["status"] = "replayed"
+            record["replayed_to"] = new_message_id
+            record["updated_at"] = now.isoformat()
+            if req.reason:
+                record["replay_reason"] = req.reason
+
+            state_path = _delivery_state_path(settings.repo_root)
+            append_targets = _capture_append_targets(paths)
+            state_rollback_plan = _capture_rollback_plan([state_path])
+            try:
+                locked_append_jsonl_multi(paths, replay_msg, repo_root=settings.repo_root, gm=gm, settings=settings)
+                _write_delivery_state(settings.repo_root, state)
+            except Exception:
+                _restore_rollback_plan(state_rollback_plan)
+                _restore_appends(append_targets)
+                raise
+    except (SegmentHistoryLockTimeout, LockInfrastructureError):
+        raise HTTPException(status_code=503, detail="Delivery state lock unavailable; retry")
     warnings: list[str] = list(state.get("warnings") or [])
     commit_paths = paths + [state_path]
     commit_rels = rels + [DELIVERY_STATE_REL]

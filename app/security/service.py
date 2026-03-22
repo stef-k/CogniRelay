@@ -23,6 +23,7 @@ from app.models import (
     SecurityTokenRotateRequest,
 )
 from app.git_safety import safe_commit_updated_file, try_commit_file
+from app.segment_history.locking import segment_history_source_lock, SegmentHistoryLockTimeout, LockInfrastructureError
 from app.storage import safe_path, write_text_file
 
 TOKEN_CONFIG_REL = "config/peer_tokens.json"
@@ -801,25 +802,29 @@ def verify_signed_payload_service(
     elif not signature_valid:
         reason = "invalid_signature"
     elif consume_nonce:
-        nonce_payload = _load_nonce_index(settings.repo_root)
-        _prune_nonce_entries(nonce_payload, now)
-        entries = nonce_payload.setdefault("entries", {})
-        key = f"{key_id}|{nonce}"
-        if key in entries:
-            replay_detected = True
-            reason = "replay_detected"
-        else:
-            entries[key] = {"key_id": key_id, "nonce": nonce, "first_seen_at": now.isoformat(), "expires_at": expires_at}
-            nonce_path = _write_nonce_index(settings.repo_root, nonce_payload)
-            nonce_committed = try_commit_file(
-                path=nonce_path, gm=gm,
-                commit_message=f"messages: consume nonce {key_id}:{nonce}",
-            )
-            if nonce_committed:
-                committed_files.append(NONCE_INDEX_REL)
-            else:
-                warnings.append("nonce_commit_failed: nonce consumed on disk but not committed to git")
-            nonce_consumed = True
+        try:
+            with segment_history_source_lock("registry:nonce_index", lock_dir=settings.repo_root / ".locks"):
+                nonce_payload = _load_nonce_index(settings.repo_root)
+                _prune_nonce_entries(nonce_payload, now)
+                entries = nonce_payload.setdefault("entries", {})
+                key = f"{key_id}|{nonce}"
+                if key in entries:
+                    replay_detected = True
+                    reason = "replay_detected"
+                else:
+                    entries[key] = {"key_id": key_id, "nonce": nonce, "first_seen_at": now.isoformat(), "expires_at": expires_at}
+                    nonce_path = _write_nonce_index(settings.repo_root, nonce_payload)
+                    nonce_committed = try_commit_file(
+                        path=nonce_path, gm=gm,
+                        commit_message=f"messages: consume nonce {key_id}:{nonce}",
+                    )
+                    if nonce_committed:
+                        committed_files.append(NONCE_INDEX_REL)
+                    else:
+                        warnings.append("nonce_commit_failed: nonce consumed on disk but not committed to git")
+                    nonce_consumed = True
+        except (SegmentHistoryLockTimeout, LockInfrastructureError):
+            raise HTTPException(status_code=503, detail="Nonce index lock unavailable; retry")
 
     valid = reason == "ok"
     if not valid:
