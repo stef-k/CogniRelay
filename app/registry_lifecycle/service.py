@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from app.git_safety import try_commit_paths
+from app.segment_history.locking import (
+    LockInfrastructureError,
+    segment_history_source_lock,
+)
 from app.storage import safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
@@ -179,6 +184,83 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _write_json_exclusive(path: Path, data: dict[str, Any]) -> None:
+    """Write JSON data to path, failing if the file already exists.
+
+    Uses ``O_CREAT | O_EXCL`` to claim the filename atomically, then
+    delegates to ``write_text_file`` for durable content (temp+fsync+rename).
+    If the durable write fails, the empty sentinel is removed so a future
+    retry can reclaim the sequence.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    os.close(fd)
+    try:
+        write_text_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+_SHARD_WRITE_MAX_RETRIES = 3
+
+
+def _write_shard_pair_exclusive(
+    *,
+    family: str,
+    cut_at: datetime,
+    shard_dir: Path,
+    stub_dir: Path,
+    shard_dir_rel: str,
+    stub_dir_rel: str,
+    shard_payload: dict[str, Any],
+    stub_payload: dict[str, Any],
+) -> tuple[str, str, str]:
+    """Allocate a shard ID and write shard+stub atomically with retry on collision.
+
+    Returns ``(shard_id, shard_rel, stub_rel)`` on success.
+    Raises ``RuntimeError`` if all retries are exhausted.
+    """
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    stub_dir.mkdir(parents=True, exist_ok=True)
+
+    for attempt in range(_SHARD_WRITE_MAX_RETRIES):
+        shard_id = _next_shard_id(family, cut_at, shard_dir)
+        shard_rel = f"{shard_dir_rel}/{shard_id}.json"
+        stub_rel = f"{stub_dir_rel}/{shard_id}.json"
+        shard_path = shard_dir / f"{shard_id}.json"
+        stub_path = stub_dir / f"{shard_id}.json"
+
+        # Update shard_id in payloads (they reference their own ID)
+        shard_payload["shard_id"] = shard_id
+        stub_payload["shard_id"] = shard_id
+        stub_payload["payload_path"] = shard_rel
+
+        try:
+            _write_json_exclusive(shard_path, shard_payload)
+        except FileExistsError:
+            if attempt == _SHARD_WRITE_MAX_RETRIES - 1:
+                raise RuntimeError(f"Shard ID collision exhausted {_SHARD_WRITE_MAX_RETRIES} retries for {family}")
+            _logger.debug("Shard ID collision on %s (attempt %d), retrying", shard_id, attempt + 1)
+            continue
+
+        try:
+            _write_json_exclusive(stub_path, stub_payload)
+        except FileExistsError:
+            shard_path.unlink(missing_ok=True)
+            if attempt == _SHARD_WRITE_MAX_RETRIES - 1:
+                raise RuntimeError(f"Stub ID collision exhausted {_SHARD_WRITE_MAX_RETRIES} retries for {family}")
+            _logger.debug("Stub ID collision on %s (attempt %d), retrying", shard_id, attempt + 1)
+            continue
+        except Exception:
+            shard_path.unlink(missing_ok=True)
+            raise
+
+        return shard_id, shard_rel, stub_rel
+
+    raise RuntimeError(f"Shard write exhausted {_SHARD_WRITE_MAX_RETRIES} retries for {family}")
+
+
 # ---------------------------------------------------------------------------
 # Effective delivery status (mirrors messages/service.py logic)
 # ---------------------------------------------------------------------------
@@ -269,6 +351,29 @@ def delivery_maintenance_pass(
 
     Returns a result dict with ok, warnings, shard_id (if created), and counts.
     """
+    lock_dir = repo_root / ".locks"
+    try:
+        lock_ctx = segment_history_source_lock("registry:delivery_index", lock_dir=lock_dir)
+    except LockInfrastructureError:
+        return {"ok": False, "family": "delivery", "warning": "registry_head_lock_unavailable:delivery_index"}
+    with lock_ctx:
+        return _delivery_maintenance_pass_locked(
+            repo_root=repo_root, now=now,
+            terminal_retention_days=terminal_retention_days,
+            idempotency_retention_days=idempotency_retention_days,
+            batch_limit=batch_limit,
+        )
+
+
+def _delivery_maintenance_pass_locked(
+    *,
+    repo_root: Path,
+    now: datetime,
+    terminal_retention_days: int,
+    idempotency_retention_days: int,
+    batch_limit: int,
+) -> dict[str, Any]:
+    """Inner implementation of delivery_maintenance_pass, called under head-file lock."""
     warnings: list[str] = []
     head_path = safe_path(repo_root, DELIVERY_STATE_REL)
     head, load_warnings = _load_json_head(
@@ -353,10 +458,6 @@ def delivery_maintenance_pass(
     cut_idempotency: dict[str, str] = {}
 
     if eligible_records:
-        shard_dir = safe_path(repo_root, DELIVERY_HISTORY_DIR_REL)
-        shard_dir.mkdir(parents=True, exist_ok=True)
-        shard_id = _next_shard_id("delivery", now, shard_dir)
-
         for msg_id, row, _ in eligible_records:
             cut_records[msg_id] = row
         cut_idempotency = dict(idem_to_externalize)
@@ -381,7 +482,7 @@ def delivery_maintenance_pass(
         shard_payload = {
             "schema_type": "delivery_history_shard",
             "schema_version": "1.0",
-            "shard_id": shard_id,
+            "shard_id": "",
             "source_head_path": DELIVERY_STATE_REL,
             "cut_at": now.isoformat(),
             "records": cut_records,
@@ -389,16 +490,24 @@ def delivery_maintenance_pass(
             "summary": summary,
         }
 
-        shard_rel = f"{DELIVERY_HISTORY_DIR_REL}/{shard_id}.json"
-        stub_rel = f"{DELIVERY_STUB_DIR_REL}/{shard_id}.json"
-
         stub_payload = _create_stub(
             family="delivery",
-            shard_id=shard_id,
-            payload_path=shard_rel,
+            shard_id="",
+            payload_path="",
             created_at=now,
             source_head_path=DELIVERY_STATE_REL,
             summary=summary,
+        )
+
+        shard_id, shard_rel, stub_rel = _write_shard_pair_exclusive(
+            family="delivery",
+            cut_at=now,
+            shard_dir=safe_path(repo_root, DELIVERY_HISTORY_DIR_REL),
+            stub_dir=safe_path(repo_root, DELIVERY_STUB_DIR_REL),
+            shard_dir_rel=DELIVERY_HISTORY_DIR_REL,
+            stub_dir_rel=DELIVERY_STUB_DIR_REL,
+            shard_payload=shard_payload,
+            stub_payload=stub_payload,
         )
 
     # --- Apply changes to head ---
@@ -431,23 +540,22 @@ def delivery_maintenance_pass(
     head["records"] = records
     head["idempotency"] = idempotency
 
-    # --- Write files with rollback (shard→stub→head so partial rollback
-    # failure leaves an orphaned shard, not a mutilated head) ---
-    paths_to_write: list[tuple[Path, str, dict[str, Any]]] = []
+    # --- Write head with rollback; shard+stub already written exclusively ---
+    written_rels: list[str] = []
+    rollback_plan: list[tuple[Path, bytes | None]] = []
     if shard_rel:
-        shard_path = safe_path(repo_root, shard_rel)
-        paths_to_write.append((shard_path, shard_rel, shard_payload))  # type: ignore[possibly-undefined]
+        rollback_plan.append((safe_path(repo_root, shard_rel), None))
+        written_rels.append(shard_rel)
     if stub_rel:
-        stub_path = safe_path(repo_root, stub_rel)
-        paths_to_write.append((stub_path, stub_rel, stub_payload))  # type: ignore[possibly-undefined]
-    paths_to_write.append((head_path, DELIVERY_STATE_REL, head))
+        rollback_plan.append((safe_path(repo_root, stub_rel), None))
+        written_rels.append(stub_rel)
+    rollback_plan.extend(_capture_rollback([head_path]))
+    written_rels.append(DELIVERY_STATE_REL)
 
-    rollback = _capture_rollback([p for p, _, _ in paths_to_write])
     try:
-        for path, _, data in paths_to_write:
-            _write_json(path, data)
+        _write_json(head_path, head)
     except Exception:
-        _restore_rollback(rollback)
+        _restore_rollback(rollback_plan)
         raise
 
     return {
@@ -459,7 +567,7 @@ def delivery_maintenance_pass(
         "shard_id": shard_id,
         "shard_path": shard_rel,
         "stub_path": stub_rel,
-        "written_paths": [rel for _, rel, _ in paths_to_write],
+        "written_paths": written_rels,
         "warnings": warnings,
     }
 
@@ -476,6 +584,26 @@ def nonce_maintenance_pass(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Run one maintenance pass for nonce_index.json (prune-only)."""
+    lock_dir = repo_root / ".locks"
+    try:
+        lock_ctx = segment_history_source_lock("registry:nonce_index", lock_dir=lock_dir)
+    except LockInfrastructureError:
+        return {"ok": False, "family": "nonce", "warning": "registry_head_lock_unavailable:nonce_index"}
+    with lock_ctx:
+        return _nonce_maintenance_pass_locked(
+            repo_root=repo_root, now=now,
+            nonce_retention_days=nonce_retention_days, batch_limit=batch_limit,
+        )
+
+
+def _nonce_maintenance_pass_locked(
+    *,
+    repo_root: Path,
+    now: datetime,
+    nonce_retention_days: int,
+    batch_limit: int,
+) -> dict[str, Any]:
+    """Inner implementation of nonce_maintenance_pass, called under head-file lock."""
     warnings: list[str] = []
     head_path = safe_path(repo_root, NONCE_INDEX_REL)
     head, load_warnings = _load_json_head(
@@ -572,6 +700,28 @@ def peer_trust_maintenance_pass(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Run one maintenance pass for peers/registry.json trust history."""
+    lock_dir = repo_root / ".locks"
+    try:
+        lock_ctx = segment_history_source_lock("registry:peers_registry", lock_dir=lock_dir)
+    except LockInfrastructureError:
+        return {"ok": False, "family": "peer_trust", "warning": "registry_head_lock_unavailable:peers_registry"}
+    with lock_ctx:
+        return _peer_trust_maintenance_pass_locked(
+            repo_root=repo_root, now=now,
+            max_hot_entries=max_hot_entries, hot_retention_days=hot_retention_days,
+            batch_limit=batch_limit,
+        )
+
+
+def _peer_trust_maintenance_pass_locked(
+    *,
+    repo_root: Path,
+    now: datetime,
+    max_hot_entries: int,
+    hot_retention_days: int,
+    batch_limit: int,
+) -> dict[str, Any]:
+    """Inner implementation of peer_trust_maintenance_pass, called under head-file lock."""
     warnings: list[str] = []
     head_path = safe_path(repo_root, PEERS_REGISTRY_REL)
     head, load_warnings = _load_json_head(
@@ -620,10 +770,6 @@ def peer_trust_maintenance_pass(
             continue
 
         # Build shard
-        shard_dir = safe_path(repo_root, PEER_TRUST_HISTORY_DIR_REL)
-        shard_dir.mkdir(parents=True, exist_ok=True)
-        shard_id = _next_shard_id("peer_trust", now, shard_dir)
-
         transition_timestamps: list[datetime] = [dt for t in eligible if (dt := _parse_iso(t.get("at"))) is not None]
         final_trust_after = str(row.get("trust_level") or "untrusted")
 
@@ -637,7 +783,7 @@ def peer_trust_maintenance_pass(
         shard_payload = {
             "schema_type": "peer_trust_history_shard",
             "schema_version": "1.0",
-            "shard_id": shard_id,
+            "shard_id": "",
             "source_head_path": PEERS_REGISTRY_REL,
             "peer_id": peer_id,
             "cut_at": now.isoformat(),
@@ -645,19 +791,27 @@ def peer_trust_maintenance_pass(
             "summary": summary,
         }
 
-        shard_rel = f"{PEER_TRUST_HISTORY_DIR_REL}/{shard_id}.json"
-        stub_rel = f"{PEER_TRUST_STUB_DIR_REL}/{shard_id}.json"
-
         stub_summary = dict(summary)
         stub_summary["peer_id"] = peer_id
 
         stub_payload = _create_stub(
             family="peer_trust",
-            shard_id=shard_id,
-            payload_path=shard_rel,
+            shard_id="",
+            payload_path="",
             created_at=now,
             source_head_path=PEERS_REGISTRY_REL,
             summary=stub_summary,
+        )
+
+        shard_id, shard_rel, stub_rel = _write_shard_pair_exclusive(
+            family="peer_trust",
+            cut_at=now,
+            shard_dir=safe_path(repo_root, PEER_TRUST_HISTORY_DIR_REL),
+            stub_dir=safe_path(repo_root, PEER_TRUST_STUB_DIR_REL),
+            shard_dir_rel=PEER_TRUST_HISTORY_DIR_REL,
+            stub_dir_rel=PEER_TRUST_STUB_DIR_REL,
+            shard_payload=shard_payload,
+            stub_payload=stub_payload,
         )
 
         # Update peer row: remaining prefix + keep tail
@@ -670,8 +824,6 @@ def peer_trust_maintenance_pass(
             "shard_rel": shard_rel,
             "stub_rel": stub_rel,
             "transition_count": len(eligible),
-            "shard_payload": shard_payload,
-            "stub_payload": stub_payload,
         })
 
     if not shard_results:
@@ -728,22 +880,20 @@ def peer_trust_maintenance_pass(
 
     head["peers"] = peers
 
-    # --- Write all files with rollback (shards→stubs→head so partial rollback
-    # failure leaves orphaned shards, not a mutilated head) ---
-    paths_to_write: list[tuple[Path, str, dict[str, Any]]] = []
+    # --- Write head with rollback; shards+stubs already written exclusively ---
+    written_rels: list[str] = []
+    rollback_plan: list[tuple[Path, bytes | None]] = []
     for sr in shard_results:
-        shard_path = safe_path(repo_root, sr["shard_rel"])
-        paths_to_write.append((shard_path, sr["shard_rel"], sr["shard_payload"]))
-        stub_path = safe_path(repo_root, sr["stub_rel"])
-        paths_to_write.append((stub_path, sr["stub_rel"], sr["stub_payload"]))
-    paths_to_write.append((head_path, PEERS_REGISTRY_REL, head))
+        rollback_plan.append((safe_path(repo_root, sr["shard_rel"]), None))
+        rollback_plan.append((safe_path(repo_root, sr["stub_rel"]), None))
+        written_rels.extend([sr["shard_rel"], sr["stub_rel"]])
+    rollback_plan.extend(_capture_rollback([head_path]))
+    written_rels.append(PEERS_REGISTRY_REL)
 
-    rollback = _capture_rollback([p for p, _, _ in paths_to_write])
     try:
-        for path, _, data in paths_to_write:
-            _write_json(path, data)
+        _write_json(head_path, head)
     except Exception:
-        _restore_rollback(rollback)
+        _restore_rollback(rollback_plan)
         raise
 
     return {
@@ -752,7 +902,7 @@ def peer_trust_maintenance_pass(
         "transitions_externalized": total_externalized,
         "shards_created": len(shard_results),
         "shards": [{"peer_id": sr["peer_id"], "shard_id": sr["shard_id"], "transition_count": sr["transition_count"]} for sr in shard_results],
-        "written_paths": [rel for _, rel, _ in paths_to_write],
+        "written_paths": written_rels,
         "warnings": warnings,
     }
 
@@ -781,10 +931,6 @@ def externalize_superseded_push(
     if pushed_at > cutoff:
         return None  # Still within hot window
 
-    shard_dir = safe_path(repo_root, REPLICATION_STATE_HISTORY_DIR_REL)
-    shard_dir.mkdir(parents=True, exist_ok=True)
-    shard_id = _next_shard_id("replication_state", now, shard_dir)
-
     summary = {
         "push_event_count": 1,
         "pull_event_count": 0,
@@ -795,7 +941,7 @@ def externalize_superseded_push(
     shard_payload = {
         "schema_type": "replication_state_history_shard",
         "schema_version": "1.0",
-        "shard_id": shard_id,
+        "shard_id": "",
         "source_head_path": REPLICATION_STATE_REL,
         "cut_at": now.isoformat(),
         "push_events": [{"superseded_at": now.isoformat(), "row": previous_row}],
@@ -803,27 +949,25 @@ def externalize_superseded_push(
         "summary": summary,
     }
 
-    shard_rel = f"{REPLICATION_STATE_HISTORY_DIR_REL}/{shard_id}.json"
-    stub_rel = f"{REPLICATION_STATE_STUB_DIR_REL}/{shard_id}.json"
-
     stub_payload = _create_stub(
         family="replication_state",
-        shard_id=shard_id,
-        payload_path=shard_rel,
+        shard_id="",
+        payload_path="",
         created_at=now,
         source_head_path=REPLICATION_STATE_REL,
         summary=summary,
     )
 
-    shard_path = safe_path(repo_root, shard_rel)
-    stub_path = safe_path(repo_root, stub_rel)
-    rollback = _capture_rollback([shard_path, stub_path])
-    try:
-        _write_json(shard_path, shard_payload)
-        _write_json(stub_path, stub_payload)
-    except Exception:
-        _restore_rollback(rollback)
-        raise
+    shard_id, shard_rel, stub_rel = _write_shard_pair_exclusive(
+        family="replication_state",
+        cut_at=now,
+        shard_dir=safe_path(repo_root, REPLICATION_STATE_HISTORY_DIR_REL),
+        stub_dir=safe_path(repo_root, REPLICATION_STATE_STUB_DIR_REL),
+        shard_dir_rel=REPLICATION_STATE_HISTORY_DIR_REL,
+        stub_dir_rel=REPLICATION_STATE_STUB_DIR_REL,
+        shard_payload=shard_payload,
+        stub_payload=stub_payload,
+    )
 
     return {
         "shard_id": shard_id,
@@ -849,10 +993,6 @@ def externalize_superseded_pull(
     if pulled_at > cutoff:
         return None
 
-    shard_dir = safe_path(repo_root, REPLICATION_STATE_HISTORY_DIR_REL)
-    shard_dir.mkdir(parents=True, exist_ok=True)
-    shard_id = _next_shard_id("replication_state", now, shard_dir)
-
     summary = {
         "push_event_count": 0,
         "pull_event_count": 1,
@@ -863,7 +1003,7 @@ def externalize_superseded_pull(
     shard_payload = {
         "schema_type": "replication_state_history_shard",
         "schema_version": "1.0",
-        "shard_id": shard_id,
+        "shard_id": "",
         "source_head_path": REPLICATION_STATE_REL,
         "cut_at": now.isoformat(),
         "push_events": [],
@@ -871,27 +1011,25 @@ def externalize_superseded_pull(
         "summary": summary,
     }
 
-    shard_rel = f"{REPLICATION_STATE_HISTORY_DIR_REL}/{shard_id}.json"
-    stub_rel = f"{REPLICATION_STATE_STUB_DIR_REL}/{shard_id}.json"
-
     stub_payload = _create_stub(
         family="replication_state",
-        shard_id=shard_id,
-        payload_path=shard_rel,
+        shard_id="",
+        payload_path="",
         created_at=now,
         source_head_path=REPLICATION_STATE_REL,
         summary=summary,
     )
 
-    shard_path = safe_path(repo_root, shard_rel)
-    stub_path = safe_path(repo_root, stub_rel)
-    rollback = _capture_rollback([shard_path, stub_path])
-    try:
-        _write_json(shard_path, shard_payload)
-        _write_json(stub_path, stub_payload)
-    except Exception:
-        _restore_rollback(rollback)
-        raise
+    shard_id, shard_rel, stub_rel = _write_shard_pair_exclusive(
+        family="replication_state",
+        cut_at=now,
+        shard_dir=safe_path(repo_root, REPLICATION_STATE_HISTORY_DIR_REL),
+        stub_dir=safe_path(repo_root, REPLICATION_STATE_STUB_DIR_REL),
+        shard_dir_rel=REPLICATION_STATE_HISTORY_DIR_REL,
+        stub_dir_rel=REPLICATION_STATE_STUB_DIR_REL,
+        shard_payload=shard_payload,
+        stub_payload=stub_payload,
+    )
 
     return {
         "shard_id": shard_id,
@@ -908,6 +1046,27 @@ def replication_state_prune_idempotency(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Prune expired pull_idempotency entries from replication_state.json."""
+    lock_dir = repo_root / ".locks"
+    try:
+        lock_ctx = segment_history_source_lock("registry:replication_state", lock_dir=lock_dir)
+    except LockInfrastructureError:
+        return {"ok": False, "family": "replication_state", "warning": "registry_head_lock_unavailable:replication_state"}
+    with lock_ctx:
+        return _replication_state_prune_idempotency_locked(
+            repo_root=repo_root, now=now,
+            pull_idempotency_retention_days=pull_idempotency_retention_days,
+            batch_limit=batch_limit,
+        )
+
+
+def _replication_state_prune_idempotency_locked(
+    *,
+    repo_root: Path,
+    now: datetime,
+    pull_idempotency_retention_days: int,
+    batch_limit: int,
+) -> dict[str, Any]:
+    """Inner implementation, called under head-file lock."""
     warnings: list[str] = []
     head_path = safe_path(repo_root, REPLICATION_STATE_REL)
     head, load_warnings = _load_json_head(
@@ -988,6 +1147,25 @@ def tombstone_maintenance_pass(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Run one maintenance pass for replication_tombstones.json."""
+    lock_dir = repo_root / ".locks"
+    try:
+        lock_ctx = segment_history_source_lock("registry:replication_tombstones", lock_dir=lock_dir)
+    except LockInfrastructureError:
+        return {"ok": False, "family": "replication_tombstones", "warning": "registry_head_lock_unavailable:replication_tombstones"}
+    with lock_ctx:
+        return _tombstone_maintenance_pass_locked(
+            repo_root=repo_root, now=now, grace_days=grace_days, batch_limit=batch_limit,
+        )
+
+
+def _tombstone_maintenance_pass_locked(
+    *,
+    repo_root: Path,
+    now: datetime,
+    grace_days: int,
+    batch_limit: int,
+) -> dict[str, Any]:
+    """Inner implementation, called under head-file lock."""
     warnings: list[str] = []
     head_path = safe_path(repo_root, REPLICATION_TOMBSTONES_REL)
     head, load_warnings = _load_json_head(
@@ -1026,10 +1204,6 @@ def tombstone_maintenance_pass(
         }
 
     # Build shard
-    shard_dir = safe_path(repo_root, REPLICATION_TOMBSTONE_HISTORY_DIR_REL)
-    shard_dir.mkdir(parents=True, exist_ok=True)
-    shard_id = _next_shard_id("replication_tombstone", now, shard_dir)
-
     cut_entries: dict[str, Any] = {}
     tombstone_timestamps: list[datetime] = []
     for path_key, row, ts in eligible:
@@ -1045,23 +1219,31 @@ def tombstone_maintenance_pass(
     shard_payload = {
         "schema_type": "replication_tombstone_shard",
         "schema_version": "1.0",
-        "shard_id": shard_id,
+        "shard_id": "",
         "source_head_path": REPLICATION_TOMBSTONES_REL,
         "cut_at": now.isoformat(),
         "entries": cut_entries,
         "summary": summary,
     }
 
-    shard_rel = f"{REPLICATION_TOMBSTONE_HISTORY_DIR_REL}/{shard_id}.json"
-    stub_rel = f"{REPLICATION_TOMBSTONE_STUB_DIR_REL}/{shard_id}.json"
-
     stub_payload = _create_stub(
         family="replication_tombstone",
-        shard_id=shard_id,
-        payload_path=shard_rel,
+        shard_id="",
+        payload_path="",
         created_at=now,
         source_head_path=REPLICATION_TOMBSTONES_REL,
         summary=summary,
+    )
+
+    shard_id, shard_rel, stub_rel = _write_shard_pair_exclusive(
+        family="replication_tombstone",
+        cut_at=now,
+        shard_dir=safe_path(repo_root, REPLICATION_TOMBSTONE_HISTORY_DIR_REL),
+        stub_dir=safe_path(repo_root, REPLICATION_TOMBSTONE_STUB_DIR_REL),
+        shard_dir_rel=REPLICATION_TOMBSTONE_HISTORY_DIR_REL,
+        stub_dir_rel=REPLICATION_TOMBSTONE_STUB_DIR_REL,
+        shard_payload=shard_payload,
+        stub_payload=stub_payload,
     )
 
     # Remove from head
@@ -1092,20 +1274,17 @@ def tombstone_maintenance_pass(
 
     head["entries"] = entries
 
-    # Write with rollback (shard→stub→head so partial rollback failure
-    # leaves an orphaned shard, not a mutilated head)
-    paths_to_write: list[tuple[Path, str, dict[str, Any]]] = [
-        (safe_path(repo_root, shard_rel), shard_rel, shard_payload),
-        (safe_path(repo_root, stub_rel), stub_rel, stub_payload),
-        (head_path, REPLICATION_TOMBSTONES_REL, head),
+    # --- Write head with rollback; shard+stub already written exclusively ---
+    rollback_plan: list[tuple[Path, bytes | None]] = [
+        (safe_path(repo_root, shard_rel), None),
+        (safe_path(repo_root, stub_rel), None),
     ]
+    rollback_plan.extend(_capture_rollback([head_path]))
 
-    rollback = _capture_rollback([p for p, _, _ in paths_to_write])
     try:
-        for path, _, data in paths_to_write:
-            _write_json(path, data)
+        _write_json(head_path, head)
     except Exception:
-        _restore_rollback(rollback)
+        _restore_rollback(rollback_plan)
         raise
 
     return {
@@ -1115,7 +1294,7 @@ def tombstone_maintenance_pass(
         "shard_id": shard_id,
         "shard_path": shard_rel,
         "stub_path": stub_rel,
-        "written_paths": [rel for _, rel, _ in paths_to_write],
+        "written_paths": [shard_rel, stub_rel, REPLICATION_TOMBSTONES_REL],
         "warnings": warnings,
     }
 
