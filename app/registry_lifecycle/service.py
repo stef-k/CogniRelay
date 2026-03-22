@@ -1699,17 +1699,80 @@ def registry_history_cold_store_service(
     try:
         lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
     except LockInfrastructureError as exc:
-        raise HTTPException(status_code=503, detail="Registry-history cold-store lock unavailable; retry") from exc
+        raise make_lock_error("registry_history_cold_store", family, exc, is_timeout=False) from exc
     try:
         with lock_ctx:
-            # Crash recovery: if both hot and cold exist, a previous attempt crashed
-            # after writing cold but before deleting hot. Remove the orphan cold file.
+            # Crash recovery: if both hot and cold exist, a previous attempt
+            # crashed mid-cold-store.  Inspect the stub to determine which
+            # copy is canonical before deleting the orphan.
             if cold_payload_path.exists() and hot_payload_path.exists():
-                _logger.warning(
-                    "Registry cold-store crash recovery: removing orphaned cold file %s",
-                    cold_storage_path,
-                )
-                cold_payload_path.unlink(missing_ok=True)
+                try:
+                    _crash_stub = _load_registry_history_stub(repo_root, stub_rel)
+                    _stub_points_cold = _crash_stub.get("payload_path") == cold_storage_path
+                except Exception:
+                    # Unreadable stub — safer to discard cold and redo.
+                    _stub_points_cold = False
+
+                if _stub_points_cold:
+                    # Stub already mutated → cold is canonical, hot is orphan.
+                    # Delete hot, commit the recovery, and return success.
+                    _logger.warning(
+                        "Registry cold-store crash recovery: stub already "
+                        "points to cold; removing orphaned hot file %s",
+                        source_payload_path,
+                    )
+                    hot_payload_path.unlink(missing_ok=True)
+                    _recovery_committed = bool(gm and try_commit_paths(
+                        paths=[
+                            cold_payload_path,
+                            safe_path(repo_root, stub_rel),
+                            hot_payload_path,
+                        ],
+                        gm=gm,
+                        commit_message=(
+                            f"registry-history: cold-store recovery "
+                            f"{family} {_crash_stub.get('shard_id', '')}"
+                        ),
+                    ))
+                    audit(
+                        auth,
+                        "registry_history_cold_store",
+                        {
+                            "family": family,
+                            "source_payload_path": source_payload_path,
+                            "cold_storage_path": cold_storage_path,
+                            "crash_recovery": True,
+                        },
+                    )
+                    return {
+                        "ok": True,
+                        "family": family,
+                        "shard_state": "cold",
+                        "source_payload_path": source_payload_path,
+                        "cold_storage_path": cold_storage_path,
+                        "cold_stub_path": stub_rel,
+                        "committed_files": [cold_storage_path, stub_rel, source_payload_path],
+                        "durable": _recovery_committed,
+                        "latest_commit": gm.latest_commit() if gm is not None else None,
+                        "warnings": [
+                            make_warning(
+                                "registry_history_cold_store_crash_recovery",
+                                "Completed cold-store via crash recovery: "
+                                "stub already pointed to cold, removed orphaned hot file",
+                            ),
+                        ],
+                        "recovery_warnings": [],
+                    }
+                else:
+                    # Stub still points to hot → cold is orphan (crash
+                    # happened before stub mutation).  Remove cold and
+                    # fall through to a clean cold-store.
+                    _logger.warning(
+                        "Registry cold-store crash recovery: removing "
+                        "orphaned cold file %s",
+                        cold_storage_path,
+                    )
+                    cold_payload_path.unlink(missing_ok=True)
 
             payload = _load_registry_history_shard(repo_root, source_payload_path)
             stub = _load_registry_history_stub(repo_root, stub_rel)
@@ -1818,7 +1881,7 @@ def registry_history_cold_rehydrate_service(
     try:
         lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
     except LockInfrastructureError as exc:
-        raise HTTPException(status_code=503, detail="Registry-history cold-rehydrate lock unavailable; retry") from exc
+        raise make_lock_error("registry_history_cold_rehydrate", family, exc, is_timeout=False) from exc
     try:
         with lock_ctx:
             if hot_payload_path.exists():
