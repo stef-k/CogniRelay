@@ -6,6 +6,29 @@ This is not a Git forge. It is an AI-native substrate for memory, retrieval, mes
 
 The current implementation should be read as a bounded orientation-preservation substrate, not as a claim of perfect persistence across context boundaries.
 
+## When CogniRelay Is Useful
+
+CogniRelay exists for people who run agents that work across sessions, over long tasks, or alongside other agents.
+
+When an agent hits a context-window reset, a compaction boundary, or a handoff to another agent, it loses its working orientation: what it was doing, what it decided not to do, what constraints still apply, and where it was headed. Without infrastructure to preserve that orientation, the user has to re-brief the agent, the agent has to rediscover its own prior decisions, and silent regressions go unnoticed.
+
+CogniRelay reduces that cost. It gives agents a place to persist bounded orientation state and retrieve it on restart, so the user does not have to re-explain context after every reset and the agent does not have to guess what it was doing.
+
+**When it helps most:**
+
+- Long-running agent workflows that span multiple sessions or context windows
+- Multi-step tasks where losing intermediate progress is costly
+- Collaborative setups where multiple agents need bounded coordination without shared-state mutation
+- Any scenario where silent context loss leads to repeated work, contradictory decisions, or undetected drift
+
+**When it is not especially needed:**
+
+- One-shot chat interactions with no continuation expectation
+- Single-prompt tool use where the full context fits in one window
+- Stateless pipelines where no agent needs to remember prior decisions
+
+CogniRelay does not claim to preserve everything. It preserves enough bounded orientation for useful continuation, makes loss explicit rather than silent, and keeps the agent in control of what matters.
+
 ## What It Offers
 
 - Git-backed read, write, and append operations with commit-on-change behavior
@@ -15,8 +38,31 @@ The current implementation should be read as a bounded orientation-preservation 
 - Shared task records, patch proposal/apply flows, and code check/merge workflows
 - Token lifecycle management, signed message verification, replication, backup, and host-local ops automation
 
+## Agent Integration Patterns
+
+Agents integrate with CogniRelay through hook points in their runtime loop. CogniRelay does not control when it is invoked — agents own invocation timing, and CogniRelay owns response quality once invoked.
+
+**Minimum viable integration** (two hook points):
+
+- `startup`: read continuity capsule and retrieve context to restore orientation after a reset
+- `pre-compaction / handoff`: upsert continuity capsule to preserve current orientation before the context window compacts or the agent hands off
+
+This is enough for basic orientation recovery across resets.
+
+**Recommended fuller integration** (four hook points):
+
+- `startup`: restore orientation (same as above)
+- `pre-prompt`: retrieve fresh context and check for pending messages, coordination artifacts, or task updates
+- `post-prompt`: persist any orientation changes, new decisions, or negative decisions after the agent acts
+- `pre-compaction / handoff`: ensure the latest orientation is durable before context loss
+
+The fuller pattern gives tighter continuity — the agent's orientation stays current within the session, not just across resets.
+
+For the full cold-start endpoint sequence, see [System Overview: Agent Usage](docs/system-overview.md#agent-usage).
+
 ## Canonical Docs
 
+- [Agent Onboarding](docs/agent-onboarding.md): practical integration guide for cold-start and already-running agents
 - [Reviewer Guide](docs/reviewer-guide.md): system thesis, boundaries, recovery model, and authority limits
 - [System Overview](docs/system-overview.md): implemented product shape and agent usage guidance
 - [API Surface](docs/api-surface.md): currently implemented HTTP behavior grouped by domain

@@ -121,3 +121,4 @@ This is documented at the protocol level by the implementation and should be pre
 - Use MCP when your runtime already speaks JSON-RPC tool protocols.
 - Use HTTP discovery endpoints when you want broader service introspection or simpler direct integration.
 - Use `GET /v1/discovery` alongside MCP if you want startup guidance and workflow hints beyond the basic MCP descriptor.
+- For a practical walkthrough of integration hook points and incremental adoption, see [Agent Onboarding](agent-onboarding.md).

@@ -93,6 +93,8 @@ That means the recovery model is built around bounded usefulness under loss, not
 - surface verification and health state explicitly
 - degrade reads and retrievals safely where the current contract permits it
 - preserve auditable history for archive, delete, and restore-test flows
+- manage continuity lifecycle through tiered retention: active, fallback, archive, and cold storage
+- provide explicit retention planning and cold-store/rehydrate operations so storage cost does not grow without bound
 
 ### What the system does not claim
 
@@ -132,23 +134,64 @@ The intended reading is:
 
 **remote coordination artifacts are evidence and advice, not automatic local truth**
 
+## Coordination Model
+
+CogniRelay provides three bounded coordination primitives for inter-agent work. All three are additive records — they do not mutate local continuity capsules or automatically synchronize state between agents.
+
+### Handoffs
+
+A handoff projects a bounded subset of one agent's active continuity capsule (only `active_constraints` and `drift_signals`) into an auditable artifact for another agent. The recipient records one of `accepted_advisory`, `deferred`, or `rejected` as advisory input. Nothing is promoted into local continuity automatically.
+
+### Shared coordination artifacts
+
+An owner-authored artifact that exposes bounded coordination state (`constraints`, `drift_signals`, `coordination_alerts`) to a listed participant set. Participants can read the artifact; only the owner can update it. Shared artifacts are coordination context, not shared capsules.
+
+### Reconciliation records
+
+When handoff or shared coordination claims visibly disagree, a reconciliation record names the bounded dispute — the claims, epistemic status, and evidence — without resolving it by fiat. First-slice outcomes are conservative: `advisory_only`, `conflicted`, or `rejected`. Stronger agreement semantics that would mutate shared or local state are explicitly deferred.
+
+### What ties them together
+
+All three primitives follow the same principle: coordination artifacts are evidence and advice, not automatic local truth. Discovery is bounded by caller identity. The system does not converge agents toward one shared state — it gives them auditable coordination records and leaves the decision to each agent.
+
+## Operator and Host-Local Boundary
+
+CogniRelay exposes two distinct operational surfaces:
+
+### Agent-facing collaboration surface
+
+Memory, retrieval, continuity, coordination, messaging, tasks, patches, and peer discovery. These endpoints are designed for peer-facing access under the normal bearer-token auth model.
+
+### Host-local authority surface
+
+This surface has two enforcement tiers:
+
+- **IP-enforced local-only**: ops runner endpoints under `/v1/ops/*` enforce an IP-based local-client check in addition to `admin:peers` scope. These are unreachable from WAN peers even if the scope is present.
+- **Scope-restricted authority**: trust transitions (`/v1/peers/{peer_id}/trust`), token and signing-key lifecycle (`/v1/security/*`), backup creation and restore drills require `admin:peers` scope but do not enforce IP-based locality. They are intended for local use but rely on scope restriction rather than transport-level enforcement.
+
+Both tiers carry system-wide impact — revoking a token, rotating a key, or running a retention job affects every agent using the instance. Operators should keep `admin:peers` tokens off WAN-accessible peers and, if automating authority actions, run them through a local scheduler (`systemd`, `cron`) invoked through a local boundary.
+
+The boundary matters for reviewers because it separates what an agent can do to collaborate from what an operator can do to maintain the system. Agents do not have authority over token lifecycle or retention policy unless the operator explicitly grants it.
+
 ## How To Read The Docs
 
 Use the docs in this order:
 
 1. `README.md`
    Start here for repo shape, quick start, and the canonical doc map.
-2. `docs/reviewer-guide.md`
+2. `docs/agent-onboarding.md`
+   Use this for practical agent integration guidance, including cold-start and incremental adoption.
+3. `docs/reviewer-guide.md`
    Use this document for the system thesis, boundaries, and non-goals.
-3. `docs/system-overview.md`
+4. `docs/system-overview.md`
    Use this for the implemented product shape, operational model, and agent usage guidance.
-4. `docs/api-surface.md`
+5. `docs/api-surface.md`
    Use this for the currently implemented HTTP behavior and endpoint grouping.
-5. `docs/mcp.md`
+6. `docs/mcp.md`
    Use this if you care about MCP integration and tool exposure.
-6. `DESIGN_DOC.md`
+7. `DESIGN_DOC.md`
    Use this for earlier architectural rationale and background framing.
-7. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
+8. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
    Use these for operator-facing deployment and signoff concerns.
 
 ## What Reviewers Should Pressure-Test
@@ -159,4 +202,7 @@ The most important review questions are not "does it have many features?" They a
 - Are the degradation and fallback semantics honest and operationally safe?
 - Are negative decisions represented strongly enough to avoid obvious action bias?
 - Are inter-agent authority boundaries narrow and explicit enough?
+- Are coordination primitives genuinely additive, or do they imply hidden state convergence?
+- Is the operator/host-local boundary clear enough that an agent cannot accidentally perform authority actions?
+- Does the retention and cold-storage model keep storage bounded without silently discarding data the agent still needs?
 - Do the docs describe the implemented system faithfully, without implying a fuller memory architecture than exists?

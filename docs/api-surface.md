@@ -8,7 +8,7 @@ This document is the canonical human-facing summary of the currently implemented
 
 The sections below mirror that runtime shape and group endpoints by behavior rather than implementation order.
 
-For the higher-level system thesis, recovery model, and authority boundaries, start with [Reviewer Guide](reviewer-guide.md).
+For practical agent integration guidance, start with [Agent Onboarding](agent-onboarding.md). For the higher-level system thesis, recovery model, and authority boundaries, see [Reviewer Guide](reviewer-guide.md).
 
 ## Discovery and contracts
 
