@@ -282,6 +282,42 @@ def _validate_registry_lifecycle_settings(settings: Settings) -> None:
         )
 
 
+def _validate_artifact_lifecycle_settings(settings: Settings) -> None:
+    """Validate artifact lifecycle settings.
+
+    Artifact retention and cold-after settings operate on sequential lifecycle
+    stages (hot → externalized → cold), so cold_after_days is NOT required to
+    be ≤ retention_days.  Only minimum-value checks apply.
+
+    Raises SystemExit if any value is less than 1.
+    """
+    errors: list[str] = []
+    day_settings: list[tuple[str, int]] = [
+        ("handoff_terminal_retention_days", settings.handoff_terminal_retention_days),
+        ("handoff_cold_after_days", settings.handoff_cold_after_days),
+        ("shared_history_hot_retention_days", settings.shared_history_hot_retention_days),
+        ("shared_history_cold_after_days", settings.shared_history_cold_after_days),
+        ("reconciliation_resolved_retention_days", settings.reconciliation_resolved_retention_days),
+        ("reconciliation_cold_after_days", settings.reconciliation_cold_after_days),
+        ("task_done_hot_retention_days", settings.task_done_hot_retention_days),
+        ("task_done_cold_after_days", settings.task_done_cold_after_days),
+        ("patch_applied_hot_retention_days", settings.patch_applied_hot_retention_days),
+        ("patch_applied_cold_after_days", settings.patch_applied_cold_after_days),
+    ]
+    for name, val in day_settings:
+        if val < 1:
+            errors.append(f"{name} ({val}) must be >= 1")
+    # Batch limit
+    if settings.artifact_history_batch_limit < 1:
+        errors.append(
+            f"artifact_history_batch_limit ({settings.artifact_history_batch_limit}) must be >= 1"
+        )
+    if errors:
+        raise SystemExit(
+            "Invalid artifact-lifecycle settings:\n  " + "\n  ".join(errors)
+        )
+
+
 def _validate_segment_history_settings(settings: Settings) -> None:
     """Validate cross-field invariants for segment-history lifecycle settings.
 
@@ -530,5 +566,6 @@ def get_settings(force_reload: bool = False) -> Settings:
         ),
     )
     _validate_registry_lifecycle_settings(_cached)
+    _validate_artifact_lifecycle_settings(_cached)
     _validate_segment_history_settings(_cached)
     return _cached

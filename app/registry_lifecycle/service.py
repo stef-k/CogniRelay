@@ -82,11 +82,18 @@ _REGISTRY_STUB_DIRS_BY_FAMILY: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp string into a timezone-aware datetime."""
+    """Parse an ISO timestamp string into a timezone-aware UTC datetime.
+
+    Naive timestamps (no offset) are assumed UTC to prevent TypeError when
+    compared against UTC-aware cutoffs.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 

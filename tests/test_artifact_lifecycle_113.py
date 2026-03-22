@@ -1982,5 +1982,84 @@ class ArtifactHistoryColdStoreTestCase(unittest.TestCase):
         self.assertEqual(stub["payload_path"], shared_payload_rel)
 
 
+# ===================================================================
+# Artifact lifecycle settings validation tests
+# ===================================================================
+
+
+class TestArtifactLifecycleValidation(unittest.TestCase):
+
+    def test_validate_artifact_lifecycle_cold_greater_than_retention_allowed(self):
+        """cold_after_days > retention_days is valid for artifact lifecycle.
+
+        Artifact retention and cold-after operate on sequential lifecycle
+        stages (hot → externalized → cold), so cold > retention is normal.
+        """
+        from dataclasses import dataclass
+        from app.config import _validate_artifact_lifecycle_settings
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            handoff_terminal_retention_days: int = 30
+            handoff_cold_after_days: int = 999
+            shared_history_hot_retention_days: int = 30
+            shared_history_cold_after_days: int = 90
+            reconciliation_resolved_retention_days: int = 30
+            reconciliation_cold_after_days: int = 90
+            task_done_hot_retention_days: int = 30
+            task_done_cold_after_days: int = 90
+            patch_applied_hot_retention_days: int = 30
+            patch_applied_cold_after_days: int = 90
+            artifact_history_batch_limit: int = 500
+
+        # Should not raise — cold > retention is valid for artifacts
+        _validate_artifact_lifecycle_settings(FakeSettings())
+
+    def test_validate_artifact_lifecycle_zero_value(self):
+        """SystemExit when a setting is 0."""
+        from dataclasses import dataclass
+        from app.config import _validate_artifact_lifecycle_settings
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            handoff_terminal_retention_days: int = 30
+            handoff_cold_after_days: int = 90
+            shared_history_hot_retention_days: int = 0
+            shared_history_cold_after_days: int = 90
+            reconciliation_resolved_retention_days: int = 30
+            reconciliation_cold_after_days: int = 90
+            task_done_hot_retention_days: int = 30
+            task_done_cold_after_days: int = 90
+            patch_applied_hot_retention_days: int = 30
+            patch_applied_cold_after_days: int = 90
+            artifact_history_batch_limit: int = 500
+
+        with self.assertRaises(SystemExit) as ctx:
+            _validate_artifact_lifecycle_settings(FakeSettings())
+        self.assertIn("must be >= 1", str(ctx.exception))
+
+    def test_validate_artifact_lifecycle_valid(self):
+        """Valid settings (matching production defaults) pass without error."""
+        from dataclasses import dataclass
+        from app.config import _validate_artifact_lifecycle_settings
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            handoff_terminal_retention_days: int = 30
+            handoff_cold_after_days: int = 90
+            shared_history_hot_retention_days: int = 30
+            shared_history_cold_after_days: int = 90
+            reconciliation_resolved_retention_days: int = 30
+            reconciliation_cold_after_days: int = 90
+            task_done_hot_retention_days: int = 30
+            task_done_cold_after_days: int = 90
+            patch_applied_hot_retention_days: int = 30
+            patch_applied_cold_after_days: int = 90
+            artifact_history_batch_limit: int = 500
+
+        # Should not raise
+        _validate_artifact_lifecycle_settings(FakeSettings())
+
+
 if __name__ == "__main__":
     unittest.main()

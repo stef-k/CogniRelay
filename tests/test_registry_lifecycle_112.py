@@ -2008,5 +2008,102 @@ class TestRegistryLifecycleValidation(unittest.TestCase):
         _validate_registry_lifecycle_settings(FakeSettings())
 
 
+# ===================================================================
+# Naive timestamp safety tests
+# ===================================================================
+
+
+class NaiveTimestampTestCase(unittest.TestCase):
+    """Tests that naive (offset-less) timestamps don't crash comparisons."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.repo = Path(self._td.name) / "repo"
+        self.repo.mkdir()
+        self.now = _now()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_naive_timestamp_delivery_does_not_crash(self):
+        """Delivery record with naive sent_at is externalized without TypeError."""
+        naive_ts = "2026-02-01T10:00:00"
+        state = {
+            "version": "1",
+            "records": {
+                "msg_naive": {
+                    "message_id": "msg_naive",
+                    "status": "acked",
+                    "sent_at": naive_ts,
+                    "acks": [{"ack_at": naive_ts, "status": "accepted"}],
+                },
+            },
+            "idempotency": {},
+        }
+        _write_head(self.repo, DELIVERY_STATE_REL, state)
+        result = delivery_maintenance_pass(
+            repo_root=self.repo, now=self.now,
+            terminal_retention_days=30, idempotency_retention_days=30,
+            batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        # Naive timestamp treated as UTC, 46 days old → externalized
+        self.assertEqual(result["records_externalized"], 1)
+
+    def test_naive_timestamp_nonce_does_not_crash(self):
+        """Nonce entry with naive first_seen_at is pruned without TypeError."""
+        naive_ts = "2026-02-01T10:00:00"
+        state = {
+            "schema_version": "1.0",
+            "entries": {
+                "key1|nonce1": {
+                    "key_id": "key1", "nonce": "nonce1",
+                    "first_seen_at": naive_ts,
+                },
+            },
+        }
+        _write_head(self.repo, NONCE_INDEX_REL, state)
+        result = nonce_maintenance_pass(
+            repo_root=self.repo, now=self.now,
+            nonce_retention_days=7, batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        # Naive timestamp treated as UTC, 46 days old → pruned
+        self.assertEqual(result["pruned"], 1)
+
+    def test_naive_timestamp_peer_trust_does_not_crash(self):
+        """Peer trust with naive transition timestamps is externalized without TypeError."""
+        naive_ts = "2026-02-01T10:00:00"
+        transitions = [
+            {
+                "at": naive_ts,
+                "from": "restricted",
+                "to": "trusted",
+                "reason": f"transition_{i}",
+                "by": "admin",
+            }
+            for i in range(40)
+        ]
+        registry = {
+            "schema_version": "1.0",
+            "updated_at": self.now.isoformat(),
+            "peers": {
+                "peer-naive": {
+                    "trust_level": "trusted",
+                    "trust_history": transitions,
+                },
+            },
+        }
+        _write_head(self.repo, PEERS_REGISTRY_REL, registry)
+        result = peer_trust_maintenance_pass(
+            repo_root=self.repo, now=self.now,
+            max_hot_entries=32, hot_retention_days=30,
+            batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        # Naive timestamps treated as UTC, 46 days old, 40 transitions > 32 max → externalized
+        self.assertGreater(result["transitions_externalized"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
