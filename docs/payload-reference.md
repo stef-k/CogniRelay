@@ -293,11 +293,57 @@ The handoff artifact projects only `active_constraints` and `drift_signals` from
 
 A fully-populated capsule with realistic content in every field is approximately **~10 KB of JSON** and **~2,400–2,800 tokens**. This section breaks down the budget by section so agents and operators can make informed decisions about what to populate.
 
-### Total field count
+### Field count by object
 
-A fully-populated capsule contains approximately **58 distinct fields** across all nested objects, including up to **130 list items** (strings) and **4 structured negative decision objects**.
+ContinuityCapsule (top-level): 15 fields
 
-### Size by section
+Nested objects when all optional fields are populated:
+
+- ContinuitySource: 3 fields
+- ContinuityState: 14 fields
+  - NegativeDecision (×4): 2 fields each = 8 fields
+  - ContinuityRelationshipModel: 3 fields
+  - ContinuityRetrievalHints: 3 fields
+- ContinuityConfidence: 2 fields
+- ContinuityAttentionPolicy: 2 fields
+- ContinuityFreshness: 3 fields
+- ContinuityVerificationState: 5 fields
+- ContinuityCapsuleHealth: 3 fields
+
+Total: **~58 distinct fields** across all nested objects.
+
+### Maximum list items at full population
+
+| Area | Items | Max chars per item |
+|------|-------|--------------------|
+| ContinuityState lists (6 required) | 5 each = 30 strings | no per-item limit |
+| ContinuityState optional lists (5) | 3–5 each = 23 strings | no per-item limit |
+| `negative_decisions` | 4 × (160 + 240) = 1,600 chars | structured |
+| `stance_summary` | 1 string | 240 chars |
+| `relationship_model` lists (2) | 5 each = 10 strings | no per-item limit |
+| `retrieval_hints` lists (3) | 8 each = 24 strings | no per-item limit |
+| `attention_policy` lists (2) | 5 + 8 = 13 strings | no per-item limit |
+| `canonical_sources` | 8 strings | no per-item limit |
+| `source.inputs` | 12 strings | no per-item limit |
+| `evidence_refs` | 4 strings | no per-item limit |
+| `capsule_health.reasons` | 5 strings | no per-item limit |
+| `conflict_summary` | 1 string | 240 chars |
+| `subject_id` | 1 string | 200 chars |
+| `producer` | 1 string | 100 chars |
+
+Total: **~130 strings + 4 negative decision objects + ~10 scalar fields**.
+
+### Estimated JSON size
+
+The string list items don't have per-item length limits in the model (only `stance_summary`, `conflict_summary`, `decision`, `rationale`, `producer`, `subject_id` are bounded). In practice, if each unbounded string averages 80–120 chars:
+
+- **Typical full capsule**: ~4–8 KB JSON
+- **Maximum realistic capsule** (all lists full, verbose strings): ~12–18 KB JSON
+- **Theoretical extreme** (very long strings in every slot): could approach the `COGNIRELAY_MAX_PAYLOAD_BYTES` limit (default 262 KB), but this would be pathological
+
+The system is designed so that a fully-populated capsule with practical content fits comfortably in a few KB — well within context-window budgets and storage constraints.
+
+### Size by section (token estimates)
 
 | Section | ~Tokens | Fields | Notes |
 |---------|---------|--------|-------|
