@@ -1744,4 +1744,11 @@ async def unhandled_exception_handler(request: FastAPIRequest, exc: Exception):
         "Unhandled exception reached global handler: %s %s",
         request.method, request.url.path, exc_info=True,
     )
-    return JSONResponse(status_code=500, content={"ok": False, "error": type(exc).__name__, "detail": str(exc)})
+    return JSONResponse(
+        status_code=500,
+        content=make_error_detail(
+            operation="unhandled",
+            error_code=type(exc).__name__,
+            error_detail=str(exc),
+        ),
+    )
