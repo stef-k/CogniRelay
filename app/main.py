@@ -1704,9 +1704,12 @@ def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) 
 
 
 @app.exception_handler(GitLockTimeout)
-async def git_lock_timeout_handler(_, exc: GitLockTimeout):
+async def git_lock_timeout_handler(request: FastAPIRequest, exc: GitLockTimeout):
     """Convert uncaught git lock timeouts to 409 Conflict."""
-    _log.warning("Git lock timeout reached global handler: %s", exc)
+    _log.warning(
+        "Git lock timeout reached global handler: %s %s: %s",
+        request.method, request.url.path, exc, exc_info=True,
+    )
     return JSONResponse(
         status_code=409,
         content=make_error_detail(
@@ -1718,9 +1721,12 @@ async def git_lock_timeout_handler(_, exc: GitLockTimeout):
 
 
 @app.exception_handler(GitLockInfrastructureError)
-async def git_lock_infra_handler(_, exc: GitLockInfrastructureError):
+async def git_lock_infra_handler(request: FastAPIRequest, exc: GitLockInfrastructureError):
     """Convert uncaught git lock infrastructure errors to 503 Service Unavailable."""
-    _log.error("Git lock infrastructure error reached global handler: %s", exc, exc_info=True)
+    _log.error(
+        "Git lock infrastructure error reached global handler: %s %s: %s",
+        request.method, request.url.path, exc, exc_info=True,
+    )
     return JSONResponse(
         status_code=503,
         content=make_error_detail(
@@ -1732,6 +1738,10 @@ async def git_lock_infra_handler(_, exc: GitLockInfrastructureError):
 
 
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(_, exc: Exception):
+async def unhandled_exception_handler(request: FastAPIRequest, exc: Exception):
     """Return a normalized JSON error payload for uncaught exceptions."""
+    _log.error(
+        "Unhandled exception reached global handler: %s %s",
+        request.method, request.url.path, exc_info=True,
+    )
     return JSONResponse(status_code=500, content={"ok": False, "error": type(exc).__name__, "detail": str(exc)})

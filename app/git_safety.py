@@ -41,6 +41,7 @@ def unstage_paths(gm: GitCommitter, paths: list[Path]) -> None:
             try:
                 rels.append(str(path.resolve().relative_to(resolved_root)))
             except ValueError:
+                _log.warning("Skipping path outside repository root during unstage: %s", path)
                 continue
         if not rels:
             return

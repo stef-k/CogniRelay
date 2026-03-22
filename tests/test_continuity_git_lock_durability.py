@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.git_locking import GitLockInfrastructureError, GitLockTimeout
@@ -138,6 +139,126 @@ class TestPersistActiveCapsuleLockDurability(unittest.TestCase):
     def test_preserves_file_on_git_lock_infra_error(self) -> None:
         """GitLockInfrastructureError must not leave the capsule overwritten."""
         self._run_persist_with_lock_failure(_raise_git_lock_infra)
+
+
+# ------------------------------------------------------------------ #
+#  Tests: _persist_active_capsule commit-failure rollback
+# ------------------------------------------------------------------ #
+
+
+class _FailingCommitGM(SimpleGitManagerStub):
+    """Git manager stub whose commit_file always raises."""
+
+    def commit_file(self, _path: Path, _message: str) -> bool:
+        raise RuntimeError("simulated commit failure")
+
+
+class _NoChangesGM(SimpleGitManagerStub):
+    """Git manager stub whose commit_file returns False (no diff)."""
+
+    def commit_file(self, _path: Path, _message: str) -> bool:
+        return False
+
+
+@contextmanager
+def _passthrough_lock(*_args, **_kwargs):
+    """Context manager that yields immediately (bypass real locking)."""
+    yield
+
+
+class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
+    """Commit failures in _persist_active_capsule must produce structured
+    errors and restore the original file."""
+
+    def test_commit_failure_returns_structured_error(self) -> None:
+        """Commit exception → 500 with continuity_persist_commit_failed, file restored."""
+        from app.continuity.service import _persist_active_capsule
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            capsule_dir = repo / "memory" / "continuity"
+            capsule_dir.mkdir(parents=True)
+            capsule_path = capsule_dir / "user-u1.json"
+
+            original = json.dumps({"original": True}, indent=2)
+            write_text_file(capsule_path, original)
+            original_bytes = capsule_path.read_bytes()
+
+            new_content = json.dumps(_make_active_capsule(), indent=2)
+            with patch("app.continuity.service.repository_mutation_lock", _passthrough_lock):
+                with self.assertRaises(HTTPException) as ctx:
+                    _persist_active_capsule(
+                        repo_root=repo,
+                        gm=_FailingCommitGM(repo),
+                        path=capsule_path,
+                        canonical=new_content,
+                        commit_message="test",
+                    )
+
+            self.assertEqual(ctx.exception.status_code, 500)
+            detail = ctx.exception.detail
+            self.assertEqual(detail["error"]["code"], "continuity_persist_commit_failed")
+            # Original content must be restored
+            self.assertEqual(capsule_path.read_bytes(), original_bytes)
+
+    def test_commit_and_rollback_failure_returns_rollback_error(self) -> None:
+        """Commit + rollback failure → 500 with continuity_persist_rollback_failed."""
+        from app.continuity.service import _persist_active_capsule
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            capsule_dir = repo / "memory" / "continuity"
+            capsule_dir.mkdir(parents=True)
+            capsule_path = capsule_dir / "user-u1.json"
+
+            original = json.dumps({"original": True}, indent=2)
+            write_text_file(capsule_path, original)
+
+            new_content = json.dumps(_make_active_capsule(), indent=2)
+            with (
+                patch("app.continuity.service.repository_mutation_lock", _passthrough_lock),
+                patch("app.continuity.service.write_bytes_file", side_effect=OSError("disk full")),
+            ):
+                with self.assertRaises(HTTPException) as ctx:
+                    _persist_active_capsule(
+                        repo_root=repo,
+                        gm=_FailingCommitGM(repo),
+                        path=capsule_path,
+                        canonical=new_content,
+                        commit_message="test",
+                    )
+
+            self.assertEqual(ctx.exception.status_code, 500)
+            detail = ctx.exception.detail
+            self.assertEqual(detail["error"]["code"], "continuity_persist_rollback_failed")
+            self.assertIn("disk full", detail["error"]["detail"])
+
+    def test_no_changes_is_success(self) -> None:
+        """commit_file returning False (no diff) must not trigger rollback."""
+        from app.continuity.service import _persist_active_capsule
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            capsule_dir = repo / "memory" / "continuity"
+            capsule_dir.mkdir(parents=True)
+            capsule_path = capsule_dir / "user-u1.json"
+
+            original = json.dumps({"original": True}, indent=2)
+            write_text_file(capsule_path, original)
+
+            new_content = json.dumps(_make_active_capsule(), indent=2)
+            with patch("app.continuity.service.repository_mutation_lock", _passthrough_lock):
+                # Should NOT raise — content is already durable in git
+                _persist_active_capsule(
+                    repo_root=repo,
+                    gm=_NoChangesGM(repo),
+                    path=capsule_path,
+                    canonical=new_content,
+                    commit_message="test",
+                )
+
+            # File must have the NEW content, not rolled back to original
+            self.assertEqual(capsule_path.read_text(encoding="utf-8"), new_content)
 
 
 # ------------------------------------------------------------------ #

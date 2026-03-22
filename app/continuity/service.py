@@ -518,10 +518,9 @@ def _persist_active_capsule(
     with repository_mutation_lock(repo_root):
         write_text_file(path, canonical)
         try:
-            committed = gm.commit_file(path, commit_message)
-            if not committed:
-                raise RuntimeError("git commit produced no changes")
+            gm.commit_file(path, commit_message)
         except Exception as exc:
+            _logger.error("Continuity capsule persist failed: %s", exc, exc_info=True)
             restore_error: Exception | None = None
             unstage_paths(gm, [path])
             try:
@@ -531,6 +530,7 @@ def _persist_active_capsule(
                     write_bytes_file(path, old_bytes)
             except Exception as restore_exc:
                 restore_error = restore_exc
+                _logger.exception("Rollback also failed after continuity persist error")
             error_detail = f"Failed to persist continuity capsule: {exc}"
             if restore_error is not None:
                 error_detail = f"{error_detail}; rollback failed: {restore_error}"
@@ -2607,10 +2607,12 @@ def continuity_archive_service(
                     f"continuity: archive {req.subject_kind} {req.subject_id}",
                 )
             except Exception as exc:
+                _logger.error("Continuity archive commit failed: %s", exc, exc_info=True)
                 unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
+                    _logger.exception("Rollback also failed after archive commit error")
                     raise HTTPException(
                         status_code=500,
                         detail=make_error_detail(
@@ -2628,10 +2630,12 @@ def continuity_archive_service(
                     ),
                 ) from exc
             if not committed:
+                _logger.error("Continuity archive commit produced no changes")
                 unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
+                    _logger.exception("Rollback failed after archive no-changes error")
                     raise HTTPException(
                         status_code=500,
                         detail=make_error_detail(
