@@ -1468,5 +1468,545 @@ class TestNonceRetentionNegative(unittest.TestCase):
         self.assertIn("key1|nonce1", head["entries"])
 
 
+# ===================================================================
+# Cold-store / rehydrate / cold-apply / retention-prune tests
+# ===================================================================
+
+
+def _create_shard_and_stub(repo_root, family, shard_id, summary, *, schema_type, source_head_path, extra_shard=None):
+    """Helper: create a hot shard + stub pair for testing cold-store operations."""
+    from app.registry_lifecycle.service import (
+        _REGISTRY_HISTORY_DIRS_BY_FAMILY,
+        _REGISTRY_STUB_DIRS_BY_FAMILY,
+    )
+    history_dir_rel = _REGISTRY_HISTORY_DIRS_BY_FAMILY[family]
+    stub_dir_rel = _REGISTRY_STUB_DIRS_BY_FAMILY[family]
+
+    shard_payload = {
+        "schema_type": schema_type,
+        "schema_version": "1.0",
+        "shard_id": shard_id,
+        "source_head_path": source_head_path,
+        "cut_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+        "summary": summary,
+    }
+    if extra_shard:
+        shard_payload.update(extra_shard)
+
+    shard_path = safe_path(repo_root, f"{history_dir_rel}/{shard_id}.json")
+    write_text_file(shard_path, json.dumps(shard_payload, indent=2))
+
+    stub_payload = {
+        "schema_type": "registry_history_stub",
+        "schema_version": "1.0",
+        "family": family,
+        "shard_id": shard_id,
+        "payload_path": f"{history_dir_rel}/{shard_id}.json",
+        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+        "source_head_path": source_head_path,
+        "summary": summary,
+    }
+    stub_path = safe_path(repo_root, f"{stub_dir_rel}/{shard_id}.json")
+    write_text_file(stub_path, json.dumps(stub_payload, indent=2))
+
+    return shard_path, stub_path
+
+
+class TestRegistryColdStore(unittest.TestCase):
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.repo = Path(self._td.name) / "repo"
+        self.repo.mkdir()
+        self.now = _now()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_cold_store_compresses_and_updates_stub(self):
+        """Cold-store a delivery shard: hot deleted, cold .json.gz created, stub updated."""
+        import gzip as _gzip
+        from app.registry_lifecycle.service import (
+            DELIVERY_HISTORY_DIR_REL,
+            registry_history_cold_store_service,
+        )
+        shard_id = "delivery__20260101T000000Z__0001"
+        summary = {
+            "record_count": 2,
+            "oldest_retention_timestamp": "2025-11-01T00:00:00+00:00",
+            "newest_retention_timestamp": "2025-12-01T00:00:00+00:00",
+        }
+        shard_path, stub_path = _create_shard_and_stub(
+            self.repo, "delivery", shard_id, summary,
+            schema_type="delivery_history_shard",
+            source_head_path=DELIVERY_STATE_REL,
+        )
+        payload_rel = f"{DELIVERY_HISTORY_DIR_REL}/{shard_id}.json"
+
+        result = registry_history_cold_store_service(
+            repo_root=self.repo,
+            gm=None,
+            auth=None,
+            req=type("Req", (), {"source_payload_path": payload_rel})(),
+            audit=lambda *a, **kw: None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["shard_state"], "cold")
+        # Hot file removed
+        self.assertFalse(shard_path.exists())
+        # Cold file created
+        cold_rel = result["cold_storage_path"]
+        cold_path = safe_path(self.repo, cold_rel)
+        self.assertTrue(cold_path.exists())
+        # Decompress and verify content
+        decompressed = _gzip.decompress(cold_path.read_bytes())
+        payload = json.loads(decompressed)
+        self.assertEqual(payload["shard_id"], shard_id)
+        # Stub updated
+        stub = json.loads(stub_path.read_text(encoding="utf-8"))
+        self.assertEqual(stub["payload_path"], cold_rel)
+
+    def test_cold_rehydrate_restores_hot(self):
+        """After cold-store, rehydrate should restore the hot shard."""
+        from app.registry_lifecycle.service import (
+            DELIVERY_HISTORY_DIR_REL,
+            registry_history_cold_rehydrate_service,
+            registry_history_cold_store_service,
+        )
+        shard_id = "delivery__20260101T000000Z__0001"
+        summary = {
+            "record_count": 1,
+            "oldest_retention_timestamp": "2025-11-01T00:00:00+00:00",
+            "newest_retention_timestamp": "2025-12-01T00:00:00+00:00",
+        }
+        shard_path, stub_path = _create_shard_and_stub(
+            self.repo, "delivery", shard_id, summary,
+            schema_type="delivery_history_shard",
+            source_head_path=DELIVERY_STATE_REL,
+        )
+        payload_rel = f"{DELIVERY_HISTORY_DIR_REL}/{shard_id}.json"
+
+        # Cold-store first
+        cold_result = registry_history_cold_store_service(
+            repo_root=self.repo, gm=None, auth=None,
+            req=type("Req", (), {"source_payload_path": payload_rel})(),
+            audit=lambda *a, **kw: None,
+        )
+        self.assertTrue(cold_result["ok"])
+        self.assertFalse(shard_path.exists())
+
+        # Rehydrate
+        result = registry_history_cold_rehydrate_service(
+            repo_root=self.repo, gm=None, auth=None,
+            req=type("Req", (), {"source_payload_path": payload_rel, "cold_stub_path": None})(),
+            audit=lambda *a, **kw: None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["shard_state"], "hot")
+        self.assertTrue(shard_path.exists())
+        cold_path = safe_path(self.repo, cold_result["cold_storage_path"])
+        self.assertFalse(cold_path.exists())
+        stub = json.loads(stub_path.read_text(encoding="utf-8"))
+        self.assertEqual(stub["payload_path"], payload_rel)
+
+    def test_cold_store_rollback_on_write_failure(self):
+        """If stub write fails during cold-store, hot file is preserved."""
+        from unittest.mock import patch
+        from app.registry_lifecycle.service import (
+            DELIVERY_HISTORY_DIR_REL,
+            registry_history_cold_store_service,
+        )
+        shard_id = "delivery__20260101T000000Z__0001"
+        summary = {
+            "record_count": 1,
+            "oldest_retention_timestamp": "2025-11-01T00:00:00+00:00",
+            "newest_retention_timestamp": "2025-12-01T00:00:00+00:00",
+        }
+        shard_path, _stub_path = _create_shard_and_stub(
+            self.repo, "delivery", shard_id, summary,
+            schema_type="delivery_history_shard",
+            source_head_path=DELIVERY_STATE_REL,
+        )
+        payload_rel = f"{DELIVERY_HISTORY_DIR_REL}/{shard_id}.json"
+        original_bytes = shard_path.read_bytes()
+
+        with patch("app.registry_lifecycle.service._write_json", side_effect=OSError("disk full")):
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as ctx:
+                registry_history_cold_store_service(
+                    repo_root=self.repo, gm=None, auth=None,
+                    req=type("Req", (), {"source_payload_path": payload_rel})(),
+                    audit=lambda *a, **kw: None,
+                )
+            self.assertEqual(ctx.exception.status_code, 500)
+
+        # Hot file should be restored
+        self.assertTrue(shard_path.exists())
+        self.assertEqual(shard_path.read_bytes(), original_bytes)
+
+    def test_cold_apply_respects_thresholds(self):
+        """Cold-apply only cold-stores shards older than the configured threshold."""
+        from dataclasses import dataclass
+        from app.registry_lifecycle.service import (
+            DELIVERY_HISTORY_DIR_REL,
+            registry_history_cold_apply_service,
+        )
+
+        # Create two shards: one old (eligible), one recent (not eligible)
+        old_ts = (self.now - timedelta(days=120)).isoformat()
+        recent_ts = (self.now - timedelta(days=10)).isoformat()
+
+        _create_shard_and_stub(
+            self.repo, "delivery", "delivery__20260101T000000Z__0001",
+            {"record_count": 1, "oldest_retention_timestamp": old_ts, "newest_retention_timestamp": old_ts},
+            schema_type="delivery_history_shard",
+            source_head_path=DELIVERY_STATE_REL,
+        )
+        _create_shard_and_stub(
+            self.repo, "delivery", "delivery__20260319T000000Z__0001",
+            {"record_count": 1, "oldest_retention_timestamp": recent_ts, "newest_retention_timestamp": recent_ts},
+            schema_type="delivery_history_shard",
+            source_head_path=DELIVERY_STATE_REL,
+        )
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            delivery_history_cold_after_days: int = 90
+            peer_trust_history_cold_after_days: int = 120
+            replication_history_cold_after_days: int = 90
+            replication_tombstone_cold_after_days: int = 90
+
+        result = registry_history_cold_apply_service(
+            repo_root=self.repo, gm=None, auth=None, now=self.now,
+            settings=FakeSettings(), families=["delivery"],
+            audit=lambda *a, **kw: None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cold_stored"], 1)
+        self.assertEqual(result["families"]["delivery"]["eligible"], 1)
+
+        # Verify old shard cold-stored, recent shard still hot
+        old_hot = safe_path(self.repo, f"{DELIVERY_HISTORY_DIR_REL}/delivery__20260101T000000Z__0001.json")
+        recent_hot = safe_path(self.repo, f"{DELIVERY_HISTORY_DIR_REL}/delivery__20260319T000000Z__0001.json")
+        self.assertFalse(old_hot.exists())
+        self.assertTrue(recent_hot.exists())
+
+    def test_cold_apply_skips_already_cold(self):
+        """Cold-apply skips shards whose stub already points to a cold path."""
+        import gzip as _gzip
+        from dataclasses import dataclass
+        from app.registry_lifecycle.service import (
+            DELIVERY_HISTORY_DIR_REL,
+            DELIVERY_STUB_DIR_REL,
+            registry_history_cold_apply_service,
+        )
+
+        shard_id = "delivery__20260101T000000Z__0001"
+        old_ts = (self.now - timedelta(days=120)).isoformat()
+        summary = {"record_count": 1, "oldest_retention_timestamp": old_ts, "newest_retention_timestamp": old_ts}
+
+        # Create shard, stub pointing to cold (simulating already cold-stored)
+        shard_payload = {
+            "schema_type": "delivery_history_shard", "schema_version": "1.0",
+            "shard_id": shard_id, "summary": summary,
+            "source_head_path": DELIVERY_STATE_REL,
+            "cut_at": "2026-01-01T00:00:00+00:00",
+        }
+        # Write a hot shard AND set stub to cold path (inconsistent — stub says cold but hot exists)
+        # Actually for "already cold" test, we should NOT have a hot file, but glob won't find it.
+        # The cold-apply scans for *.json in the history dir, so if no hot file, nothing to process.
+        # This test verifies that if stub points to cold, the shard is skipped.
+        hot_path = safe_path(self.repo, f"{DELIVERY_HISTORY_DIR_REL}/{shard_id}.json")
+        write_text_file(hot_path, json.dumps(shard_payload, indent=2))
+
+        cold_path_rel = f"{DELIVERY_HISTORY_DIR_REL}/cold/{shard_id}.json.gz"
+        cold_path = safe_path(self.repo, cold_path_rel)
+        cold_path.parent.mkdir(parents=True, exist_ok=True)
+        cold_path.write_bytes(_gzip.compress(json.dumps(shard_payload).encode(), mtime=0))
+
+        stub_payload = {
+            "schema_type": "registry_history_stub", "schema_version": "1.0",
+            "family": "delivery", "shard_id": shard_id,
+            "payload_path": cold_path_rel,  # Already cold
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "source_head_path": DELIVERY_STATE_REL, "summary": summary,
+        }
+        stub_path = safe_path(self.repo, f"{DELIVERY_STUB_DIR_REL}/{shard_id}.json")
+        write_text_file(stub_path, json.dumps(stub_payload, indent=2))
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            delivery_history_cold_after_days: int = 90
+            peer_trust_history_cold_after_days: int = 120
+            replication_history_cold_after_days: int = 90
+            replication_tombstone_cold_after_days: int = 90
+
+        result = registry_history_cold_apply_service(
+            repo_root=self.repo, gm=None, auth=None, now=self.now,
+            settings=FakeSettings(), families=["delivery"],
+            audit=lambda *a, **kw: None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cold_stored"], 0)
+
+    def test_cold_store_crash_recovery_orphaned_cold(self):
+        """If both hot and cold files exist (crash recovery), cold-store cleans up orphan and proceeds."""
+        import gzip as _gzip
+        from app.registry_lifecycle.service import (
+            DELIVERY_HISTORY_DIR_REL,
+            registry_history_cold_store_service,
+        )
+
+        shard_id = "delivery__20260101T000000Z__0001"
+        summary = {
+            "record_count": 1,
+            "oldest_retention_timestamp": "2025-11-01T00:00:00+00:00",
+            "newest_retention_timestamp": "2025-12-01T00:00:00+00:00",
+        }
+        shard_path, stub_path = _create_shard_and_stub(
+            self.repo, "delivery", shard_id, summary,
+            schema_type="delivery_history_shard",
+            source_head_path=DELIVERY_STATE_REL,
+        )
+        payload_rel = f"{DELIVERY_HISTORY_DIR_REL}/{shard_id}.json"
+
+        # Simulate crash: create orphaned cold file
+        cold_path_rel = f"{DELIVERY_HISTORY_DIR_REL}/cold/{shard_id}.json.gz"
+        cold_path = safe_path(self.repo, cold_path_rel)
+        cold_path.parent.mkdir(parents=True, exist_ok=True)
+        cold_path.write_bytes(b"orphaned-cold-data")
+
+        result = registry_history_cold_store_service(
+            repo_root=self.repo, gm=None, auth=None,
+            req=type("Req", (), {"source_payload_path": payload_rel})(),
+            audit=lambda *a, **kw: None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(shard_path.exists())
+        # Cold file should now contain valid gzip data (not the orphan)
+        decompressed = _gzip.decompress(cold_path.read_bytes())
+        payload = json.loads(decompressed)
+        self.assertEqual(payload["shard_id"], shard_id)
+
+    def test_retention_prune_deletes_expired_cold_tombstones(self):
+        """Cold tombstone shards past retention_days are deleted."""
+        import gzip as _gzip
+        from app.registry_lifecycle.service import (
+            REPLICATION_TOMBSTONE_HISTORY_DIR_REL,
+            REPLICATION_TOMBSTONE_STUB_DIR_REL,
+            registry_history_retention_prune_service,
+        )
+
+        shard_id = "replication_tombstones__20250101T000000Z__0001"
+        old_ts = (self.now - timedelta(days=400)).isoformat()
+        summary = {"entry_count": 1, "oldest_tombstone_at": old_ts, "newest_tombstone_at": old_ts}
+        shard_payload = {
+            "schema_type": "replication_tombstone_shard", "schema_version": "1.0",
+            "shard_id": shard_id, "summary": summary,
+        }
+        cold_path_rel = f"{REPLICATION_TOMBSTONE_HISTORY_DIR_REL}/cold/{shard_id}.json.gz"
+        cold_path = safe_path(self.repo, cold_path_rel)
+        cold_path.parent.mkdir(parents=True, exist_ok=True)
+        cold_path.write_bytes(_gzip.compress(json.dumps(shard_payload).encode(), mtime=0))
+
+        stub_payload = {
+            "schema_type": "registry_history_stub", "schema_version": "1.0",
+            "family": "replication_tombstones", "shard_id": shard_id,
+            "payload_path": cold_path_rel,
+            "created_at": "2025-01-01T00:00:00+00:00",
+            "source_head_path": REPLICATION_TOMBSTONES_REL, "summary": summary,
+        }
+        stub_path = safe_path(self.repo, f"{REPLICATION_TOMBSTONE_STUB_DIR_REL}/{shard_id}.json")
+        write_text_file(stub_path, json.dumps(stub_payload, indent=2))
+
+        result = registry_history_retention_prune_service(
+            repo_root=self.repo, gm=None, now=self.now,
+            retention_days=365, batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pruned"], 1)
+        self.assertFalse(cold_path.exists())
+        self.assertFalse(stub_path.exists())
+
+    def test_retention_prune_preserves_non_expired(self):
+        """Cold tombstone shards within the retention window are preserved."""
+        import gzip as _gzip
+        from app.registry_lifecycle.service import (
+            REPLICATION_TOMBSTONE_HISTORY_DIR_REL,
+            REPLICATION_TOMBSTONE_STUB_DIR_REL,
+            registry_history_retention_prune_service,
+        )
+
+        shard_id = "replication_tombstones__20260101T000000Z__0001"
+        recent_ts = (self.now - timedelta(days=30)).isoformat()
+        summary = {"entry_count": 1, "oldest_tombstone_at": recent_ts, "newest_tombstone_at": recent_ts}
+        shard_payload = {
+            "schema_type": "replication_tombstone_shard", "schema_version": "1.0",
+            "shard_id": shard_id, "summary": summary,
+        }
+        cold_path_rel = f"{REPLICATION_TOMBSTONE_HISTORY_DIR_REL}/cold/{shard_id}.json.gz"
+        cold_path = safe_path(self.repo, cold_path_rel)
+        cold_path.parent.mkdir(parents=True, exist_ok=True)
+        cold_path.write_bytes(_gzip.compress(json.dumps(shard_payload).encode(), mtime=0))
+
+        stub_payload = {
+            "schema_type": "registry_history_stub", "schema_version": "1.0",
+            "family": "replication_tombstones", "shard_id": shard_id,
+            "payload_path": cold_path_rel,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "source_head_path": REPLICATION_TOMBSTONES_REL, "summary": summary,
+        }
+        stub_path = safe_path(self.repo, f"{REPLICATION_TOMBSTONE_STUB_DIR_REL}/{shard_id}.json")
+        write_text_file(stub_path, json.dumps(stub_payload, indent=2))
+
+        result = registry_history_retention_prune_service(
+            repo_root=self.repo, gm=None, now=self.now,
+            retention_days=365, batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pruned"], 0)
+        self.assertTrue(cold_path.exists())
+        self.assertTrue(stub_path.exists())
+
+    def test_retention_prune_guards_against_concurrent_rehydrate(self):
+        """If stub no longer points to cold (rehydrated), retention prune skips it."""
+        import gzip as _gzip
+        from app.registry_lifecycle.service import (
+            REPLICATION_TOMBSTONE_HISTORY_DIR_REL,
+            REPLICATION_TOMBSTONE_STUB_DIR_REL,
+            registry_history_retention_prune_service,
+        )
+
+        shard_id = "replication_tombstones__20250101T000000Z__0001"
+        old_ts = (self.now - timedelta(days=400)).isoformat()
+        summary = {"entry_count": 1, "oldest_tombstone_at": old_ts, "newest_tombstone_at": old_ts}
+        shard_payload = {
+            "schema_type": "replication_tombstone_shard", "schema_version": "1.0",
+            "shard_id": shard_id, "summary": summary,
+        }
+        cold_path_rel = f"{REPLICATION_TOMBSTONE_HISTORY_DIR_REL}/cold/{shard_id}.json.gz"
+        cold_path = safe_path(self.repo, cold_path_rel)
+        cold_path.parent.mkdir(parents=True, exist_ok=True)
+        cold_path.write_bytes(_gzip.compress(json.dumps(shard_payload).encode(), mtime=0))
+
+        # Stub points to hot (as if rehydrated)
+        hot_path_rel = f"{REPLICATION_TOMBSTONE_HISTORY_DIR_REL}/{shard_id}.json"
+        stub_payload = {
+            "schema_type": "registry_history_stub", "schema_version": "1.0",
+            "family": "replication_tombstones", "shard_id": shard_id,
+            "payload_path": hot_path_rel,  # Points to hot, not cold
+            "created_at": "2025-01-01T00:00:00+00:00",
+            "source_head_path": REPLICATION_TOMBSTONES_REL, "summary": summary,
+        }
+        stub_path = safe_path(self.repo, f"{REPLICATION_TOMBSTONE_STUB_DIR_REL}/{shard_id}.json")
+        write_text_file(stub_path, json.dumps(stub_payload, indent=2))
+
+        result = registry_history_retention_prune_service(
+            repo_root=self.repo, gm=None, now=self.now,
+            retention_days=365, batch_limit=500,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pruned"], 0)
+        # Both cold and stub should still exist (not deleted)
+        self.assertTrue(cold_path.exists())
+        self.assertTrue(stub_path.exists())
+
+    def test_orchestrator_includes_cold_apply_and_retention_prune(self):
+        """Full orchestrator with auth includes cold_apply and retention_prune keys."""
+        from app.registry_lifecycle.service import registry_maintenance_service
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            delivery_terminal_retention_days: int = 30
+            delivery_idempotency_retention_days: int = 30
+            nonce_retention_days: int = 7
+            peer_trust_history_max_hot_entries: int = 32
+            peer_trust_history_hot_retention_days: int = 30
+            replication_tombstone_grace_days: int = 30
+            replication_pull_idempotency_retention_days: int = 14
+            registry_history_batch_limit: int = 500
+            delivery_history_cold_after_days: int = 90
+            peer_trust_history_cold_after_days: int = 120
+            replication_history_cold_after_days: int = 90
+            replication_tombstone_cold_after_days: int = 90
+            replication_tombstone_retention_days: int = 365
+
+        class FakeAuth:
+            def require(self, _s): pass
+            def require_read_path(self, _p): pass
+            def require_write_path(self, _p): pass
+
+        result = registry_maintenance_service(
+            repo_root=self.repo, gm=None, now=self.now,
+            settings=FakeSettings(), auth=FakeAuth(),
+            audit=lambda *_a, **_kw: None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn("cold_apply", result)
+        self.assertIn("retention_prune", result)
+
+
+# ===================================================================
+# Config validation tests
+# ===================================================================
+
+
+class TestRegistryLifecycleValidation(unittest.TestCase):
+
+    def test_validate_registry_lifecycle_cold_exceeds_retention(self):
+        """SystemExit when cold_after_days > retention_days."""
+        from dataclasses import dataclass
+        from app.config import _validate_registry_lifecycle_settings
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            delivery_history_cold_after_days: int = 90
+            peer_trust_history_cold_after_days: int = 120
+            replication_history_cold_after_days: int = 90
+            replication_tombstone_cold_after_days: int = 999
+            replication_tombstone_retention_days: int = 30
+            registry_history_batch_limit: int = 500
+
+        with self.assertRaises(SystemExit) as ctx:
+            _validate_registry_lifecycle_settings(FakeSettings())
+        self.assertIn("must not exceed", str(ctx.exception))
+
+    def test_validate_registry_lifecycle_zero_value(self):
+        """SystemExit when a cold_after_days is 0."""
+        from dataclasses import dataclass
+        from app.config import _validate_registry_lifecycle_settings
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            delivery_history_cold_after_days: int = 0
+            peer_trust_history_cold_after_days: int = 120
+            replication_history_cold_after_days: int = 90
+            replication_tombstone_cold_after_days: int = 90
+            replication_tombstone_retention_days: int = 365
+            registry_history_batch_limit: int = 500
+
+        with self.assertRaises(SystemExit) as ctx:
+            _validate_registry_lifecycle_settings(FakeSettings())
+        self.assertIn("must be >= 1", str(ctx.exception))
+
+    def test_validate_registry_lifecycle_valid(self):
+        """Valid settings pass without error."""
+        from dataclasses import dataclass
+        from app.config import _validate_registry_lifecycle_settings
+
+        @dataclass(frozen=True)
+        class FakeSettings:
+            delivery_history_cold_after_days: int = 90
+            peer_trust_history_cold_after_days: int = 120
+            replication_history_cold_after_days: int = 90
+            replication_tombstone_cold_after_days: int = 90
+            replication_tombstone_retention_days: int = 365
+            registry_history_batch_limit: int = 500
+
+        # Should not raise
+        _validate_registry_lifecycle_settings(FakeSettings())
+
+
 if __name__ == "__main__":
     unittest.main()
