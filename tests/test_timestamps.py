@@ -50,9 +50,9 @@ class TestParseIso(unittest.TestCase):
     def test_malformed_returns_none(self) -> None:
         self.assertIsNone(parse_iso("not-a-date"))
 
-    def test_non_string_coercion(self) -> None:
-        """Numeric or other types that str() can convert should not crash."""
-        self.assertIsNone(parse_iso("12345"))  # type: ignore[arg-type]
+    def test_digit_only_string_returns_none(self) -> None:
+        """A digit-only string is not a valid ISO timestamp."""
+        self.assertIsNone(parse_iso("12345"))
 
     def test_with_microseconds(self) -> None:
         dt = parse_iso("2026-03-20T12:00:00.123456Z")
@@ -103,6 +103,11 @@ class TestRequireUtcIso(unittest.TestCase):
             require_utc_iso("not-a-dateZ", "field")
         self.assertIn("malformed", str(ctx.exception))
 
+    def test_whitespace_padded_z_accepted(self) -> None:
+        """Leading/trailing whitespace should be tolerated."""
+        dt = require_utc_iso("  2026-03-20T12:00:00Z  ", "field")
+        self.assertEqual(dt, datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc))
+
 
 class TestIsoNow(unittest.TestCase):
     """Tests for ``iso_now``."""
@@ -143,6 +148,11 @@ class TestFormatIso(unittest.TestCase):
         dt = datetime(2026, 3, 20, 17, 30, 0, tzinfo=ist)
         self.assertEqual(format_iso(dt), "2026-03-20T12:00:00Z")
 
+    def test_naive_datetime_assumed_utc(self) -> None:
+        """Naive datetimes must be treated as UTC, not server-local time."""
+        dt = datetime(2026, 3, 20, 12, 0, 0)
+        self.assertEqual(format_iso(dt), "2026-03-20T12:00:00Z")
+
     def test_roundtrip_with_parse_iso(self) -> None:
         original = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
         formatted = format_iso(original)
@@ -160,6 +170,11 @@ class TestFormatCompact(unittest.TestCase):
     def test_converts_to_utc(self) -> None:
         ist = timezone(timedelta(hours=5, minutes=30))
         dt = datetime(2026, 3, 20, 17, 30, 0, tzinfo=ist)
+        self.assertEqual(format_compact(dt), "20260320T120000Z")
+
+    def test_naive_datetime_assumed_utc(self) -> None:
+        """Naive datetimes must be treated as UTC, not server-local time."""
+        dt = datetime(2026, 3, 20, 12, 0, 0)
         self.assertEqual(format_compact(dt), "20260320T120000Z")
 
     def test_strips_microseconds(self) -> None:
@@ -215,6 +230,12 @@ class TestIsoToPosix(unittest.TestCase):
     def test_z_and_offset_equal(self) -> None:
         a = iso_to_posix("2026-03-20T12:00:00Z")
         b = iso_to_posix("2026-03-20T12:00:00+00:00")
+        self.assertEqual(a, b)
+
+    def test_non_utc_offset_normalizes(self) -> None:
+        """Non-UTC offsets must produce the same POSIX value as equivalent UTC."""
+        a = iso_to_posix("2026-03-20T17:30:00+05:30")
+        b = iso_to_posix("2026-03-20T12:00:00Z")
         self.assertEqual(a, b)
 
 
