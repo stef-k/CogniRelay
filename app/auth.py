@@ -11,6 +11,7 @@ from typing import Set
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from .config import get_settings, sha256_token
+from .timestamps import parse_iso as _parse_iso
 
 
 @dataclass
@@ -63,16 +64,6 @@ def _extract_bearer_token(authorization: str | None) -> str:
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
     return parts[1].strip()
-
-
-def _parse_iso(sv: str | None):
-    """Parse an ISO timestamp and return ``None`` on invalid input."""
-    if not sv:
-        return None
-    try:
-        return datetime.fromisoformat(str(sv).replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 def _normalize_ip(value: str | None) -> str | None:

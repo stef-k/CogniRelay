@@ -13,6 +13,8 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from app.timestamps import parse_iso as _parse_iso
+
 from app.auth import AuthContext
 from app.config import ALL_SCOPES
 from app.models import (
@@ -30,16 +32,6 @@ TOKEN_CONFIG_REL = "config/peer_tokens.json"
 SECURITY_KEYS_REL = "config/security_keys.json"
 NONCE_INDEX_REL = "messages/security/nonce_index.json"
 GOVERNANCE_POLICY_REL = "config/governance_policy.json"
-
-
-def _parse_iso(value: str | None):
-    """Parse an ISO timestamp string into a datetime when possible."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 def _sha256_text(content: str) -> str:

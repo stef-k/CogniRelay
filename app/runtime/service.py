@@ -13,6 +13,7 @@ import logging
 from fastapi import HTTPException
 
 from app.audit import WriteTimeRolloverError, append_audit
+from app.timestamps import parse_iso
 from app.segment_history.append import SegmentHistoryAppendError
 from app.config import sha256_token
 from app.discovery import handle_mcp_rpc_request as discovery_handle_mcp_rpc_request
@@ -179,16 +180,6 @@ def _auth_refs(auth: Any) -> tuple[str, str]:
     client_ip = getattr(auth, "client_ip", None)
     ip_ref = (client_ip or "unknown").strip() or "unknown"
     return token_ref, ip_ref
-
-
-def parse_iso(value: str | None):
-    """Parse an ISO timestamp and return ``None`` on invalid input."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 def _prune_rate_limit_state(payload: dict[str, Any], now: datetime, max_window_seconds: int) -> None:
