@@ -1706,6 +1706,7 @@ def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) 
 @app.exception_handler(GitLockTimeout)
 async def git_lock_timeout_handler(_, exc: GitLockTimeout):
     """Convert uncaught git lock timeouts to 409 Conflict."""
+    _log.warning("Git lock timeout reached global handler: %s", exc)
     return JSONResponse(
         status_code=409,
         content=make_error_detail(
@@ -1719,6 +1720,7 @@ async def git_lock_timeout_handler(_, exc: GitLockTimeout):
 @app.exception_handler(GitLockInfrastructureError)
 async def git_lock_infra_handler(_, exc: GitLockInfrastructureError):
     """Convert uncaught git lock infrastructure errors to 503 Service Unavailable."""
+    _log.error("Git lock infrastructure error reached global handler: %s", exc, exc_info=True)
     return JSONResponse(
         status_code=503,
         content=make_error_detail(

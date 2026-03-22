@@ -531,10 +531,17 @@ def _persist_active_capsule(
                     write_bytes_file(path, old_bytes)
             except Exception as restore_exc:
                 restore_error = restore_exc
-            detail = f"Failed to persist continuity capsule: {exc}"
+            error_detail = f"Failed to persist continuity capsule: {exc}"
             if restore_error is not None:
-                detail = f"{detail}; rollback failed: {restore_error}"
-            raise HTTPException(status_code=500, detail=detail) from exc
+                error_detail = f"{error_detail}; rollback failed: {restore_error}"
+            raise HTTPException(
+                status_code=500,
+                detail=make_error_detail(
+                    operation="continuity_persist",
+                    error_code="continuity_persist_commit_failed" if restore_error is None else "continuity_persist_rollback_failed",
+                    error_detail=error_detail,
+                ),
+            ) from exc
 
 
 def _fallback_snapshot_payload(*, capsule: dict[str, Any], active_rel: str, captured_at: str) -> dict[str, Any]:
