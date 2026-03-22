@@ -11,6 +11,8 @@ import threading
 import time
 import zlib
 from datetime import datetime, timezone
+
+from app.timestamps import format_compact, format_iso
 from pathlib import Path
 from typing import Any, Callable, NoReturn
 
@@ -58,10 +60,7 @@ _FAMILY_EXTENSION: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Timestamp helpers
 # ---------------------------------------------------------------------------
-def _segment_timestamp_str(dt: datetime) -> str:
-    """Format a datetime as the canonical segment timestamp ``YYYYMMDDTHHMMSSZ``."""
-    utc = dt.astimezone(timezone.utc)
-    return utc.strftime("%Y%m%dT%H%M%SZ")
+_segment_timestamp_str = format_compact
 
 
 # ---------------------------------------------------------------------------
@@ -2138,7 +2137,7 @@ def segment_history_cold_store_service(
 
                     # Mutate stub: payload_path moves to cold location, add cold_stored_at
                     cold_rel = str(cold_path.relative_to(repo_root))
-                    cold_stored_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    cold_stored_at = format_iso(datetime.now(timezone.utc))
                     updated_stub = _mutate_stub_cold(stub, cold_rel, cold_stored_at)
                     write_text_file(
                         stub_path,

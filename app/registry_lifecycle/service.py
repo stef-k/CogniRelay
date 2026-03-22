@@ -12,13 +12,13 @@ import gzip
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from app.timestamps import parse_iso as _parse_iso, iso_now as _iso_now
+from app.timestamps import format_compact, format_iso, parse_iso as _parse_iso, iso_now as _iso_now
 
 from app.git_safety import try_commit_paths
 from app.lifecycle_warnings import make_error_detail, make_lock_error, make_warning
@@ -83,10 +83,7 @@ _REGISTRY_STUB_DIRS_BY_FAMILY: dict[str, str] = {
 # Shared shard naming
 # ---------------------------------------------------------------------------
 
-def _shard_timestamp_str(cut_at: datetime) -> str:
-    """Convert cut_at to the YYYYMMDDTHHMMSSZ format per spec."""
-    utc = cut_at.astimezone(timezone.utc).replace(microsecond=0)
-    return utc.strftime("%Y%m%dT%H%M%SZ")
+_shard_timestamp_str = format_compact
 
 
 def _next_shard_id(family: str, cut_at: datetime, shard_dir: Path) -> str:
@@ -130,7 +127,7 @@ def _create_stub(
         "family": family,
         "shard_id": shard_id,
         "payload_path": payload_path,
-        "created_at": created_at.isoformat(),
+        "created_at": format_iso(created_at),
         "source_head_path": source_head_path,
         "summary": summary,
     }
@@ -487,8 +484,8 @@ def _delivery_maintenance_pass_locked(
             "record_count": len(cut_records),
             "idempotency_count": len(cut_idempotency),
             "effective_status_counts": status_counts,
-            "oldest_retention_timestamp": min(retention_timestamps).isoformat() if retention_timestamps else None,
-            "newest_retention_timestamp": max(retention_timestamps).isoformat() if retention_timestamps else None,
+            "oldest_retention_timestamp": format_iso(min(retention_timestamps)) if retention_timestamps else None,
+            "newest_retention_timestamp": format_iso(max(retention_timestamps)) if retention_timestamps else None,
         }
 
         shard_payload = {
@@ -496,7 +493,7 @@ def _delivery_maintenance_pass_locked(
             "schema_version": "1.0",
             "shard_id": "",
             "source_head_path": DELIVERY_STATE_REL,
-            "cut_at": now.isoformat(),
+            "cut_at": format_iso(now),
             "records": cut_records,
             "idempotency": cut_idempotency,
             "summary": summary,
@@ -543,7 +540,7 @@ def _delivery_maintenance_pass_locked(
         dm = {}
         history_meta["delivery"] = dm
     if eligible_records:
-        dm["last_cut_at"] = now.isoformat()
+        dm["last_cut_at"] = format_iso(now)
         dm["last_cut_record_count"] = len(cut_records)
         dm["last_cut_effective_status_counts"] = summary["effective_status_counts"]  # type: ignore[possibly-undefined]
     dm["hot_record_count"] = len(records)
@@ -685,7 +682,7 @@ def _nonce_maintenance_pass_locked(
     if not isinstance(nm, dict):
         nm = {}
         history_meta["nonce"] = nm
-    nm["last_pruned_at"] = now.isoformat()
+    nm["last_pruned_at"] = format_iso(now)
     nm["last_pruned_count"] = len(prune_keys)
     nm["hot_entry_count"] = len(entries)
 
@@ -798,8 +795,8 @@ def _peer_trust_maintenance_pass_locked(
 
         summary = {
             "transition_count": len(eligible),
-            "oldest_transition_at": min(transition_timestamps).isoformat() if transition_timestamps else None,
-            "newest_transition_at": max(transition_timestamps).isoformat() if transition_timestamps else None,
+            "oldest_transition_at": format_iso(min(transition_timestamps)) if transition_timestamps else None,
+            "newest_transition_at": format_iso(max(transition_timestamps)) if transition_timestamps else None,
             "final_hot_trust_level_after_cut": final_trust_after,
         }
 
@@ -809,7 +806,7 @@ def _peer_trust_maintenance_pass_locked(
             "shard_id": "",
             "source_head_path": PEERS_REGISTRY_REL,
             "peer_id": peer_id,
-            "cut_at": now.isoformat(),
+            "cut_at": format_iso(now),
             "transitions": eligible,
             "summary": summary,
         }
@@ -870,7 +867,7 @@ def _peer_trust_maintenance_pass_locked(
         history_meta["peer_registry"] = pr_meta
 
     last_result = shard_results[-1]
-    pr_meta["last_cut_at"] = now.isoformat()
+    pr_meta["last_cut_at"] = format_iso(now)
     pr_meta["last_cut_peer_id"] = last_result["peer_id"]
     pr_meta["last_cut_transition_count"] = total_externalized
     pr_meta["hot_peer_count"] = len(peers)
@@ -896,7 +893,7 @@ def _peer_trust_maintenance_pass_locked(
         if not isinstance(prev_ext, int):
             prev_ext = 0
         pm["trust_history_externalized_count"] = prev_ext + sr["transition_count"]
-        pm["last_trust_cut_at"] = now.isoformat()
+        pm["last_trust_cut_at"] = format_iso(now)
         # Compute total count
         peer_row = peers.get(pid, {})
         hot_count = len(peer_row.get("trust_history", [])) if isinstance(peer_row, dict) else 0
@@ -963,8 +960,8 @@ def externalize_superseded_push(
     summary = {
         "push_event_count": 1,
         "pull_event_count": 0,
-        "oldest_event_at": pushed_at.isoformat(),
-        "newest_event_at": pushed_at.isoformat(),
+        "oldest_event_at": format_iso(pushed_at),
+        "newest_event_at": format_iso(pushed_at),
     }
 
     shard_payload = {
@@ -972,8 +969,8 @@ def externalize_superseded_push(
         "schema_version": "1.0",
         "shard_id": "",
         "source_head_path": REPLICATION_STATE_REL,
-        "cut_at": now.isoformat(),
-        "push_events": [{"superseded_at": now.isoformat(), "row": previous_row}],
+        "cut_at": format_iso(now),
+        "push_events": [{"superseded_at": format_iso(now), "row": previous_row}],
         "pull_events": [],
         "summary": summary,
     }
@@ -1027,8 +1024,8 @@ def externalize_superseded_pull(
     summary = {
         "push_event_count": 0,
         "pull_event_count": 1,
-        "oldest_event_at": pulled_at.isoformat(),
-        "newest_event_at": pulled_at.isoformat(),
+        "oldest_event_at": format_iso(pulled_at),
+        "newest_event_at": format_iso(pulled_at),
     }
 
     shard_payload = {
@@ -1036,9 +1033,9 @@ def externalize_superseded_pull(
         "schema_version": "1.0",
         "shard_id": "",
         "source_head_path": REPLICATION_STATE_REL,
-        "cut_at": now.isoformat(),
+        "cut_at": format_iso(now),
         "push_events": [],
-        "pull_events": [{"source_peer": source_peer, "superseded_at": now.isoformat(), "row": previous_row}],
+        "pull_events": [{"source_peer": source_peer, "superseded_at": format_iso(now), "row": previous_row}],
         "summary": summary,
     }
 
@@ -1263,8 +1260,8 @@ def _tombstone_maintenance_pass_locked(
 
     summary = {
         "entry_count": len(cut_entries),
-        "oldest_tombstone_at": min(tombstone_timestamps).isoformat() if tombstone_timestamps else None,
-        "newest_tombstone_at": max(tombstone_timestamps).isoformat() if tombstone_timestamps else None,
+        "oldest_tombstone_at": format_iso(min(tombstone_timestamps)) if tombstone_timestamps else None,
+        "newest_tombstone_at": format_iso(max(tombstone_timestamps)) if tombstone_timestamps else None,
     }
 
     shard_payload = {
@@ -1272,7 +1269,7 @@ def _tombstone_maintenance_pass_locked(
         "schema_version": "1.0",
         "shard_id": "",
         "source_head_path": REPLICATION_TOMBSTONES_REL,
-        "cut_at": now.isoformat(),
+        "cut_at": format_iso(now),
         "entries": cut_entries,
         "summary": summary,
     }
@@ -1310,7 +1307,7 @@ def _tombstone_maintenance_pass_locked(
     if not isinstance(tm, dict):
         tm = {}
         history_meta["replication_tombstones"] = tm
-    tm["last_cut_at"] = now.isoformat()
+    tm["last_cut_at"] = format_iso(now)
     tm["last_cut_entry_count"] = len(cut_entries)
     tm["hot_entry_count"] = len(entries)
 
@@ -1321,7 +1318,7 @@ def _tombstone_maintenance_pass_locked(
             ts = _parse_iso(row.get("tombstone_at"))
             if ts and (oldest_hot is None or ts < oldest_hot):
                 oldest_hot = ts
-    tm["oldest_hot_tombstone_at"] = oldest_hot.isoformat() if oldest_hot else None
+    tm["oldest_hot_tombstone_at"] = format_iso(oldest_hot) if oldest_hot else None
 
     head["entries"] = entries
 

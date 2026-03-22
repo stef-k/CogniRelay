@@ -13,7 +13,7 @@ import logging
 from fastapi import HTTPException
 
 from app.audit import WriteTimeRolloverError, append_audit
-from app.timestamps import parse_iso
+from app.timestamps import format_iso, parse_iso
 from app.segment_history.append import SegmentHistoryAppendError
 from app.config import sha256_token
 from app.discovery import handle_mcp_rpc_request as discovery_handle_mcp_rpc_request
@@ -236,7 +236,7 @@ def enforce_rate_limit(settings: Any, auth: Any, bucket: str) -> None:
 
     events.append(
         {
-            "at": now.isoformat(),
+            "at": format_iso(now),
             "bucket": bucket,
             "token_ref": token_ref,
             "ip_ref": ip_ref,
@@ -256,7 +256,7 @@ def record_verification_failure(settings: Any, auth: Any, reason: str) -> None:
     failures = payload.setdefault("verification_failures", [])
     failures.append(
         {
-            "at": now.isoformat(),
+            "at": format_iso(now),
             "token_ref": token_ref,
             "ip_ref": ip_ref,
             "peer_id": auth.peer_id,

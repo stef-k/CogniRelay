@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from app.timestamps import is_iso_timestamp
+from app.timestamps import format_compact, format_iso, is_iso_timestamp
 
 from app.auth import AuthContext
 from app.artifact_lifecycle.service import (
@@ -907,7 +907,7 @@ def iter_replication_files(repo_root: Path, include_prefixes: list[str], max_fil
                     "path": rel,
                     "content": content,
                     "sha256": _sha256_text(content),
-                    "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    "modified_at": format_iso(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)),
                     "deleted": False,
                     "tombstone_at": None,
                 }
@@ -1104,7 +1104,7 @@ def metrics_service(
 
     result = {
         "ok": True,
-        "generated_at": now.isoformat(),
+        "generated_at": format_iso(now),
         "delivery": {
             "summary": delivery_summary,
             "backlog_depth": backlog_depth,
@@ -1226,7 +1226,7 @@ def replication_pull_service(
                             skipped += 1
 
                         tomb_entries[file_row.path] = {
-                            "tombstone_at": file_row.tombstone_at or now.isoformat(),
+                            "tombstone_at": file_row.tombstone_at or format_iso(now),
                             "source_peer": req.source_peer,
                             "idempotency_key": idempotency_key,
                         }
@@ -1285,7 +1285,7 @@ def replication_pull_service(
                             if not isinstance(rs, dict):
                                 rs = {}
                                 hm["replication_state"] = rs
-                            rs["last_cut_at"] = now.isoformat()
+                            rs["last_cut_at"] = format_iso(now)
                             rs["last_cut_pull_count"] = rs.get("last_cut_pull_count", 0) + 1 if isinstance(rs.get("last_cut_pull_count"), int) else 1
                     except Exception:
                         _logger.error(
@@ -1296,7 +1296,7 @@ def replication_pull_service(
                         )
 
                 pull_by_source[req.source_peer] = {
-                    "pulled_at": now.isoformat(),
+                    "pulled_at": format_iso(now),
                     "received_count": len(req.files),
                     "changed_count": changed,
                     "deleted_count": deleted,
@@ -1311,7 +1311,7 @@ def replication_pull_service(
                         pull_map = {}
                         state["pull_idempotency"] = pull_map
                     pull_map[idem_ref] = {
-                        "at": now.isoformat(),
+                        "at": format_iso(now),
                         "received_count": len(req.files),
                         "changed_count": changed,
                         "deleted_count": deleted,
@@ -1500,7 +1500,7 @@ def replication_push_service(
                         if not isinstance(rs, dict):
                             rs = {}
                             hm["replication_state"] = rs
-                        rs["last_cut_at"] = push_now.isoformat()
+                        rs["last_cut_at"] = format_iso(push_now)
                         rs["last_cut_push_count"] = rs.get("last_cut_push_count", 0) + 1 if isinstance(rs.get("last_cut_push_count"), int) else 1
                 except Exception:
                     _logger.error(
@@ -1510,7 +1510,7 @@ def replication_push_service(
                     )
 
             state["last_push"] = {
-                "pushed_at": push_now.isoformat(),
+                "pushed_at": format_iso(push_now),
                 "target_url": target_url,
                 "file_count": len(files),
                 "by_prefix": by_prefix,
@@ -1613,7 +1613,7 @@ def backup_create_service(
             )
 
     now = datetime.now(timezone.utc)
-    backup_id = f"backup_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
+    backup_id = f"backup_{format_compact(now)}_{uuid4().hex[:8]}"
     backup_rel = f"{BACKUPS_DIR_REL}/{backup_id}.tar.gz"
     manifest_rel = f"{BACKUPS_DIR_REL}/{backup_id}.json"
     backup_path = safe_path(settings.repo_root, backup_rel)
@@ -1634,7 +1634,7 @@ def backup_create_service(
         manifest_payload = {
             "schema_version": "1.0",
             "backup_id": backup_id,
-            "created_at": now.isoformat(),
+            "created_at": format_iso(now),
             "created_by": auth.peer_id,
             "include_prefixes": included_paths,
             "note": req.note,
@@ -2277,7 +2277,7 @@ def compact_run_service(
     auth.require_write_path("memory/summaries/weekly/x.md")
 
     now = datetime.now(timezone.utc)
-    report_id = f"compact_{now.strftime('%Y%m%dT%H%M%SZ')}"
+    report_id = f"compact_{format_compact(now)}"
     source_rel = req.source_path or "(policy-scan)"
 
     access_stats, access_warnings = _load_access_stats(
@@ -2347,7 +2347,7 @@ def compact_run_service(
     body = f"""---
 id: {report_id}
 type: compaction_report
-created_at: {now.isoformat()}
+created_at: {format_iso(now)}
 source: {source_rel}
 ---
 
@@ -2388,7 +2388,7 @@ This endpoint is an **orchestrator/planner**, not an LLM summarizer. It proposes
     payload = {
         "id": report_id,
         "type": "compaction_report",
-        "created_at": now.isoformat(),
+        "created_at": format_iso(now),
         "source": source_rel,
         "planner_only": True,
         "compaction_semantics": {

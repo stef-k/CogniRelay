@@ -15,7 +15,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
-from app.timestamps import parse_iso
+from app.timestamps import format_compact, format_iso, parse_iso
 from app.continuity import build_continuity_state
 from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
@@ -391,7 +391,7 @@ def _raw_scan_recent_relevant(
                 "type": record_type,
                 "snippet": _snippet_text(text),
                 "importance": importance,
-                "modified_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+                "modified_at": format_iso(datetime.fromtimestamp(mtime, tz=timezone.utc)),
                 "score": (path_matches * 1000) + snippet_matches,
                 "_path_matches": path_matches,
                 "_snippet_matches": snippet_matches,
@@ -472,7 +472,7 @@ def context_retrieve_service(
     open_questions = [row["snippet"] for row in recent[:10] if "?" in row.get("snippet", "")]
     bundle = {
         "task": req.task,
-        "generated_at": now.isoformat(),
+        "generated_at": format_iso(now),
         "core_memory": core_memory,
         "recent_relevant": recent,
         "open_questions": open_questions[:5],
@@ -695,14 +695,14 @@ def context_snapshot_create_service(
     else:
         core_memory, items, open_questions = _build_snapshot_from_commit(repo_root, auth, req.task, req.include_types, req.limit, req.include_core, str(as_of["value"]))
 
-    snapshot_id = f"snap_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
+    snapshot_id = f"snap_{format_compact(now)}_{uuid4().hex[:8]}"
     snapshot_rel = f"{SNAPSHOT_DIR_REL}/{snapshot_id}.json"
     auth.require_write_path(snapshot_rel)
     payload = {
         "schema_version": "1.0",
         "snapshot_id": snapshot_id,
         "task": req.task,
-        "created_at": now.isoformat(),
+        "created_at": format_iso(now),
         "as_of": as_of,
         "filters": {"include_types": req.include_types, "limit": req.limit, "include_core": req.include_core},
         "core_memory": core_memory,

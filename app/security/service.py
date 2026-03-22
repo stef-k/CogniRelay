@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from app.timestamps import parse_iso as _parse_iso
+from app.timestamps import format_compact, format_iso, iso_now, parse_iso as _parse_iso
 
 from app.auth import AuthContext
 from app.config import ALL_SCOPES
@@ -223,12 +223,12 @@ def _resolve_token_expiry(expires_at: str | None, ttl_seconds: int | None) -> st
     if expires_at and ttl_seconds:
         raise HTTPException(status_code=400, detail="Provide either expires_at or ttl_seconds, not both")
     if ttl_seconds:
-        return (datetime.now(timezone.utc) + timedelta(seconds=int(ttl_seconds))).isoformat()
+        return format_iso(datetime.now(timezone.utc) + timedelta(seconds=int(ttl_seconds)))
     if expires_at:
         dt = _parse_iso(expires_at)
         if dt is None:
             raise HTTPException(status_code=400, detail="Invalid expires_at format")
-        return dt.isoformat()
+        return format_iso(dt)
     return None
 
 
@@ -376,8 +376,8 @@ def security_tokens_issue_service(
         payload["tokens"] = tokens
 
     now_dt = datetime.now(timezone.utc)
-    now = now_dt.isoformat()
-    token_id = req.token_id or f"tok_{now_dt.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
+    now = format_iso(now_dt)
+    token_id = req.token_id or f"tok_{format_compact(now_dt)}_{uuid4().hex[:8]}"
     if any(isinstance(x, dict) and str(x.get("token_id") or "") == token_id for x in tokens):
         raise HTTPException(status_code=409, detail=f"Token id already exists: {token_id}")
 
@@ -451,7 +451,7 @@ def security_tokens_revoke_service(
             raise HTTPException(status_code=400, detail="Provide token_id or token_sha256")
 
     now_dt = datetime.now(timezone.utc)
-    now = now_dt.isoformat()
+    now = format_iso(now_dt)
     norm_sha = _normalize_token_sha(req.token_sha256)
     matched = 0
     revoked = 0
@@ -541,7 +541,7 @@ def security_tokens_rotate_service(
 
     src = matched[0]
     now_dt = datetime.now(timezone.utc)
-    now = now_dt.isoformat()
+    now = format_iso(now_dt)
     src_effective = _token_effective_status(src, now_dt)
     if src_effective == "revoked":
         raise HTTPException(status_code=409, detail="Token is already revoked")
@@ -551,7 +551,7 @@ def security_tokens_rotate_service(
     if not peer_id:
         raise HTTPException(status_code=400, detail="Matched token is missing peer_id")
 
-    new_token_id = req.new_token_id or f"tok_{now_dt.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
+    new_token_id = req.new_token_id or f"tok_{format_compact(now_dt)}_{uuid4().hex[:8]}"
     if any(isinstance(x, dict) and str(x.get("token_id") or "") == new_token_id for x in tokens):
         raise HTTPException(status_code=409, detail=f"Token id already exists: {new_token_id}")
 
@@ -651,8 +651,8 @@ def security_keys_rotate_service(
     auth.require("admin:peers")
     auth.require_write_path(SECURITY_KEYS_REL)
     payload = load_security_keys(repo_root)
-    now = datetime.now(timezone.utc).isoformat()
-    key_id = req.key_id or f"key_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
+    now = format_iso(iso_now())
+    key_id = req.key_id or f"key_{format_compact(iso_now())}_{uuid4().hex[:8]}"
     secret = req.secret or f"{uuid4().hex}{uuid4().hex}"
     keys = payload.setdefault("keys", {})
     if not isinstance(keys, dict):
@@ -804,7 +804,7 @@ def verify_signed_payload_service(
                     replay_detected = True
                     reason = "replay_detected"
                 else:
-                    entries[key] = {"key_id": key_id, "nonce": nonce, "first_seen_at": now.isoformat(), "expires_at": expires_at}
+                    entries[key] = {"key_id": key_id, "nonce": nonce, "first_seen_at": format_iso(now), "expires_at": expires_at}
                     nonce_path = _write_nonce_index(settings.repo_root, nonce_payload)
                     nonce_committed = try_commit_file(
                         path=nonce_path, gm=gm,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from app.timestamps import format_iso, iso_now
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urljoin
@@ -162,7 +162,7 @@ def peers_register_service(
         with segment_history_source_lock("registry:peers_registry", lock_dir=repo_root / ".locks"):
             registry = load_peers_registry(repo_root)
             peers = registry.setdefault("peers", {})
-            now = datetime.now(timezone.utc).isoformat()
+            now = format_iso(iso_now())
             prev = peers.get(req.peer_id) if isinstance(peers, dict) else None
 
             policies = _load_trust_policies(repo_root, trust_policies_rel)
@@ -287,7 +287,7 @@ def peers_trust_transition_service(
             if expected_fp and expected_fp != current_fp:
                 raise HTTPException(status_code=409, detail="Peer fingerprint mismatch for trust transition")
 
-            now = datetime.now(timezone.utc).isoformat()
+            now = format_iso(iso_now())
             history = row.get("trust_history")
             if not isinstance(history, list):
                 history = []

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from app.timestamps import format_iso, iso_now
 from typing import Any, Callable
 
 from fastapi import HTTPException
@@ -1396,7 +1396,7 @@ def handle_mcp_rpc_request(
         return _rpc_ok(request_id, {"acknowledged": True})
 
     if method == "ping":
-        return _rpc_ok(request_id, {"ok": True, "ts": datetime.now(timezone.utc).isoformat()})
+        return _rpc_ok(request_id, {"ok": True, "ts": format_iso(iso_now())})
 
     if method == "tools/list":
         return _rpc_ok(request_id, _mcp_list_tools_result(tools))
@@ -1458,7 +1458,7 @@ def health_payload(*, app_version: str, contract_version: str, repo_root: str, g
         "git_initialized": git_initialized,
         "latest_commit": latest_commit,
         "signed_ingress_required": signed_ingress_required,
-        "time": datetime.now(timezone.utc).isoformat(),
+        "time": format_iso(iso_now()),
     }
 
 
