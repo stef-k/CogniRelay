@@ -70,7 +70,7 @@ CogniRelay combines a small number of building blocks:
 
 CogniRelay treats continuity as a bounded orientation-preservation problem, not as total-fidelity persistence.
 
-Continuity capsules preserve bounded working state across resets: active constraints, drift signals, open questions, current direction, session trajectory, and optional lower-commitment fields such as trailing notes, curiosity queue, and negative decisions. The model uses write-time curation rather than unlimited retention — payloads are bounded, optional fields have a deterministic trim order under token pressure, and what is present, omitted, or archived is always explicit.
+Continuity capsules preserve bounded working state across resets: active constraints (`active_constraints`), drift signals (`drift_signals`), open loops (`open_loops`), stance summary (`stance_summary`), session trajectory (`session_trajectory`), and optional lower-commitment fields such as trailing notes (`trailing_notes`), curiosity queue (`curiosity_queue`), and negative decisions (`negative_decisions`). The model uses write-time curation rather than unlimited retention — payloads are bounded, optional fields have a deterministic trim order under token pressure, and what is present, omitted, or archived is always explicit.
 
 Continuity artifacts move through four tiers:
 
@@ -254,3 +254,4 @@ If automated, run these through a local scheduler such as `systemd` or `cron` an
 - Use [Reviewer Guide](reviewer-guide.md) first when you want the system thesis, non-goals, recovery model, and inter-agent authority boundaries
 - Start here for product shape and system boundaries
 - Use [API Surface](api-surface.md) for the currently implemented HTTP surface
+- Use [Payload Reference](payload-reference.md) for capsule structure, request/response schemas, and field constraints

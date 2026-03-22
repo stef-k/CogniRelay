@@ -8,7 +8,7 @@ This document is the canonical human-facing summary of the currently implemented
 
 The sections below mirror that runtime shape and group endpoints by behavior rather than implementation order.
 
-For practical agent integration guidance, start with [Agent Onboarding](agent-onboarding.md). For the higher-level system thesis, recovery model, and authority boundaries, see [Reviewer Guide](reviewer-guide.md).
+For practical agent integration guidance, start with [Agent Onboarding](agent-onboarding.md). For capsule structure and request/response schemas, see [Payload Reference](payload-reference.md). For the higher-level system thesis, recovery model, and authority boundaries, see [Reviewer Guide](reviewer-guide.md).
 
 ## Discovery and contracts
 
@@ -131,7 +131,7 @@ Notable behavior:
 - direct delivery supports idempotency keys and acknowledgment tracking
 - relay forwarding writes immutable transport records plus inbox/thread artifacts
 - signed ingress can be enforced for direct and relayed message flows
-- messages and relay flows may carry stable handoff references via `attachments: ["handoff:{handoff_id}"]`; handoff ids become valid only after the referenced handoff artifact commits successfully
+- messages and relay flows may include handoff references in `attachments` using the convention `"handoff:{handoff_id}"`; the server stores these as opaque strings without validating the referenced artifact exists
 
 ## Shared work and code workflows
 
@@ -147,7 +147,7 @@ Notable behavior:
 Notable behavior:
 
 - task transitions are deterministic and constrained
-- tasks may carry a coordination handoff link through `metadata.handoff_id`; 5A treats this as a deterministic reference convention rather than automatic shared-state coupling
+- tasks may carry a handoff reference in `metadata.handoff_id` by convention; the server stores this as arbitrary task metadata without validating or acting on it
 - patch application validates working tree state and base reference compatibility
 - code merge decisions depend on persisted check evidence rather than implicit local state
 

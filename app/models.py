@@ -574,6 +574,8 @@ class OpsRunRequest(BaseModel):
         "continuity_retention_apply",
         "artifact_history_cold_store",
         "artifact_history_cold_rehydrate",
+        "registry_history_cold_store",
+        "registry_history_cold_rehydrate",
         "segment_history_maintenance",
         "segment_history_cold_store",
         "segment_history_cold_rehydrate",
