@@ -651,8 +651,9 @@ def security_keys_rotate_service(
     auth.require("admin:peers")
     auth.require_write_path(SECURITY_KEYS_REL)
     payload = load_security_keys(repo_root)
-    now = format_iso(iso_now())
-    key_id = req.key_id or f"key_{format_compact(iso_now())}_{uuid4().hex[:8]}"
+    now_dt = iso_now()
+    now = format_iso(now_dt)
+    key_id = req.key_id or f"key_{format_compact(now_dt)}_{uuid4().hex[:8]}"
     secret = req.secret or f"{uuid4().hex}{uuid4().hex}"
     keys = payload.setdefault("keys", {})
     if not isinstance(keys, dict):

@@ -87,8 +87,9 @@ def is_iso_timestamp(value: Any) -> bool:
 def iso_to_posix(value: str | None) -> float:
     """Parse an ISO timestamp to a POSIX float for sorting.
 
-    Returns ``0.0`` for ``None`` or malformed values so that unparseable
-    timestamps sort last.
+    Returns ``0.0`` (epoch) for ``None`` or malformed values.  Current
+    callers negate this for descending sort, placing unparseable entries
+    last.
     """
     dt = parse_iso(value)
     if dt is None:

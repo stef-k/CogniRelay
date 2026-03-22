@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
-from app.timestamps import parse_iso as _parse_iso, format_iso, format_compact
+from app.timestamps import parse_iso as _parse_iso, format_iso, format_compact, iso_now
 from app.lifecycle_warnings import make_error_detail, make_warning
 from app.storage import build_cold_gzip_bytes
 from app.git_locking import repository_mutation_lock
@@ -748,7 +748,7 @@ def _persist_fallback_snapshot(
         payload = _fallback_snapshot_payload(
             capsule=capsule,
             active_rel=continuity_rel_path(subject_kind, subject_id),
-            captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or format_iso(datetime.now(timezone.utc))),
+            captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or format_iso(iso_now())),
         )
         canonical = canonical_json(payload)
         new_bytes = canonical.encode("utf-8")
@@ -2865,7 +2865,7 @@ def continuity_cold_rehydrate_service(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Invalid continuity cold payload: {exc}") from exc
 
-        rehydrated_at = format_iso(datetime.now(timezone.utc))
+        rehydrated_at = format_iso(iso_now())
         try:
             write_bytes_file(archive_path, archive_bytes)
             # Cold file deletions and commit are inside the git lock so
