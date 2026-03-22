@@ -1199,6 +1199,94 @@ def artifact_history_cold_store_service(
         raise make_lock_error("artifact_history_cold_store", family, exc, is_timeout=False) from exc
     try:
         with lock_ctx:
+            # --- Crash recovery (must precede stub identity validation) ---
+            # If both hot and cold exist, a prior cold-store crashed mid-way.
+            # Check stub direction to decide which copy is canonical.
+            if cold_payload_path.exists() and hot_payload_path.exists():
+                try:
+                    _crash_stub = _load_artifact_history_stub(repo_root, stub_rel)
+                    _stub_points_cold = _crash_stub.get("payload_path") == cold_storage_path
+                except Exception:
+                    _logger.warning(
+                        "Artifact cold-store crash recovery: could not read "
+                        "stub %s; defaulting to discard cold and redo",
+                        stub_rel,
+                        exc_info=True,
+                    )
+                    _stub_points_cold = False
+
+                if _stub_points_cold:
+                    # Stub already mutated → cold is canonical, hot is orphan.
+                    # Delete hot, attempt recovery commit, return success.
+                    _logger.warning(
+                        "Artifact cold-store crash recovery: stub already "
+                        "points to cold; removing orphaned hot file %s",
+                        source_payload_path,
+                    )
+                    hot_payload_path.unlink(missing_ok=True)
+                    _recovery_committed = bool(gm and try_commit_paths(
+                        paths=[
+                            cold_payload_path,
+                            safe_path(repo_root, stub_rel),
+                            hot_payload_path,
+                        ],
+                        gm=gm,
+                        commit_message=(
+                            f"artifact-history: cold-store recovery "
+                            f"{family} {hot_payload_path.stem}"
+                        ),
+                    ))
+                    audit(
+                        auth,
+                        "artifact_history_cold_store",
+                        {
+                            "family": family,
+                            "source_payload_path": source_payload_path,
+                            "cold_storage_path": cold_storage_path,
+                            "cold_stub_path": stub_rel,
+                            "crash_recovery": True,
+                        },
+                    )
+                    _recovery_warnings: list[dict[str, Any]] = [
+                        make_warning(
+                            "artifact_history_cold_store_crash_recovery",
+                            "Completed cold-store via crash recovery: "
+                            "stub already pointed to cold, removed orphaned hot file",
+                        ),
+                    ]
+                    if not _recovery_committed and gm is not None:
+                        _recovery_warnings.append(
+                            make_warning(
+                                "artifact_history_cold_store_recovery_not_durable",
+                                "Crash recovery completed on disk but git commit "
+                                "failed; state is not yet durable",
+                            ),
+                        )
+                    return {
+                        "ok": True,
+                        "family": family,
+                        "artifact_state": "cold",
+                        "source_payload_path": source_payload_path,
+                        "cold_storage_path": cold_storage_path,
+                        "cold_stub_path": stub_rel,
+                        "committed_files": [cold_storage_path, stub_rel, source_payload_path],
+                        "durable": _recovery_committed,
+                        "latest_commit": gm.latest_commit() if gm is not None else None,
+                        "warnings": _recovery_warnings,
+                        "recovery_warnings": _recovery_warnings,
+                    }
+                else:
+                    # Stub still points to hot → cold is orphan (crash
+                    # happened before stub mutation). Remove cold and
+                    # fall through to a clean cold-store.
+                    _logger.warning(
+                        "Artifact cold-store crash recovery: removing "
+                        "orphaned cold file %s",
+                        cold_storage_path,
+                    )
+                    cold_payload_path.unlink(missing_ok=True)
+
+            # --- Normal flow ---
             payload = _load_artifact_history_payload(repo_root, source_payload_path)
             stub = _load_artifact_history_stub(repo_root, stub_rel)
             if stub.get("payload_path") != source_payload_path:
@@ -1206,16 +1294,7 @@ def artifact_history_cold_store_service(
             if stub.get("summary") != payload.get("summary") or stub.get("source_path") != payload.get("source_path"):
                 raise HTTPException(status_code=400, detail="Artifact-history stub does not match payload")
             source_bytes = hot_payload_path.read_bytes()
-            # Crash recovery: if both hot and cold exist, a prior cold-store
-            # wrote the cold file but crashed before deleting the hot file.
-            # Remove the orphaned cold file and proceed with a fresh cold-store.
-            if cold_payload_path.exists() and hot_payload_path.exists():
-                _logger.warning(
-                    "Artifact cold-store crash recovery: removing orphaned cold file %s",
-                    cold_storage_path,
-                )
-                cold_payload_path.unlink(missing_ok=True)
-            elif cold_payload_path.exists():
+            if cold_payload_path.exists():
                 raise HTTPException(status_code=409, detail="Artifact-history cold payload already exists")
 
             try:
@@ -1317,8 +1396,94 @@ def artifact_history_cold_rehydrate_service(
         raise make_lock_error("artifact_history_cold_rehydrate", None, exc, is_timeout=False) from exc
     try:
         with lock_ctx:
-            if hot_payload_path.exists():
+            # --- Crash recovery: both hot and cold exist ---
+            # Compute expected cold path independently of the stub (which
+            # may have been mutated to point to hot before the crash).
+            _expected_cold_rel = artifact_history_cold_storage_rel_path(source_payload_path)
+            _expected_cold_path = safe_path(repo_root, _expected_cold_rel)
+            if hot_payload_path.exists() and _expected_cold_path.exists():
+                _crash_stub: dict[str, Any] = {}
+                try:
+                    _crash_stub = _load_artifact_history_stub(repo_root, cold_stub_path)
+                    _stub_points_hot = _crash_stub.get("payload_path") == source_payload_path
+                except Exception:
+                    _logger.warning(
+                        "Artifact cold-rehydrate crash recovery: could not "
+                        "read stub; defaulting to discard hot and redo",
+                        exc_info=True,
+                    )
+                    _stub_points_hot = False
+
+                if _stub_points_hot:
+                    # Rehydrate completed (stub points to hot) → cold is orphan.
+                    _logger.warning(
+                        "Artifact cold-rehydrate crash recovery: stub "
+                        "points to hot; removing orphaned cold file %s",
+                        _expected_cold_rel,
+                    )
+                    _expected_cold_path.unlink(missing_ok=True)
+                    _recovery_committed = bool(gm and try_commit_paths(
+                        paths=[hot_payload_path, stub_path, _expected_cold_path],
+                        gm=gm,
+                        commit_message=(
+                            f"artifact-history: cold-rehydrate recovery "
+                            f"{hot_payload_path.stem}"
+                        ),
+                    ))
+                    audit(
+                        auth,
+                        "artifact_history_cold_rehydrate",
+                        {
+                            "source_payload_path": source_payload_path,
+                            "cold_storage_path": _expected_cold_rel,
+                            "cold_stub_path": cold_stub_path,
+                            "crash_recovery": True,
+                        },
+                    )
+                    _rh_recovery_warnings: list[dict[str, Any]] = [
+                        make_warning(
+                            "artifact_history_cold_rehydrate_crash_recovery",
+                            "Completed rehydrate via crash recovery: "
+                            "stub already pointed to hot, removed orphaned cold file",
+                        ),
+                    ]
+                    if not _recovery_committed and gm is not None:
+                        _rh_recovery_warnings.append(
+                            make_warning(
+                                "artifact_history_cold_rehydrate_recovery_not_durable",
+                                "Crash recovery completed on disk but git commit "
+                                "failed; state is not yet durable",
+                            ),
+                        )
+                    return {
+                        "ok": True,
+                        "family": _crash_stub.get("family", ""),
+                        "artifact_state": "hot",
+                        "source_payload_path": source_payload_path,
+                        "restored_payload_path": source_payload_path,
+                        "cold_storage_path": _expected_cold_rel,
+                        "cold_stub_path": cold_stub_path,
+                        "committed_files": [source_payload_path, _expected_cold_rel, cold_stub_path],
+                        "durable": _recovery_committed,
+                        "latest_commit": gm.latest_commit() if gm is not None else None,
+                        "warnings": _rh_recovery_warnings,
+                        "recovery_warnings": _rh_recovery_warnings,
+                    }
+                else:
+                    # Rehydrate incomplete (stub still points to cold) →
+                    # hot is orphan from partial rehydrate.
+                    _logger.warning(
+                        "Artifact cold-rehydrate crash recovery: removing "
+                        "orphaned hot file %s",
+                        source_payload_path,
+                    )
+                    hot_payload_path.unlink(missing_ok=True)
+                    # Fall through to normal rehydrate
+
+            elif hot_payload_path.exists():
                 raise HTTPException(status_code=409, detail="Artifact-history payload already exists")
+
+            # --- Normal flow ---
             if not cold_payload_path.exists() or not cold_payload_path.is_file():
                 raise HTTPException(status_code=404, detail="Artifact-history cold payload not found")
             try:
