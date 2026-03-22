@@ -23,7 +23,7 @@ from app.lifecycle_warnings import make_error_detail, make_warning
 from app.storage import build_cold_gzip_bytes
 from app.git_locking import repository_mutation_lock
 from app.git_manager import GitManager
-from app.git_safety import unstage_paths
+from app.git_safety import try_commit_paths, unstage_paths
 from app.models import (
     ContinuityArchiveRequest,
     ContinuityColdRehydrateRequest,
@@ -2708,12 +2708,81 @@ def continuity_cold_store_service(
     auth.require_write_path(cold_stub_path)
 
     archive_path = safe_path(repo_root, source_archive_path)
+    cold_payload_file = safe_path(repo_root, cold_storage_path)
+    cold_stub_file = safe_path(repo_root, cold_stub_path)
+
+    # --- Crash recovery: cold-store completed but uncommitted ---
+    # If archive is missing but both cold files exist with valid stub identity,
+    # the prior cold-store deleted the archive inside the git lock but crashed
+    # before the commit completed.  Recover by committing the existing state.
+    if not archive_path.exists() and cold_payload_file.exists() and cold_stub_file.exists():
+        try:
+            _cold_fm = _load_cold_stub(repo_root, cold_stub_path)
+            if _cold_fm.get("source_archive_path") == source_archive_path:
+                with _continuity_subject_lock(
+                    repo_root=repo_root,
+                    subject_kind=_cold_fm["subject_kind"],
+                    subject_id=_cold_fm["subject_id"],
+                ):
+                    # Re-verify under lock (TOCTOU prevention)
+                    if not archive_path.exists() and cold_payload_file.exists() and cold_stub_file.exists():
+                        _recovery_committed = bool(try_commit_paths(
+                            paths=[cold_payload_file, cold_stub_file, archive_path],
+                            gm=gm,
+                            commit_message=(
+                                f"continuity: cold-store recovery "
+                                f"{_cold_fm['subject_kind']} {_cold_fm['subject_id']}"
+                            ),
+                        ))
+                        audit(
+                            auth,
+                            "continuity_cold_store",
+                            {
+                                "source_archive_path": source_archive_path,
+                                "cold_storage_path": cold_storage_path,
+                                "cold_stub_path": cold_stub_path,
+                                "crash_recovery": True,
+                            },
+                        )
+                        _cs_recovery_warnings: list[dict[str, Any]] = [
+                            make_warning(
+                                "continuity_cold_store_crash_recovery",
+                                "Completed cold-store via crash recovery: "
+                                "archive was already deleted, cold files committed",
+                            ),
+                        ]
+                        if not _recovery_committed:
+                            _cs_recovery_warnings.append(
+                                make_warning(
+                                    "continuity_cold_store_recovery_not_durable",
+                                    "Crash recovery completed on disk but git commit "
+                                    "failed; state is not yet durable",
+                                ),
+                            )
+                        return {
+                            "ok": True,
+                            "artifact_state": "cold",
+                            "source_archive_path": source_archive_path,
+                            "cold_storage_path": cold_storage_path,
+                            "cold_stub_path": cold_stub_path,
+                            "cold_stored_at": _cold_fm.get("cold_stored_at", ""),
+                            "committed_files": [cold_storage_path, cold_stub_path, source_archive_path],
+                            "durable": _recovery_committed,
+                            "latest_commit": gm.latest_commit(),
+                            "warnings": _cs_recovery_warnings,
+                            "recovery_warnings": _cs_recovery_warnings,
+                        }
+        except Exception:
+            _logger.warning(
+                "Continuity cold-store crash recovery: cold stub validation "
+                "failed; falling through to normal flow",
+                exc_info=True,
+            )
+
     if not archive_path.exists() or not archive_path.is_file():
         raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
     envelope = _load_archive_envelope(repo_root, source_archive_path)
     capsule = envelope["capsule"]
-    cold_payload_file = safe_path(repo_root, cold_storage_path)
-    cold_stub_file = safe_path(repo_root, cold_stub_path)
     with _continuity_subject_lock(
         repo_root=repo_root,
         subject_kind=str(capsule["subject_kind"]),
@@ -2852,6 +2921,67 @@ def continuity_cold_rehydrate_service(
             if frontmatter["source_archive_path"] != source_archive_path:
                 raise HTTPException(status_code=400, detail="Continuity cold stub identity does not match requested source archive")
             if archive_path.exists():
+                # --- Crash recovery: rehydrate wrote archive but crashed
+                # before deleting cold files and committing. ---
+                if cold_payload_file.exists() or cold_stub_file.exists():
+                    try:
+                        _check_envelope = _load_archive_envelope(repo_root, source_archive_path)
+                        if _archive_rel_path_from_envelope(_check_envelope) == source_archive_path:
+                            cold_payload_file.unlink(missing_ok=True)
+                            cold_stub_file.unlink(missing_ok=True)
+                            _rh_recovery_committed = bool(try_commit_paths(
+                                paths=[archive_path, cold_payload_file, cold_stub_file],
+                                gm=gm,
+                                commit_message=(
+                                    f"continuity: cold-rehydrate recovery "
+                                    f"{frontmatter['subject_kind']} {frontmatter['subject_id']}"
+                                ),
+                            ))
+                            audit(
+                                auth,
+                                "continuity_cold_rehydrate",
+                                {
+                                    "source_archive_path": source_archive_path,
+                                    "cold_storage_path": cold_storage_path,
+                                    "cold_stub_path": cold_stub_path,
+                                    "crash_recovery": True,
+                                },
+                            )
+                            _rh_warnings: list[dict[str, Any]] = [
+                                make_warning(
+                                    "continuity_cold_rehydrate_crash_recovery",
+                                    "Completed rehydrate via crash recovery: "
+                                    "archive already restored, removed orphaned cold files",
+                                ),
+                            ]
+                            if not _rh_recovery_committed:
+                                _rh_warnings.append(
+                                    make_warning(
+                                        "continuity_cold_rehydrate_recovery_not_durable",
+                                        "Crash recovery completed on disk but git commit "
+                                        "failed; state is not yet durable",
+                                    ),
+                                )
+                            return {
+                                "ok": True,
+                                "artifact_state": "archived",
+                                "source_archive_path": source_archive_path,
+                                "restored_archive_path": source_archive_path,
+                                "cold_storage_path": cold_storage_path,
+                                "cold_stub_path": cold_stub_path,
+                                "rehydrated_at": format_iso(iso_now()),
+                                "committed_files": [source_archive_path, cold_storage_path, cold_stub_path],
+                                "durable": _rh_recovery_committed,
+                                "latest_commit": gm.latest_commit(),
+                                "warnings": _rh_warnings,
+                                "recovery_warnings": _rh_warnings,
+                            }
+                    except Exception:
+                        _logger.warning(
+                            "Continuity cold-rehydrate crash recovery: "
+                            "archive validation failed; falling through to 409",
+                            exc_info=True,
+                        )
                 raise HTTPException(status_code=409, detail="Continuity archive envelope already exists")
             if not cold_payload_file.exists() or not cold_payload_file.is_file():
                 raise HTTPException(status_code=404, detail="Continuity cold payload not found")

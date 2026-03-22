@@ -1898,8 +1898,96 @@ def registry_history_cold_rehydrate_service(
         raise make_lock_error("registry_history_cold_rehydrate", family, exc, is_timeout=False) from exc
     try:
         with lock_ctx:
-            if hot_payload_path.exists():
+            # --- Crash recovery: both hot and cold exist ---
+            # Compute expected cold path independently of the stub (which
+            # may have been mutated to point to hot before the crash).
+            _expected_cold_rel = registry_history_cold_storage_rel_path(source_payload_path)
+            _expected_cold_path = safe_path(repo_root, _expected_cold_rel)
+            if hot_payload_path.exists() and _expected_cold_path.exists():
+                _crash_stub_rh: dict[str, Any] = {}
+                try:
+                    _crash_stub_rh = _load_registry_history_stub(repo_root, cold_stub_path)
+                    _stub_points_hot = _crash_stub_rh.get("payload_path") == source_payload_path
+                except Exception:
+                    _logger.warning(
+                        "Registry cold-rehydrate crash recovery: could not "
+                        "read stub %s; defaulting to discard hot and redo",
+                        cold_stub_path,
+                        exc_info=True,
+                    )
+                    _stub_points_hot = False
+
+                if _stub_points_hot:
+                    # Rehydrate completed (stub points to hot) → cold is orphan.
+                    _logger.warning(
+                        "Registry cold-rehydrate crash recovery: stub "
+                        "points to hot; removing orphaned cold file %s",
+                        _expected_cold_rel,
+                    )
+                    _expected_cold_path.unlink(missing_ok=True)
+                    _recovery_committed = bool(gm and try_commit_paths(
+                        paths=[hot_payload_path, stub_path, _expected_cold_path],
+                        gm=gm,
+                        commit_message=(
+                            f"registry-history: cold-rehydrate recovery "
+                            f"{_crash_stub_rh.get('family', '')} "
+                            f"{_crash_stub_rh.get('shard_id', '')}"
+                        ),
+                    ))
+                    audit(
+                        auth,
+                        "registry_history_cold_rehydrate",
+                        {
+                            "source_payload_path": source_payload_path,
+                            "cold_storage_path": _expected_cold_rel,
+                            "cold_stub_path": cold_stub_path,
+                            "crash_recovery": True,
+                        },
+                    )
+                    _rh_recovery_warnings: list[dict[str, Any]] = [
+                        make_warning(
+                            "registry_history_cold_rehydrate_crash_recovery",
+                            "Completed rehydrate via crash recovery: "
+                            "stub already pointed to hot, removed orphaned cold file",
+                        ),
+                    ]
+                    if not _recovery_committed and gm is not None:
+                        _rh_recovery_warnings.append(
+                            make_warning(
+                                "registry_history_cold_rehydrate_recovery_not_durable",
+                                "Crash recovery completed on disk but git commit "
+                                "failed; state is not yet durable",
+                            ),
+                        )
+                    return {
+                        "ok": True,
+                        "family": _crash_stub_rh.get("family", family),
+                        "shard_state": "hot",
+                        "source_payload_path": source_payload_path,
+                        "restored_payload_path": source_payload_path,
+                        "cold_storage_path": _expected_cold_rel,
+                        "cold_stub_path": cold_stub_path,
+                        "committed_files": [source_payload_path, _expected_cold_rel, cold_stub_path],
+                        "durable": _recovery_committed,
+                        "latest_commit": gm.latest_commit() if gm is not None else None,
+                        "warnings": _rh_recovery_warnings,
+                        "recovery_warnings": _rh_recovery_warnings,
+                    }
+                else:
+                    # Rehydrate incomplete (stub still points to cold) →
+                    # hot is orphan from partial rehydrate.
+                    _logger.warning(
+                        "Registry cold-rehydrate crash recovery: removing "
+                        "orphaned hot file %s",
+                        source_payload_path,
+                    )
+                    hot_payload_path.unlink(missing_ok=True)
+                    # Fall through to normal rehydrate
+
+            elif hot_payload_path.exists():
                 raise HTTPException(status_code=409, detail="Registry-history hot payload already exists")
+
+            # --- Normal flow ---
             if not cold_payload_path.exists() or not cold_payload_path.is_file():
                 raise HTTPException(status_code=404, detail="Registry-history cold payload not found")
             try:
