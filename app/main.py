@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
 from .artifact_lifecycle.service import artifact_history_cold_rehydrate_service, artifact_history_cold_store_service
+from .registry_lifecycle.service import registry_history_cold_rehydrate_service, registry_history_cold_store_service
 from .segment_history.service import (
     segment_history_cold_rehydrate_service,
     segment_history_cold_store_service,
@@ -126,6 +127,8 @@ from .models import (
     BackupRestoreTestRequest,
     OpsRunRequest,
     RecentRequest,
+    RegistryHistoryColdRehydrateRequest,
+    RegistryHistoryColdStoreRequest,
     SegmentHistoryColdRehydrateRequest,
     SegmentHistoryColdStoreRequest,
     SegmentHistoryMaintenanceRequest,
@@ -637,6 +640,22 @@ def ops_run(req: OpsRunRequest, auth: AuthContext = Depends(require_auth)) -> di
             audit=_make_audit(settings, gm),
         ),
         artifact_history_cold_rehydrate_request_factory=ArtifactHistoryColdRehydrateRequest,
+        registry_history_cold_store=lambda req, auth: registry_history_cold_store_service(
+            repo_root=settings.repo_root,
+            gm=gm,
+            auth=auth,
+            req=req,
+            audit=_make_audit(settings, gm),
+        ),
+        registry_history_cold_store_request_factory=RegistryHistoryColdStoreRequest,
+        registry_history_cold_rehydrate=lambda req, auth: registry_history_cold_rehydrate_service(
+            repo_root=settings.repo_root,
+            gm=gm,
+            auth=auth,
+            req=req,
+            audit=_make_audit(settings, gm),
+        ),
+        registry_history_cold_rehydrate_request_factory=RegistryHistoryColdRehydrateRequest,
         segment_history_maintenance=lambda req, auth: segment_history_maintenance_service(
             family=req.family,
             repo_root=settings.repo_root,
