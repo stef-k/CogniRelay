@@ -67,7 +67,6 @@ For the full cold-start endpoint sequence, see [System Overview: Agent Usage](do
 - [System Overview](docs/system-overview.md): implemented product shape and agent usage guidance
 - [API Surface](docs/api-surface.md): currently implemented HTTP behavior grouped by domain
 - [MCP Guide](docs/mcp.md): MCP bootstrap flow and tool mapping
-- [Design Doc](DESIGN_DOC.md): architecture rationale and background framing
 - [Go-live Runbook](deploy/GO_LIVE_RUNBOOK.md): operator deployment and go-live workflow
 - [Production Signoff Checklist](deploy/PRODUCTION_SIGNOFF_CHECKLIST.md): production verification and data-safety checks
 

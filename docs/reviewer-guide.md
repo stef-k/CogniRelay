@@ -33,6 +33,22 @@ The current implementation is intentionally narrower:
 - explicit degradation and fallback, not false claims of seamless recovery
 - advisory and owner-bounded coordination, not remote authority over local continuity
 
+## Why This Architecture
+
+CogniRelay is built from a small number of deliberately constrained building blocks. Each choice optimizes for auditability, operational simplicity, and independence from external services.
+
+**Git as storage engine.** All durable state lives in a local git repository managed through subprocess calls — no GitPython, no forge, no remote dependency. Git provides version history, diffs, rollback, and offline-first operation without requiring an external database. Every mutation is a commit, so the full history of what changed and when is always recoverable.
+
+**Markdown for human-readable memory, JSON/JSONL for machine data.** Durable facts, identity, and narrative memory are stored as Markdown with optional YAML frontmatter. Event streams, message records, delivery state, and structured artifacts use JSON or append-only JSONL. This split keeps memory inspectable by humans while giving agents efficient structured access.
+
+**SQLite FTS5 for search, with JSON-index fallback.** Search uses Python's stdlib `sqlite3` module with an FTS5 virtual table — no external search service. If the SQLite database is missing or corrupt, the indexer falls back to derived JSON indexes with a simpler word-scoring algorithm. Both index layers are treated as derived state that can be rebuilt from the git-backed source of truth at any time.
+
+**Self-contained bearer-token auth.** Tokens are stored as SHA256 hashes in local config, scoped by operation and namespace. There is no OAuth provider, LDAP, or external auth dependency. The token model supports split read/write namespace restrictions, expiry, trust status, and audit logging — all locally managed.
+
+**Compaction as planning, not summarization.** The compaction service is an orchestrator that classifies candidates by age, size, memory class, and policy, then emits structured reports with action categories (summarize, archive, promote, keep, review). It does not generate summaries itself — the agent reads the plan and decides what to do. This keeps the system from making content decisions on the agent's behalf.
+
+**Four runtime dependencies.** The entire stack runs on FastAPI, uvicorn, Pydantic, and python-dotenv. No ORM, no external database, no cache or queue library. This keeps the operational surface minimal and the system easy to deploy, audit, and reason about.
+
 ## The Core Model
 
 ### Bounded orientation preservation
@@ -189,9 +205,7 @@ Use the docs in this order:
    Use this for the currently implemented HTTP behavior and endpoint grouping.
 6. `docs/mcp.md`
    Use this if you care about MCP integration and tool exposure.
-7. `DESIGN_DOC.md`
-   Use this for earlier architectural rationale and background framing.
-8. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
+7. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
    Use these for operator-facing deployment and signoff concerns.
 
 ## What Reviewers Should Pressure-Test
