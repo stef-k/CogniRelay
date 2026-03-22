@@ -22,6 +22,8 @@ from app.models import (
     ContinuityColdStoreRequest,
     ContinuityRetentionApplyRequest,
     OpsRunRequest,
+    RegistryHistoryColdRehydrateRequest,
+    RegistryHistoryColdStoreRequest,
     SegmentHistoryColdRehydrateRequest,
     SegmentHistoryColdStoreRequest,
     SegmentHistoryMaintenanceRequest,
@@ -47,6 +49,8 @@ OPS_JOBS = {
     "continuity_retention_apply",
     "artifact_history_cold_store",
     "artifact_history_cold_rehydrate",
+    "registry_history_cold_store",
+    "registry_history_cold_rehydrate",
     "segment_history_maintenance",
     "segment_history_cold_store",
     "segment_history_cold_rehydrate",
@@ -341,6 +345,24 @@ def _ops_job_catalog() -> list[dict[str, Any]]:
             "request_schema": ArtifactHistoryColdRehydrateRequest.model_json_schema(),
         },
         {
+            "job_id": "registry_history_cold_store",
+            "description": "Cold-store one registry-history shard into a gzip payload while keeping its hot stub.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "manual or policy-driven",
+            "idempotent": False,
+            "request_schema": RegistryHistoryColdStoreRequest.model_json_schema(),
+        },
+        {
+            "job_id": "registry_history_cold_rehydrate",
+            "description": "Rehydrate one cold-stored registry-history shard back into its hot history namespace.",
+            "local_only": True,
+            "external_factors": ["disk_capacity"],
+            "recommended_schedule": "manual or policy-driven",
+            "idempotent": False,
+            "request_schema": RegistryHistoryColdRehydrateRequest.model_json_schema(),
+        },
+        {
             "job_id": "segment_history_maintenance",
             "description": "Discover and roll eligible append-history sources into archived segments.",
             "local_only": True,
@@ -506,6 +528,10 @@ def _ops_execute_job(
     artifact_history_cold_store_request_factory: Callable[..., Any],
     artifact_history_cold_rehydrate: Callable[..., dict[str, Any]],
     artifact_history_cold_rehydrate_request_factory: Callable[..., Any],
+    registry_history_cold_store: Callable[..., dict[str, Any]],
+    registry_history_cold_store_request_factory: Callable[..., Any],
+    registry_history_cold_rehydrate: Callable[..., dict[str, Any]],
+    registry_history_cold_rehydrate_request_factory: Callable[..., Any],
     segment_history_maintenance: Callable[..., dict[str, Any]],
     segment_history_maintenance_request_factory: Callable[..., Any],
     segment_history_cold_store: Callable[..., dict[str, Any]],
@@ -574,6 +600,10 @@ def _ops_execute_job(
         return artifact_history_cold_store(req=artifact_history_cold_store_request_factory(**args), auth=auth)
     if req.job_id == "artifact_history_cold_rehydrate":
         return artifact_history_cold_rehydrate(req=artifact_history_cold_rehydrate_request_factory(**args), auth=auth)
+    if req.job_id == "registry_history_cold_store":
+        return registry_history_cold_store(req=registry_history_cold_store_request_factory(**args), auth=auth)
+    if req.job_id == "registry_history_cold_rehydrate":
+        return registry_history_cold_rehydrate(req=registry_history_cold_rehydrate_request_factory(**args), auth=auth)
     if req.job_id == "segment_history_maintenance":
         try:
             typed_req = segment_history_maintenance_request_factory(**args)
@@ -715,6 +745,10 @@ def ops_run_service(
     artifact_history_cold_store_request_factory: Callable[..., Any],
     artifact_history_cold_rehydrate: Callable[..., dict[str, Any]],
     artifact_history_cold_rehydrate_request_factory: Callable[..., Any],
+    registry_history_cold_store: Callable[..., dict[str, Any]],
+    registry_history_cold_store_request_factory: Callable[..., Any],
+    registry_history_cold_rehydrate: Callable[..., dict[str, Any]],
+    registry_history_cold_rehydrate_request_factory: Callable[..., Any],
     segment_history_maintenance: Callable[..., dict[str, Any]],
     segment_history_maintenance_request_factory: Callable[..., Any],
     segment_history_cold_store: Callable[..., dict[str, Any]],
@@ -772,6 +806,10 @@ def ops_run_service(
             artifact_history_cold_store_request_factory=artifact_history_cold_store_request_factory,
             artifact_history_cold_rehydrate=artifact_history_cold_rehydrate,
             artifact_history_cold_rehydrate_request_factory=artifact_history_cold_rehydrate_request_factory,
+            registry_history_cold_store=registry_history_cold_store,
+            registry_history_cold_store_request_factory=registry_history_cold_store_request_factory,
+            registry_history_cold_rehydrate=registry_history_cold_rehydrate,
+            registry_history_cold_rehydrate_request_factory=registry_history_cold_rehydrate_request_factory,
             segment_history_maintenance=segment_history_maintenance,
             segment_history_maintenance_request_factory=segment_history_maintenance_request_factory,
             segment_history_cold_store=segment_history_cold_store,

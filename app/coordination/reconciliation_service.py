@@ -25,7 +25,8 @@ from app.coordination.common import (
     utc_now,
     validate_prefixed_hex_id,
 )
-from app.coordination.locking import artifact_lock
+from app.coordination.locking import ArtifactLockInfrastructureError, ArtifactLockTimeout, artifact_lock
+from app.lifecycle_warnings import make_lock_error
 from app.models import (
     CoordinationHandoffArtifact,
     CoordinationReconciliationArtifact,
@@ -527,75 +528,80 @@ def reconciliation_resolve_service(
     validate_prefixed_hex_id(reconciliation_id, prefix="recon_", detail=INVALID_RECONCILIATION_ID_DETAIL)
 
     lock_dir = repo_root / ".locks"
-    with artifact_lock(reconciliation_id, lock_dir=lock_dir):
-        rel, artifact = _load_reconciliation_artifact(repo_root, reconciliation_id)
+    try:
+        with artifact_lock(reconciliation_id, lock_dir=lock_dir):
+            rel, artifact = _load_reconciliation_artifact(repo_root, reconciliation_id)
 
-        # Owner-only resolve unless caller has admin:peers.
-        caller = getattr(auth, "peer_id", "")
-        if caller != artifact.get("owner_peer") and not is_admin(auth):
-            raise HTTPException(status_code=403, detail="Only the owner may resolve this reconciliation artifact")
+            # Owner-only resolve unless caller has admin:peers.
+            caller = getattr(auth, "peer_id", "")
+            if caller != artifact.get("owner_peer") and not is_admin(auth):
+                raise HTTPException(status_code=403, detail="Only the owner may resolve this reconciliation artifact")
 
-        # Require resolution_summary.
-        if req.resolution_summary is None:
-            raise HTTPException(status_code=400, detail="resolution_summary is required for reconciliation resolve")
+            # Require resolution_summary.
+            if req.resolution_summary is None:
+                raise HTTPException(status_code=400, detail="resolution_summary is required for reconciliation resolve")
 
-        # Validate text bounds for resolution_summary and commit_message.
-        if len(req.resolution_summary) < 1:
-            raise HTTPException(status_code=400, detail="Value too short in coordination_reconciliation.resolution_summary")
-        if len(req.resolution_summary) > 240:
-            raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.resolution_summary")
-        if req.commit_message is not None and len(req.commit_message) > 120:
-            raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.commit_message")
+            # Validate text bounds for resolution_summary and commit_message.
+            if len(req.resolution_summary) < 1:
+                raise HTTPException(status_code=400, detail="Value too short in coordination_reconciliation.resolution_summary")
+            if len(req.resolution_summary) > 240:
+                raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.resolution_summary")
+            if req.commit_message is not None and len(req.commit_message) > 120:
+                raise HTTPException(status_code=400, detail="Value too long in coordination_reconciliation.commit_message")
 
-        # Handle already-resolved artifacts: replay or conflict.
-        if artifact.get("status") == "resolved":
-            if artifact.get("resolution_outcome") == req.outcome and artifact.get("resolution_summary") == req.resolution_summary:
-                return {"ok": True, "reconciliation": artifact, "path": rel, "updated": False, "latest_commit": gm.latest_commit()}
-            raise HTTPException(status_code=409, detail="Reconciliation has already been resolved")
+            # Handle already-resolved artifacts: replay or conflict.
+            if artifact.get("status") == "resolved":
+                if artifact.get("resolution_outcome") == req.outcome and artifact.get("resolution_summary") == req.resolution_summary:
+                    return {"ok": True, "reconciliation": artifact, "path": rel, "updated": False, "latest_commit": gm.latest_commit()}
+                raise HTTPException(status_code=409, detail="Reconciliation has already been resolved")
 
-        # Version check: first-write-wins.
-        stored_version = int(artifact.get("version") or 0)
-        if req.expected_version != stored_version:
-            raise HTTPException(status_code=409, detail="Reconciliation version conflict")
+            # Version check: first-write-wins.
+            stored_version = int(artifact.get("version") or 0)
+            if req.expected_version != stored_version:
+                raise HTTPException(status_code=409, detail="Reconciliation version conflict")
 
-        # Build updated artifact.
-        now = utc_now()
-        updated = dict(artifact)
-        updated["status"] = "resolved"
-        updated["resolution_outcome"] = req.outcome
-        updated["resolution_summary"] = req.resolution_summary
-        updated["resolved_at"] = now
-        updated["resolved_by"] = caller
-        updated["updated_at"] = now
-        updated["last_updated_by"] = caller
-        updated["version"] = stored_version + 1
+            # Build updated artifact.
+            now = utc_now()
+            updated = dict(artifact)
+            updated["status"] = "resolved"
+            updated["resolution_outcome"] = req.outcome
+            updated["resolution_summary"] = req.resolution_summary
+            updated["resolved_at"] = now
+            updated["resolved_by"] = caller
+            updated["updated_at"] = now
+            updated["last_updated_by"] = caller
+            updated["version"] = stored_version + 1
 
-        commit_message = req.commit_message
-        if commit_message is None or not commit_message.strip():
-            commit_message = f"coordination: resolve {reconciliation_id} {req.outcome}"
+            commit_message = req.commit_message
+            if commit_message is None or not commit_message.strip():
+                commit_message = f"coordination: resolve {reconciliation_id} {req.outcome}"
 
-        persist_updated_artifact(
-            path=_reconciliation_path(repo_root, reconciliation_id),
-            rel=rel,
-            gm=gm,
-            artifact=updated,
-            commit_message=commit_message,
-            error_detail="Failed to commit reconciliation resolve",
-        )
-        # Keep the SQLite sidecar index in sync after successful persist.
-        from app.coordination.query_index import try_upsert_reconciliation
+            persist_updated_artifact(
+                path=_reconciliation_path(repo_root, reconciliation_id),
+                rel=rel,
+                gm=gm,
+                artifact=updated,
+                commit_message=commit_message,
+                error_detail="Failed to commit reconciliation resolve",
+            )
+            # Keep the SQLite sidecar index in sync after successful persist.
+            from app.coordination.query_index import try_upsert_reconciliation
 
-        try_upsert_reconciliation(updated)
-        audit(
-            auth,
-            "coordination_reconciliation_resolve",
-            {
-                "reconciliation_id": reconciliation_id,
-                "owner_peer": updated["owner_peer"],
-                "outcome": updated["resolution_outcome"],
-                "resolved_by": caller,
-                "version": updated["version"],
-                "path": rel,
-            },
-        )
+            try_upsert_reconciliation(updated)
+            audit(
+                auth,
+                "coordination_reconciliation_resolve",
+                {
+                    "reconciliation_id": reconciliation_id,
+                    "owner_peer": updated["owner_peer"],
+                    "outcome": updated["resolution_outcome"],
+                    "resolved_by": caller,
+                    "version": updated["version"],
+                    "path": rel,
+                },
+            )
+    except ArtifactLockTimeout as exc:
+        raise make_lock_error("coordination_reconciliation_resolve", None, exc, is_timeout=True) from exc
+    except ArtifactLockInfrastructureError as exc:
+        raise make_lock_error("coordination_reconciliation_resolve", None, exc, is_timeout=False) from exc
     return {"ok": True, "reconciliation": updated, "path": rel, "updated": True, "latest_commit": gm.latest_commit()}

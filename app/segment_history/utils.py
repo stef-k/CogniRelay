@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
 
 _log = logging.getLogger(__name__)
 
@@ -188,19 +187,8 @@ def _derive_stream_key(family: str, source_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Structured warning helper (moved from service.py to break circular imports)
+# Structured warning helper — re-export from the shared lifecycle module.
+# lifecycle_warnings is a leaf module (imports only fastapi + stdlib) so
+# this import is always safe from circular-import issues.
 # ---------------------------------------------------------------------------
-def _make_warning(
-    code: str,
-    detail: str,
-    *,
-    path: str | None = None,
-    segment_id: str | None = None,
-) -> dict[str, Any]:
-    """Build a structured warning object."""
-    return {
-        "code": code,
-        "detail": detail,
-        "path": path,
-        "segment_id": segment_id,
-    }
+from app.lifecycle_warnings import make_warning as _make_warning  # noqa: E402, F401

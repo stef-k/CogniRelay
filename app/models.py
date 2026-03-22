@@ -782,6 +782,24 @@ class ArtifactHistoryColdRehydrateRequest(BaseModel):
         return self
 
 
+class RegistryHistoryColdStoreRequest(BaseModel):
+    """Host-local request for cold-storing one registry-history shard."""
+    source_payload_path: str = Field(min_length=1, max_length=400)
+
+
+class RegistryHistoryColdRehydrateRequest(BaseModel):
+    """Host-local request for rehydrating one cold-stored registry-history shard."""
+    source_payload_path: Optional[str] = Field(default=None, max_length=400)
+    cold_stub_path: Optional[str] = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def _require_exactly_one_selector(self) -> "RegistryHistoryColdRehydrateRequest":
+        """Require exactly one selector field for registry-history rehydration."""
+        if bool(self.source_payload_path) == bool(self.cold_stub_path):
+            raise ValueError("exactly one of source_payload_path or cold_stub_path is required")
+        return self
+
+
 class SegmentHistoryMaintenanceRequest(BaseModel):
     """Host-local request for rolling active sources into history segments."""
     family: Literal["journal", "api_audit", "ops_runs", "message_stream", "message_thread", "episodic"]

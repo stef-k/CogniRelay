@@ -363,8 +363,8 @@ class TestContinuityColdStorage(unittest.TestCase):
             self.assertFalse(validation["ok"])
             self.assertIn("memory/continuity/cold/user-alpha-20260319T101500Z.json.gz", validation["invalid_cold_payloads"])
 
-    def test_cold_store_rechecks_conflicts_inside_subject_lock(self) -> None:
-        """Cold-store should fail cleanly when the cold pair appears after lock acquisition planning."""
+    def test_cold_store_crash_recovery_removes_orphaned_cold_artifacts(self) -> None:
+        """When both archive and cold artifacts exist, crash recovery removes cold and proceeds."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             archive_rel, _archive_bytes = self._write_archive(repo_root)
@@ -383,16 +383,39 @@ class TestContinuityColdStorage(unittest.TestCase):
                     return False
 
             with patch("app.continuity.service._continuity_subject_lock", return_value=_InjectConflictLock()):
-                with self.assertRaises(HTTPException) as cm:
-                    continuity_cold_store_service(
-                        repo_root=repo_root,
-                        gm=_GitManagerStub(repo_root),
-                        auth=_LocalOpsAuth(),
-                        req=type("Req", (), {"source_archive_path": archive_rel})(),
-                        audit=lambda *_args: None,
-                    )
+                result = continuity_cold_store_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(repo_root),
+                    auth=_LocalOpsAuth(),
+                    req=type("Req", (), {"source_archive_path": archive_rel})(),
+                    audit=lambda *_args: None,
+                )
 
-            self.assertEqual(cm.exception.status_code, 409)
+            self.assertTrue(result["ok"])
+
+    def test_cold_store_conflicts_when_cold_exists_without_archive(self) -> None:
+        """Cold-store should fail with 409 when cold artifacts exist but archive does not."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            archive_rel, _archive_bytes = self._write_archive(repo_root)
+            cold_payload = repo_root / "memory/continuity/cold/user-alpha-20260319T101500Z.json.gz"
+
+            # Pre-create cold payload, then delete the archive so only cold remains
+            cold_payload.parent.mkdir(parents=True, exist_ok=True)
+            cold_payload.write_bytes(b"conflict")
+            archive_path = repo_root / archive_rel
+            archive_path.unlink()
+
+            with self.assertRaises(HTTPException) as cm:
+                continuity_cold_store_service(
+                    repo_root=repo_root,
+                    gm=_GitManagerStub(repo_root),
+                    auth=_LocalOpsAuth(),
+                    req=type("Req", (), {"source_archive_path": archive_rel})(),
+                    audit=lambda *_args: None,
+                )
+
+            self.assertEqual(cm.exception.status_code, 404)
 
     def test_cold_store_returns_controlled_error_when_archive_disappears_after_lock(self) -> None:
         """Cold-store should convert an after-lock archive disappearance into a controlled HTTP error."""

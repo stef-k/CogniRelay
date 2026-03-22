@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gzip
-import io
 import json
 import logging
 import re
@@ -29,14 +28,13 @@ from app.segment_history.utils import (
     parse_event_timestamp,
     sample_json_field,
 )
-from app.storage import write_bytes_file, write_text_file
+from app.storage import build_cold_gzip_bytes, write_bytes_file, write_text_file
 
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SEGMENT_HISTORY_GZIP_LEVEL = 9
 SEGMENT_HISTORY_STUB_SCHEMA_TYPE = "segment_history_stub"
 SEGMENT_HISTORY_STUB_SCHEMA_VERSION = "1.0"
 
@@ -200,19 +198,6 @@ def _mutate_stub_rehydrate(stub: dict[str, Any], hot_path: str) -> dict[str, Any
 # ---------------------------------------------------------------------------
 # Gzip cold-store primitives
 # ---------------------------------------------------------------------------
-def _build_cold_gzip_bytes(source_bytes: bytes) -> bytes:
-    """Build deterministic gzip bytes for a rolled segment payload."""
-    buf = io.BytesIO()
-    with gzip.GzipFile(
-        fileobj=buf,
-        mode="wb",
-        filename="",
-        mtime=0,
-        compresslevel=SEGMENT_HISTORY_GZIP_LEVEL,
-    ) as handle:
-        handle.write(source_bytes)
-    return buf.getvalue()
-
 
 def _decompress_cold_payload(compressed: bytes) -> bytes:
     """Decompress a cold payload and validate CRC integrity.
@@ -890,7 +875,7 @@ def _reconcile_manifest_residue_locked(
         detail = "segment_history_manifest_unreadable_cleanup"
         if orphan_count:
             detail += f"; removed {orphan_count} orphaned files"
-        return {"warning": detail}
+        return {"warning": detail, "reconciled_source_paths": set(), "recovery_failed": False}
 
     if manifest is None:
         return None
@@ -1346,6 +1331,14 @@ def segment_history_maintenance_service(
                         residue["warning"],
                     )
                 )
+                if residue.get("recovery_failed"):
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_manifest_recovery_failed",
+                            "Manifest reconciliation could not recover orphaned files; "
+                            "manual intervention may be required",
+                        )
+                    )
 
             # Post-lock: recount eligible for selection_count.
             # Re-check rollover eligibility under lock so that a source
@@ -1953,10 +1946,12 @@ def segment_history_cold_store_service(
             "cold_stored_count": 0,
             "batch_limit_reached": False,
             "cold_segment_ids": [],
+            "hot_payloads_removed": False,
             "durable": True,
             "committed_files": [],
             "latest_commit": None,
             "warnings": warnings,
+            "recovery_warnings": [],
         }
 
     # Derive lock keys from source paths using _derive_stream_key.
@@ -2014,6 +2009,14 @@ def segment_history_cold_store_service(
                         residue["warning"],
                     )
                 )
+                if residue.get("recovery_failed"):
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_manifest_recovery_failed",
+                            "Manifest reconciliation could not recover orphaned files; "
+                            "manual intervention may be required",
+                        )
+                    )
 
             # Re-read stubs under lock and revalidate (5 checks per spec)
             validated: list[tuple[str, dict, Path]] = []
@@ -2127,7 +2130,7 @@ def segment_history_cold_store_service(
 
                     # Compress
                     source_bytes = hot_payload.read_bytes()
-                    compressed = _build_cold_gzip_bytes(source_bytes)
+                    compressed = build_cold_gzip_bytes(source_bytes)
                     cold_path = _cold_payload_path(hot_payload)
                     cold_path.parent.mkdir(parents=True, exist_ok=True)
                     write_bytes_file(cold_path, compressed)
@@ -2165,6 +2168,7 @@ def segment_history_cold_store_service(
                 # (added at line ~1933), so git will stage the deletion.
                 from app.git_locking import repository_mutation_lock
 
+                hot_payloads_removed = bool(deferred_hot_deletes)
                 if deferred_hot_deletes:
                     for hp, sid in deferred_hot_deletes:
                         try:
@@ -2186,28 +2190,56 @@ def segment_history_cold_store_service(
                             if success:
                                 latest_commit = gm.latest_commit()
                                 committed_files = [str(p.relative_to(repo_root)) for p in commit_paths]
+                                remove_manifest(repo_root, family, expected_operation="cold_store")
                             else:
-                                durable = False
-                                warnings.append(
-                                    _make_warning(
-                                        "segment_history_git_commit_failed",
-                                        f"Git commit failed for cold-store; at-risk segments: {cold_stored_ids}",
-                                    )
+                                # Commit produced no changes — full rollback
+                                stub_ok = _try_restore_rollback_state(stub_rollback)
+                                hot_ok = _try_restore_rollback_state(hot_rollback)
+                                from app.git_safety import unstage_paths as _unstage_cs_nochg
+                                if gm is not None and commit_paths:
+                                    _unstage_cs_nochg(gm, commit_paths)
+                                if stub_ok and hot_ok:
+                                    _remove_created_paths(created_cold_paths)
+                                    remove_manifest(repo_root, family, expected_operation="cold_store")
+                                raise HTTPException(
+                                    status_code=500,
+                                    detail={
+                                        "ok": False,
+                                        "operation": "segment_history_cold_store",
+                                        "family": family,
+                                        "error": {
+                                            "code": "segment_history_cold_store_commit_failed",
+                                            "detail": f"Git commit failed for cold-store; rolled back {len(cold_stored_ids)} segment(s)",
+                                        },
+                                    },
                                 )
-                    except Exception:
-                        durable = False
+                    except HTTPException:
+                        raise
+                    except Exception as exc:
                         # Restore hot payloads so segments remain accessible
-                        _restore_rollback_state(hot_rollback)
+                        stub_ok = _try_restore_rollback_state(stub_rollback)
+                        hot_ok = _try_restore_rollback_state(hot_rollback)
                         # Unstage git index to prevent phantom staged entries
                         from app.git_safety import unstage_paths as _unstage_cs_commit
                         if gm is not None and commit_paths:
                             _unstage_cs_commit(gm, commit_paths)
-                        warnings.append(
-                            _make_warning(
-                                "segment_history_git_commit_failed",
-                                f"Git commit failed for cold-store; at-risk segments: {cold_stored_ids}",
-                            )
-                        )
+                        if stub_ok and hot_ok:
+                            _remove_created_paths(created_cold_paths)
+                            remove_manifest(repo_root, family, expected_operation="cold_store")
+                        raise HTTPException(
+                            status_code=500,
+                            detail={
+                                "ok": False,
+                                "operation": "segment_history_cold_store",
+                                "family": family,
+                                "error": {
+                                    "code": "segment_history_cold_store_commit_failed",
+                                    "detail": f"Git commit failed for cold-store: {exc}",
+                                },
+                            },
+                        ) from exc
+            except HTTPException:
+                raise
             except Exception:
                 # Rollback under lock: restore stubs first, then hot
                 # payloads.  Only remove cold .gz and manifest if both
@@ -2229,12 +2261,6 @@ def segment_history_cold_store_service(
                         family, stub_ok, hot_ok,
                     )
                 raise
-
-            # Remove manifest only when the commit succeeded; preserving
-            # it on failure lets _reconcile_manifest_residue re-commit
-            # orphaned files on the next invocation.
-            if durable:
-                remove_manifest(repo_root, family, expected_operation="cold_store")
 
     except ManifestOccupied as exc:
         raise HTTPException(
@@ -2309,10 +2335,12 @@ def segment_history_cold_store_service(
         "cold_stored_count": len(cold_stored_ids),
         "batch_limit_reached": batch_limit_reached,
         "cold_segment_ids": cold_stored_ids,
+        "hot_payloads_removed": hot_payloads_removed,
         "durable": durable,
         "committed_files": committed_files,
         "latest_commit": latest_commit,
         "warnings": warnings,
+        "recovery_warnings": [],
     }
     if not durable:
         result["at_risk_segment_ids"] = cold_stored_ids
@@ -2539,9 +2567,17 @@ def segment_history_cold_rehydrate_service(
                         "committed_files": [],
                         "latest_commit": None,
                         "warnings": warnings,
+                        "recovery_warnings": [],
                     }
                     if not recon_recovered:
                         result_recon["at_risk_segment_ids"] = [segment_id]
+                    _emit_audit(audit, "segment_history_cold_rehydrate", {
+                        "family": family,
+                        "segment_id": segment_id,
+                        "reconciliation_recovery": True,
+                        "durable": recon_recovered,
+                        "warning_count": len(warnings),
+                    })
                     return result_recon
                 _error_response(
                     409,
@@ -2646,6 +2682,38 @@ def segment_history_cold_rehydrate_service(
                     f"Cold payload is corrupt for segment: {segment_id}",
                 )
 
+            # Validate decompressed content is well-formed
+            try:
+                decompressed_text = decompressed.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "operation": "segment_history_cold_rehydrate",
+                        "family": family,
+                        "segment_id": segment_id,
+                        "error": {
+                            "code": "segment_history_cold_payload_corrupt",
+                            "detail": f"Decompressed payload is not valid UTF-8: {exc}",
+                        },
+                    },
+                )
+            if not decompressed_text.strip():
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "operation": "segment_history_cold_rehydrate",
+                        "family": family,
+                        "segment_id": segment_id,
+                        "error": {
+                            "code": "segment_history_cold_payload_corrupt",
+                            "detail": "Decompressed payload is empty",
+                        },
+                    },
+                )
+
             # Capture stub state for rollback before mutations begin.
             stub_rollback = _capture_rollback_state([stub_path])
 
@@ -2713,6 +2781,15 @@ def segment_history_cold_rehydrate_service(
                             segment_id=segment_id,
                         )
                     )
+                    warnings.append(
+                        _make_warning(
+                            "segment_history_cold_orphan_retained",
+                            f"Cold payload remains tracked in git after rehydrate; "
+                            f"manual cleanup may be required: {cold_payload_rel}",
+                            path=cold_payload_rel,
+                            segment_id=segment_id,
+                        )
+                    )
 
                 commit_paths_list = [hot_path, stub_path]
                 if cold_removed:
@@ -2724,30 +2801,57 @@ def segment_history_cold_rehydrate_service(
                         if success:
                             latest_commit = gm.latest_commit()
                             committed_files = [str(p.relative_to(repo_root)) for p in commit_paths_list]
+                            _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
                         else:
-                            durable = False
-                            warnings.append(
-                                _make_warning(
-                                    "segment_history_git_commit_failed",
-                                    f"Git commit failed for rehydrate; at-risk segment: {segment_id}",
-                                    segment_id=segment_id,
-                                )
+                            stub_ok = _try_restore_rollback_state(stub_rollback)
+                            _remove_created_paths([hot_path])
+                            from app.git_safety import unstage_paths as _unstage_rh_nochg
+                            if gm is not None:
+                                _unstage_rh_nochg(gm, commit_paths_list)
+                            if stub_ok:
+                                _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
+                            raise HTTPException(
+                                status_code=500,
+                                detail={
+                                    "ok": False,
+                                    "operation": "segment_history_cold_rehydrate",
+                                    "family": family,
+                                    "segment_id": segment_id,
+                                    "error": {
+                                        "code": "segment_history_cold_rehydrate_commit_failed",
+                                        "detail": f"Git commit failed for rehydrate of {segment_id}",
+                                    },
+                                },
                             )
-                except Exception:
-                    durable = False
-                    warnings.append(
-                        _make_warning(
-                            "segment_history_git_commit_failed",
-                            f"Git commit failed for rehydrate; at-risk segment: {segment_id}",
-                            segment_id=segment_id,
-                        )
-                    )
-
-                # Remove manifest after successful commit.  On commit
-                # failure the manifest is preserved so the orphaned-hot
-                # auto-cleanup fires on the next rehydrate attempt.
-                if durable:
-                    _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    stub_ok = _try_restore_rollback_state(stub_rollback)
+                    _remove_created_paths([hot_path])
+                    from app.git_safety import unstage_paths as _unstage_rh_exc
+                    try:
+                        _rh_paths = commit_paths_list
+                    except NameError:
+                        _rh_paths = [hot_path, stub_path]
+                    if gm is not None:
+                        _unstage_rh_exc(gm, _rh_paths)
+                    if stub_ok:
+                        _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "ok": False,
+                            "operation": "segment_history_cold_rehydrate",
+                            "family": family,
+                            "segment_id": segment_id,
+                            "error": {
+                                "code": "segment_history_cold_rehydrate_commit_failed",
+                                "detail": f"Git commit failed for rehydrate of {segment_id}: {exc}",
+                            },
+                        },
+                    ) from exc
+            except HTTPException:
+                raise
             except Exception:
                 # Rollback: restore stub to pre-mutation state and remove
                 # the hot payload that was created.  Only remove the
@@ -2848,6 +2952,7 @@ def segment_history_cold_rehydrate_service(
         "committed_files": committed_files,
         "latest_commit": latest_commit,
         "warnings": warnings,
+        "recovery_warnings": [],
     }
     if not durable:
         result["at_risk_segment_ids"] = [segment_id]

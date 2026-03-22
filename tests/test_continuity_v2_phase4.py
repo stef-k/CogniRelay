@@ -217,7 +217,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
             gm = _FailingGitManagerStub()
             self._write_capsule(repo_root, subject_kind="user", subject_id="stef")
 
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(HTTPException) as cm:
                 continuity_archive_service(
                     repo_root=repo_root,
                     gm=gm,
@@ -226,6 +226,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
                     now=datetime(2026, 3, 15, 14, 30, 22, tzinfo=timezone.utc),
                     audit=lambda *_args: None,
                 )
+            self.assertEqual(cm.exception.status_code, 500)
 
             active_path = repo_root / "memory" / "continuity" / "user-stef.json"
             archive_path = repo_root / "memory" / "continuity" / "archive" / "user-stef-20260315T143022Z.json"
@@ -239,7 +240,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
             gm = _NoOpGitManagerStub()
             self._write_capsule(repo_root, subject_kind="user", subject_id="stef")
 
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(HTTPException) as cm:
                 continuity_archive_service(
                     repo_root=repo_root,
                     gm=gm,
@@ -248,6 +249,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
                     now=datetime(2026, 3, 15, 14, 30, 22, tzinfo=timezone.utc),
                     audit=lambda *_args: None,
                 )
+            self.assertEqual(cm.exception.status_code, 500)
 
             active_path = repo_root / "memory" / "continuity" / "user-stef.json"
             archive_path = repo_root / "memory" / "continuity" / "archive" / "user-stef-20260315T143022Z.json"
@@ -262,7 +264,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
             self._write_capsule(repo_root, subject_kind="user", subject_id="stef")
 
             with patch("app.continuity.service.write_bytes_file", side_effect=OSError("disk full")):
-                with self.assertRaises(RuntimeError) as cm:
+                with self.assertRaises(HTTPException) as cm:
                     continuity_archive_service(
                         repo_root=repo_root,
                         gm=gm,
@@ -272,6 +274,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
                         audit=lambda *_args: None,
                     )
 
-            self.assertIn("Continuity archive commit failed", str(cm.exception))
-            self.assertIn("git commit failed", str(cm.exception))
-            self.assertIn("rollback failed", str(cm.exception))
+            self.assertEqual(cm.exception.status_code, 500)
+            detail = cm.exception.detail
+            self.assertEqual(detail["error"]["code"], "continuity_archive_rollback_failed")
+            self.assertIn("rollback failed", detail["error"]["detail"])

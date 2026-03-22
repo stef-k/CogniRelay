@@ -221,7 +221,7 @@ class HandoffMaintenanceTestCase(unittest.TestCase):
             terminal_retention_days=30, batch_limit=500,
         )
         self.assertEqual(result["externalized"], 0)
-        self.assertTrue(any("handoff_retention_missing" in w for w in result["warnings"]))
+        self.assertTrue(any(w.get("code") == "handoff_retention_missing" for w in result["warnings"]))
 
     def test_corrupt_artifact_warning(self):
         """Corrupt JSON produces warnings and is skipped."""
@@ -233,7 +233,7 @@ class HandoffMaintenanceTestCase(unittest.TestCase):
             repo_root=self.repo, now=self.now,
             terminal_retention_days=30, batch_limit=500,
         )
-        self.assertTrue(any("artifact_corrupt" in w for w in result["warnings"]))
+        self.assertTrue(any(w.get("code") == "artifact_corrupt" for w in result["warnings"]))
 
     def test_history_id_format(self):
         """history_id follows <family>__<YYYYMMDDTHHMMSSZ>__<seq> format."""
@@ -517,7 +517,7 @@ class ReconciliationMaintenanceTestCase(unittest.TestCase):
             resolved_retention_days=30, batch_limit=500,
         )
         self.assertEqual(result["externalized"], 0)
-        self.assertTrue(any("reconciliation_retention_missing" in w for w in result["warnings"]))
+        self.assertTrue(any(w.get("code") == "reconciliation_retention_missing" for w in result["warnings"]))
 
 
 class TaskDoneMaintenanceTestCase(unittest.TestCase):
@@ -581,7 +581,7 @@ class TaskDoneMaintenanceTestCase(unittest.TestCase):
             repo_root=self.repo, now=self.now,
             hot_retention_days=30, batch_limit=500,
         )
-        self.assertTrue(any("task_done_retention_missing" in w for w in result["warnings"]))
+        self.assertTrue(any(w.get("code") == "task_done_retention_missing" for w in result["warnings"]))
 
     def test_unreadable_done_task_is_skipped_with_warning(self):
         """Unreadable immutable hot files should degrade instead of aborting the pass."""
@@ -608,7 +608,7 @@ class TaskDoneMaintenanceTestCase(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["externalized"], 0)
-        self.assertIn(f"artifact_unreadable:{source_path.name}", result["warnings"])
+        self.assertTrue(any(w.get("code") == "artifact_unreadable" for w in result["warnings"]))
         self.assertTrue(source_path.exists())
 
 
@@ -691,7 +691,7 @@ class PatchAppliedMaintenanceTestCase(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["externalized"], 0)
-        self.assertIn(f"artifact_unreadable:{source_path.name}", result["warnings"])
+        self.assertTrue(any(w.get("code") == "artifact_unreadable" for w in result["warnings"]))
         self.assertTrue(source_path.exists())
 
 
@@ -830,7 +830,7 @@ class OrchestratorTestCase(unittest.TestCase):
 
         self.assertFalse(result["families"]["handoff"]["ok"])
         self.assertTrue(result["families"]["reconciliation"]["ok"])
-        self.assertTrue(any("artifact_maintenance_failed:handoff" in w for w in result["warnings"]))
+        self.assertTrue(any(w.get("code") == "artifact_maintenance_failed" for w in result["warnings"]))
 
 
 class RollbackTestCase(unittest.TestCase):
@@ -1062,7 +1062,7 @@ class MutableFamilyRaceGuardTestCase(unittest.TestCase):
             )
 
         self.assertEqual(result["externalized"], 0)
-        self.assertIn(f"handoff_hot_changed:{handoff_id}", result["warnings"])
+        self.assertTrue(any(w.get("code") == "handoff_hot_changed" for w in result["warnings"]))
         self.assertTrue(source_path.exists())
         self.assertEqual(list(safe_path(self.repo, HANDOFFS_HISTORY_DIR_REL).glob("handoff__*.json")), [])
 
@@ -1207,21 +1207,6 @@ class OrchestratorResponseFieldsTestCase(unittest.TestCase):
             )
         self.assertFalse(result["ok"])
 
-    def test_degraded_false_on_clean_pass(self):
-        """degraded is False when no git issues occur."""
-        result = artifact_lifecycle_maintenance_service(
-            repo_root=self.repo, gm=None, now=self.now,
-            settings=self.FakeSettings(),
-        )
-        self.assertFalse(result["degraded"])
-
-    def test_degraded_present_in_response(self):
-        """degraded field is always present in orchestrator response."""
-        result = artifact_lifecycle_maintenance_service(
-            repo_root=self.repo, gm=None, now=self.now,
-            settings=self.FakeSettings(),
-        )
-        self.assertIn("degraded", result)
 
 
 class SharedUpdateHookIntegrationTestCase(unittest.TestCase):

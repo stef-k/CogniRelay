@@ -17,7 +17,13 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from app.coordination.locking import _lock_dir_ready, artifact_lock, purge_stale_lockfiles
+from app.coordination.locking import (
+    ArtifactLockInfrastructureError,
+    ArtifactLockTimeout,
+    _lock_dir_ready,
+    artifact_lock,
+    purge_stale_lockfiles,
+)
 from app.coordination.shared_service import shared_update_service
 from app.models import CoordinationSharedArtifact, CoordinationSharedUpdateRequest
 from app.storage import canonical_json, write_text_file
@@ -116,17 +122,16 @@ class TestArtifactLockUnit(unittest.TestCase):
             with artifact_lock(good_id, lock_dir=self.lock_dir):
                 pass  # Should not raise.
 
-    def test_raises_503_when_lock_dir_not_writable(self) -> None:
-        """Lock infrastructure failure returns HTTP 503."""
+    def test_raises_infra_error_when_lock_dir_not_writable(self) -> None:
+        """Lock infrastructure failure raises ArtifactLockInfrastructureError."""
         # Use a path under a non-existent read-only parent.
         bad_dir = Path("/proc/nonexistent/.locks")
-        with self.assertRaises(HTTPException) as ctx:
+        with self.assertRaises(ArtifactLockInfrastructureError):
             with artifact_lock("some_id", lock_dir=bad_dir):
                 pass
-        self.assertEqual(ctx.exception.status_code, 503)
 
-    def test_lock_timeout_returns_503(self) -> None:
-        """A held lock that exceeds the timeout returns HTTP 503."""
+    def test_lock_timeout_raises_domain_exception(self) -> None:
+        """A held lock that exceeds the timeout raises ArtifactLockTimeout."""
         held = threading.Event()
         release = threading.Event()
 
@@ -139,11 +144,11 @@ class TestArtifactLockUnit(unittest.TestCase):
         holder.start()
         held.wait(timeout=5)
 
-        with self.assertRaises(HTTPException) as ctx:
+        with self.assertRaises(ArtifactLockTimeout) as ctx:
             with artifact_lock("timeout_id", lock_dir=self.lock_dir, timeout=0.15):
                 pass
-        self.assertEqual(ctx.exception.status_code, 503)
-        self.assertIn("timed out", ctx.exception.detail)
+        self.assertEqual(ctx.exception.artifact_id, "timeout_id")
+        self.assertAlmostEqual(ctx.exception.timeout, 0.15)
 
         release.set()
         holder.join(timeout=5)

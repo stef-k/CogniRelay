@@ -24,15 +24,21 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
+from app.lifecycle_warnings import make_error_detail, make_lock_error, make_warning
+
 from app.auth import AuthContext
-from app.coordination.locking import artifact_lock
+from app.coordination.locking import (
+    ArtifactLockInfrastructureError,
+    ArtifactLockTimeout,
+    artifact_lock,
+)
 from app.git_safety import try_commit_paths
 from app.segment_history.locking import (
     LockInfrastructureError,
     SegmentHistoryLockTimeout,
     segment_history_source_lock,
 )
-from app.storage import safe_path, write_bytes_file, write_text_file
+from app.storage import build_cold_gzip_bytes, safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
 
@@ -279,21 +285,22 @@ def artifact_history_payload_rel_path_from_cold_artifact(cold_artifact_path: str
 # ---------------------------------------------------------------------------
 
 
-def _load_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+def _load_json_file(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Load a JSON artifact file with graceful degradation.
 
     Returns (data, warning). If data is None, the file is unreadable.
+    The warning (when present) is a structured dict from ``make_warning``.
     """
     if not path.exists() or not path.is_file():
         return None, None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, ValueError):
-        return None, f"artifact_corrupt:{path.name}"
+        return None, make_warning("artifact_corrupt", f"Cannot parse artifact: {path.name}", path=str(path))
     except Exception:
-        return None, f"artifact_unreadable:{path.name}"
+        return None, make_warning("artifact_unreadable", f"Cannot read artifact: {path.name}", path=str(path))
     if not isinstance(data, dict):
-        return None, f"artifact_not_dict:{path.name}"
+        return None, make_warning("artifact_not_dict", f"Artifact is not a dict: {path.name}", path=str(path))
     return data, None
 
 
@@ -412,7 +419,7 @@ def _externalize_single_artifact(
 # ===================================================================
 
 
-def _handoff_retention_timestamp(artifact: dict[str, Any]) -> tuple[datetime | None, str | None]:
+def _handoff_retention_timestamp(artifact: dict[str, Any]) -> tuple[datetime | None, dict[str, Any] | None]:
     """Derive the retention timestamp for a terminal handoff.
 
     Per spec: consumed_at when present, otherwise updated_at, otherwise created_at.
@@ -421,7 +428,7 @@ def _handoff_retention_timestamp(artifact: dict[str, Any]) -> tuple[datetime | N
         ts = _parse_iso(artifact.get(field))
         if ts is not None:
             return ts, None
-    return None, f"handoff_retention_missing:{artifact.get('handoff_id', 'unknown')}"
+    return None, make_warning("handoff_retention_missing", f"No retention timestamp for handoff: {artifact.get('handoff_id', 'unknown')}")
 
 
 def _handoff_summary(artifact: dict[str, Any]) -> dict[str, Any]:
@@ -445,7 +452,7 @@ def handoff_maintenance_pass(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Run one maintenance pass for terminal handoff artifacts."""
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     cutoff = now - timedelta(days=terminal_retention_days)
 
     handoffs_dir = safe_path(repo_root, HANDOFFS_DIR_REL)
@@ -525,6 +532,9 @@ def handoff_maintenance_pass(
         "written_paths": written_paths,
         "deleted_paths": deleted_paths,
         "warnings": warnings,
+        "audit_events": [{"event": "artifact_handoff_maintenance", "detail": {
+            "family": "handoff", "externalized": len(externalized_ids),
+        }}],
     }
 
 
@@ -654,7 +664,7 @@ def reconciliation_maintenance_pass(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Run one maintenance pass for resolved reconciliation artifacts."""
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     cutoff = now - timedelta(days=resolved_retention_days)
 
     recon_dir = safe_path(repo_root, RECONCILIATIONS_DIR_REL)
@@ -681,7 +691,7 @@ def reconciliation_maintenance_pass(
 
         updated_at = _parse_iso(artifact.get("updated_at"))
         if updated_at is None:
-            warnings.append(f"reconciliation_retention_missing:{recon_id}")
+            warnings.append(make_warning("reconciliation_retention_missing", f"No retention timestamp for reconciliation: {recon_id}"))
             continue
         if updated_at > cutoff:
             continue
@@ -729,6 +739,9 @@ def reconciliation_maintenance_pass(
         "written_paths": written_paths,
         "deleted_paths": deleted_paths,
         "warnings": warnings,
+        "audit_events": [{"event": "artifact_reconciliation_maintenance", "detail": {
+            "family": "reconciliation", "externalized": len(externalized_ids),
+        }}],
     }
 
 
@@ -756,7 +769,7 @@ def task_done_maintenance_pass(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Run one maintenance pass for done-task artifacts."""
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     cutoff = now - timedelta(days=hot_retention_days)
 
     done_dir = safe_path(repo_root, TASKS_DONE_DIR_REL)
@@ -776,7 +789,7 @@ def task_done_maintenance_pass(
 
         updated_at = _parse_iso(artifact.get("updated_at"))
         if updated_at is None:
-            warnings.append(f"task_done_retention_missing:{task_id}")
+            warnings.append(make_warning("task_done_retention_missing", f"No retention timestamp for task: {task_id}"))
             continue
         if updated_at > cutoff:
             continue
@@ -818,6 +831,9 @@ def task_done_maintenance_pass(
         "written_paths": written_paths,
         "deleted_paths": deleted_paths,
         "warnings": warnings,
+        "audit_events": [{"event": "artifact_task_done_maintenance", "detail": {
+            "family": "task_done", "externalized": len(externalized_ids),
+        }}],
     }
 
 
@@ -899,7 +915,7 @@ def _externalize_selected_family(
     mutable_hot_family: bool,
 ) -> dict[str, Any]:
     """Externalize one selected family set as a single rollback unit."""
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     reserved_ids: set[str] = set()
     written_paths: list[str] = []
     deleted_paths: list[str] = []
@@ -918,13 +934,13 @@ def _externalize_selected_family(
                 try:
                     current_bytes = current_path.read_bytes()
                 except FileNotFoundError:
-                    warnings.append(f"{family}_hot_changed:{artifact_id}")
+                    warnings.append(make_warning(f"{family}_hot_changed", f"Hot artifact changed since snapshot: {artifact_id}"))
                     return
                 except OSError:
-                    warnings.append(f"artifact_unreadable:{current_path.name}")
+                    warnings.append(make_warning("artifact_unreadable", f"Cannot read artifact: {current_path.name}", path=str(current_path)))
                     return
                 if mutable_hot_family and current_bytes != row["snapshot_bytes"]:
-                    warnings.append(f"{family}_hot_changed:{artifact_id}")
+                    warnings.append(make_warning(f"{family}_hot_changed", f"Hot artifact changed since snapshot: {artifact_id}"))
                     return
 
                 # Retry on O_EXCL collision (concurrent ID allocation)
@@ -948,7 +964,7 @@ def _externalize_selected_family(
                     ):
                         break
                     if _ext_attempt == _max_ext_retries - 1:
-                        warnings.append(f"{collision_warning_prefix}:{artifact_id}")
+                        warnings.append(make_warning(collision_warning_prefix, f"History ID collision after retries: {artifact_id}"))
                         return
                 if current_path.resolve() not in rollback_seen:
                     rollback_seen.add(current_path.resolve())
@@ -959,8 +975,17 @@ def _externalize_selected_family(
                 externalized_ids.append(artifact_id)
 
             if mutable_hot_family:
-                with artifact_lock(artifact_id, lock_dir=lock_dir):
-                    _process_one()
+                try:
+                    with artifact_lock(artifact_id, lock_dir=lock_dir):
+                        _process_one()
+                except ArtifactLockTimeout as exc:
+                    raise make_lock_error(
+                        "artifact_lifecycle_maintenance", family, exc, is_timeout=True,
+                    ) from exc
+                except ArtifactLockInfrastructureError as exc:
+                    raise make_lock_error(
+                        "artifact_lifecycle_maintenance", family, exc, is_timeout=False,
+                    ) from exc
             else:
                 _process_one()
     except Exception:
@@ -985,7 +1010,7 @@ def patch_applied_maintenance_pass(
     batch_limit: int,
 ) -> dict[str, Any]:
     """Run one maintenance pass for applied-patch artifacts."""
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     cutoff = now - timedelta(days=hot_retention_days)
 
     applied_dir = safe_path(repo_root, PATCHES_APPLIED_DIR_REL)
@@ -1005,7 +1030,7 @@ def patch_applied_maintenance_pass(
 
         updated_at = _parse_iso(artifact.get("updated_at"))
         if updated_at is None:
-            warnings.append(f"patch_applied_retention_missing:{patch_id}")
+            warnings.append(make_warning("patch_applied_retention_missing", f"No retention timestamp for patch: {patch_id}"))
             continue
         if updated_at > cutoff:
             continue
@@ -1047,6 +1072,9 @@ def patch_applied_maintenance_pass(
         "written_paths": written_paths,
         "deleted_paths": deleted_paths,
         "warnings": warnings,
+        "audit_events": [{"event": "artifact_patch_applied_maintenance", "detail": {
+            "family": "patch_applied", "externalized": len(externalized_ids),
+        }}],
     }
 
 
@@ -1200,11 +1228,20 @@ def artifact_history_cold_store_service(
             if stub.get("summary") != payload.get("summary") or stub.get("source_path") != payload.get("source_path"):
                 raise HTTPException(status_code=400, detail="Artifact-history stub does not match payload")
             source_bytes = hot_payload_path.read_bytes()
-            if cold_payload_path.exists():
+            # Crash recovery: if both hot and cold exist, a prior cold-store
+            # wrote the cold file but crashed before deleting the hot file.
+            # Remove the orphaned cold file and proceed with a fresh cold-store.
+            if cold_payload_path.exists() and hot_payload_path.exists():
+                _logger.warning(
+                    "Artifact cold-store crash recovery: removing orphaned cold file %s",
+                    cold_storage_path,
+                )
+                cold_payload_path.unlink(missing_ok=True)
+            elif cold_payload_path.exists():
                 raise HTTPException(status_code=409, detail="Artifact-history cold payload already exists")
 
             try:
-                gzip_bytes = gzip.compress(source_bytes, mtime=0)
+                gzip_bytes = build_cold_gzip_bytes(source_bytes)
                 write_bytes_file(cold_payload_path, gzip_bytes)
                 updated_stub = dict(stub)
                 updated_stub["payload_path"] = cold_storage_path
@@ -1225,12 +1262,18 @@ def artifact_history_cold_store_service(
                     stub_path=safe_path(repo_root, stub_rel),
                     original_stub=stub,
                 )
-                detail = f"Artifact-history cold-store failed: {exc}"
-                if cleanup_errors:
-                    detail += f"; rollback failed for {', '.join(cleanup_errors)}"
-                raise HTTPException(status_code=500, detail=detail) from exc
+                raise HTTPException(
+                    status_code=500,
+                    detail=make_error_detail(
+                        operation="artifact_history_cold_store",
+                        family=family,
+                        error_code="artifact_history_cold_store_failed",
+                        error_detail=str(exc),
+                        rollback_errors=cleanup_errors,
+                    ),
+                ) from exc
     except SegmentHistoryLockTimeout as exc:
-        raise HTTPException(status_code=503, detail="Artifact-history cold-store lock timed out; retry") from exc
+        raise make_lock_error("artifact_history_cold_store", family, exc, is_timeout=True) from exc
 
     audit(
         auth,
@@ -1250,8 +1293,10 @@ def artifact_history_cold_store_service(
         "cold_storage_path": cold_storage_path,
         "cold_stub_path": stub_rel,
         "committed_files": [cold_storage_path, stub_rel, source_payload_path],
+        "durable": True,
         "latest_commit": gm.latest_commit() if gm is not None else None,
         "warnings": [],
+        "recovery_warnings": [],
     }
 
 
@@ -1342,12 +1387,17 @@ def artifact_history_cold_rehydrate_service(
                     write_bytes_file(stub_path, cold_stub_bytes)
                 except Exception as rollback_exc:
                     rollback_errors.append(f"restore cold stub: {rollback_exc}")
-                detail = f"Artifact-history cold rehydrate failed: {exc}"
-                if rollback_errors:
-                    detail += f"; rollback failed for {', '.join(rollback_errors)}"
-                raise HTTPException(status_code=500, detail=detail) from exc
+                raise HTTPException(
+                    status_code=500,
+                    detail=make_error_detail(
+                        operation="artifact_history_cold_rehydrate",
+                        error_code="artifact_history_cold_rehydrate_failed",
+                        error_detail=str(exc),
+                        rollback_errors=rollback_errors,
+                    ),
+                ) from exc
     except SegmentHistoryLockTimeout as exc:
-        raise HTTPException(status_code=503, detail="Artifact-history cold-rehydrate lock timed out; retry") from exc
+        raise make_lock_error("artifact_history_cold_rehydrate", None, exc, is_timeout=True) from exc
 
     audit(
         auth,
@@ -1361,14 +1411,16 @@ def artifact_history_cold_rehydrate_service(
     return {
         "ok": True,
         "family": payload["family"],
-        "artifact_state": "archived",
+        "artifact_state": "hot",
         "source_payload_path": source_payload_path,
         "restored_payload_path": source_payload_path,
         "cold_storage_path": cold_storage_path,
         "cold_stub_path": cold_stub_path,
         "committed_files": [source_payload_path, cold_storage_path, cold_stub_path],
+        "durable": True,
         "latest_commit": gm.latest_commit() if gm is not None else None,
         "warnings": [],
+        "recovery_warnings": [],
     }
 
 
@@ -1419,7 +1471,7 @@ def artifact_history_cold_apply_service(
         "patch_applied": int(settings.patch_applied_cold_after_days),
     }
     results: dict[str, Any] = {}
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     cold_stored = 0
 
     for family in requested:
@@ -1434,16 +1486,21 @@ def artifact_history_cold_apply_service(
                 try:
                     payload = _load_artifact_history_payload(repo_root, rel)
                 except HTTPException:
+                    warnings.append(make_warning(
+                        "artifact_history_payload_unreadable",
+                        f"Cannot read payload: {rel}",
+                        path=rel,
+                    ))
                     continue
                 cold_ts = _family_cold_timestamp(payload["summary"], family=family)
                 if cold_ts is None:
-                    warnings.append(f"artifact_history_cold_timestamp_missing:{rel}")
+                    warnings.append(make_warning("artifact_history_cold_timestamp_missing", f"No cold-eligibility timestamp: {rel}", path=rel))
                     continue
                 stub_rel = f"{_ARTIFACT_HISTORY_DIRS_BY_FAMILY[family]}/index/{path.name}"
                 try:
                     stub = _load_artifact_history_stub(repo_root, stub_rel)
                 except HTTPException:
-                    warnings.append(f"artifact_history_invalid_stub:{stub_rel}")
+                    warnings.append(make_warning("artifact_history_invalid_stub", f"Cannot read stub: {stub_rel}", path=stub_rel))
                     continue
                 if stub.get("payload_path") != rel:
                     continue
@@ -1463,7 +1520,11 @@ def artifact_history_cold_apply_service(
                 )
                 cold_stored += 1
             except HTTPException as exc:
-                warnings.append(f"artifact_history_cold_store_failed:{rel}:{exc.detail}")
+                warnings.append(make_warning(
+                    "artifact_history_cold_store_failed",
+                    str(exc.detail),
+                    path=rel,
+                ))
         results[family] = {"eligible": len(eligible_paths), "cold_stored": len(family_results), "results": family_results}
 
     return {"ok": True, "cold_stored": cold_stored, "families": results, "warnings": warnings}
@@ -1498,7 +1559,7 @@ def artifact_lifecycle_maintenance_service(
     ordered = [f for f in all_families if f in requested]
 
     results: dict[str, Any] = {}
-    all_warnings: list[str] = []
+    all_warnings: list[dict[str, Any]] = []
     all_written: list[str] = []
     all_deleted: list[str] = []
     cold_apply_result: dict[str, Any] | None = None
@@ -1546,7 +1607,7 @@ def artifact_lifecycle_maintenance_service(
                 exc_info=True,
             )
             results[family] = {"ok": False, "family": family, "error": f"maintenance_failed:{family}"}
-            all_warnings.append(f"artifact_maintenance_failed:{family}")
+            all_warnings.append(make_warning("artifact_maintenance_failed", f"Maintenance pass failed for {family}", family=family))
             continue
 
         results[family] = result
@@ -1575,7 +1636,7 @@ def artifact_lifecycle_maintenance_service(
 
     # Git commit all written and deleted paths
     committed_files: list[str] = []
-    git_warnings: list[str] = []
+    git_warnings: list[dict[str, Any]] = []
     commit_paths_list = (
         [safe_path(repo_root, rel) for rel in all_written]
         + [safe_path(repo_root, rel) for rel in all_deleted]
@@ -1588,7 +1649,7 @@ def artifact_lifecycle_maintenance_service(
         ):
             committed_files = list(all_written) + list(all_deleted)
         else:
-            git_warnings.append("artifact_maintenance_not_durable: data written to disk but not committed to git")
+            git_warnings.append(make_warning("artifact_maintenance_not_durable", "Data written to disk but not committed to git"))
 
     all_warnings.extend(git_warnings)
 
@@ -1596,20 +1657,36 @@ def artifact_lifecycle_maintenance_service(
         isinstance(r, dict) and not r.get("ok", True)
         for r in results.values()
     )
-    degraded = bool(git_warnings)
+    durable = not bool(git_warnings)
 
     response: dict[str, Any] = {
         "ok": not any_family_failed,
-        "degraded": degraded,
+        "durable": durable,
+
         "families": results,
         "cold_apply": cold_apply_result,
         "committed_files": committed_files,
         "warnings": all_warnings if all_warnings else [],
     }
+    if not durable:
+        response["at_risk_paths"] = list(all_written)
     if gm is not None:
         response["latest_commit"] = gm.latest_commit()
 
     if audit and auth:
-        audit(auth, "artifact_lifecycle_maintenance", {"families": list(results.keys()), "committed": len(committed_files)})
+        audit(auth, "artifact_lifecycle_maintenance", {
+            "families": list(results.keys()),
+            "committed": len(committed_files),
+            "durable": durable,
+            "warning_count": len(all_warnings),
+        })
+        # Emit per-family audit events collected from family passes
+        for fam_name, fam_result in results.items():
+            if isinstance(fam_result, dict):
+                for evt in fam_result.get("audit_events", []):
+                    try:
+                        audit(auth, evt["event"], evt["detail"])
+                    except Exception:
+                        _logger.warning("Failed to emit audit event for family %s", fam_name, exc_info=True)
 
     return response

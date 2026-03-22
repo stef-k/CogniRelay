@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import gzip
-import io
 import json
 import logging
 import math
 import re
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +18,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
+from app.lifecycle_warnings import make_error_detail, make_warning
+from app.storage import build_cold_gzip_bytes
 from app.git_locking import repository_mutation_lock
 from app.git_manager import GitManager
 from app.git_safety import unstage_paths
@@ -173,7 +175,6 @@ CONTINUITY_COLD_STUB_FRONTMATTER_ORDER = [
     "phase",
     "update_reason",
 ]
-CONTINUITY_COLD_GZIP_LEVEL = 9
 
 
 def continuity_cold_storage_rel_path(source_archive_path: str) -> str:
@@ -266,14 +267,32 @@ def _continuity_subject_lock_id(subject_kind: str, subject_id: str) -> str:
     return f"continuity_{digest}"
 
 
+@contextmanager
 def _continuity_subject_lock(*, repo_root: Path, subject_kind: str, subject_id: str):
-    """Return the shared per-subject mutation lock context for one selector."""
-    from app.coordination.locking import artifact_lock
+    """Acquire the per-subject mutation lock, translating domain exceptions.
 
-    return artifact_lock(
-        _continuity_subject_lock_id(subject_kind, subject_id),
-        lock_dir=repo_root / ".locks",
+    Converts ``ArtifactLockTimeout`` → HTTP 409 and
+    ``ArtifactLockInfrastructureError`` → HTTP 503 via the shared
+    ``make_lock_error`` helper so that continuity lock errors use the
+    same status codes as all other lifecycle modules.
+    """
+    from app.coordination.locking import (
+        ArtifactLockInfrastructureError,
+        ArtifactLockTimeout,
+        artifact_lock,
     )
+    from app.lifecycle_warnings import make_lock_error
+
+    try:
+        with artifact_lock(
+            _continuity_subject_lock_id(subject_kind, subject_id),
+            lock_dir=repo_root / ".locks",
+        ):
+            yield
+    except ArtifactLockTimeout as exc:
+        raise make_lock_error("continuity", None, exc, is_timeout=True) from exc
+    except ArtifactLockInfrastructureError as exc:
+        raise make_lock_error("continuity", None, exc, is_timeout=False) from exc
 
 
 def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name: str) -> None:
@@ -823,20 +842,6 @@ def _normalize_stub_scalar(value: Any) -> str:
 def _truncate_stub_text(value: Any, limit: int) -> str:
     """Apply the cold-stub scalar normalization and code-point truncation."""
     return _normalize_stub_scalar(value)[:limit]
-
-
-def _build_cold_gzip_bytes(source_bytes: bytes) -> bytes:
-    """Build deterministic gzip bytes for one archive envelope."""
-    buf = io.BytesIO()
-    with gzip.GzipFile(
-        fileobj=buf,
-        mode="wb",
-        filename="",
-        mtime=0,
-        compresslevel=CONTINUITY_COLD_GZIP_LEVEL,
-    ) as handle:
-        handle.write(source_bytes)
-    return buf.getvalue()
 
 
 def _render_cold_stub_list(items: Any, *, count: int, limit: int) -> list[str]:
@@ -1495,13 +1500,22 @@ def continuity_upsert_service(
             "fallback_warning_detail": fallback_warning_detail,
         },
     )
+    _warnings: list[dict[str, Any]] = []
+    if fallback_warning:
+        _warnings.append(make_warning(
+            fallback_warning,
+            fallback_warning_detail or "Fallback snapshot write failed",
+            path=rel,
+        ))
     return {
         "ok": True,
         "path": rel,
         "created": created,
         "updated": bool(changed and not created),
+        "durable": True,
         "latest_commit": gm.latest_commit(),
         "capsule_sha256": capsule_sha256,
+        "warnings": _warnings,
         "recovery_warnings": [fallback_warning] if fallback_warning else [],
         "fallback_warning_detail": fallback_warning_detail,
     }
@@ -1852,7 +1866,9 @@ def continuity_delete_service(
                 "ok": True,
                 "deleted_paths": [],
                 "missing_paths": missing_paths,
+                "durable": True,
                 "latest_commit": gm.latest_commit(),
+                "warnings": [],
             }
 
         with repository_mutation_lock(repo_root):
@@ -1894,7 +1910,9 @@ def continuity_delete_service(
         "ok": True,
         "deleted_paths": selected_rels,
         "missing_paths": missing_paths,
+        "durable": True,
         "latest_commit": gm.latest_commit(),
+        "warnings": [],
     }
 
 
@@ -2061,6 +2079,7 @@ def continuity_refresh_plan_service(
             "subject_kind": req.subject_kind,
             "count": len(candidates),
             "path": refresh_rel,
+            "latest_commit": latest_commit,
         },
     )
     return {
@@ -2068,7 +2087,9 @@ def continuity_refresh_plan_service(
         "count": len(candidates),
         "generated_at": payload["last_planned_at"],
         "candidates": candidates,
+        "durable": True,
         "latest_commit": latest_commit,
+        "warnings": [],
     }
 
 
@@ -2191,6 +2212,7 @@ def continuity_retention_plan_service(
             "has_more": len(all_candidates) > len(candidates),
             "path": CONTINUITY_RETENTION_STATE_REL,
             "warnings_count": len(warnings),
+            "latest_commit": latest_commit,
         },
     )
     return {
@@ -2198,6 +2220,7 @@ def continuity_retention_plan_service(
         "count": len(candidates),
         "generated_at": payload["generated_at"],
         "path": CONTINUITY_RETENTION_STATE_REL,
+        "durable": True,
         "latest_commit": latest_commit,
         "warnings": warnings,
         "candidates": candidates,
@@ -2343,12 +2366,13 @@ def continuity_retention_apply_service(
         },
     )
     return {
-        "ok": True,
+        "ok": failed == 0,
         "requested": len(req.source_archive_paths),
         "unique_requested": len(unique_paths),
         "processed": len(results),
         "cold_stored": cold_stored,
         "failed": failed,
+        "durable": True,
         "results": results,
         "warnings": warnings,
     }
@@ -2523,6 +2547,13 @@ def continuity_revalidate_service(
             "fallback_warning_detail": fallback_warning_detail,
         },
     )
+    _rev_warnings: list[dict[str, Any]] = []
+    if fallback_status == "failed":
+        _rev_warnings.append(make_warning(
+            CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
+            fallback_warning_detail or "Fallback snapshot write failed",
+            path=rel,
+        ))
     return {
         "ok": True,
         "path": rel,
@@ -2530,7 +2561,9 @@ def continuity_revalidate_service(
         "updated": updated,
         "verification_state": final_capsule.verification_state.model_dump(mode="json", exclude_none=True),
         "capsule_health": final_capsule.capsule_health.model_dump(mode="json", exclude_none=True),
+        "durable": True,
         "latest_commit": gm.latest_commit(),
+        "warnings": _rev_warnings,
         "recovery_warnings": [CONTINUITY_WARNING_FALLBACK_WRITE_FAILED] if fallback_status == "failed" else [],
         "fallback_warning_detail": fallback_warning_detail,
     }
@@ -2585,19 +2618,43 @@ def continuity_archive_service(
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
-                    raise RuntimeError(
-                        f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}"
+                    raise HTTPException(
+                        status_code=500,
+                        detail=make_error_detail(
+                            operation="continuity_archive",
+                            error_code="continuity_archive_rollback_failed",
+                            error_detail=f"Continuity archive commit failed: {exc}; rollback failed: {restore_exc}",
+                        ),
                     ) from exc
-                raise
+                raise HTTPException(
+                    status_code=500,
+                    detail=make_error_detail(
+                        operation="continuity_archive",
+                        error_code="continuity_archive_commit_failed",
+                        error_detail=f"Continuity archive commit failed: {exc}",
+                    ),
+                ) from exc
             if not committed:
                 unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
-                    raise RuntimeError(
-                        f"Continuity archive commit produced no changes; rollback failed: {restore_exc}"
+                    raise HTTPException(
+                        status_code=500,
+                        detail=make_error_detail(
+                            operation="continuity_archive",
+                            error_code="continuity_archive_rollback_failed",
+                            error_detail=f"Continuity archive commit produced no changes; rollback failed: {restore_exc}",
+                        ),
                     ) from restore_exc
-                raise RuntimeError("Continuity archive commit produced no changes")
+                raise HTTPException(
+                    status_code=500,
+                    detail=make_error_detail(
+                        operation="continuity_archive",
+                        error_code="continuity_archive_commit_no_changes",
+                        error_detail="Continuity archive commit produced no changes",
+                    ),
+                )
 
     audit(
         auth,
@@ -2614,7 +2671,9 @@ def continuity_archive_service(
         "ok": True,
         "archived_path": archive_rel,
         "removed_active_path": rel,
+        "durable": True,
         "latest_commit": gm.latest_commit(),
+        "warnings": [],
     }
 
 
@@ -2676,12 +2735,22 @@ def continuity_cold_store_service(
             envelope = _load_archive_envelope(repo_root, source_archive_path)
             if _archive_rel_path_from_envelope(envelope) != source_archive_path:
                 raise HTTPException(status_code=400, detail="Continuity archive envelope identity does not match source_archive_path")
-            if cold_payload_file.exists() or cold_stub_file.exists():
+            # Crash recovery: if both archive and cold artifacts exist,
+            # a prior cold-store wrote cold but crashed before committing
+            # the archive deletion. Remove orphaned cold artifacts.
+            if (cold_payload_file.exists() or cold_stub_file.exists()) and archive_path.exists():
+                _logger.warning(
+                    "Continuity cold-store crash recovery: removing orphaned cold artifacts for %s",
+                    source_archive_path,
+                )
+                cold_payload_file.unlink(missing_ok=True)
+                cold_stub_file.unlink(missing_ok=True)
+            elif cold_payload_file.exists() or cold_stub_file.exists():
                 raise HTTPException(status_code=409, detail="Continuity cold artifact already exists for source archive")
 
             now = datetime.now(timezone.utc).replace(microsecond=0)
             cold_stored_at = now.isoformat().replace("+00:00", "Z")
-            gzip_bytes = _build_cold_gzip_bytes(source_bytes)
+            gzip_bytes = build_cold_gzip_bytes(source_bytes)
             stub_text = _build_cold_stub_text(
                 envelope=envelope,
                 source_archive_path=source_archive_path,
@@ -2712,10 +2781,15 @@ def continuity_cold_store_service(
                 cold_payload_path=cold_payload_file,
                 cold_stub_path=cold_stub_file,
             )
-            detail = f"Continuity cold-store failed: {exc}"
-            if cleanup_errors:
-                detail += f"; rollback failed for {', '.join(cleanup_errors)}"
-            raise HTTPException(status_code=500, detail=detail) from exc
+            raise HTTPException(
+                status_code=500,
+                detail=make_error_detail(
+                    operation="continuity_cold_store",
+                    error_code="continuity_cold_store_failed",
+                    error_detail=str(exc),
+                    rollback_errors=cleanup_errors,
+                ),
+            ) from exc
 
     audit(
         auth,
@@ -2734,6 +2808,7 @@ def continuity_cold_store_service(
         "cold_stub_path": cold_stub_path,
         "cold_stored_at": cold_stored_at,
         "committed_files": [cold_storage_path, cold_stub_path, source_archive_path],
+        "durable": True,
         "latest_commit": gm.latest_commit(),
         "warnings": [],
     }
@@ -2835,10 +2910,15 @@ def continuity_cold_rehydrate_service(
                 write_bytes_file(cold_stub_file, cold_stub_bytes)
             except Exception as rollback_exc:
                 rollback_errors.append(f"restore cold stub: {rollback_exc}")
-            detail = f"Continuity cold rehydrate failed: {exc}"
-            if rollback_errors:
-                detail += f"; rollback failed for {', '.join(rollback_errors)}"
-            raise HTTPException(status_code=500, detail=detail) from exc
+            raise HTTPException(
+                status_code=500,
+                detail=make_error_detail(
+                    operation="continuity_cold_rehydrate",
+                    error_code="continuity_cold_rehydrate_failed",
+                    error_detail=str(exc),
+                    rollback_errors=rollback_errors,
+                ),
+            ) from exc
 
     audit(
         auth,
@@ -2858,6 +2938,7 @@ def continuity_cold_rehydrate_service(
         "cold_stub_path": cold_stub_path,
         "rehydrated_at": rehydrated_at,
         "committed_files": [source_archive_path, cold_storage_path, cold_stub_path],
+        "durable": True,
         "latest_commit": gm.latest_commit(),
         "warnings": [],
     }

@@ -239,6 +239,49 @@ def _merge_tokens(repo_root: Path) -> Dict[str, PeerToken]:
     return merged
 
 
+def _validate_registry_lifecycle_settings(settings: Settings) -> None:
+    """Validate cross-field invariants for registry lifecycle settings.
+
+    Raises SystemExit if any cold_after_days exceeds its corresponding
+    retention_days or if any value is less than 1.
+    """
+    errors: list[str] = []
+    # cold/retention pair: tombstone cold must not exceed tombstone retention
+    checks: list[tuple[str, int, str, int]] = [
+        ("replication_tombstone_cold_after_days",
+         settings.replication_tombstone_cold_after_days,
+         "replication_tombstone_retention_days",
+         settings.replication_tombstone_retention_days),
+    ]
+    for cold_name, cold_val, ret_name, ret_val in checks:
+        if cold_val < 1:
+            errors.append(f"{cold_name} ({cold_val}) must be >= 1")
+        if ret_val < 1:
+            errors.append(f"{ret_name} ({ret_val}) must be >= 1")
+        if cold_val > ret_val:
+            errors.append(
+                f"{cold_name} ({cold_val}) must not exceed {ret_name} ({ret_val})"
+            )
+    # Standalone cold_after_days settings (no retention pair)
+    standalone_cold: list[tuple[str, int]] = [
+        ("delivery_history_cold_after_days", settings.delivery_history_cold_after_days),
+        ("peer_trust_history_cold_after_days", settings.peer_trust_history_cold_after_days),
+        ("replication_history_cold_after_days", settings.replication_history_cold_after_days),
+    ]
+    for name, val in standalone_cold:
+        if val < 1:
+            errors.append(f"{name} ({val}) must be >= 1")
+    # Batch limit
+    if settings.registry_history_batch_limit < 1:
+        errors.append(
+            f"registry_history_batch_limit ({settings.registry_history_batch_limit}) must be >= 1"
+        )
+    if errors:
+        raise SystemExit(
+            "Invalid registry-lifecycle settings:\n  " + "\n  ".join(errors)
+        )
+
+
 def _validate_segment_history_settings(settings: Settings) -> None:
     """Validate cross-field invariants for segment-history lifecycle settings.
 
@@ -486,5 +529,6 @@ def get_settings(force_reload: bool = False) -> Settings:
             _env_first("COGNIRELAY_SEGMENT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
         ),
     )
+    _validate_registry_lifecycle_settings(_cached)
     _validate_segment_history_settings(_cached)
     return _cached

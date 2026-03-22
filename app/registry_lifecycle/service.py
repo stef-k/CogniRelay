@@ -8,6 +8,7 @@ top of this module.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
@@ -15,12 +16,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from fastapi import HTTPException
+
 from app.git_safety import try_commit_paths
+from app.lifecycle_warnings import make_error_detail, make_lock_error, make_warning
 from app.segment_history.locking import (
     LockInfrastructureError,
+    SegmentHistoryLockTimeout,
     segment_history_source_lock,
 )
-from app.storage import safe_path, write_bytes_file, write_text_file
+from app.storage import build_cold_gzip_bytes, safe_path, write_bytes_file, write_text_file
 
 _logger = logging.getLogger(__name__)
 
@@ -48,6 +53,28 @@ REPLICATION_TOMBSTONE_STUB_DIR_REL = "peers/history/replication_tombstones/index
 
 # Terminal delivery states per spec
 _TERMINAL_DELIVERY_STATES = frozenset({"acked", "delivered", "dead_letter"})
+
+# Per-family schema types for shards
+_REGISTRY_SHARD_SCHEMA_TYPES_BY_FAMILY: dict[str, str] = {
+    "delivery": "delivery_history_shard",
+    "peer_trust": "peer_trust_history_shard",
+    "replication_state": "replication_state_history_shard",
+    "replication_tombstones": "replication_tombstone_shard",
+}
+
+# Per-family directory mappings for cold-store operations
+_REGISTRY_HISTORY_DIRS_BY_FAMILY: dict[str, str] = {
+    "delivery": DELIVERY_HISTORY_DIR_REL,
+    "peer_trust": PEER_TRUST_HISTORY_DIR_REL,
+    "replication_state": REPLICATION_STATE_HISTORY_DIR_REL,
+    "replication_tombstones": REPLICATION_TOMBSTONE_HISTORY_DIR_REL,
+}
+_REGISTRY_STUB_DIRS_BY_FAMILY: dict[str, str] = {
+    "delivery": DELIVERY_STUB_DIR_REL,
+    "peer_trust": PEER_TRUST_STUB_DIR_REL,
+    "replication_state": REPLICATION_STATE_STUB_DIR_REL,
+    "replication_tombstones": REPLICATION_TOMBSTONE_STUB_DIR_REL,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +382,7 @@ def delivery_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:delivery_index", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "delivery", "warning": "registry_head_lock_unavailable:delivery_index"}
+        return {"ok": False, "family": "delivery", "warnings": [make_warning("registry_head_lock_unavailable", "Lock infrastructure unavailable for delivery_index", path="delivery_index")]}
     with lock_ctx:
         return _delivery_maintenance_pass_locked(
             repo_root=repo_root, now=now,
@@ -447,6 +474,7 @@ def _delivery_maintenance_pass_locked(
             "idempotency_externalized": 0,
             "idempotency_pruned": 0,
             "shard_id": None,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -569,6 +597,13 @@ def _delivery_maintenance_pass_locked(
         "stub_path": stub_rel,
         "written_paths": written_rels,
         "warnings": warnings,
+        "audit_events": [{"event": "registry_delivery_maintenance", "detail": {
+            "family": "delivery",
+            "records_externalized": len(cut_records),
+            "idempotency_externalized": len(cut_idempotency),
+            "idempotency_pruned": len(idem_to_prune),
+            "shard_id": shard_id,
+        }}],
     }
 
 
@@ -588,7 +623,7 @@ def nonce_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:nonce_index", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "nonce", "warning": "registry_head_lock_unavailable:nonce_index"}
+        return {"ok": False, "family": "nonce", "warnings": [make_warning("registry_head_lock_unavailable", "Lock infrastructure unavailable for nonce_index", path="nonce_index")]}
     with lock_ctx:
         return _nonce_maintenance_pass_locked(
             repo_root=repo_root, now=now,
@@ -650,6 +685,7 @@ def _nonce_maintenance_pass_locked(
             "ok": True,
             "family": "nonce",
             "pruned": 0,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -684,6 +720,9 @@ def _nonce_maintenance_pass_locked(
         "pruned": len(prune_keys),
         "written_paths": [NONCE_INDEX_REL],
         "warnings": warnings,
+        "audit_events": [{"event": "registry_nonce_maintenance", "detail": {
+            "family": "nonce", "pruned": len(prune_keys),
+        }}],
     }
 
 
@@ -704,7 +743,7 @@ def peer_trust_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:peers_registry", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "peer_trust", "warning": "registry_head_lock_unavailable:peers_registry"}
+        return {"ok": False, "family": "peer_trust", "warnings": [make_warning("registry_head_lock_unavailable", "Lock infrastructure unavailable for peers_registry", path="peers_registry")]}
     with lock_ctx:
         return _peer_trust_maintenance_pass_locked(
             repo_root=repo_root, now=now,
@@ -832,6 +871,7 @@ def _peer_trust_maintenance_pass_locked(
             "family": "peer_trust",
             "transitions_externalized": 0,
             "shards_created": 0,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -904,6 +944,11 @@ def _peer_trust_maintenance_pass_locked(
         "shards": [{"peer_id": sr["peer_id"], "shard_id": sr["shard_id"], "transition_count": sr["transition_count"]} for sr in shard_results],
         "written_paths": written_rels,
         "warnings": warnings,
+        "audit_events": [{"event": "registry_peer_trust_maintenance", "detail": {
+            "family": "peer_trust",
+            "transitions_externalized": total_externalized,
+            "shards_created": len(shard_results),
+        }}],
     }
 
 
@@ -970,9 +1015,11 @@ def externalize_superseded_push(
     )
 
     return {
+        "ok": True,
         "shard_id": shard_id,
         "shard_path": shard_rel,
         "stub_path": stub_rel,
+        "warnings": [],
     }
 
 
@@ -1032,9 +1079,11 @@ def externalize_superseded_pull(
     )
 
     return {
+        "ok": True,
         "shard_id": shard_id,
         "shard_path": shard_rel,
         "stub_path": stub_rel,
+        "warnings": [],
     }
 
 
@@ -1050,7 +1099,14 @@ def replication_state_prune_idempotency(
     try:
         lock_ctx = segment_history_source_lock("registry:replication_state", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "replication_state", "warning": "registry_head_lock_unavailable:replication_state"}
+        return {
+            "ok": False, "family": "replication_state",
+            "warnings": [make_warning(
+                "registry_head_lock_unavailable",
+                "Lock infrastructure unavailable for replication_state",
+                path="replication_state",
+            )],
+        }
     with lock_ctx:
         return _replication_state_prune_idempotency_locked(
             repo_root=repo_root, now=now,
@@ -1099,7 +1155,7 @@ def _replication_state_prune_idempotency_locked(
             prune_keys.append(key)
 
     if not prune_keys:
-        return {"ok": True, "family": "replication_state", "pruned": 0, "warnings": warnings}
+        return {"ok": True, "family": "replication_state", "pruned": 0, "written_paths": [], "warnings": warnings}
 
     for key in prune_keys:
         pull_idem.pop(key, None)
@@ -1132,6 +1188,9 @@ def _replication_state_prune_idempotency_locked(
         "pruned": len(prune_keys),
         "written_paths": [REPLICATION_STATE_REL],
         "warnings": warnings,
+        "audit_events": [{"event": "registry_replication_state_maintenance", "detail": {
+            "family": "replication_state", "pruned": len(prune_keys),
+        }}],
     }
 
 
@@ -1151,7 +1210,14 @@ def tombstone_maintenance_pass(
     try:
         lock_ctx = segment_history_source_lock("registry:replication_tombstones", lock_dir=lock_dir)
     except LockInfrastructureError:
-        return {"ok": False, "family": "replication_tombstones", "warning": "registry_head_lock_unavailable:replication_tombstones"}
+        return {
+            "ok": False, "family": "replication_tombstones",
+            "warnings": [make_warning(
+                "registry_head_lock_unavailable",
+                "Lock infrastructure unavailable for replication_tombstones",
+                path="replication_tombstones",
+            )],
+        }
     with lock_ctx:
         return _tombstone_maintenance_pass_locked(
             repo_root=repo_root, now=now, grace_days=grace_days, batch_limit=batch_limit,
@@ -1200,6 +1266,7 @@ def _tombstone_maintenance_pass_locked(
             "family": "replication_tombstones",
             "entries_externalized": 0,
             "shard_id": None,
+            "written_paths": [],
             "warnings": warnings,
         }
 
@@ -1296,6 +1363,11 @@ def _tombstone_maintenance_pass_locked(
         "stub_path": stub_rel,
         "written_paths": [shard_rel, stub_rel, REPLICATION_TOMBSTONES_REL],
         "warnings": warnings,
+        "audit_events": [{"event": "registry_tombstone_maintenance", "detail": {
+            "family": "replication_tombstones",
+            "entries_externalized": len(cut_entries),
+            "shard_id": shard_id,
+        }}],
     }
 
 
@@ -1402,7 +1474,7 @@ def registry_maintenance_service(
 
     # Git commit all written paths
     committed_files: list[str] = []
-    git_warnings: list[str] = []
+    durable = True
     if all_written and gm is not None:
         commit_paths = [safe_path(repo_root, rel) for rel in all_written]
         if try_commit_paths(
@@ -1412,20 +1484,661 @@ def registry_maintenance_service(
         ):
             committed_files = list(all_written)
         else:
-            git_warnings.append("registry_maintenance_not_durable: data written to disk but not committed to git")
+            durable = False
+            all_warnings.append(
+                make_warning(
+                    "registry_maintenance_not_durable",
+                    "Data written to disk but not committed to git",
+                )
+            )
 
-    all_warnings.extend(git_warnings)
+    any_family_failed = any(not r.get("ok", True) for r in results.values())
 
     response: dict[str, Any] = {
-        "ok": True,
+        "ok": not any_family_failed,
+        "durable": durable,
         "families": results,
         "committed_files": committed_files,
         "warnings": all_warnings if all_warnings else [],
     }
+    if not durable:
+        response["at_risk_paths"] = list(all_written)
     if gm is not None:
         response["latest_commit"] = gm.latest_commit()
 
     if audit and auth:
-        audit(auth, "registry_maintenance", {"families": list(results.keys()), "committed": len(committed_files)})
+        audit(auth, "registry_maintenance", {
+            "families": list(results.keys()),
+            "committed": len(committed_files),
+            "durable": durable,
+            "warning_count": len(all_warnings),
+        })
+        # Emit per-family audit events collected from family passes
+        for fam_name, fam_result in results.items():
+            for evt in fam_result.get("audit_events", []):
+                try:
+                    audit(auth, evt["event"], evt["detail"])
+                except Exception:
+                    _logger.warning("Failed to emit audit event for family %s", fam_name, exc_info=True)
+
+    # Cold-store eligible history shards and prune expired cold tombstones
+    cold_apply_result: dict[str, Any] | None = None
+    retention_prune_result: dict[str, Any] | None = None
+    if auth is not None and gm is not None:
+        try:
+            cold_apply_result = registry_history_cold_apply_service(
+                repo_root=repo_root,
+                gm=gm,
+                auth=auth,
+                now=now,
+                settings=settings,
+                families=families,
+                audit=audit or (lambda *_args, **_kwargs: None),
+            )
+            all_warnings.extend(cold_apply_result.get("warnings", []))
+        except Exception:
+            _logger.error("Registry cold-apply failed; continuing", exc_info=True)
+            all_warnings.append("registry_cold_apply_failed")
+
+        try:
+            retention_prune_result = registry_history_retention_prune_service(
+                repo_root=repo_root,
+                gm=gm,
+                now=now,
+                retention_days=int(settings.replication_tombstone_retention_days),
+                batch_limit=batch_limit,
+            )
+            all_warnings.extend(retention_prune_result.get("warnings", []))
+        except Exception:
+            _logger.error("Registry retention-prune failed; continuing", exc_info=True)
+            all_warnings.append("registry_retention_prune_failed")
+
+    response["cold_apply"] = cold_apply_result
+    response["retention_prune"] = retention_prune_result
 
     return response
+
+
+# ===================================================================
+# Registry-history cold-store / rehydrate
+# ===================================================================
+
+
+def registry_history_cold_dir_rel(history_dir_rel: str) -> str:
+    """Return the cold payload directory for one history namespace."""
+    return f"{history_dir_rel}/cold"
+
+
+def registry_history_cold_storage_rel_path(payload_rel: str) -> str:
+    """Map a hot registry-history shard path to its cold gzip payload path."""
+    rel = str(payload_rel or "").strip().strip("/")
+    for history_dir_rel in _REGISTRY_HISTORY_DIRS_BY_FAMILY.values():
+        prefix = f"{history_dir_rel}/"
+        if rel.startswith(prefix) and rel.endswith(".json") and "/index/" not in rel and "/cold/" not in rel:
+            return f"{registry_history_cold_dir_rel(history_dir_rel)}/{Path(rel).name}.gz"
+    raise HTTPException(status_code=400, detail="Invalid registry-history payload path")
+
+
+def registry_history_payload_rel_from_cold(cold_rel: str) -> str:
+    """Derive the hot payload path from a registry-history cold payload path."""
+    rel = str(cold_rel or "").strip().strip("/")
+    for history_dir_rel in _REGISTRY_HISTORY_DIRS_BY_FAMILY.values():
+        cold_prefix = f"{registry_history_cold_dir_rel(history_dir_rel)}/"
+        if rel.startswith(cold_prefix) and rel.endswith(".json.gz"):
+            stem = Path(rel).name[:-3]  # remove .gz → leaves shard_id.json
+            return f"{history_dir_rel}/{stem}"
+    raise HTTPException(status_code=400, detail="Invalid registry-history cold payload path")
+
+
+def _validate_registry_history_payload_rel_path(payload_rel: str) -> tuple[str, str]:
+    """Validate one hot registry-history payload path and return family + history dir."""
+    rel = str(payload_rel or "").strip().strip("/")
+    for family, history_dir_rel in _REGISTRY_HISTORY_DIRS_BY_FAMILY.items():
+        prefix = f"{history_dir_rel}/"
+        if rel.startswith(prefix) and rel.endswith(".json") and "/index/" not in rel and "/cold/" not in rel:
+            return family, history_dir_rel
+    raise HTTPException(status_code=400, detail="Invalid registry-history payload path")
+
+
+def _registry_family_cold_timestamp(summary: dict[str, Any], *, family: str) -> datetime | None:
+    """Return the cold-eligibility timestamp from a shard's summary."""
+    field = {
+        "delivery": "newest_retention_timestamp",
+        "peer_trust": "newest_transition_at",
+        "replication_state": "newest_event_at",
+        "replication_tombstones": "newest_tombstone_at",
+    }.get(family)
+    if field is None:
+        return None
+    return _parse_iso(str(summary.get(field) or ""))
+
+
+def _load_registry_history_shard(repo_root: Path, payload_rel: str) -> dict[str, Any]:
+    """Load and validate one hot registry-history shard payload."""
+    family, _history_dir_rel = _validate_registry_history_payload_rel_path(payload_rel)
+    path = safe_path(repo_root, payload_rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Registry-history shard not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid registry-history shard: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid registry-history shard")
+    expected_schema = _REGISTRY_SHARD_SCHEMA_TYPES_BY_FAMILY.get(family)
+    if expected_schema and payload.get("schema_type") != expected_schema:
+        raise HTTPException(status_code=400, detail="Registry-history shard schema_type mismatch")
+    if payload.get("schema_version") != "1.0":
+        raise HTTPException(status_code=400, detail="Registry-history shard schema_version mismatch")
+    if not isinstance(payload.get("summary"), dict):
+        raise HTTPException(status_code=400, detail="Registry-history shard summary must be an object")
+    return payload
+
+
+def _load_registry_history_stub(repo_root: Path, stub_rel: str) -> dict[str, Any]:
+    """Load and validate one registry-history stub."""
+    rel = str(stub_rel or "").strip().strip("/")
+    path = safe_path(repo_root, rel)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Registry-history stub not found")
+    try:
+        stub = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid registry-history stub: {exc}") from exc
+    if not isinstance(stub, dict):
+        raise HTTPException(status_code=400, detail="Invalid registry-history stub")
+    if stub.get("schema_type") != "registry_history_stub" or stub.get("schema_version") != "1.0":
+        raise HTTPException(status_code=400, detail="Invalid registry-history stub schema")
+    family = str(stub.get("family") or "")
+    if family not in _REGISTRY_STUB_DIRS_BY_FAMILY:
+        raise HTTPException(status_code=400, detail="Invalid registry-history stub family")
+    if stub.get("shard_id") != path.stem:
+        raise HTTPException(status_code=400, detail="Registry-history stub shard_id does not match path")
+    if not isinstance(stub.get("summary"), dict):
+        raise HTTPException(status_code=400, detail="Registry-history stub summary must be an object")
+    payload_path = str(stub.get("payload_path") or "")
+    if not payload_path:
+        raise HTTPException(status_code=400, detail="Registry-history stub payload_path is required")
+    return stub
+
+
+def _restore_failed_registry_cold_store(
+    *,
+    source_payload_path: Path,
+    source_payload_bytes: bytes,
+    cold_payload_path: Path,
+    stub_path: Path,
+    original_stub: dict[str, Any],
+) -> list[str]:
+    """Restore the original hot payload and stub after failed cold-store commit."""
+    errors: list[str] = []
+    try:
+        write_bytes_file(source_payload_path, source_payload_bytes)
+    except Exception as exc:
+        errors.append(f"restore payload: {exc}")
+    try:
+        cold_payload_path.unlink(missing_ok=True)
+    except Exception as exc:
+        errors.append(f"remove cold: {exc}")
+    try:
+        _write_json(stub_path, original_stub)
+    except Exception as exc:
+        errors.append(f"restore stub: {exc}")
+    return errors
+
+
+def registry_history_cold_store_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: Any,
+    req: Any,
+    audit: Callable[[Any, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Cold-store one registry-history shard into a gzip payload plus hot JSON stub."""
+    if hasattr(auth, "require"):
+        auth.require("admin:peers")
+    source_payload_path = str(req.source_payload_path)
+    if hasattr(auth, "require_read_path"):
+        auth.require_read_path(source_payload_path)
+        auth.require_write_path(source_payload_path)
+    family, history_dir_rel = _validate_registry_history_payload_rel_path(source_payload_path)
+    cold_storage_path = registry_history_cold_storage_rel_path(source_payload_path)
+    cold_payload_path = safe_path(repo_root, cold_storage_path)
+    hot_payload_path = safe_path(repo_root, source_payload_path)
+    stub_dir_rel = _REGISTRY_STUB_DIRS_BY_FAMILY[family]
+    stub_rel = f"{stub_dir_rel}/{hot_payload_path.name}"
+    if hasattr(auth, "require_read_path"):
+        auth.require_read_path(stub_rel)
+        auth.require_write_path(stub_rel)
+        auth.require_write_path(cold_storage_path)
+
+    lock_key = f"registry_history_cold:{source_payload_path}"
+    lock_dir = repo_root / ".locks"
+    try:
+        lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
+    except LockInfrastructureError as exc:
+        raise HTTPException(status_code=503, detail="Registry-history cold-store lock unavailable; retry") from exc
+    try:
+        with lock_ctx:
+            # Crash recovery: if both hot and cold exist, a previous attempt crashed
+            # after writing cold but before deleting hot. Remove the orphan cold file.
+            if cold_payload_path.exists() and hot_payload_path.exists():
+                _logger.warning(
+                    "Registry cold-store crash recovery: removing orphaned cold file %s",
+                    cold_storage_path,
+                )
+                cold_payload_path.unlink(missing_ok=True)
+
+            payload = _load_registry_history_shard(repo_root, source_payload_path)
+            stub = _load_registry_history_stub(repo_root, stub_rel)
+            if stub.get("payload_path") != source_payload_path:
+                raise HTTPException(status_code=409, detail="Registry-history stub does not point at the hot payload")
+            source_bytes = hot_payload_path.read_bytes()
+            if cold_payload_path.exists():
+                raise HTTPException(status_code=409, detail="Registry-history cold payload already exists")
+
+            try:
+                gzip_bytes = build_cold_gzip_bytes(source_bytes)
+                cold_payload_path.parent.mkdir(parents=True, exist_ok=True)
+                write_bytes_file(cold_payload_path, gzip_bytes)
+                updated_stub = dict(stub)
+                updated_stub["payload_path"] = cold_storage_path
+                _write_json(safe_path(repo_root, stub_rel), updated_stub)
+                hot_payload_path.unlink()
+                committed = bool(gm and try_commit_paths(
+                    paths=[cold_payload_path, safe_path(repo_root, stub_rel), hot_payload_path],
+                    gm=gm,
+                    commit_message=f"registry-history: cold-store {family} {payload.get('shard_id', '')}",
+                ))
+                if gm is not None and not committed:
+                    raise RuntimeError("Registry-history cold-store commit produced no changes")
+            except Exception as exc:
+                cleanup_errors = _restore_failed_registry_cold_store(
+                    source_payload_path=hot_payload_path,
+                    source_payload_bytes=source_bytes,
+                    cold_payload_path=cold_payload_path,
+                    stub_path=safe_path(repo_root, stub_rel),
+                    original_stub=stub,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_store",
+                        family=family,
+                        error_code="registry_history_cold_store_failed",
+                        error_detail=str(exc),
+                        rollback_errors=cleanup_errors,
+                    ),
+                ) from exc
+    except SegmentHistoryLockTimeout as exc:
+        raise make_lock_error("registry_history_cold_store", family, exc, is_timeout=True) from exc
+
+    audit(
+        auth,
+        "registry_history_cold_store",
+        {
+            "family": family,
+            "source_payload_path": source_payload_path,
+            "cold_storage_path": cold_storage_path,
+        },
+    )
+    return {
+        "ok": True,
+        "family": family,
+        "shard_state": "cold",
+        "source_payload_path": source_payload_path,
+        "cold_storage_path": cold_storage_path,
+        "cold_stub_path": stub_rel,
+        "committed_files": [cold_storage_path, stub_rel, source_payload_path],
+        "durable": True,
+        "latest_commit": gm.latest_commit() if gm is not None else None,
+        "warnings": [],
+        "recovery_warnings": [],
+    }
+
+
+def registry_history_cold_rehydrate_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: Any,
+    req: Any,
+    audit: Callable[[Any, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Rehydrate one registry-history cold payload back into its hot history path."""
+    if hasattr(auth, "require"):
+        auth.require("admin:peers")
+    if getattr(req, "cold_stub_path", None):
+        cold_stub_path = str(req.cold_stub_path)
+        stub = _load_registry_history_stub(repo_root, cold_stub_path)
+        source_payload_path = registry_history_payload_rel_from_cold(str(stub.get("payload_path") or ""))
+        family, _history_dir_rel = _validate_registry_history_payload_rel_path(source_payload_path)
+    else:
+        source_payload_path = str(req.source_payload_path)
+        family, _history_dir_rel = _validate_registry_history_payload_rel_path(source_payload_path)
+        stub_dir_rel = _REGISTRY_STUB_DIRS_BY_FAMILY[family]
+        cold_stub_path = f"{stub_dir_rel}/{Path(source_payload_path).name}"
+        stub = _load_registry_history_stub(repo_root, cold_stub_path)
+    cold_storage_path = str(stub.get("payload_path") or "")
+    if hasattr(auth, "require_read_path"):
+        auth.require_read_path(cold_stub_path)
+        auth.require_read_path(cold_storage_path)
+        auth.require_write_path(cold_stub_path)
+        auth.require_write_path(cold_storage_path)
+        auth.require_write_path(source_payload_path)
+
+    stub_path = safe_path(repo_root, cold_stub_path)
+    hot_payload_path = safe_path(repo_root, source_payload_path)
+    cold_payload_path = safe_path(repo_root, cold_storage_path)
+
+    lock_key = f"registry_history_cold:{source_payload_path}"
+    lock_dir = repo_root / ".locks"
+    try:
+        lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
+    except LockInfrastructureError as exc:
+        raise HTTPException(status_code=503, detail="Registry-history cold-rehydrate lock unavailable; retry") from exc
+    try:
+        with lock_ctx:
+            if hot_payload_path.exists():
+                raise HTTPException(status_code=409, detail="Registry-history hot payload already exists")
+            if not cold_payload_path.exists() or not cold_payload_path.is_file():
+                raise HTTPException(status_code=404, detail="Registry-history cold payload not found")
+            try:
+                cold_payload_bytes = cold_payload_path.read_bytes()
+                cold_stub_bytes = stub_path.read_bytes()
+                payload_bytes = gzip.decompress(cold_payload_bytes)
+                payload = json.loads(payload_bytes.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not an object")
+                if payload.get("shard_id") != Path(source_payload_path).stem:
+                    raise ValueError("shard_id mismatch")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid registry-history cold payload: {exc}") from exc
+
+            # Validate decompressed payload schema
+            _expected_type = _REGISTRY_SHARD_SCHEMA_TYPES_BY_FAMILY.get(family)
+            if payload.get("schema_type") != _expected_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_rehydrate",
+                        family=family,
+                        error_code="registry_history_cold_rehydrate_schema_mismatch",
+                        error_detail=f"Expected schema_type '{_expected_type}', got '{payload.get('schema_type')}'",
+                    ),
+                )
+            if payload.get("schema_version") != "1.0":
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_rehydrate",
+                        family=family,
+                        error_code="registry_history_cold_rehydrate_schema_version_mismatch",
+                        error_detail=f"Expected schema_version '1.0', got '{payload.get('schema_version')}'",
+                    ),
+                )
+            if not isinstance(payload.get("summary"), dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_rehydrate",
+                        family=family,
+                        error_code="registry_history_cold_rehydrate_invalid_summary",
+                        error_detail="Decompressed payload 'summary' must be a dict",
+                    ),
+                )
+
+            updated_stub = dict(stub)
+            updated_stub["payload_path"] = source_payload_path
+            try:
+                write_bytes_file(hot_payload_path, payload_bytes)
+                _write_json(stub_path, updated_stub)
+                cold_payload_path.unlink()
+                committed = bool(gm and try_commit_paths(
+                    paths=[hot_payload_path, stub_path, cold_payload_path],
+                    gm=gm,
+                    commit_message=f"registry-history: cold-rehydrate {payload.get('schema_type', '')} {payload.get('shard_id', '')}",
+                ))
+                if gm is not None and not committed:
+                    raise RuntimeError("Registry-history cold rehydrate commit produced no changes")
+            except Exception as exc:
+                rollback_errors: list[str] = []
+                try:
+                    hot_payload_path.unlink(missing_ok=True)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"remove restored payload: {rollback_exc}")
+                try:
+                    write_bytes_file(cold_payload_path, cold_payload_bytes)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"restore cold payload: {rollback_exc}")
+                try:
+                    write_bytes_file(stub_path, cold_stub_bytes)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"restore cold stub: {rollback_exc}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=make_error_detail(
+                        operation="registry_history_cold_rehydrate",
+                        error_code="registry_history_cold_rehydrate_failed",
+                        error_detail=str(exc),
+                        rollback_errors=rollback_errors,
+                    ),
+                ) from exc
+    except SegmentHistoryLockTimeout as exc:
+        raise make_lock_error("registry_history_cold_rehydrate", None, exc, is_timeout=True) from exc
+
+    audit(
+        auth,
+        "registry_history_cold_rehydrate",
+        {
+            "source_payload_path": source_payload_path,
+            "cold_storage_path": cold_storage_path,
+            "cold_stub_path": cold_stub_path,
+        },
+    )
+    return {
+        "ok": True,
+        "family": payload.get("schema_type", "").replace("_shard", "").replace("_history", ""),
+        "shard_state": "hot",
+        "source_payload_path": source_payload_path,
+        "restored_payload_path": source_payload_path,
+        "cold_storage_path": cold_storage_path,
+        "cold_stub_path": cold_stub_path,
+        "committed_files": [source_payload_path, cold_storage_path, cold_stub_path],
+        "durable": True,
+        "latest_commit": gm.latest_commit() if gm is not None else None,
+        "warnings": [],
+        "recovery_warnings": [],
+    }
+
+
+def registry_history_cold_apply_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    auth: Any,
+    now: datetime,
+    settings: Any,
+    families: list[str] | None,
+    audit: Callable[[Any, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Apply registry-history cold-store eligibility using the configured thresholds."""
+    all_cold_families = ["delivery", "peer_trust", "replication_state", "replication_tombstones"]
+    requested = [f for f in all_cold_families if (families is None or f in families)]
+    cold_after_days_by_family = {
+        "delivery": int(settings.delivery_history_cold_after_days),
+        "peer_trust": int(settings.peer_trust_history_cold_after_days),
+        "replication_state": int(settings.replication_history_cold_after_days),
+        "replication_tombstones": int(settings.replication_tombstone_cold_after_days),
+    }
+    results: dict[str, Any] = {}
+    warnings: list[str] = []
+    cold_stored = 0
+
+    for family in requested:
+        history_dir_rel = _REGISTRY_HISTORY_DIRS_BY_FAMILY[family]
+        history_dir = safe_path(repo_root, history_dir_rel)
+        eligible_paths: list[str] = []
+        if history_dir.exists() and history_dir.is_dir():
+            cutoff = now - timedelta(days=cold_after_days_by_family[family])
+            for path in sorted(history_dir.glob("*.json")):
+                if not path.is_file():
+                    continue
+                rel = str(path.relative_to(repo_root))
+                try:
+                    payload = _load_registry_history_shard(repo_root, rel)
+                except HTTPException:
+                    warnings.append(make_warning(
+                        "registry_history_payload_unreadable",
+                        f"Cannot read shard: {rel}",
+                        path=rel,
+                    ))
+                    continue
+                cold_ts = _registry_family_cold_timestamp(payload.get("summary", {}), family=family)
+                if cold_ts is None:
+                    warnings.append(f"registry_history_cold_timestamp_missing:{rel}")
+                    continue
+                stub_dir_rel = _REGISTRY_STUB_DIRS_BY_FAMILY[family]
+                stub_rel = f"{stub_dir_rel}/{path.name}"
+                try:
+                    stub = _load_registry_history_stub(repo_root, stub_rel)
+                except HTTPException:
+                    warnings.append(f"registry_history_invalid_stub:{stub_rel}")
+                    continue
+                if stub.get("payload_path") != rel:
+                    continue  # Already cold or inconsistent
+                if cold_ts <= cutoff:
+                    eligible_paths.append(rel)
+        family_results: list[dict[str, Any]] = []
+        for rel in eligible_paths:
+            try:
+                family_results.append(
+                    registry_history_cold_store_service(
+                        repo_root=repo_root,
+                        gm=gm,
+                        auth=auth,
+                        req=type("Req", (), {"source_payload_path": rel})(),
+                        audit=audit,
+                    )
+                )
+                cold_stored += 1
+            except HTTPException as exc:
+                warnings.append(make_warning(
+                    "registry_history_cold_store_failed",
+                    str(exc.detail),
+                    path=rel,
+                ))
+        results[family] = {"eligible": len(eligible_paths), "cold_stored": len(family_results), "results": family_results}
+
+    return {"ok": True, "cold_stored": cold_stored, "families": results, "warnings": warnings}
+
+
+def registry_history_retention_prune_service(
+    *,
+    repo_root: Path,
+    gm: Any,
+    now: datetime,
+    retention_days: int,
+    batch_limit: int,
+) -> dict[str, Any]:
+    """Prune cold tombstone shards past the configured retention window.
+
+    Only applies to the replication_tombstones family (the only registry family
+    with a retention_days setting).
+    """
+    cold_dir_rel = registry_history_cold_dir_rel(REPLICATION_TOMBSTONE_HISTORY_DIR_REL)
+    cold_dir = safe_path(repo_root, cold_dir_rel)
+    stub_dir_rel = REPLICATION_TOMBSTONE_STUB_DIR_REL
+    warnings: list[str] = []
+    pruned = 0
+    pruned_paths: list[str] = []
+    cutoff = now - timedelta(days=retention_days)
+
+    if not cold_dir.exists() or not cold_dir.is_dir():
+        return {"ok": True, "pruned": 0, "warnings": warnings}
+
+    for cold_path in sorted(cold_dir.glob("*.json.gz")):
+        if pruned >= batch_limit:
+            break
+        if not cold_path.is_file():
+            continue
+        cold_rel = str(cold_path.relative_to(repo_root))
+
+        # Read and decompress to extract summary timestamp
+        try:
+            payload_bytes = gzip.decompress(cold_path.read_bytes())
+            payload = json.loads(payload_bytes.decode("utf-8"))
+        except Exception:
+            warnings.append(f"registry_retention_prune_unreadable:{cold_rel}")
+            continue
+
+        if not isinstance(payload, dict):
+            warnings.append(f"registry_retention_prune_invalid:{cold_rel}")
+            continue
+
+        summary = payload.get("summary", {})
+        cold_ts = _parse_iso(str(summary.get("newest_tombstone_at") or ""))
+        if cold_ts is None:
+            warnings.append(f"registry_retention_prune_no_timestamp:{cold_rel}")
+            continue
+        if cold_ts > cutoff:
+            continue  # Not past retention
+
+        # Derive stub path from the cold shard filename
+        shard_filename = cold_path.name[:-3]  # remove .gz → shard_id.json
+        stub_rel = f"{stub_dir_rel}/{shard_filename}"
+
+        # Acquire lock to prevent racing with a concurrent rehydrate
+        lock_key = f"registry_history_cold:{REPLICATION_TOMBSTONE_HISTORY_DIR_REL}/{shard_filename}"
+        lock_dir = repo_root / ".locks"
+        try:
+            lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
+        except LockInfrastructureError:
+            warnings.append(f"registry_retention_prune_lock_unavailable:{cold_rel}")
+            continue
+
+        try:
+            with lock_ctx:
+                # TOCTOU guard: verify stub still points to this cold file
+                stub_path = safe_path(repo_root, stub_rel)
+                if stub_path.exists():
+                    try:
+                        stub = json.loads(stub_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        warnings.append(f"registry_retention_prune_stub_unreadable:{stub_rel}")
+                        continue
+                    if stub.get("payload_path") != cold_rel:
+                        # Stub points elsewhere (e.g., rehydrated) — skip
+                        continue
+                    stub_path.unlink()
+                    pruned_paths.append(stub_rel)
+
+                cold_path.unlink()
+                pruned_paths.append(cold_rel)
+                pruned += 1
+        except SegmentHistoryLockTimeout:
+            warnings.append(f"registry_retention_prune_lock_timeout:{cold_rel}")
+            continue
+
+    # Git commit all deletions
+    durable = True
+    if pruned_paths and gm is not None:
+        commit_paths = [safe_path(repo_root, rel) for rel in pruned_paths]
+        if not try_commit_paths(
+            paths=commit_paths,
+            gm=gm,
+            commit_message=f"registry-history: retention-prune {pruned} tombstone shards",
+        ):
+            durable = False
+            warnings.append("registry_retention_prune_not_durable")
+
+    return {
+        "ok": True,
+        "pruned": pruned,
+        "durable": durable,
+        "pruned_paths": pruned_paths,
+        "warnings": warnings,
+    }

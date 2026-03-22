@@ -21,7 +21,8 @@ from app.coordination.common import (
     utc_now,
     validate_prefixed_hex_id,
 )
-from app.coordination.locking import artifact_lock
+from app.coordination.locking import ArtifactLockInfrastructureError, ArtifactLockTimeout, artifact_lock
+from app.lifecycle_warnings import make_lock_error
 from app.models import (
     CoordinationSharedArtifact,
     CoordinationSharedCreateRequest,
@@ -422,120 +423,129 @@ def shared_update_service(
     auth.require("write:projects")
     auth.require_write_path(SHARED_SAMPLE_REL)
     lock_dir = repo_root / ".locks"
-    with artifact_lock(shared_id, lock_dir=lock_dir):
-        _, artifact = _load_shared_artifact(repo_root, shared_id)
-        if getattr(auth, "peer_id", "") != artifact.get("owner_peer"):
-            raise HTTPException(status_code=403, detail="Only the owner may update this shared coordination artifact")
+    try:
+        with artifact_lock(shared_id, lock_dir=lock_dir):
+            _, artifact = _load_shared_artifact(repo_root, shared_id)
+            if getattr(auth, "peer_id", "") != artifact.get("owner_peer"):
+                raise HTTPException(status_code=403, detail="Only the owner may update this shared coordination artifact")
 
-        _validate_shared_coordination_request(
-            title=req.title,
-            summary=req.summary,
-            constraints=req.constraints,
-            drift_signals=req.drift_signals,
-            coordination_alerts=req.coordination_alerts,
-            commit_message=req.commit_message,
-        )
-        current_version = int(artifact.get("version") or 0)
-        if req.expected_version != current_version:
-            raise HTTPException(status_code=409, detail="Shared coordination version conflict")
+            _validate_shared_coordination_request(
+                title=req.title,
+                summary=req.summary,
+                constraints=req.constraints,
+                drift_signals=req.drift_signals,
+                coordination_alerts=req.coordination_alerts,
+                commit_message=req.commit_message,
+            )
+            current_version = int(artifact.get("version") or 0)
+            if req.expected_version != current_version:
+                raise HTTPException(status_code=409, detail="Shared coordination version conflict")
 
-        # Synchronous pre-write capture: externalize superseded version (#113)
-        from app.artifact_lifecycle.service import externalize_superseded_shared
-        from datetime import datetime as _dt, timezone as _tz
+            # Synchronous pre-write capture: externalize superseded version (#113)
+            from app.artifact_lifecycle.service import externalize_superseded_shared
+            from datetime import datetime as _dt, timezone as _tz
 
-        _capture_now = _dt.now(_tz.utc)
-        _shared_hot_retention = getattr(settings, "shared_history_hot_retention_days", 30)
-        _history_result: dict[str, Any] | None = None
-        _update_warnings: list[str] = []
-        try:
-            _history_result = externalize_superseded_shared(
-                repo_root=repo_root,
-                now=_capture_now,
-                previous_artifact=artifact,
-                hot_retention_days=int(_shared_hot_retention),
-            )
-        except FileExistsError:
-            _log.warning(
-                "Shared history capture collision exhausted retries for %s; superseded version lost",
-                shared_id,
-                exc_info=True,
-            )
-            _update_warnings.append("shared_history_capture_collision: retry budget exhausted, superseded version not archived")
-        except Exception:
-            _log.warning(
-                "Shared history capture failed for %s; proceeding with update (non-fatal)",
-                shared_id,
-                exc_info=True,
-            )
-            _update_warnings.append("shared_history_capture_failed: superseded version not archived")
+            _capture_now = _dt.now(_tz.utc)
+            _shared_hot_retention = getattr(settings, "shared_history_hot_retention_days", 30)
+            _history_result: dict[str, Any] | None = None
+            _update_warnings: list[str] = []
+            try:
+                _history_result = externalize_superseded_shared(
+                    repo_root=repo_root,
+                    now=_capture_now,
+                    previous_artifact=artifact,
+                    hot_retention_days=int(_shared_hot_retention),
+                )
+            except FileExistsError:
+                _log.warning(
+                    "Shared history capture collision exhausted retries for %s; superseded version lost",
+                    shared_id,
+                    exc_info=True,
+                )
+                _update_warnings.append("shared_history_capture_collision: retry budget exhausted, superseded version not archived")
+            except Exception:
+                _log.warning(
+                    "Shared history capture failed for %s; proceeding with update (non-fatal)",
+                    shared_id,
+                    exc_info=True,
+                )
+                _update_warnings.append("shared_history_capture_failed: superseded version not archived")
 
-        updated = dict(artifact)
-        updated["title"] = req.title
-        updated["summary"] = req.summary
-        updated["shared_state"] = {
-            "constraints": list(req.constraints),
-            "drift_signals": list(req.drift_signals),
-            "coordination_alerts": list(req.coordination_alerts),
-        }
-        updated["updated_at"] = utc_now()
-        updated["version"] = current_version + 1
-        updated["last_updated_by"] = auth.peer_id
-        commit_message = req.commit_message
-        if commit_message is None or not commit_message.strip():
-            commit_message = f"coordination: update {shared_id} v{updated['version']}"
-        # If persist fails, clean up captured history to avoid phantom entries.
-        try:
-            rel = _persist_updated_shared_artifact(
-                repo_root=repo_root,
-                gm=gm,
-                shared_id=shared_id,
-                artifact=updated,
-                commit_message=commit_message,
-            )
-        except Exception:
+            updated = dict(artifact)
+            updated["title"] = req.title
+            updated["summary"] = req.summary
+            updated["shared_state"] = {
+                "constraints": list(req.constraints),
+                "drift_signals": list(req.drift_signals),
+                "coordination_alerts": list(req.coordination_alerts),
+            }
+            updated["updated_at"] = utc_now()
+            updated["version"] = current_version + 1
+            updated["last_updated_by"] = auth.peer_id
+            commit_message = req.commit_message
+            if commit_message is None or not commit_message.strip():
+                commit_message = f"coordination: update {shared_id} v{updated['version']}"
+            # If persist fails, clean up captured history to avoid phantom entries.
+            try:
+                rel = _persist_updated_shared_artifact(
+                    repo_root=repo_root,
+                    gm=gm,
+                    shared_id=shared_id,
+                    artifact=updated,
+                    commit_message=commit_message,
+                )
+            except Exception:
+                if _history_result is not None:
+                    for _hkey in ("payload_path", "stub_path"):
+                        _hp = _history_result.get(_hkey)
+                        if _hp:
+                            try:
+                                safe_path(repo_root, _hp).unlink(missing_ok=True)
+                            except Exception:
+                                _log.warning("Failed to clean up history file %s after persist failure", _hp, exc_info=True)
+                raise
+
+            # Best-effort commit of shared history files written by the capture hook.
             if _history_result is not None:
+                from app.git_safety import try_commit_paths as _try_commit_history
+                _history_paths = []
                 for _hkey in ("payload_path", "stub_path"):
                     _hp = _history_result.get(_hkey)
                     if _hp:
-                        try:
-                            safe_path(repo_root, _hp).unlink(missing_ok=True)
-                        except Exception:
-                            _log.warning("Failed to clean up history file %s after persist failure", _hp, exc_info=True)
-            raise
+                        _history_paths.append(safe_path(repo_root, _hp))
+                if _history_paths:
+                    _history_committed = _try_commit_history(
+                        paths=_history_paths,
+                        gm=gm,
+                        commit_message=f"coordination: shared history capture for {shared_id}",
+                    )
+                    if not _history_committed:
+                        _update_warnings.append("shared_history_not_durable: history files written but not committed to git")
 
-        # Best-effort commit of shared history files written by the capture hook.
-        if _history_result is not None:
-            from app.git_safety import try_commit_paths as _try_commit_history
-            _history_paths = []
-            for _hkey in ("payload_path", "stub_path"):
-                _hp = _history_result.get(_hkey)
-                if _hp:
-                    _history_paths.append(safe_path(repo_root, _hp))
-            if _history_paths:
-                _history_committed = _try_commit_history(
-                    paths=_history_paths,
-                    gm=gm,
-                    commit_message=f"coordination: shared history capture for {shared_id}",
-                )
-                if not _history_committed:
-                    _update_warnings.append("shared_history_not_durable: history files written but not committed to git")
+            # Keep the SQLite sidecar index in sync after successful persist.
+            from app.coordination.query_index import try_upsert_shared
 
-        # Keep the SQLite sidecar index in sync after successful persist.
-        from app.coordination.query_index import try_upsert_shared
-
-        try_upsert_shared(updated)
-        audit(
-            auth,
-            "coordination_shared_update",
-            {
-                "shared_id": shared_id,
-                "owner_peer": artifact["owner_peer"],
-                "version": updated["version"],
-                "updated_by": auth.peer_id,
-                "path": rel,
-            },
-        )
-    result: dict[str, Any] = {"ok": True, "shared": updated, "path": rel, "updated": True, "latest_commit": gm.latest_commit()}
-    if _update_warnings:
-        result["warnings"] = _update_warnings
-    return result
+            try_upsert_shared(updated)
+            audit(
+                auth,
+                "coordination_shared_update",
+                {
+                    "shared_id": shared_id,
+                    "owner_peer": artifact["owner_peer"],
+                    "version": updated["version"],
+                    "updated_by": auth.peer_id,
+                    "path": rel,
+                },
+            )
+    except ArtifactLockTimeout as exc:
+        raise make_lock_error("coordination_shared_update", None, exc, is_timeout=True) from exc
+    except ArtifactLockInfrastructureError as exc:
+        raise make_lock_error("coordination_shared_update", None, exc, is_timeout=False) from exc
+    return {
+        "ok": True,
+        "shared": updated,
+        "path": rel,
+        "updated": True,
+        "latest_commit": gm.latest_commit(),
+        "warnings": _update_warnings,
+    }
