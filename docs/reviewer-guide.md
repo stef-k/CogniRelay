@@ -140,7 +140,7 @@ CogniRelay provides three bounded coordination primitives for inter-agent work. 
 
 ### Handoffs
 
-A handoff projects a bounded subset of one agent's active continuity capsule (only `active_constraints` and `drift_signals`) into an auditable artifact for another agent. The recipient can accept, defer, or reject the handoff as advisory input. Nothing is promoted into local continuity automatically.
+A handoff projects a bounded subset of one agent's active continuity capsule (only `active_constraints` and `drift_signals`) into an auditable artifact for another agent. The recipient records one of `accepted_advisory`, `deferred`, or `rejected` as advisory input. Nothing is promoted into local continuity automatically.
 
 ### Shared coordination artifacts
 
