@@ -515,8 +515,8 @@ def _persist_active_capsule(
 ) -> None:
     """Persist an active capsule safely, restoring the prior durable file on commit failure."""
     old_bytes = path.read_bytes() if path.exists() else None
-    write_text_file(path, canonical)
     with repository_mutation_lock(repo_root):
+        write_text_file(path, canonical)
         try:
             committed = gm.commit_file(path, commit_message)
             if not committed:
@@ -2588,11 +2588,11 @@ def continuity_archive_service(
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         active_path = safe_path(repo_root, rel)
         active_bytes = active_path.read_bytes()
-        write_text_file(archive_path, canonical_json(archive_payload))
         # Both the archive write and the active-file deletion are performed
         # inside the git lock so that a process crash before commit cannot
         # leave the active capsule deleted without a durable archive.
         with repository_mutation_lock(repo_root):
+            write_text_file(archive_path, canonical_json(archive_payload))
             try:
                 active_path.unlink()
                 committed = gm.commit_paths(

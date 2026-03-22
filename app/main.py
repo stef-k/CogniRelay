@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
+from .git_locking import GitLockInfrastructureError, GitLockTimeout
+from .lifecycle_warnings import make_error_detail
 from .timestamps import parse_iso as _parse_iso
 from .artifact_lifecycle.service import artifact_history_cold_rehydrate_service, artifact_history_cold_store_service
 from .registry_lifecycle.service import registry_history_cold_rehydrate_service, registry_history_cold_store_service
@@ -1698,6 +1700,32 @@ def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) 
         req=req,
         parse_iso=_parse_iso,
         audit=_make_audit(settings, gm),
+    )
+
+
+@app.exception_handler(GitLockTimeout)
+async def git_lock_timeout_handler(_, exc: GitLockTimeout):
+    """Convert uncaught git lock timeouts to 409 Conflict."""
+    return JSONResponse(
+        status_code=409,
+        content=make_error_detail(
+            operation="git_lock",
+            error_code="git_lock_timeout",
+            error_detail=str(exc),
+        ),
+    )
+
+
+@app.exception_handler(GitLockInfrastructureError)
+async def git_lock_infra_handler(_, exc: GitLockInfrastructureError):
+    """Convert uncaught git lock infrastructure errors to 503 Service Unavailable."""
+    return JSONResponse(
+        status_code=503,
+        content=make_error_detail(
+            operation="git_lock",
+            error_code="git_lock_infrastructure_unavailable",
+            error_detail=str(exc),
+        ),
     )
 
 
