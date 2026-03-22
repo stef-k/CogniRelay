@@ -84,6 +84,29 @@ _ARTIFACT_HISTORY_SPECS: tuple[dict[str, str], ...] = (
     },
 )
 
+_REGISTRY_HISTORY_SPECS: tuple[dict[str, str], ...] = (
+    {
+        "family": "delivery",
+        "history_dir_rel": "messages/state/history/delivery",
+        "payload_schema_type": "delivery_history_shard",
+    },
+    {
+        "family": "peer_trust",
+        "history_dir_rel": "peers/history/registry",
+        "payload_schema_type": "peer_trust_history_shard",
+    },
+    {
+        "family": "replication_state",
+        "history_dir_rel": "peers/history/replication_state",
+        "payload_schema_type": "replication_state_history_shard",
+    },
+    {
+        "family": "replication_tombstones",
+        "history_dir_rel": "peers/history/replication_tombstones",
+        "payload_schema_type": "replication_tombstone_shard",
+    },
+)
+
 
 def _capture_path_state(path: Path, rollback_plan: list[tuple[Path, bytes | None]], seen: set[Path]) -> None:
     """Record a path's prior bytes once for fail-hard rollback flows."""
@@ -561,6 +584,224 @@ def _validate_restored_artifact_history(restore_root: Path) -> dict[str, Any]:
         if expected_stub_rel not in valid_stubs:
             unmatched_payloads.append(rel)
             warnings.append(f"artifact_history_missing_stub:{rel}")
+
+    return {
+        "ok": not (invalid_payloads or invalid_cold_payloads or invalid_stubs or missing_payloads or unmatched_payloads or mismatched_stubs),
+        "payloads": payload_count,
+        "cold_payloads": cold_payload_count,
+        "stubs": stub_count,
+        "invalid_payloads": invalid_payloads,
+        "invalid_cold_payloads": invalid_cold_payloads,
+        "invalid_stubs": invalid_stubs,
+        "missing_payloads": missing_payloads,
+        "unmatched_payloads": unmatched_payloads,
+        "mismatched_stubs": mismatched_stubs,
+        "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Registry-history restore-test validators
+# ---------------------------------------------------------------------------
+
+
+def _validate_registry_history_payload(
+    path: Path,
+    restore_root: Path,
+    *,
+    schema_type: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored registry-history hot shard payload file."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, None
+    if not isinstance(payload, dict):
+        return False, None
+    if payload.get("schema_type") != schema_type:
+        return False, None
+    if payload.get("schema_version") != "1.0":
+        return False, None
+    shard_id = payload.get("shard_id")
+    if not isinstance(shard_id, str) or shard_id != path.stem:
+        return False, None
+    if not isinstance(payload.get("summary"), dict):
+        return False, None
+    payload["rel"] = str(path.relative_to(restore_root))
+    return True, payload
+
+
+def _validate_registry_history_cold_payload(
+    path: Path,
+    restore_root: Path,
+    *,
+    schema_type: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored registry-history cold (gzipped) shard payload."""
+    try:
+        payload_bytes = gzip.decompress(path.read_bytes())
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        return False, None
+    if not isinstance(payload, dict):
+        return False, None
+    if payload.get("schema_type") != schema_type:
+        return False, None
+    if payload.get("schema_version") != "1.0":
+        return False, None
+    # Cold filename is {shard_id}.json.gz — derive shard_id safely.
+    fname = path.name
+    if not fname.endswith(".json.gz"):
+        return False, None
+    expected_shard_id = fname[: -len(".json.gz")]
+    shard_id = payload.get("shard_id")
+    if not isinstance(shard_id, str) or shard_id != expected_shard_id:
+        return False, None
+    if not isinstance(payload.get("summary"), dict):
+        return False, None
+    payload["rel"] = str(path.relative_to(restore_root))
+    return True, payload
+
+
+def _validate_registry_history_stub(
+    path: Path,
+    restore_root: Path,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Validate one restored registry-history stub file."""
+    try:
+        stub = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, None
+    if not isinstance(stub, dict):
+        return False, None
+    if stub.get("schema_type") != "registry_history_stub":
+        return False, None
+    if stub.get("schema_version") != "1.0":
+        return False, None
+    shard_id = stub.get("shard_id")
+    if not isinstance(shard_id, str) or shard_id != path.stem:
+        return False, None
+    if not isinstance(stub.get("family"), str) or not stub["family"].strip():
+        return False, None
+    if not isinstance(stub.get("payload_path"), str) or not stub["payload_path"].strip():
+        return False, None
+    if not _is_iso_timestamp(stub.get("created_at")):
+        return False, None
+    if not isinstance(stub.get("source_head_path"), str) or not stub["source_head_path"].strip():
+        return False, None
+    if not isinstance(stub.get("summary"), dict):
+        return False, None
+    stub["rel"] = str(path.relative_to(restore_root))
+    return True, stub
+
+
+def _validate_restored_registry_history(restore_root: Path) -> dict[str, Any]:
+    """Inspect restored registry-history shards/stubs and validate symmetry."""
+    payload_count = 0
+    cold_payload_count = 0
+    stub_count = 0
+    invalid_payloads: list[str] = []
+    invalid_cold_payloads: list[str] = []
+    invalid_stubs: list[str] = []
+    missing_payloads: list[str] = []
+    unmatched_payloads: list[str] = []
+    mismatched_stubs: list[str] = []
+    warnings: list[str] = []
+    valid_payloads: dict[str, dict[str, Any]] = {}
+    valid_stubs: dict[str, dict[str, Any]] = {}
+
+    for spec in _REGISTRY_HISTORY_SPECS:
+        history_dir = restore_root / spec["history_dir_rel"]
+        if history_dir.exists() and history_dir.is_dir():
+            for path in sorted(history_dir.glob("*.json")):
+                if not path.is_file():
+                    continue
+                payload_count += 1
+                valid, payload = _validate_registry_history_payload(
+                    path,
+                    restore_root,
+                    schema_type=spec["payload_schema_type"],
+                )
+                rel = str(path.relative_to(restore_root))
+                if not valid or payload is None:
+                    invalid_payloads.append(rel)
+                    warnings.append(f"registry_history_invalid_payload:{rel}")
+                    continue
+                valid_payloads[rel] = payload
+
+        cold_dir = history_dir / "cold"
+        if cold_dir.exists() and cold_dir.is_dir():
+            for path in sorted(cold_dir.glob("*.json.gz")):
+                if not path.is_file():
+                    continue
+                cold_payload_count += 1
+                valid, payload = _validate_registry_history_cold_payload(
+                    path,
+                    restore_root,
+                    schema_type=spec["payload_schema_type"],
+                )
+                rel = str(path.relative_to(restore_root))
+                if not valid or payload is None:
+                    invalid_cold_payloads.append(rel)
+                    warnings.append(f"registry_history_invalid_cold_payload:{rel}")
+                    continue
+                valid_payloads[rel] = payload
+
+        stub_dir = history_dir / "index"
+        if stub_dir.exists() and stub_dir.is_dir():
+            for path in sorted(stub_dir.glob("*.json")):
+                if not path.is_file():
+                    continue
+                stub_count += 1
+                valid, stub = _validate_registry_history_stub(path, restore_root)
+                rel = str(path.relative_to(restore_root))
+                if not valid or stub is None:
+                    invalid_stubs.append(rel)
+                    warnings.append(f"registry_history_invalid_stub:{rel}")
+                    continue
+                valid_stubs[rel] = stub
+
+    # Phase 2: cross-match stubs → payloads
+    for rel, stub in valid_stubs.items():
+        try:
+            payload_rel = str(safe_path(restore_root, stub["payload_path"]).relative_to(restore_root))
+        except Exception:
+            invalid_stubs.append(rel)
+            warnings.append(f"registry_history_invalid_stub_payload_path:{rel}")
+            continue
+
+        payload = valid_payloads.get(payload_rel)
+        if payload is None:
+            missing_payloads.append(rel)
+            warnings.append(f"registry_history_missing_payload:{rel}")
+            continue
+
+        if (
+            stub.get("shard_id") != payload.get("shard_id")
+            or stub.get("summary") != payload.get("summary")
+        ):
+            mismatched_stubs.append(rel)
+            warnings.append(f"registry_history_stub_mismatch:{rel}")
+
+    # Phase 3: cross-match payloads → stubs
+    for rel in valid_payloads:
+        payload_path = Path(rel)
+        if payload_path.suffix == ".gz":
+            # Cold: {history_dir}/cold/{shard_id}.json.gz
+            # Expected stub: {history_dir}/index/{shard_id}.json
+            cold_parent = payload_path.parent  # …/cold
+            if cold_parent.name == "cold":
+                hot_name = payload_path.name[: -len(".gz")]  # {shard_id}.json
+                expected_stub_rel = str(cold_parent.parent / "index" / hot_name)
+            else:
+                expected_stub_rel = ""
+        else:
+            # Hot: {history_dir}/{shard_id}.json
+            # Expected stub: {history_dir}/index/{shard_id}.json
+            expected_stub_rel = str(payload_path.parent / "index" / payload_path.name)
+        if not expected_stub_rel or expected_stub_rel not in valid_stubs:
+            unmatched_payloads.append(rel)
+            warnings.append(f"registry_history_missing_stub:{rel}")
 
     return {
         "ok": not (invalid_payloads or invalid_cold_payloads or invalid_stubs or missing_payloads or unmatched_payloads or mismatched_stubs),
@@ -1842,12 +2083,15 @@ def backup_restore_test_service(
 
         segment_history_validation = _validate_segment_history(restore_root)
 
+        registry_history_validation = _validate_restored_registry_history(restore_root)
+
     ok = (
         extracted_files > 0
         and (index_validation is None or bool(index_validation.get("ok")))
         and (continuity_validation is None or bool(continuity_validation.get("ok")))
         and bool(artifact_history_validation.get("ok"))
         and bool(segment_history_validation.get("ok"))
+        and bool(registry_history_validation.get("ok"))
     )
     audit(
         auth,
@@ -1857,6 +2101,7 @@ def backup_restore_test_service(
             "ok": ok,
             "extracted_files": extracted_files,
             "continuity_ok": None if continuity_validation is None else bool(continuity_validation.get("ok")),
+            "registry_history_ok": bool(registry_history_validation.get("ok")),
         },
     )
     return {
@@ -1868,6 +2113,7 @@ def backup_restore_test_service(
         "continuity_validation": continuity_validation,
         "artifact_history_validation": artifact_history_validation,
         "segment_history_validation": segment_history_validation,
+        "registry_history_validation": registry_history_validation,
     }
 
 
