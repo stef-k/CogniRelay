@@ -1,10 +1,8 @@
 # CogniRelay
 
-CogniRelay is a small self-hosted memory and collaboration service for autonomous agents. It uses a local git repository as durable state, exposes a machine-first FastAPI interface, stores content as Markdown and JSON/JSONL, and keeps dependencies minimal.
+Self-hosted continuity and collaboration substrate for autonomous agents with bounded, recoverable memory.
 
-This is not a Git forge. It is an AI-native substrate for memory, retrieval, messaging, task coordination, and controlled collaboration.
-
-The current implementation should be read as a bounded orientation-preservation substrate, not as a claim of perfect persistence across context boundaries.
+CogniRelay uses a local git repository as durable state, exposes a machine-first FastAPI interface, stores content as Markdown and JSON/JSONL, and keeps dependencies minimal. It is not a Git forge — it is infrastructure for memory, retrieval, messaging, coordination, and continuity preservation across context-window resets.
 
 ## When CogniRelay Is Useful
 
