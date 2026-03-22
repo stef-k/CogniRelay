@@ -41,6 +41,7 @@ def unstage_paths(gm: GitCommitter, paths: list[Path]) -> None:
             try:
                 rels.append(str(path.resolve().relative_to(resolved_root)))
             except ValueError:
+                _log.warning("Skipping path outside repository root during unstage: %s", path)
                 continue
         if not rels:
             return
@@ -90,6 +91,7 @@ def safe_commit_new_file(
         try:
             return gm.commit_file(path, commit_message)
         except Exception as exc:
+            _log.error("safe_commit_new_file failed: %s", exc, exc_info=True)
             _unstage(gm, [path])
             _restore_files([(path, None)])
             raise HTTPException(status_code=500, detail=error_detail) from exc
@@ -117,6 +119,7 @@ def safe_commit_updated_file(
         try:
             return gm.commit_file(path, commit_message)
         except Exception as exc:
+            _log.error("safe_commit_updated_file failed: %s", exc, exc_info=True)
             _unstage(gm, [path])
             _restore_files([(path, old_bytes)])
             raise HTTPException(status_code=500, detail=error_detail) from exc
@@ -142,6 +145,7 @@ def safe_commit_paths(
         try:
             return gm.commit_paths(paths, commit_message)
         except Exception as exc:
+            _log.error("safe_commit_paths failed: %s", exc, exc_info=True)
             _unstage(gm, paths)
             _restore_files(rollback_plan)
             raise HTTPException(status_code=500, detail=error_detail) from exc

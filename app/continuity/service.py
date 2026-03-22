@@ -515,13 +515,12 @@ def _persist_active_capsule(
 ) -> None:
     """Persist an active capsule safely, restoring the prior durable file on commit failure."""
     old_bytes = path.read_bytes() if path.exists() else None
-    write_text_file(path, canonical)
     with repository_mutation_lock(repo_root):
+        write_text_file(path, canonical)
         try:
-            committed = gm.commit_file(path, commit_message)
-            if not committed:
-                raise RuntimeError("git commit produced no changes")
+            gm.commit_file(path, commit_message)
         except Exception as exc:
+            _logger.error("Continuity capsule persist failed: %s", exc, exc_info=True)
             restore_error: Exception | None = None
             unstage_paths(gm, [path])
             try:
@@ -531,10 +530,18 @@ def _persist_active_capsule(
                     write_bytes_file(path, old_bytes)
             except Exception as restore_exc:
                 restore_error = restore_exc
-            detail = f"Failed to persist continuity capsule: {exc}"
+                _logger.exception("Rollback also failed after continuity persist error")
+            error_detail = f"Failed to persist continuity capsule: {exc}"
             if restore_error is not None:
-                detail = f"{detail}; rollback failed: {restore_error}"
-            raise HTTPException(status_code=500, detail=detail) from exc
+                error_detail = f"{error_detail}; rollback failed: {restore_error}"
+            raise HTTPException(
+                status_code=500,
+                detail=make_error_detail(
+                    operation="continuity_persist",
+                    error_code="continuity_persist_commit_failed" if restore_error is None else "continuity_persist_rollback_failed",
+                    error_detail=error_detail,
+                ),
+            ) from exc
 
 
 def _fallback_snapshot_payload(*, capsule: dict[str, Any], active_rel: str, captured_at: str) -> dict[str, Any]:
@@ -2588,11 +2595,11 @@ def continuity_archive_service(
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         active_path = safe_path(repo_root, rel)
         active_bytes = active_path.read_bytes()
-        write_text_file(archive_path, canonical_json(archive_payload))
         # Both the archive write and the active-file deletion are performed
         # inside the git lock so that a process crash before commit cannot
         # leave the active capsule deleted without a durable archive.
         with repository_mutation_lock(repo_root):
+            write_text_file(archive_path, canonical_json(archive_payload))
             try:
                 active_path.unlink()
                 committed = gm.commit_paths(
@@ -2600,10 +2607,12 @@ def continuity_archive_service(
                     f"continuity: archive {req.subject_kind} {req.subject_id}",
                 )
             except Exception as exc:
+                _logger.error("Continuity archive commit failed: %s", exc, exc_info=True)
                 unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
+                    _logger.exception("Rollback also failed after archive commit error")
                     raise HTTPException(
                         status_code=500,
                         detail=make_error_detail(
@@ -2621,10 +2630,12 @@ def continuity_archive_service(
                     ),
                 ) from exc
             if not committed:
+                _logger.error("Continuity archive commit produced no changes")
                 unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
+                    _logger.exception("Rollback failed after archive no-changes error")
                     raise HTTPException(
                         status_code=500,
                         detail=make_error_detail(

@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
+from .git_locking import GitLockInfrastructureError, GitLockTimeout
+from .lifecycle_warnings import make_error_detail
 from .timestamps import parse_iso as _parse_iso
 from .artifact_lifecycle.service import artifact_history_cold_rehydrate_service, artifact_history_cold_store_service
 from .registry_lifecycle.service import registry_history_cold_rehydrate_service, registry_history_cold_store_service
@@ -1701,7 +1703,52 @@ def compact_run(req: CompactRequest, auth: AuthContext = Depends(require_auth)) 
     )
 
 
+@app.exception_handler(GitLockTimeout)
+async def git_lock_timeout_handler(request: FastAPIRequest, exc: GitLockTimeout):
+    """Convert uncaught git lock timeouts to 409 Conflict."""
+    _log.warning(
+        "Git lock timeout reached global handler: %s %s: %s",
+        request.method, request.url.path, exc, exc_info=True,
+    )
+    return JSONResponse(
+        status_code=409,
+        content=make_error_detail(
+            operation="git_lock",
+            error_code="git_lock_timeout",
+            error_detail=str(exc),
+        ),
+    )
+
+
+@app.exception_handler(GitLockInfrastructureError)
+async def git_lock_infra_handler(request: FastAPIRequest, exc: GitLockInfrastructureError):
+    """Convert uncaught git lock infrastructure errors to 503 Service Unavailable."""
+    _log.error(
+        "Git lock infrastructure error reached global handler: %s %s: %s",
+        request.method, request.url.path, exc, exc_info=True,
+    )
+    return JSONResponse(
+        status_code=503,
+        content=make_error_detail(
+            operation="git_lock",
+            error_code="git_lock_infrastructure_unavailable",
+            error_detail=str(exc),
+        ),
+    )
+
+
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(_, exc: Exception):
+async def unhandled_exception_handler(request: FastAPIRequest, exc: Exception):
     """Return a normalized JSON error payload for uncaught exceptions."""
-    return JSONResponse(status_code=500, content={"ok": False, "error": type(exc).__name__, "detail": str(exc)})
+    _log.error(
+        "Unhandled exception reached global handler: %s %s",
+        request.method, request.url.path, exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content=make_error_detail(
+            operation="unhandled",
+            error_code=type(exc).__name__,
+            error_detail=str(exc),
+        ),
+    )
