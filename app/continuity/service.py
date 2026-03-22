@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
+from app.timestamps import parse_iso as _parse_iso
 from app.lifecycle_warnings import make_error_detail, make_warning
 from app.storage import build_cold_gzip_bytes
 from app.git_locking import repository_mutation_lock
@@ -199,22 +200,6 @@ def continuity_archive_rel_path_from_cold_artifact(cold_artifact_path: str) -> s
         basename = Path(rel).name[:-3]
         return f"{CONTINUITY_DIR_REL}/archive/{basename}"
     raise HTTPException(status_code=400, detail="Invalid continuity cold artifact path")
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp into a timezone-aware UTC datetime when possible."""
-    if not value:
-        return None
-    raw = value.strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        return None
-    return dt.astimezone(timezone.utc)
 
 
 def _require_utc_timestamp(value: str, field_name: str) -> datetime:

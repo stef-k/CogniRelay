@@ -24,6 +24,8 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
+from app.timestamps import parse_iso as _parse_iso, iso_now as _iso_now
+
 from app.lifecycle_warnings import make_error_detail, make_lock_error, make_warning
 
 from app.auth import AuthContext
@@ -83,27 +85,6 @@ _TERMINAL_HANDOFF_STATUSES = frozenset({"accepted_advisory", "deferred", "reject
 # ---------------------------------------------------------------------------
 # ISO timestamp helpers
 # ---------------------------------------------------------------------------
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp string into a timezone-aware UTC datetime.
-
-    Naive timestamps (no offset) are assumed UTC to prevent TypeError when
-    compared against UTC-aware cutoffs.
-    """
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def _iso_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------

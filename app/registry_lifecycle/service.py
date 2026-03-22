@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
+from app.timestamps import parse_iso as _parse_iso, iso_now as _iso_now
+
 from app.git_safety import try_commit_paths
 from app.lifecycle_warnings import make_error_detail, make_lock_error, make_warning
 from app.segment_history.locking import (
@@ -75,31 +77,6 @@ _REGISTRY_STUB_DIRS_BY_FAMILY: dict[str, str] = {
     "replication_state": REPLICATION_STATE_STUB_DIR_REL,
     "replication_tombstones": REPLICATION_TOMBSTONE_STUB_DIR_REL,
 }
-
-
-# ---------------------------------------------------------------------------
-# ISO timestamp helpers
-# ---------------------------------------------------------------------------
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp string into a timezone-aware UTC datetime.
-
-    Naive timestamps (no offset) are assumed UTC to prevent TypeError when
-    compared against UTC-aware cutoffs.
-    """
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def _iso_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
