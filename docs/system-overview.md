@@ -85,7 +85,7 @@ Retention planning and cold-store/rehydrate operations are explicit and operator
 
 CogniRelay provides three bounded coordination primitives. All are additive records that do not mutate local continuity capsules or automatically synchronize state between agents.
 
-- **Handoffs**: project a bounded subset of one agent's active continuity (only `active_constraints` and `drift_signals`) into an auditable artifact for another agent. Recipients record advisory, deferred, or rejected outcomes without local-state mutation.
+- **Handoffs**: project a bounded subset of one agent's active continuity (only `active_constraints` and `drift_signals`) into an auditable artifact for another agent. Recipients record `accepted_advisory`, `deferred`, or `rejected` outcomes without local-state mutation.
 - **Shared coordination artifacts**: owner-authored bounded state (`constraints`, `drift_signals`, `coordination_alerts`) visible to a listed participant set. Only the owner can update; participants observe. These are coordination context, not shared capsules.
 - **Reconciliation records**: name bounded disagreements between handoff or shared coordination claims with epistemic status and evidence references. First-slice outcomes (`advisory_only`, `conflicted`, `rejected`) resolve conservatively without mutating local or shared state.
 

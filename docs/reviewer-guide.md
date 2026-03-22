@@ -160,13 +160,16 @@ CogniRelay exposes two distinct operational surfaces:
 
 ### Agent-facing collaboration surface
 
-Memory, retrieval, continuity, coordination, messaging, tasks, patches, and peer discovery. These endpoints are designed for WAN-safe peer access and follow the normal bearer-token auth model.
+Memory, retrieval, continuity, coordination, messaging, tasks, patches, and peer discovery. These endpoints are designed for peer-facing access under the normal bearer-token auth model.
 
 ### Host-local authority surface
 
-Trust transitions, token and signing-key lifecycle, backup creation and restore drills, compaction apply, ops runner control, and cold-storage/retention jobs. These endpoints are under `/v1/ops/*` and the security/governance authority paths.
+This surface has two enforcement tiers:
 
-Host-local actions are intended for loopback or Unix-socket access, not remote peer invocation. They carry system-wide impact — revoking a token, rotating a key, or running a retention job affects every agent using the instance. If automated, they should run through a local scheduler (`systemd`, `cron`) rather than through the collaboration surface.
+- **IP-enforced local-only**: ops runner endpoints under `/v1/ops/*` enforce an IP-based local-client check in addition to `admin:peers` scope. These are unreachable from WAN peers even if the scope is present.
+- **Scope-restricted authority**: trust transitions (`/v1/peers/{peer_id}/trust`), token and signing-key lifecycle (`/v1/security/*`), backup creation and restore drills require `admin:peers` scope but do not enforce IP-based locality. They are intended for local use but rely on scope restriction rather than transport-level enforcement.
+
+Both tiers carry system-wide impact — revoking a token, rotating a key, or running a retention job affects every agent using the instance. Operators should keep `admin:peers` tokens off WAN-accessible peers and, if automating authority actions, run them through a local scheduler (`systemd`, `cron`) invoked through a local boundary.
 
 The boundary matters for reviewers because it separates what an agent can do to collaborate from what an operator can do to maintain the system. Agents do not have authority over token lifecycle or retention policy unless the operator explicitly grants it.
 
