@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.timestamps import format_iso, format_compact
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES
 from app.models import (
     ArtifactHistoryColdRehydrateRequest,
@@ -428,7 +429,7 @@ def _ops_rotation_check(
                 {
                     "peer_id": item.get("peer_id"),
                     "token_id": item.get("token_id"),
-                    "expires_at": expires_at.isoformat(),
+                    "expires_at": format_iso(expires_at),
                 }
             )
 
@@ -441,7 +442,7 @@ def _ops_rotation_check(
 
     return {
         "ok": True,
-        "checked_at": now.isoformat(),
+        "checked_at": format_iso(now),
         "lookahead_hours": int(lookahead_hours),
         "active_key_id": active_key_id,
         "active_key_status": active_key_status,
@@ -772,8 +773,8 @@ def ops_run_service(
         raise HTTPException(status_code=400, detail=f"Unsupported ops job: {req.job_id}")
 
     started = datetime.now(timezone.utc)
-    run_id = f"ops_{started.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
-    lock_path = _acquire_ops_lock(settings.repo_root, req.job_id, run_id, started.isoformat())
+    run_id = f"ops_{format_compact(started)}_{uuid4().hex[:8]}"
+    lock_path = _acquire_ops_lock(settings.repo_root, req.job_id, run_id, format_iso(started))
 
     status = "succeeded"
     job_result: dict[str, Any] | None = None
@@ -840,8 +841,8 @@ def ops_run_service(
                 "run_id": run_id,
                 "job_id": req.job_id,
                 "status": status,
-                "started_at": started.isoformat(),
-                "finished_at": finished.isoformat(),
+                "started_at": format_iso(started),
+                "finished_at": format_iso(finished),
                 "duration_seconds": round((finished - started).total_seconds(), 4),
                 "dry_run": req.dry_run,
                 "force": req.force,

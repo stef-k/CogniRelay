@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .auth import AuthContext, require_auth
+from .timestamps import parse_iso as _parse_iso
 from .artifact_lifecycle.service import artifact_history_cold_rehydrate_service, artifact_history_cold_store_service
 from .registry_lifecycle.service import registry_history_cold_rehydrate_service, registry_history_cold_store_service
 from .segment_history.service import (
@@ -168,7 +169,6 @@ from .runtime import (
     enforce_rate_limit as _enforce_rate_limit,
     handle_mcp_request as _handle_mcp_rpc_request,
     load_rate_limit_state as _load_rate_limit_state,
-    parse_iso as _parse_iso,
     read_commit_file as _read_commit_file,
     record_verification_failure as _record_verification_failure,
     resolve_auth_context as _resolve_auth_context,

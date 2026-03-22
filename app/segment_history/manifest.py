@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from app.timestamps import format_iso, iso_now
 from pathlib import Path
 from typing import Generator
 
@@ -170,7 +170,7 @@ def write_manifest(
             "segment_ids": segment_ids,
             "target_paths": effective_targets,
             "cleanup_paths": cleanup_paths or [],
-            "started_at": started_at or datetime.now(timezone.utc).isoformat(),
+            "started_at": started_at or format_iso(iso_now()),
         }
         # NOTE: write_text_file must write directly to `path` (or via a
         # sibling temp-rename that resolves atomically before this function

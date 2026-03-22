@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -13,6 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
+from app.timestamps import iso_to_posix
 from app.coordination.common import (
     is_admin,
     persist_new_artifact,
@@ -54,12 +54,7 @@ def _shared_path(repo_root: Path, shared_id: str) -> Path:
 def _shared_query_sort_key(artifact: dict[str, Any]) -> tuple[float, str]:
     """Return the deterministic sort key for shared coordination query results."""
     updated_at = str(artifact.get("updated_at") or "")
-    try:
-        dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-        updated_value = dt.timestamp()
-    except (ValueError, TypeError):
-        updated_value = 0.0
-    return (-updated_value, str(artifact.get("shared_id") or ""))
+    return (-iso_to_posix(updated_at), str(artifact.get("shared_id") or ""))
 
 
 def _load_shared_artifact(repo_root: Path, shared_id: str) -> tuple[str, dict[str, Any]]:

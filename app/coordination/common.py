@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from app.timestamps import format_iso, iso_now
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ _UUID_HEX = re.compile(r"^[0-9a-f]{32}$")
 
 def utc_now() -> str:
     """Return a normalized UTC timestamp for persisted coordination artifacts."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return format_iso(iso_now())
 
 
 def is_admin(auth: AuthContext) -> bool:

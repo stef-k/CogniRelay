@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -15,6 +14,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.timestamps import format_compact, format_iso, iso_now
 from app.models import (
     CodeCheckRunRequest,
     CodeMergeRequest,
@@ -176,7 +176,7 @@ def tasks_create_service(
     if existing_rel:
         raise HTTPException(status_code=409, detail=f"Task already exists: {req.task_id}")
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = format_iso(iso_now())
     payload = req.model_dump()
     payload["created_at"] = now
     payload["updated_at"] = now
@@ -218,7 +218,7 @@ def tasks_update_service(
     updates = req.model_dump(exclude_unset=True)
     task.update({k: v for k, v in updates.items() if v is not None})
     task["status"] = new_status
-    task["updated_at"] = datetime.now(timezone.utc).isoformat()
+    task["updated_at"] = format_iso(iso_now())
     task["task_id"] = task_id
 
     next_rel = _task_rel(task_id, new_status)
@@ -322,7 +322,7 @@ def _patch_propose_service(
     if path.exists():
         raise HTTPException(status_code=409, detail=f"Patch already exists: {patch_id}")
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = format_iso(iso_now())
     payload = {
         "schema_version": "1.0",
         "patch_id": patch_id,
@@ -444,7 +444,7 @@ def docs_patch_apply_service(
         except OSError:
             pass
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = format_iso(iso_now())
     proposal["status"] = "applied"
     proposal["applied_at"] = now
     proposal["applied_by"] = auth.peer_id
@@ -499,8 +499,8 @@ def code_checks_run_service(
     auth.require("write:projects")
     ref_resolved = _resolve_commit_ref(repo_root, req.ref, run_git)
     rc, stdout_text, stderr_text = _run_check_command(repo_root, ref_resolved, req.profile, run_git)
-    now = datetime.now(timezone.utc)
-    run_id = f"run_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
+    now = iso_now()
+    run_id = f"run_{format_compact(now)}_{uuid4().hex[:8]}"
     status = "passed" if rc == 0 else "failed"
     payload = {
         "schema_version": "1.0",
@@ -510,8 +510,8 @@ def code_checks_run_service(
         "ref_resolved": ref_resolved,
         "status": status,
         "return_code": rc,
-        "started_at": now.isoformat(),
-        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": format_iso(now),
+        "finished_at": format_iso(iso_now()),
         "command": CHECK_PROFILE_COMMANDS[req.profile],
         "stdout": stdout_text[-12000:],
         "stderr": stderr_text[-12000:],

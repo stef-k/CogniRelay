@@ -15,30 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.timestamps import iso_to_posix as _parse_ts
+
 _log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Timestamp helper — mirrors the sort-key logic in the service modules
-# ---------------------------------------------------------------------------
-
-
-def _parse_ts(value: str | None) -> float:
-    """Parse an ISO-8601 timestamp string into a POSIX float for sorting.
-
-    Returns ``0.0`` for *None* or malformed values so that unparseable
-    timestamps sort last (matching the existing degraded-sort behaviour).
-    """
-    if not value:
-        return 0.0
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return dt.timestamp()
-    except (ValueError, TypeError):
-        return 0.0
 
 
 # ---------------------------------------------------------------------------

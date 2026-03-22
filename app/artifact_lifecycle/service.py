@@ -18,11 +18,13 @@ from __future__ import annotations
 import json
 import logging
 import gzip
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import HTTPException
+
+from app.timestamps import format_compact, format_iso, parse_iso as _parse_iso, iso_now as _iso_now
 
 from app.lifecycle_warnings import make_error_detail, make_lock_error, make_warning
 
@@ -85,36 +87,12 @@ _TERMINAL_HANDOFF_STATUSES = frozenset({"accepted_advisory", "deferred", "reject
 # ---------------------------------------------------------------------------
 
 
-def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp string into a timezone-aware UTC datetime.
-
-    Naive timestamps (no offset) are assumed UTC to prevent TypeError when
-    compared against UTC-aware cutoffs.
-    """
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def _iso_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 # ---------------------------------------------------------------------------
 # Shared history_id naming
 # ---------------------------------------------------------------------------
 
 
-def _history_timestamp_str(cut_at: datetime) -> str:
-    """Convert cut_at to the YYYYMMDDTHHMMSSZ format per spec."""
-    utc = cut_at.astimezone(timezone.utc).replace(microsecond=0)
-    return utc.strftime("%Y%m%dT%H%M%SZ")
+_history_timestamp_str = format_compact
 
 
 def _next_history_id(
@@ -191,7 +169,7 @@ def _create_stub(
         "family": family,
         "history_id": history_id,
         "payload_path": payload_path,
-        "created_at": created_at.isoformat(),
+        "created_at": format_iso(created_at),
         "source_path": source_path,
         "summary": summary,
     }
@@ -388,7 +366,7 @@ def _externalize_single_artifact(
         "history_id": history_id,
         "artifact_id": artifact_id,
         "source_path": source_rel,
-        "cut_at": cut_at.isoformat(),
+        "cut_at": format_iso(cut_at),
         "artifact": artifact,
         "summary": summary,
     }

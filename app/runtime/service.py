@@ -13,6 +13,7 @@ import logging
 from fastapi import HTTPException
 
 from app.audit import WriteTimeRolloverError, append_audit
+from app.timestamps import format_iso, parse_iso
 from app.segment_history.append import SegmentHistoryAppendError
 from app.config import sha256_token
 from app.discovery import handle_mcp_rpc_request as discovery_handle_mcp_rpc_request
@@ -181,16 +182,6 @@ def _auth_refs(auth: Any) -> tuple[str, str]:
     return token_ref, ip_ref
 
 
-def parse_iso(value: str | None):
-    """Parse an ISO timestamp and return ``None`` on invalid input."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 def _prune_rate_limit_state(payload: dict[str, Any], now: datetime, max_window_seconds: int) -> None:
     """Drop rate-limit and verification events older than the active window."""
     cutoff = now - timedelta(seconds=max_window_seconds)
@@ -245,7 +236,7 @@ def enforce_rate_limit(settings: Any, auth: Any, bucket: str) -> None:
 
     events.append(
         {
-            "at": now.isoformat(),
+            "at": format_iso(now),
             "bucket": bucket,
             "token_ref": token_ref,
             "ip_ref": ip_ref,
@@ -265,7 +256,7 @@ def record_verification_failure(settings: Any, auth: Any, reason: str) -> None:
     failures = payload.setdefault("verification_failures", [])
     failures.append(
         {
-            "at": now.isoformat(),
+            "at": format_iso(now),
             "token_ref": token_ref,
             "ip_ref": ip_ref,
             "peer_id": auth.peer_id,

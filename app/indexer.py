@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
+from app.timestamps import format_iso, iso_now, parse_iso
+
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".jsonl"}
 _logger = logging.getLogger(__name__)
 
@@ -93,7 +95,7 @@ def _record_for_file(repo_root: Path, path: Path) -> dict[str, Any] | None:
         'path': rel,
         'type': file_type,
         'size': stat.st_size,
-        'modified_at': datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        'modified_at': format_iso(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)),
         'mtime_ns': getattr(stat, 'st_mtime_ns', int(stat.st_mtime * 1e9)),
         'snippet': _snippet(content),
         'tags': _extract_tags(content),
@@ -165,7 +167,7 @@ def _write_json_indexes(repo_root: Path, files: list[dict[str, Any]]) -> dict[st
         mtime_map[r['path']] = int(r.get('mtime_ns') or 0)
 
     payload = {
-        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'generated_at': format_iso(iso_now()),
         'file_count': len(files),
         'files': sorted([{k:v for k,v in r.items() if k != 'mtime_ns'} for r in files], key=lambda x: x['path']),
     }
@@ -197,17 +199,7 @@ def load_files_index(repo_root: Path) -> Dict[str, Any]:
     return json.loads(p.read_text(encoding='utf-8'))
 
 
-def _parse_modified_at(value: str | None) -> datetime | None:
-    """Parse an indexed modified-at timestamp into UTC."""
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+_parse_modified_at = parse_iso
 
 
 def filter_results_by_time_window(
@@ -325,9 +317,9 @@ def search_index(
                     params: list[Any] = [fts_query]
                     where = 'WHERE files_fts MATCH ?'
                     if time_window_hours is not None:
-                        cutoff = (datetime.now(timezone.utc) - timedelta(hours=time_window_hours)).isoformat()
+                        cutoff = format_iso(datetime.now(timezone.utc) - timedelta(hours=time_window_hours))
                     elif time_window_days is not None:
-                        cutoff = (datetime.now(timezone.utc) - timedelta(days=time_window_days)).isoformat()
+                        cutoff = format_iso(datetime.now(timezone.utc) - timedelta(days=time_window_days))
                     if cutoff is not None:
                         where += ' AND f.modified_at >= ?'
                         params.append(cutoff)

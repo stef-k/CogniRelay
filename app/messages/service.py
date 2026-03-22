@@ -19,6 +19,7 @@ from app.models import MessageAckRequest, MessageReplayRequest, MessageSendReque
 from app.segment_history.append import SegmentHistoryAppendError, locked_append_jsonl, locked_append_jsonl_multi
 from app.segment_history.locking import LockInfrastructureError, SegmentHistoryLockTimeout, segment_history_source_lock
 from app.storage import safe_path, write_bytes_file, write_text_file
+from app.timestamps import format_iso, iso_now
 
 DELIVERY_STATE_REL = "messages/state/delivery_index.json"
 
@@ -289,13 +290,13 @@ def messages_send_service(
                     raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {signature_verification['reason']}")
                 committed_files.extend(signature_verification.get("committed_files", []))
 
-            now = datetime.now(timezone.utc)
+            now = iso_now()
             msg = {
                 "id": f"msg_{uuid4().hex[:12]}",
                 "thread_id": req.thread_id,
                 "from": req.sender,
                 "to": req.recipient,
-                "sent_at": now.isoformat(),
+                "sent_at": format_iso(now),
                 "subject": req.subject,
                 "body_md": req.body_md,
                 "priority": req.priority,
@@ -317,7 +318,7 @@ def messages_send_service(
             if should_track_delivery:
                 ack_deadline = None
                 if req.delivery.requires_ack:
-                    ack_deadline = (now + timedelta(seconds=req.delivery.ack_timeout_seconds)).isoformat()
+                    ack_deadline = format_iso(now + timedelta(seconds=req.delivery.ack_timeout_seconds))
                 status = "pending_ack" if req.delivery.requires_ack else "delivered"
                 record = {
                     "message_id": msg["id"],
@@ -331,7 +332,7 @@ def messages_send_service(
                     "ack_timeout_seconds": req.delivery.ack_timeout_seconds,
                     "max_retries": req.delivery.max_retries,
                     "retry_count": 0,
-                    "sent_at": now.isoformat(),
+                    "sent_at": format_iso(now),
                     "ack_deadline": ack_deadline,
                     "acks": [],
                     "last_error": None,
@@ -400,13 +401,13 @@ def messages_ack_service(
             if not isinstance(record, dict):
                 raise HTTPException(status_code=404, detail="Tracked message not found")
 
-            now = datetime.now(timezone.utc)
+            now = iso_now()
             ack_row = {
                 "ack_id": req.ack_id or f"ack_{uuid4().hex[:12]}",
                 "message_id": req.message_id,
                 "status": req.status,
                 "reason": req.reason,
-                "ack_at": now.isoformat(),
+                "ack_at": format_iso(now),
                 "by": auth.peer_id,
             }
             record.setdefault("acks", []).append(ack_row)
@@ -419,7 +420,7 @@ def messages_ack_service(
             else:
                 record["status"] = "pending_ack"
                 timeout = int(record.get("ack_timeout_seconds") or 300)
-                record["ack_deadline"] = (now + timedelta(seconds=timeout)).isoformat()
+                record["ack_deadline"] = format_iso(now + timedelta(seconds=timeout))
 
             committed_files = []
             ack_rel = f"messages/acks/{req.message_id}.jsonl"
@@ -751,14 +752,14 @@ def relay_forward_service(
             raise HTTPException(status_code=401, detail=f"Invalid signed envelope: {signature_verification['reason']}")
         committed_files.extend(signature_verification.get("committed_files", []))
 
-    now = datetime.now(timezone.utc)
+    now = iso_now()
     msg = {
         "id": f"msg_{uuid4().hex[:12]}",
         "thread_id": req.thread_id,
         "from": req.sender,
         "to": req.target_recipient,
         "via": req.relay_id,
-        "sent_at": now.isoformat(),
+        "sent_at": format_iso(now),
         "subject": req.subject,
         "body_md": req.body_md,
         "priority": req.priority,
@@ -814,7 +815,7 @@ def replay_messages_service(
             if not isinstance(record, dict):
                 raise HTTPException(status_code=404, detail="Tracked message not found")
 
-            now = datetime.now(timezone.utc)
+            now = iso_now()
             effective = effective_delivery_status(record, now, parse_iso=parse_iso)
             if not req.force and effective != "dead_letter":
                 raise HTTPException(status_code=409, detail=f"Replay requires dead_letter status; got {effective}")
@@ -845,7 +846,7 @@ def replay_messages_service(
             replay_msg = dict(original)
             replay_msg["id"] = new_message_id
             replay_msg["replay_of"] = req.message_id
-            replay_msg["sent_at"] = now.isoformat()
+            replay_msg["sent_at"] = format_iso(now)
 
             sender = str(replay_msg.get("from") or record.get("from") or "unknown")
             recipient = str(replay_msg.get("to") or record.get("to") or "unknown")
@@ -860,7 +861,7 @@ def replay_messages_service(
             committed_files = []
 
             if req.requires_ack:
-                ack_deadline = (now + timedelta(seconds=req.ack_timeout_seconds)).isoformat()
+                ack_deadline = format_iso(now + timedelta(seconds=req.ack_timeout_seconds))
                 new_status = "pending_ack"
             else:
                 ack_deadline = None
@@ -877,7 +878,7 @@ def replay_messages_service(
                     "requires_ack": req.requires_ack,
                     "ack_timeout_seconds": req.ack_timeout_seconds,
                     "retry_count": retry_count + 1,
-                    "sent_at": now.isoformat(),
+                    "sent_at": format_iso(now),
                     "ack_deadline": ack_deadline,
                     "acks": [],
                     "last_error": None,
@@ -888,7 +889,7 @@ def replay_messages_service(
             state.setdefault("records", {})[new_message_id] = new_record
             record["status"] = "replayed"
             record["replayed_to"] = new_message_id
-            record["updated_at"] = now.isoformat()
+            record["updated_at"] = format_iso(now)
             if req.reason:
                 record["replay_reason"] = req.reason
 

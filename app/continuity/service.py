@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
+from app.timestamps import parse_iso as _parse_iso, format_iso, format_compact, iso_now
 from app.lifecycle_warnings import make_error_detail, make_warning
 from app.storage import build_cold_gzip_bytes
 from app.git_locking import repository_mutation_lock
@@ -199,22 +200,6 @@ def continuity_archive_rel_path_from_cold_artifact(cold_artifact_path: str) -> s
         basename = Path(rel).name[:-3]
         return f"{CONTINUITY_DIR_REL}/archive/{basename}"
     raise HTTPException(status_code=400, detail="Invalid continuity cold artifact path")
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp into a timezone-aware UTC datetime when possible."""
-    if not value:
-        return None
-    raw = value.strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        return None
-    return dt.astimezone(timezone.utc)
 
 
 def _require_utc_timestamp(value: str, field_name: str) -> datetime:
@@ -691,7 +676,7 @@ def _retention_candidate_from_envelope(
         "artifact_state": "archived",
         "retention_class": "archive_stale",
         "policy_action": "cold_store",
-        "archived_at": archived_at.isoformat().replace("+00:00", "Z"),
+        "archived_at": format_iso(archived_at),
         "age_days": _retention_age_days(archived_at=archived_at, generated_at=generated_at),
         "cold_storage_path": continuity_cold_storage_rel_path(source_archive_path),
         "cold_stub_path": continuity_cold_stub_rel_path(source_archive_path),
@@ -711,7 +696,7 @@ def _retention_plan_payload(
     return {
         "schema_type": CONTINUITY_RETENTION_PLAN_SCHEMA_TYPE,
         "schema_version": CONTINUITY_RETENTION_PLAN_SCHEMA_VERSION,
-        "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+        "generated_at": format_iso(generated_at),
         "path": CONTINUITY_RETENTION_STATE_REL,
         "filters": {"subject_kind": req.subject_kind, "limit": req.limit},
         "count": len(candidates),
@@ -763,7 +748,7 @@ def _persist_fallback_snapshot(
         payload = _fallback_snapshot_payload(
             capsule=capsule,
             active_rel=continuity_rel_path(subject_kind, subject_id),
-            captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")),
+            captured_at=str(capsule.get("updated_at") or capsule.get("verified_at") or format_iso(iso_now())),
         )
         canonical = canonical_json(payload)
         new_bytes = canonical.encode("utf-8")
@@ -944,7 +929,7 @@ def _archive_rel_path_from_envelope(payload: dict[str, Any]) -> str:
     subject_kind = str(capsule.get("subject_kind") or "")
     subject_id = str(capsule.get("subject_id") or "")
     archived_at = _require_utc_timestamp(str(payload.get("archived_at") or ""), "archived_at")
-    timestamp = archived_at.strftime("%Y%m%dT%H%M%SZ")
+    timestamp = format_compact(archived_at)
     return f"{CONTINUITY_DIR_REL}/archive/{subject_kind}-{_normalize_subject_id(subject_id)}-{timestamp}.json"
 
 
@@ -1236,7 +1221,7 @@ def _refresh_state_payload(now: datetime, candidates: list[dict[str, Any]]) -> d
     """Build the persisted refresh-state payload from one refresh-plan result."""
     return {
         "schema_version": CONTINUITY_REFRESH_STATE_SCHEMA_VERSION,
-        "last_planned_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "last_planned_at": format_iso(now),
         "last_run_at": None,
         "last_run_count": 0,
         "entries": candidates,
@@ -2451,7 +2436,7 @@ def continuity_revalidate_service(
             _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
         )
         now = datetime.now(timezone.utc).replace(microsecond=0)
-        now_iso = now.isoformat().replace("+00:00", "Z")
+        now_iso = format_iso(now)
         strongest_signal = _strongest_signal_kind(req.signals)
         derived_status = CONTINUITY_SIGNAL_STATUS[strongest_signal]
         evidence_refs = _signals_to_evidence_refs(req.signals)
@@ -2581,7 +2566,7 @@ def continuity_archive_service(
     """Archive one active continuity capsule and remove the active file in one commit."""
     auth.require("write:projects")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
-    timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+    timestamp = format_compact(now)
     archive_rel = f"{CONTINUITY_DIR_REL}/archive/{req.subject_kind}-{_normalize_subject_id(req.subject_id)}-{timestamp}.json"
     auth.require_read_path(rel)
     auth.require_write_path(rel)
@@ -2591,7 +2576,7 @@ def continuity_archive_service(
         archive_payload = {
             "schema_type": CONTINUITY_ARCHIVE_SCHEMA_TYPE,
             "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
-            "archived_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "archived_at": format_iso(now),
             "archived_by": auth.peer_id,
             "reason": req.reason,
             "active_path": rel,
@@ -2749,7 +2734,7 @@ def continuity_cold_store_service(
                 raise HTTPException(status_code=409, detail="Continuity cold artifact already exists for source archive")
 
             now = datetime.now(timezone.utc).replace(microsecond=0)
-            cold_stored_at = now.isoformat().replace("+00:00", "Z")
+            cold_stored_at = format_iso(now)
             gzip_bytes = build_cold_gzip_bytes(source_bytes)
             stub_text = _build_cold_stub_text(
                 envelope=envelope,
@@ -2880,7 +2865,7 @@ def continuity_cold_rehydrate_service(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Invalid continuity cold payload: {exc}") from exc
 
-        rehydrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        rehydrated_at = format_iso(iso_now())
         try:
             write_bytes_file(archive_path, archive_bytes)
             # Cold file deletions and commit are inside the git lock so

@@ -6,6 +6,8 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+
+from app.timestamps import format_iso, iso_now
 from pathlib import Path
 from typing import Any, Callable
 
@@ -323,7 +325,7 @@ def append_audit(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     row = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": format_iso(iso_now()),
         "event": event,
         "peer_id": peer_id,
         "detail": detail,
