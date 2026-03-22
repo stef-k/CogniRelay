@@ -139,9 +139,13 @@ class TestFormatIso(unittest.TestCase):
         result = format_iso(datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc))
         self.assertNotIn("+00:00", result)
 
-    def test_strips_microseconds(self) -> None:
+    def test_preserves_microseconds(self) -> None:
         dt = datetime(2026, 3, 20, 12, 0, 0, 123456, tzinfo=timezone.utc)
-        self.assertEqual(format_iso(dt), "2026-03-20T12:00:00Z")
+        self.assertEqual(format_iso(dt), "2026-03-20T12:00:00.123456Z")
+
+    def test_no_microseconds_when_zero(self) -> None:
+        dt = datetime(2026, 3, 20, 12, 0, 0, 0, tzinfo=timezone.utc)
+        self.assertNotIn(".", format_iso(dt))
 
     def test_converts_non_utc_to_utc(self) -> None:
         ist = timezone(timedelta(hours=5, minutes=30))

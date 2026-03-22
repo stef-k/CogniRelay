@@ -53,14 +53,16 @@ def iso_now() -> datetime:
 def format_iso(dt: datetime) -> str:
     """Format a datetime as ISO 8601 with ``Z`` suffix.
 
-    Converts to UTC, strips microseconds, replaces ``+00:00`` with ``Z``.
-    Naive datetimes (no tzinfo) are assumed UTC to prevent silent
-    locale-dependent conversion.  This is the canonical serialization
-    format for all CogniRelay stored timestamps.
+    Converts to UTC, replaces ``+00:00`` with ``Z``.  Preserves
+    sub-second precision when present — callers that need second-level
+    granularity should use ``iso_now()`` which already strips
+    microseconds.  Naive datetimes (no tzinfo) are assumed UTC to
+    prevent silent locale-dependent conversion.  This is the canonical
+    serialization format for all CogniRelay stored timestamps.
     """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    utc = dt.astimezone(timezone.utc).replace(microsecond=0)
+    utc = dt.astimezone(timezone.utc)
     return utc.isoformat().replace("+00:00", "Z")
 
 
