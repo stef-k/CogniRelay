@@ -64,6 +64,45 @@ CogniRelay combines a small number of building blocks:
 - Expose host-local ops automation endpoints for maintenance jobs
 - Emit audit and operational metrics for monitoring and troubleshooting
 
+## System Models
+
+### Continuity model
+
+CogniRelay treats continuity as a bounded orientation-preservation problem, not as total-fidelity persistence.
+
+Continuity capsules preserve bounded working state across resets: active constraints, drift signals, open questions, current direction, session trajectory, and optional lower-commitment fields such as trailing notes, curiosity queue, and negative decisions. The model uses write-time curation rather than unlimited retention — payloads are bounded, optional fields have a deterministic trim order under token pressure, and what is present, omitted, or archived is always explicit.
+
+Continuity artifacts move through four tiers:
+
+- **Active**: the current working capsule, used for orientation on restart
+- **Fallback**: a last-known-good snapshot, refreshed automatically after each successful active write, used for recovery when the active capsule is missing or damaged
+- **Archive**: an immutable envelope preserved after the active capsule is archived, retained for audit and potential rehydration
+- **Cold storage**: a compressed archive artifact stored as `.json.gz` with a searchable hot stub, for long-term retention at lower storage cost
+
+Retention planning and cold-store/rehydrate operations are explicit and operator-visible. The system aims for inspectable loss, not imaginary losslessness.
+
+### Coordination model
+
+CogniRelay provides three bounded coordination primitives. All are additive records that do not mutate local continuity capsules or automatically synchronize state between agents.
+
+- **Handoffs**: project a bounded subset of one agent's active continuity (only `active_constraints` and `drift_signals`) into an auditable artifact for another agent. Recipients record advisory, deferred, or rejected outcomes without local-state mutation.
+- **Shared coordination artifacts**: owner-authored bounded state (`constraints`, `drift_signals`, `coordination_alerts`) visible to a listed participant set. Only the owner can update; participants observe. These are coordination context, not shared capsules.
+- **Reconciliation records**: name bounded disagreements between handoff or shared coordination claims with epistemic status and evidence references. First-slice outcomes (`advisory_only`, `conflicted`, `rejected`) resolve conservatively without mutating local or shared state.
+
+Discovery for all three primitives is bounded by caller identity unless the caller is an admin.
+
+### Degradation and recovery model
+
+CogniRelay assumes blind spots are structural and optimizes for bounded usefulness under loss rather than claiming seamless recovery.
+
+Key degradation behaviors:
+
+- Reads and retrievals degrade safely where the current API contract permits it: stale indexes produce results with warnings, missing indexes fall back to a bounded raw scan, and unreadable artifacts in list operations are skipped with warnings rather than failing the whole response.
+- Multi-step continuity mutations preserve the already-durable active write when a later step (such as fallback snapshot refresh) fails. Failures surface as additive `recovery_warnings` in the response body, not as HTTP errors.
+- Continuity read with `allow_fallback=true` returns structured fallback or missing-state degradation rather than a hard failure.
+- Backup restore-test validates recovered artifacts and reports problems without crashing the drill.
+- Verification and health state are explicit and auditable, not implicit self-healing.
+
 ## Operational Boundary
 
 There are two distinct surfaces:
@@ -91,7 +130,9 @@ The runtime repo under `data_repo/` is organized around durable memory and colla
 
 ### Startup sequence
 
-For an agent cold start, the recommended sequence is:
+For recommended hook-based integration patterns (minimum viable versus fuller integration), see [README: Agent Integration Patterns](../README.md#agent-integration-patterns).
+
+For an agent cold start, the full recommended sequence is:
 
 1. `GET /v1/discovery`
 2. `GET /v1/manifest`
