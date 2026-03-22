@@ -130,7 +130,7 @@ The runtime repo under `data_repo/` is organized around durable memory and colla
 
 ### Startup sequence
 
-For recommended hook-based integration patterns (minimum viable versus fuller integration), see [README: Agent Integration Patterns](../README.md#agent-integration-patterns).
+For a practical onboarding walkthrough covering both cold-start and incremental integration, see [Agent Onboarding](agent-onboarding.md). For the hook-based integration pattern summary, see [README: Agent Integration Patterns](../README.md#agent-integration-patterns).
 
 For an agent cold start, the full recommended sequence is:
 
@@ -250,6 +250,7 @@ If automated, run these through a local scheduler such as `systemd` or `cron` an
 
 ## How To Navigate The Docs
 
+- Use [Agent Onboarding](agent-onboarding.md) for practical integration guidance and incremental adoption
 - Use [Reviewer Guide](reviewer-guide.md) first when you want the system thesis, non-goals, recovery model, and inter-agent authority boundaries
 - Start here for product shape and system boundaries
 - Use [API Surface](api-surface.md) for the currently implemented HTTP surface
