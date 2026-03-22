@@ -179,17 +179,19 @@ Use the docs in this order:
 
 1. `README.md`
    Start here for repo shape, quick start, and the canonical doc map.
-2. `docs/reviewer-guide.md`
+2. `docs/agent-onboarding.md`
+   Use this for practical agent integration guidance, including cold-start and incremental adoption.
+3. `docs/reviewer-guide.md`
    Use this document for the system thesis, boundaries, and non-goals.
-3. `docs/system-overview.md`
+4. `docs/system-overview.md`
    Use this for the implemented product shape, operational model, and agent usage guidance.
-4. `docs/api-surface.md`
+5. `docs/api-surface.md`
    Use this for the currently implemented HTTP behavior and endpoint grouping.
-5. `docs/mcp.md`
+6. `docs/mcp.md`
    Use this if you care about MCP integration and tool exposure.
-6. `DESIGN_DOC.md`
+7. `DESIGN_DOC.md`
    Use this for earlier architectural rationale and background framing.
-7. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
+8. `deploy/GO_LIVE_RUNBOOK.md` and `deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`
    Use these for operator-facing deployment and signoff concerns.
 
 ## What Reviewers Should Pressure-Test

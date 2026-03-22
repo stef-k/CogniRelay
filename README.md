@@ -62,6 +62,7 @@ For the full cold-start endpoint sequence, see [System Overview: Agent Usage](do
 
 ## Canonical Docs
 
+- [Agent Onboarding](docs/agent-onboarding.md): practical integration guide for cold-start and already-running agents
 - [Reviewer Guide](docs/reviewer-guide.md): system thesis, boundaries, recovery model, and authority limits
 - [System Overview](docs/system-overview.md): implemented product shape and agent usage guidance
 - [API Surface](docs/api-surface.md): currently implemented HTTP behavior grouped by domain
