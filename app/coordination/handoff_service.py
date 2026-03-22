@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -13,6 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
+from app.timestamps import iso_to_posix
 from app.continuity.service import (
     _capsule_health_summary,
     _load_capsule,
@@ -110,12 +110,7 @@ def _ensure_consume_visibility(auth: AuthContext, artifact: dict[str, Any]) -> N
 def _query_sort_key(artifact: dict[str, Any]) -> tuple[float, str]:
     """Return the deterministic sort key for handoff query results."""
     created_at = str(artifact.get("created_at") or "")
-    try:
-        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        created_value = dt.timestamp()
-    except (ValueError, TypeError):
-        created_value = 0.0
-    return (-created_value, str(artifact.get("handoff_id") or ""))
+    return (-iso_to_posix(created_at), str(artifact.get("handoff_id") or ""))
 
 
 def _persist_new_handoff(

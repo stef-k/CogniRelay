@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.timestamps import parse_iso
 from app.continuity import build_continuity_state
 from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
@@ -278,17 +279,7 @@ def _load_core_memory(repo_root: Path, auth: AuthContext) -> list[dict[str, Any]
     return core_memory
 
 
-def _parse_utc_iso(value: str | None) -> datetime | None:
-    """Parse index metadata timestamps into UTC, treating legacy naive values as UTC."""
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value))
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+_parse_utc_iso = parse_iso
 
 
 def _index_health(repo_root: Path, now: datetime) -> str:

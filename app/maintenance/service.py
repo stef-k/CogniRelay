@@ -19,6 +19,8 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from app.timestamps import is_iso_timestamp
+
 from app.auth import AuthContext
 from app.artifact_lifecycle.service import (
     _ARTIFACT_HISTORY_SCHEMA_TYPES_BY_FAMILY,
@@ -356,15 +358,7 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
     }
 
 
-def _is_iso_timestamp(value: Any) -> bool:
-    """Return whether a value is a parseable ISO-8601 timestamp."""
-    if not isinstance(value, str) or not value.strip():
-        return False
-    try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return True
+_is_iso_timestamp = is_iso_timestamp
 
 
 def _validate_artifact_history_payload(

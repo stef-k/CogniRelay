@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
+from app.timestamps import parse_iso
+
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".jsonl"}
 _logger = logging.getLogger(__name__)
 
@@ -197,17 +199,7 @@ def load_files_index(repo_root: Path) -> Dict[str, Any]:
     return json.loads(p.read_text(encoding='utf-8'))
 
 
-def _parse_modified_at(value: str | None) -> datetime | None:
-    """Parse an indexed modified-at timestamp into UTC."""
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+_parse_modified_at = parse_iso
 
 
 def filter_results_by_time_window(

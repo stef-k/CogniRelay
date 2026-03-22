@@ -12,6 +12,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from app.timestamps import parse_iso
+
 _log = logging.getLogger(__name__)
 
 
@@ -126,7 +128,10 @@ def parse_event_timestamp(ts_str: str) -> datetime:
         return datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     if len(ts_str) == 10:
         return datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    dt = parse_iso(ts_str)
+    if dt is None:
+        raise ValueError(f"Unparseable ISO timestamp: {ts_str!r}")
+    return dt
 
 
 # ---------------------------------------------------------------------------
