@@ -2861,6 +2861,10 @@ def segment_history_cold_rehydrate_service(
             except HTTPException:
                 raise
             except Exception:
+                _log.error(
+                    "Segment-history rehydrate failed for %s %s; initiating rollback",
+                    family, segment_id, exc_info=True,
+                )
                 # Rollback: restore stub and cold payload to pre-mutation
                 # state and remove the hot payload that was created.  Only
                 # remove the manifest if both rollbacks succeeded — if

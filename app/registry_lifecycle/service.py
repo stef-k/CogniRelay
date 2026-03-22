@@ -1710,7 +1710,12 @@ def registry_history_cold_store_service(
                     _crash_stub = _load_registry_history_stub(repo_root, stub_rel)
                     _stub_points_cold = _crash_stub.get("payload_path") == cold_storage_path
                 except Exception:
-                    # Unreadable stub — safer to discard cold and redo.
+                    _logger.warning(
+                        "Registry cold-store crash recovery: could not read "
+                        "stub %s; defaulting to discard cold and redo",
+                        stub_rel,
+                        exc_info=True,
+                    )
                     _stub_points_cold = False
 
                 if _stub_points_cold:
@@ -1744,6 +1749,15 @@ def registry_history_cold_store_service(
                             "crash_recovery": True,
                         },
                     )
+                    _recovery_warnings: list[dict[str, Any]] = []
+                    if not _recovery_committed and gm is not None:
+                        _recovery_warnings.append(
+                            make_warning(
+                                "registry_history_cold_store_recovery_not_durable",
+                                "Crash recovery completed on disk but git commit "
+                                "failed; state is not yet durable",
+                            ),
+                        )
                     return {
                         "ok": True,
                         "family": family,
@@ -1761,7 +1775,7 @@ def registry_history_cold_store_service(
                                 "stub already pointed to cold, removed orphaned hot file",
                             ),
                         ],
-                        "recovery_warnings": [],
+                        "recovery_warnings": _recovery_warnings,
                     }
                 else:
                     # Stub still points to hot → cold is orphan (crash

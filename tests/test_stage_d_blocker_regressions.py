@@ -42,6 +42,13 @@ class _FailingCommitGM(SimpleGitManagerStub):
         raise RuntimeError("simulated git failure")
 
 
+class _FalseCommitGM(SimpleGitManagerStub):
+    """Git manager whose commit_paths returns False (no changes)."""
+
+    def commit_paths(self, _paths: list[Path], _message: str) -> bool:
+        return False
+
+
 class _Req:
     """Minimal request stub with arbitrary attributes."""
 
@@ -188,6 +195,170 @@ class TestRehydrateColdRollback(unittest.TestCase):
             # Verify content is intact
             restored = gzip.decompress(cold_payload.read_bytes())
             self.assertEqual(restored, payload_content)
+
+    def test_cold_payload_restored_on_commit_returns_false(self) -> None:
+        """Cold payload restored when commit_paths returns False (no raise)."""
+        from app.segment_history.service import segment_history_cold_rehydrate_service
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = _FalseCommitGM(repo)
+
+            family = "journal"
+            seg_id = "journal__2026-03-19__20260320T000000Z__0002"
+            history_dir = repo / "journal" / "history" / "2026"
+            index_dir = history_dir / "index"
+            cold_dir = history_dir / "cold"
+            for d in (index_dir, cold_dir):
+                d.mkdir(parents=True)
+            (repo / ".locks").mkdir(parents=True)
+            (repo / ".cognirelay" / "segment-history").mkdir(parents=True, exist_ok=True)
+
+            payload_content = b"# Another journal entry\n"
+            cold_payload = cold_dir / f"{seg_id}.md.gz"
+            cold_payload.write_bytes(gzip.compress(payload_content))
+
+            cold_rel = str(cold_payload.relative_to(repo))
+            stub_data = {
+                "schema_type": "segment_history_stub",
+                "schema_version": "1.0",
+                "family": family,
+                "segment_id": seg_id,
+                "payload_path": cold_rel,
+                "cold_stored_at": "2026-03-20T12:00:00+00:00",
+                "source_path": "journal/2026/2026-03-19.md",
+            }
+            stub_path = index_dir / f"{seg_id}.json"
+            stub_path.write_text(json.dumps(stub_data), encoding="utf-8")
+
+            with self.assertRaises(HTTPException) as ctx:
+                segment_history_cold_rehydrate_service(
+                    family=family,
+                    segment_id=seg_id,
+                    repo_root=repo,
+                    gm=gm,
+                    audit=_NoopAudit(),
+                )
+
+            self.assertEqual(ctx.exception.status_code, 500)
+            self.assertTrue(
+                cold_payload.exists(),
+                "Cold payload must be restored when commit returns False",
+            )
+            restored = gzip.decompress(cold_payload.read_bytes())
+            self.assertEqual(restored, payload_content)
+
+
+# ------------------------------------------------------------------ #
+#  BLOCKER 4 — refresh-plan lock scope (structural contract test)
+# ------------------------------------------------------------------ #
+
+
+class TestRefreshPlanLockScope(unittest.TestCase):
+    """Verify that refresh-plan read+write+commit all occur inside the lock."""
+
+    def test_read_and_commit_inside_lock(self) -> None:
+        """old_bytes read and commit_file must both occur inside repository_mutation_lock."""
+        from app.continuity.service import continuity_refresh_plan_service
+        from app.models import ContinuityRefreshPlanRequest
+
+        inside_lock = {"active": False}
+        read_inside: list[bool] = []
+        commit_inside: list[bool] = []
+
+        class _TrackingLock:
+            """Context manager that tracks whether we're inside the lock."""
+
+            def __enter__(self) -> "_TrackingLock":
+                inside_lock["active"] = True
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                inside_lock["active"] = False
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            gm = SimpleGitManagerStub(repo)
+            (repo / ".locks").mkdir()
+            (repo / "memory" / "continuity").mkdir(parents=True)
+
+            # Create a capsule so refresh-plan has something to scan
+            capsule = {
+                "schema_version": "1.0",
+                "subject_kind": "user",
+                "subject_id": "test-agent",
+                "updated_at": "2026-03-01T00:00:00Z",
+                "verified_at": "2026-03-01T00:00:00Z",
+                "verification_kind": "system_check",
+                "source": {"producer": "test", "update_reason": "manual", "inputs": []},
+                "continuity": {
+                    "top_priorities": ["p1"],
+                    "active_constraints": [],
+                    "active_concerns": [],
+                    "open_loops": [],
+                    "stance_summary": "Test.",
+                    "drift_signals": [],
+                    "session_trajectory": [],
+                    "trailing_notes": [],
+                    "curiosity_queue": [],
+                    "negative_decisions": [],
+                },
+                "confidence": {"continuity": 0.9, "relationship_model": 0.0},
+                "freshness": {"freshness_class": "durable"},
+                "verification_state": {
+                    "status": "system_confirmed",
+                    "last_revalidated_at": "2026-03-01T00:00:00Z",
+                    "strongest_signal": "system_check",
+                    "evidence_refs": [],
+                },
+                "capsule_health": {"status": "healthy", "reasons": [], "last_checked_at": "2026-03-01T00:00:00Z"},
+            }
+            capsule_path = repo / "memory" / "continuity" / "user-test-agent.json"
+            capsule_path.write_text(json.dumps(capsule), encoding="utf-8")
+
+            # Track calls
+            _orig_read_bytes = Path.read_bytes
+
+            def _tracking_read_bytes(self_path: Path) -> bytes:
+                if "refresh_state" in str(self_path):
+                    read_inside.append(inside_lock["active"])
+                return _orig_read_bytes(self_path)
+
+            def _tracking_commit_file(_path: Path, _msg: str) -> bool:
+                commit_inside.append(inside_lock["active"])
+                return True
+
+            gm.commit_file = _tracking_commit_file  # type: ignore[assignment]
+
+            req = ContinuityRefreshPlanRequest(
+                subject_kind="user",
+                limit=10,
+            )
+
+            from datetime import datetime, timezone
+
+            now = datetime(2026, 3, 22, tzinfo=timezone.utc)
+
+            with patch("app.continuity.service.repository_mutation_lock", return_value=_TrackingLock()):
+                with patch.object(Path, "read_bytes", _tracking_read_bytes):
+                    continuity_refresh_plan_service(
+                        repo_root=repo,
+                        gm=gm,
+                        auth=AllowAllAuthStub(),
+                        req=req,
+                        now=now,
+                        audit=_NoopAudit(),
+                    )
+
+            # The commit must have happened inside the lock
+            self.assertTrue(
+                len(commit_inside) > 0,
+                "commit_file should have been called",
+            )
+            self.assertTrue(
+                all(commit_inside),
+                "commit_file must be called inside repository_mutation_lock",
+            )
 
 
 # ------------------------------------------------------------------ #
