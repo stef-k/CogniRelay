@@ -1196,7 +1196,7 @@ def artifact_history_cold_store_service(
     try:
         lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
     except LockInfrastructureError as exc:
-        raise HTTPException(status_code=503, detail="Artifact-history cold-store lock unavailable; retry") from exc
+        raise make_lock_error("artifact_history_cold_store", family, exc, is_timeout=False) from exc
     try:
         with lock_ctx:
             payload = _load_artifact_history_payload(repo_root, source_payload_path)
@@ -1314,7 +1314,7 @@ def artifact_history_cold_rehydrate_service(
     try:
         lock_ctx = segment_history_source_lock(lock_key, lock_dir=lock_dir)
     except LockInfrastructureError as exc:
-        raise HTTPException(status_code=503, detail="Artifact-history cold-rehydrate lock unavailable; retry") from exc
+        raise make_lock_error("artifact_history_cold_rehydrate", None, exc, is_timeout=False) from exc
     try:
         with lock_ctx:
             if hot_payload_path.exists():

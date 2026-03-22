@@ -1048,7 +1048,31 @@ def _reconcile_manifest_residue_locked(
         try:
             from app.git_locking import repository_mutation_lock
 
-            commit_paths = existing_targets + source_files
+            # Delete remaining cleanup files (e.g. hot payloads after
+            # cold-store, cold payloads after rehydrate) before the
+            # recovery commit, and include all cleanup paths in the
+            # commit so that `git add` stages their deletion atomically.
+            # This handles both cases:
+            #   - files still on disk: unlink then stage deletion
+            #   - files already deleted before crash: stage deletion
+            cleanup_abs: list[Path] = []
+            for cp_rel in manifest.get("cleanup_paths", []):
+                cp = repo_root / cp_rel
+                cleanup_abs.append(cp)
+                if cp.is_file():
+                    try:
+                        cp.unlink()
+                        _log.info(
+                            "Removed cleanup path before recovery commit: %s",
+                            cp_rel,
+                        )
+                    except OSError:
+                        _log.warning(
+                            "Could not remove cleanup path: %s",
+                            cp_rel,
+                        )
+
+            commit_paths = existing_targets + source_files + cleanup_abs
             with repository_mutation_lock(repo_root):
                 gm.commit_paths(
                     commit_paths,
@@ -1077,26 +1101,6 @@ def _reconcile_manifest_residue_locked(
                     gm,
                 )
                 reconciled_source_paths = set(source_paths_list)
-
-            # Remove cleanup_paths — files that the operation intended
-            # to delete after a successful commit (e.g. hot payloads
-            # after cold-store, cold payloads after rehydrate).  These
-            # files are not in target_paths (they're not being committed)
-            # but lingered because the crash happened before deletion.
-            for cp_rel in manifest.get("cleanup_paths", []):
-                cp = repo_root / cp_rel
-                if cp.is_file():
-                    try:
-                        cp.unlink()
-                        _log.info(
-                            "Removed cleanup path after recovery: %s",
-                            cp_rel,
-                        )
-                    except OSError:
-                        _log.warning(
-                            "Could not remove cleanup path: %s",
-                            cp_rel,
-                        )
         except Exception as exc:
             _log.error(
                 "Could not commit recovered files from crashed %s for %s (exception: %s) — preserving manifest and targets on disk for next retry",
@@ -2713,8 +2717,11 @@ def segment_history_cold_rehydrate_service(
                     },
                 )
 
-            # Capture stub state for rollback before mutations begin.
+            # Capture stub and cold-payload state for rollback before
+            # mutations begin.  cold_rollback ensures the cold payload can
+            # be restored if the git commit fails after cold deletion.
             stub_rollback = _capture_rollback_state([stub_path])
+            cold_rollback = _capture_rollback_state([cold_path])
 
             # Write crash-recovery manifest before mutations so that a
             # process crash mid-rehydrate leaves a signal for the next
@@ -2803,11 +2810,12 @@ def segment_history_cold_rehydrate_service(
                             _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
                         else:
                             stub_ok = _try_restore_rollback_state(stub_rollback)
+                            cold_ok = _try_restore_rollback_state(cold_rollback)
                             _remove_created_paths([hot_path])
                             from app.git_safety import unstage_paths as _unstage_rh_nochg
                             if gm is not None:
                                 _unstage_rh_nochg(gm, commit_paths_list)
-                            if stub_ok:
+                            if stub_ok and cold_ok:
                                 _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
                             raise HTTPException(
                                 status_code=500,
@@ -2826,6 +2834,7 @@ def segment_history_cold_rehydrate_service(
                     raise
                 except Exception as exc:
                     stub_ok = _try_restore_rollback_state(stub_rollback)
+                    cold_ok = _try_restore_rollback_state(cold_rollback)
                     _remove_created_paths([hot_path])
                     from app.git_safety import unstage_paths as _unstage_rh_exc
                     try:
@@ -2834,7 +2843,7 @@ def segment_history_cold_rehydrate_service(
                         _rh_paths = [hot_path, stub_path]
                     if gm is not None:
                         _unstage_rh_exc(gm, _rh_paths)
-                    if stub_ok:
+                    if stub_ok and cold_ok:
                         _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
                     raise HTTPException(
                         status_code=500,
@@ -2852,14 +2861,18 @@ def segment_history_cold_rehydrate_service(
             except HTTPException:
                 raise
             except Exception:
-                # Rollback: restore stub to pre-mutation state and remove
-                # the hot payload that was created.  Only remove the
-                # manifest if stub rollback succeeded — if it failed,
-                # the stub is in an unknown state and the manifest must
-                # survive so reconciliation can recover on the next
-                # access instead of leaving the segment permanently
-                # inaccessible.
+                _log.error(
+                    "Segment-history rehydrate failed for %s %s; initiating rollback",
+                    family, segment_id, exc_info=True,
+                )
+                # Rollback: restore stub and cold payload to pre-mutation
+                # state and remove the hot payload that was created.  Only
+                # remove the manifest if both rollbacks succeeded — if
+                # either failed, the manifest must survive so reconciliation
+                # can recover on the next access instead of leaving the
+                # segment permanently inaccessible.
                 stub_ok = _try_restore_rollback_state(stub_rollback)
+                cold_ok = _try_restore_rollback_state(cold_rollback)
                 _remove_created_paths([hot_path])
                 # Unstage git index to prevent phantom staged entries
                 from app.git_safety import unstage_paths as _unstage_rh
@@ -2869,12 +2882,12 @@ def segment_history_cold_rehydrate_service(
                     _rh_unstage = [hot_path, stub_path]
                 if gm is not None:
                     _unstage_rh(gm, _rh_unstage)
-                if stub_ok:
+                if stub_ok and cold_ok:
                     _remove_rehydrate_manifest(repo_root, family, expected_operation="rehydrate")
                 else:
                     _log.warning(
-                        "Preserving rehydrate manifest for %s: stub rollback failed; manifest will trigger reconciliation on next access",
-                        family,
+                        "Preserving rehydrate manifest for %s: rollback incomplete (stub=%s, cold=%s); manifest will trigger reconciliation on next access",
+                        family, stub_ok, cold_ok,
                     )
                 raise
     except SegmentHistoryLockTimeout as exc:

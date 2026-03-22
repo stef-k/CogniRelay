@@ -2042,20 +2042,21 @@ def continuity_refresh_plan_service(
     refresh_path = safe_path(repo_root, refresh_rel)
     payload = _refresh_state_payload(now, candidates)
     canonical = canonical_json(payload)
-    old_bytes = refresh_path.read_bytes() if refresh_path.exists() else None
-    latest_commit = gm.latest_commit()
     new_bytes = canonical.encode("utf-8")
-    if old_bytes != new_bytes:
-        try:
-            write_text_file(refresh_path, canonical)
-            with repository_mutation_lock(repo_root):
+    latest_commit: str
+    with repository_mutation_lock(repo_root):
+        old_bytes = refresh_path.read_bytes() if refresh_path.exists() else None
+        latest_commit = gm.latest_commit()
+        if old_bytes != new_bytes:
+            try:
+                write_text_file(refresh_path, canonical)
                 committed = gm.commit_file(refresh_path, "continuity: refresh plan")
                 if not committed:
                     raise RuntimeError("git commit produced no changes")
                 latest_commit = gm.latest_commit()
-        except Exception as exc:
-            unstage_paths(gm, [refresh_path])
-            raise _restore_failed_refresh_state(refresh_path, old_bytes, exc) from exc
+            except Exception as exc:
+                unstage_paths(gm, [refresh_path])
+                raise _restore_failed_refresh_state(refresh_path, old_bytes, exc) from exc
 
     audit(
         auth,
@@ -2796,6 +2797,7 @@ def continuity_cold_store_service(
         "durable": True,
         "latest_commit": gm.latest_commit(),
         "warnings": [],
+        "recovery_warnings": [],
     }
 
 
@@ -2926,6 +2928,7 @@ def continuity_cold_rehydrate_service(
         "durable": True,
         "latest_commit": gm.latest_commit(),
         "warnings": [],
+        "recovery_warnings": [],
     }
 
 
