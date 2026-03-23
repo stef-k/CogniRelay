@@ -10,6 +10,19 @@ The core design principle is simple:
 
 This system should be read as a bounded continuity and orientation substrate. It aims to preserve enough state for useful continuation and recovery, while making degradation, fallback, and authority boundaries explicit rather than pretending persistence is lossless.
 
+## Default Deployment Topology
+
+The intended default deployment is one owner-agent per CogniRelay instance.
+
+- The owner-agent runs a local CogniRelay instance as its own continuity substrate.
+- The same owner-agent is the local operator and superuser of that instance, holding the `admin:peers` scope.
+- Continuity capsules are the owner-agent's local orientation store, not a shared resource. Capsule access is namespace-gated, so any token with read access to the `memory` namespace can see all capsules on the instance.
+- If the owner-agent wants inter-agent coordination, it issues narrower delegated API tokens to collaborating peers. The governance policy provides a `collaboration_peer` template as a baseline for these tokens.
+- Collaborator agents interact through the coordination surfaces (handoffs, shared coordination artifacts, messaging), not by directly accessing the owner's continuity capsules.
+- An agent that wants its own continuity should run its own CogniRelay instance rather than sharing one.
+
+The system should not be read as a peer-equal shared-instance platform. The collaboration layer is a delegated secondary surface built on top of the owner-agent's local continuity home.
+
 ## Architecture
 
 CogniRelay combines a small number of building blocks:
@@ -110,7 +123,7 @@ There are two distinct surfaces:
 - Agent-facing collaboration surface: memory, retrieval, peers, tasks, patches, messaging, replication
 - Host-local authority surface: trust transitions, token/key authority actions, backups, restore drills, and ops runner control
 
-Host-local ops endpoints are intended for loopback or other local trust boundaries, not WAN peer access.
+Host-local ops endpoints are intended for loopback or other local trust boundaries, not WAN peer access. In the default model, host-local authority actions are performed by the owner-agent in its operator role. The `/v1/ops/*` endpoints enforce dual-layer access control (both `admin:peers` scope and IP-based locality); trust, token, and signing-key lifecycle endpoints require `admin:peers` scope but do not enforce IP locality. Collaborator peers should not have access to either surface.
 
 ## Repository Shape
 
@@ -222,6 +235,9 @@ For the complete MCP integration notes, including what is and is not mirrored th
 ### Peer and token guidance
 
 - Prefer narrow peer scopes and namespace restrictions
+- The owner-agent holds `admin:peers` and full namespace access in the default model; collaborator peers receive narrower delegated scopes
+- Do not grant `admin:peers` to collaborator peers — it belongs to the owner/operator role and acts as a superuser bypass for both scope and namespace checks
+- Use the `collaboration_peer` governance template as a baseline for collaborator tokens
 - For collaboration peers, a typical split is read access to shared memory and messages, with write access limited to `messages`
 - Prefer API-driven token lifecycle operations over manual file edits so audit state stays consistent
 - Keep trust transitions explicit through `POST /v1/peers/{peer_id}/trust`

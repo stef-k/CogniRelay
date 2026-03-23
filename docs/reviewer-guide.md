@@ -14,6 +14,8 @@ Its main job is not to be a generic file server or a generic task app. Its main 
 - recover usefully when continuity artifacts or derived indexes are stale, missing, or damaged
 - coordinate with other agents through bounded, auditable artifacts instead of implicit shared state
 
+The default deployment model is one owner-agent per CogniRelay instance. That owner-agent is also the local operator and superuser of its instance, holding the `admin:peers` scope. Continuity capsules are the owner-agent's local continuity substrate. If that owner-agent needs to coordinate with other agents, it issues narrower delegated API tokens to collaborating peers. Collaboration happens through the coordination surfaces (handoffs, shared artifacts, reconciliation records), not by treating continuity as shared common state. An agent that wants its own continuity should run its own instance.
+
 The system is built around one simple operational idea:
 
 **git is the durable store; the API is the machine interface**
@@ -172,6 +174,8 @@ All three primitives follow the same principle: coordination artifacts are evide
 
 ## Operator and Host-Local Boundary
 
+In the default deployment model, the owner-agent and the local operator are the same principal. The owner-agent holds the `admin:peers` scope and acts as superuser for its own instance. Collaborator agents, if any, are external peers with narrower delegated tokens that do not include `admin:peers`.
+
 CogniRelay exposes two distinct operational surfaces:
 
 ### Agent-facing collaboration surface
@@ -185,7 +189,7 @@ This surface has two enforcement tiers:
 - **IP-enforced local-only**: ops runner endpoints under `/v1/ops/*` enforce an IP-based local-client check in addition to `admin:peers` scope. These are unreachable from WAN peers even if the scope is present.
 - **Scope-restricted authority**: trust transitions (`/v1/peers/{peer_id}/trust`), token and signing-key lifecycle (`/v1/security/*`), backup creation and restore drills require `admin:peers` scope but do not enforce IP-based locality. They are intended for local use but rely on scope restriction rather than transport-level enforcement.
 
-Both tiers carry system-wide impact — revoking a token, rotating a key, or running a retention job affects every agent using the instance. Operators should keep `admin:peers` tokens off WAN-accessible peers and, if automating authority actions, run them through a local scheduler (`systemd`, `cron`) invoked through a local boundary.
+Both tiers carry system-wide impact — revoking a token, rotating a key, or running a retention job affects every agent using the instance. In the default model, `admin:peers` belongs exclusively to the owner-agent/operator and should never be granted to collaborator peers. If automating authority actions, run them through a local scheduler (`systemd`, `cron`) invoked through a local boundary.
 
 The boundary matters for reviewers because it separates what an agent can do to collaborate from what an operator can do to maintain the system. Agents do not have authority over token lifecycle or retention policy unless the operator explicitly grants it.
 
@@ -276,7 +280,7 @@ The following are known boundaries of the current system, not unresolved bugs:
 - **Stronger reconciliation/agreement semantics deferred**: Phase 5C ([#38](https://github.com/stef-k/CogniRelay/issues/38)) implements a bounded first slice — explicit reconciliation records with `advisory_only`, `conflicted`, and `rejected` outcomes. Stronger agreement semantics that would mutate shared artifacts or local continuity are explicitly deferred until the first slice proves sound.
 - **Compaction is planning-only**: the compaction service classifies candidates and emits structured reports but does not generate summaries or execute deletions. Agents decide what to do with compaction plans. This is an intentional authority boundary.
 - **No external database or search service**: search uses SQLite FTS5 with JSON-index fallback. This keeps the system self-contained but means search sophistication is bounded by what FTS5 and the fallback scorer can provide.
-- **Single-instance, host-local deployment model**: CogniRelay is designed for single-host deployment. Horizontal scaling, replication, and multi-host coordination are out of scope.
+- **Single-instance, one-owner-agent deployment model**: Each CogniRelay instance is intended for a single owner-agent that also acts as the local operator. Agents wanting their own continuity run their own instance. Horizontal scaling, replication, and multi-host coordination are out of scope.
 - **No automatic state convergence across agents**: coordination artifacts are evidence and advice, not automatic local truth. The system does not converge agents toward shared state.
 
 ## What Reviewers Should Pressure-Test

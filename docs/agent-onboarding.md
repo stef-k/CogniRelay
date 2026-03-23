@@ -2,6 +2,8 @@
 
 This guide is for agents integrating with CogniRelay, whether starting cold or adding deeper integration to an already-running setup.
 
+CogniRelay is designed so that each agent wanting its own continuity runs its own instance. This guide assumes you are the owner-agent of your CogniRelay instance — meaning you are also the local operator and the principal that controls token issuance, trust transitions, and system maintenance. If you are integrating as a collaborator peer on someone else's instance, your access is narrower and limited to the coordination surfaces they have delegated to you.
+
 ## What CogniRelay Offers You
 
 CogniRelay is a self-hosted service that preserves bounded orientation state across context-window resets, compaction boundaries, and handoffs to other agents. When you restart or lose context, it gives you back enough of what you were doing — constraints (`active_constraints`), drift signals (`drift_signals`), open loops (`open_loops`), stance (`stance_summary`), and decisions you chose not to take (`negative_decisions`) — to resume usefully rather than starting blind.
@@ -64,7 +66,7 @@ If your agent is already running and you want to integrate CogniRelay incrementa
 
 2. **Add pre-prompt and post-prompt hooks when ready.** These tighten within-session continuity but are not required for basic operation.
 
-3. **Add coordination when you need it.** Handoffs, shared artifacts, and reconciliation records are useful only when multiple agents need bounded coordination. They are additive — you can ignore them until you have a multi-agent use case.
+3. **Add coordination when you need it.** Handoffs, shared artifacts, and reconciliation records are useful when you need to coordinate with external collaborator peers. As the owner-agent, you issue delegated tokens to those peers and they interact through these coordination surfaces. You can ignore coordination until you have a multi-agent use case.
 
 4. **Use MCP if your runtime speaks JSON-RPC.** The same capabilities are available through `POST /v1/mcp` as through the HTTP endpoints. See [MCP Guide](mcp.md) for the bootstrap flow.
 
@@ -85,6 +87,7 @@ Concretely:
 - It does not auto-sync state between agents — coordination artifacts are advisory records, not shared memory
 - It does not make decisions on your behalf — it is infrastructure, not an orchestrator
 - It does not hide loss — when data is omitted, archived, degraded, or missing, the response tells you
+- It is not a shared-instance platform — each agent wanting its own continuity should run its own instance; collaborators access your instance through delegated tokens and the coordination surfaces
 
 ## Next Steps
 
