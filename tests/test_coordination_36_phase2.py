@@ -248,7 +248,8 @@ class TestCoordination36Phase2(unittest.TestCase):
                     )
 
             self.assertEqual(cm.exception.status_code, 500)
-            self.assertEqual(cm.exception.detail, "Failed to commit handoff consume update")
+            self.assertTrue(cm.exception.detail.startswith("Failed to commit handoff consume update:"))
+            self.assertIn("simulated", cm.exception.detail)
             self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_existing_handoffs_remain_readable_and_consumable_after_trust_demotion(self) -> None:

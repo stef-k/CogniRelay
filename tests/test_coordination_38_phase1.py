@@ -723,7 +723,8 @@ class TestCoordination38Phase1(unittest.TestCase):
                     coordination_reconciliation_open(req=self._open_request(), auth=_AuthStub(peer_id="peer-alpha"))
 
             self.assertEqual(ctx.exception.status_code, 500)
-            self.assertEqual(ctx.exception.detail, "Failed to commit reconciliation artifact")
+            self.assertTrue(ctx.exception.detail.startswith("Failed to commit reconciliation artifact:"))
+            self.assertIn("simulated", ctx.exception.detail)
             recon_dir = repo_root / "memory" / "coordination" / "reconciliations"
             self.assertEqual(sorted(recon_dir.glob("*.json")), [])
 
