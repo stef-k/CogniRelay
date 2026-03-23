@@ -33,7 +33,13 @@ class AuthContext:
             )
 
     def _require_path_mode(self, relative_path: str, mode: str) -> None:
-        """Require read or write access for a repository-relative path."""
+        """Require read or write access for a repository-relative path.
+
+        Access is granted when the normalized path exactly matches an allowed
+        namespace or falls under one as a sub-directory (prefix + '/' boundary).
+        Paths are normalized via posixpath.normpath to collapse '..' and '//'
+        before comparison, preventing traversal-based namespace escapes.
+        """
         normalized = posixpath.normpath(relative_path) if relative_path else ""
         if not normalized or normalized == "." or normalized.startswith("/") or normalized.startswith(".."):
             raise HTTPException(
