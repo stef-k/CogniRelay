@@ -23,7 +23,7 @@ from app.lifecycle_warnings import make_error_detail, make_warning
 from app.storage import build_cold_gzip_bytes
 from app.git_locking import repository_mutation_lock
 from app.git_manager import GitManager
-from app.git_safety import try_commit_paths, unstage_paths
+from app.git_safety import try_commit_paths, try_unstage_paths
 from app.models import (
     ContinuityArchiveRequest,
     ContinuityColdRehydrateRequest,
@@ -522,7 +522,7 @@ def _persist_active_capsule(
         except Exception as exc:
             _logger.error("Continuity capsule persist failed: %s", exc, exc_info=True)
             restore_error: Exception | None = None
-            unstage_paths(gm, [path])
+            try_unstage_paths(gm, [path])
             try:
                 if old_bytes is None:
                     path.unlink(missing_ok=True)
@@ -771,7 +771,7 @@ def _persist_fallback_snapshot(
                 raise RuntimeError("git commit produced no changes")
     except Exception as exc:
         if path is not None:
-            unstage_paths(gm, [path])
+            try_unstage_paths(gm, [path])
             return fallback_rel, "failed", _restore_failed_fallback_snapshot(path, old_bytes, exc)
         return fallback_rel, "failed", f"Failed to persist continuity fallback snapshot: {exc}"
     return fallback_rel, "committed", None
@@ -1874,7 +1874,7 @@ def continuity_delete_service(
                 if not committed:
                     raise RuntimeError("Continuity delete commit produced no changes")
             except Exception as exc:
-                unstage_paths(gm, paths_to_stage)
+                try_unstage_paths(gm, paths_to_stage)
                 restore_errors: list[str] = []
                 for path, data in original_bytes.items():
                     try:
@@ -2062,7 +2062,7 @@ def continuity_refresh_plan_service(
                     raise RuntimeError("git commit produced no changes")
                 latest_commit = gm.latest_commit()
             except Exception as exc:
-                unstage_paths(gm, [refresh_path])
+                try_unstage_paths(gm, [refresh_path])
                 raise _restore_failed_refresh_state(refresh_path, old_bytes, exc) from exc
 
     audit(
@@ -2192,7 +2192,7 @@ def continuity_retention_plan_service(
                     raise RuntimeError("git commit produced no changes")
                 latest_commit = gm.latest_commit()
             except Exception as exc:
-                unstage_paths(gm, [retention_path])
+                try_unstage_paths(gm, [retention_path])
                 raise _restore_failed_retention_state(retention_path, old_bytes, exc) from exc
 
     audit(
@@ -2608,7 +2608,7 @@ def continuity_archive_service(
                 )
             except Exception as exc:
                 _logger.error("Continuity archive commit failed: %s", exc, exc_info=True)
-                unstage_paths(gm, [archive_path, active_path])
+                try_unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
@@ -2631,7 +2631,7 @@ def continuity_archive_service(
                 ) from exc
             if not committed:
                 _logger.error("Continuity archive commit produced no changes")
-                unstage_paths(gm, [archive_path, active_path])
+                try_unstage_paths(gm, [archive_path, active_path])
                 try:
                     _restore_failed_archive(active_path, archive_path, active_bytes)
                 except Exception as restore_exc:
@@ -2840,7 +2840,7 @@ def continuity_cold_store_service(
         except HTTPException:
             raise
         except Exception as exc:
-            unstage_paths(gm, [cold_payload_file, cold_stub_file, archive_path])
+            try_unstage_paths(gm, [cold_payload_file, cold_stub_file, archive_path])
             cleanup_errors = _restore_failed_cold_store(
                 archive_path=archive_path,
                 archive_bytes=source_bytes,
@@ -3024,7 +3024,7 @@ def continuity_cold_rehydrate_service(
                 if not committed:
                     raise RuntimeError("Continuity cold rehydrate commit produced no changes")
         except Exception as exc:
-            unstage_paths(gm, [archive_path, cold_payload_file, cold_stub_file])
+            try_unstage_paths(gm, [archive_path, cold_payload_file, cold_stub_file])
             rollback_errors: list[str] = []
             try:
                 archive_path.unlink(missing_ok=True)

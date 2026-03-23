@@ -1646,7 +1646,7 @@ def segment_history_maintenance_service(
                                 tp,
                             )
                 # Unstage git index to prevent phantom staged entries
-                from app.git_safety import unstage_paths as _unstage_maint
+                from app.git_safety import try_unstage_paths as _unstage_maint
                 _maint_unstage = all_created + rolled_sources
                 if gm is not None and _maint_unstage:
                     _unstage_maint(gm, _maint_unstage)
@@ -2198,7 +2198,7 @@ def segment_history_cold_store_service(
                                 # Commit produced no changes — full rollback
                                 stub_ok = _try_restore_rollback_state(stub_rollback)
                                 hot_ok = _try_restore_rollback_state(hot_rollback)
-                                from app.git_safety import unstage_paths as _unstage_cs_nochg
+                                from app.git_safety import try_unstage_paths as _unstage_cs_nochg
                                 if gm is not None and commit_paths:
                                     _unstage_cs_nochg(gm, commit_paths)
                                 if stub_ok and hot_ok:
@@ -2223,7 +2223,7 @@ def segment_history_cold_store_service(
                         stub_ok = _try_restore_rollback_state(stub_rollback)
                         hot_ok = _try_restore_rollback_state(hot_rollback)
                         # Unstage git index to prevent phantom staged entries
-                        from app.git_safety import unstage_paths as _unstage_cs_commit
+                        from app.git_safety import try_unstage_paths as _unstage_cs_commit
                         if gm is not None and commit_paths:
                             _unstage_cs_commit(gm, commit_paths)
                         if stub_ok and hot_ok:
@@ -2251,7 +2251,7 @@ def segment_history_cold_store_service(
                 stub_ok = _try_restore_rollback_state(stub_rollback)
                 hot_ok = _try_restore_rollback_state(hot_rollback)
                 # Unstage git index to prevent phantom staged entries
-                from app.git_safety import unstage_paths as _unstage_cs
+                from app.git_safety import try_unstage_paths as _unstage_cs
                 if gm is not None and commit_paths:
                     _unstage_cs(gm, commit_paths)
                 if stub_ok and hot_ok:
@@ -2812,7 +2812,7 @@ def segment_history_cold_rehydrate_service(
                             stub_ok = _try_restore_rollback_state(stub_rollback)
                             cold_ok = _try_restore_rollback_state(cold_rollback)
                             _remove_created_paths([hot_path])
-                            from app.git_safety import unstage_paths as _unstage_rh_nochg
+                            from app.git_safety import try_unstage_paths as _unstage_rh_nochg
                             if gm is not None:
                                 _unstage_rh_nochg(gm, commit_paths_list)
                             if stub_ok and cold_ok:
@@ -2836,7 +2836,7 @@ def segment_history_cold_rehydrate_service(
                     stub_ok = _try_restore_rollback_state(stub_rollback)
                     cold_ok = _try_restore_rollback_state(cold_rollback)
                     _remove_created_paths([hot_path])
-                    from app.git_safety import unstage_paths as _unstage_rh_exc
+                    from app.git_safety import try_unstage_paths as _unstage_rh_exc
                     try:
                         _rh_paths = commit_paths_list
                     except NameError:
@@ -2875,7 +2875,7 @@ def segment_history_cold_rehydrate_service(
                 cold_ok = _try_restore_rollback_state(cold_rollback)
                 _remove_created_paths([hot_path])
                 # Unstage git index to prevent phantom staged entries
-                from app.git_safety import unstage_paths as _unstage_rh
+                from app.git_safety import try_unstage_paths as _unstage_rh
                 try:
                     _rh_unstage = commit_paths_list  # noqa: F841
                 except NameError:

@@ -33,32 +33,41 @@ class GitCommitter(Protocol):
 
 
 def unstage_paths(gm: GitCommitter, paths: list[Path]) -> None:
-    """Best-effort unstage paths from the git index after a failed commit."""
+    """Unstage paths from the git index after a failed commit.
+
+    Raises on failure so callers can include the error in structured
+    details.  Use :func:`try_unstage_paths` when the unstage is
+    best-effort and the rollback chain must continue regardless.
+    """
+    resolved_root = gm.repo_root.resolve()
+    rels: list[str] = []
+    for path in paths:
+        try:
+            rels.append(str(path.resolve().relative_to(resolved_root)))
+        except ValueError:
+            _log.warning("Skipping path outside repository root during unstage: %s", path)
+            continue
+    if not rels:
+        return
+    subprocess.run(
+        ["git", "reset", "HEAD", "--", *rels],
+        cwd=gm.repo_root,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
+def try_unstage_paths(gm: GitCommitter, paths: list[Path]) -> None:
+    """Best-effort unstage that logs and swallows failures.
+
+    Use this in rollback chains where subsequent cleanup (file
+    restoration, etc.) must run even if unstaging fails.
+    """
     try:
-        resolved_root = gm.repo_root.resolve()
-        rels: list[str] = []
-        for path in paths:
-            try:
-                rels.append(str(path.resolve().relative_to(resolved_root)))
-            except ValueError:
-                _log.warning("Skipping path outside repository root during unstage: %s", path)
-                continue
-        if not rels:
-            return
-        subprocess.run(
-            ["git", "reset", "HEAD", "--", *rels],
-            cwd=gm.repo_root,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
+        unstage_paths(gm, paths)
     except Exception:
         _log.exception("Failed to unstage paths after rollback")
-
-
-def _unstage(gm: GitCommitter, paths: list[Path]) -> None:
-    """Backward-compatible alias for tests and existing internal callers."""
-    unstage_paths(gm, paths)
 
 
 def _restore_files(rollback_plan: list[tuple[Path, bytes | None]]) -> None:
@@ -92,7 +101,7 @@ def safe_commit_new_file(
             return gm.commit_file(path, commit_message)
         except Exception as exc:
             _log.error("safe_commit_new_file failed: %s", exc, exc_info=True)
-            _unstage(gm, [path])
+            try_unstage_paths(gm, [path])
             _restore_files([(path, None)])
             raise HTTPException(status_code=500, detail=error_detail) from exc
 
@@ -120,7 +129,7 @@ def safe_commit_updated_file(
             return gm.commit_file(path, commit_message)
         except Exception as exc:
             _log.error("safe_commit_updated_file failed: %s", exc, exc_info=True)
-            _unstage(gm, [path])
+            try_unstage_paths(gm, [path])
             _restore_files([(path, old_bytes)])
             raise HTTPException(status_code=500, detail=error_detail) from exc
 
@@ -146,7 +155,7 @@ def safe_commit_paths(
             return gm.commit_paths(paths, commit_message)
         except Exception as exc:
             _log.error("safe_commit_paths failed: %s", exc, exc_info=True)
-            _unstage(gm, paths)
+            try_unstage_paths(gm, paths)
             _restore_files(rollback_plan)
             raise HTTPException(status_code=500, detail=error_detail) from exc
 
@@ -166,7 +175,7 @@ def try_commit_file(
         try:
             return gm.commit_file(path, commit_message)
         except Exception:
-            _unstage(gm, [path])
+            try_unstage_paths(gm, [path])
             _log.exception("Git commit failed (non-fatal) for %s", path)
             return False
 
@@ -186,6 +195,6 @@ def try_commit_paths(
         try:
             return gm.commit_paths(paths, commit_message)
         except Exception:
-            _unstage(gm, paths)
+            try_unstage_paths(gm, paths)
             _log.exception("Git commit failed (non-fatal) for %s path(s)", len(paths))
             return False

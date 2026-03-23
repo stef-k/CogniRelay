@@ -139,7 +139,7 @@ class TestRepositoryMutationLocking(unittest.TestCase):
         release_unstage = threading.Event()
         entered_b_commit = threading.Event()
         real_run = subprocess.run
-        real_unstage = git_safety._unstage
+        real_unstage = git_safety.try_unstage_paths
 
         def controlled_run(*args, **kwargs):
             cmd = args[0]
@@ -162,7 +162,7 @@ class TestRepositoryMutationLocking(unittest.TestCase):
             return real_unstage(gm, paths)
 
         with patch("app.git_manager.subprocess.run", side_effect=controlled_run), patch(
-            "app.git_safety._unstage",
+            "app.git_safety.try_unstage_paths",
             side_effect=controlled_unstage,
         ):
             thread_a, _result_a, error_a = self._run_thread(
