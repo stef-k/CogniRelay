@@ -16,9 +16,9 @@ The intended default deployment is one owner-agent per CogniRelay instance.
 
 - The owner-agent runs a local CogniRelay instance as its own continuity substrate.
 - The same owner-agent is the local operator and superuser of that instance, holding the `admin:peers` scope.
-- Continuity capsules are the owner-agent's local orientation store, not a shared resource. Capsule access is namespace-gated, so any token with read access to the `memory` namespace can see all capsules on the instance.
-- If the owner-agent wants inter-agent coordination, it issues narrower delegated API tokens to collaborating peers. The governance policy provides a `collaboration_peer` template as a baseline for these tokens.
-- Collaborator agents interact through the coordination surfaces (handoffs, shared coordination artifacts, messaging), not by directly accessing the owner's continuity capsules.
+- Continuity capsules are the owner-agent's local orientation store, not a shared resource. Capsule access is namespace-gated at the top-level directory (`memory`), so any token with read access to the `memory` namespace can see all capsules on the instance. There is no sub-directory isolation within a namespace — this is why the one-owner-per-instance model matters.
+- If the owner-agent wants inter-agent coordination, it issues narrower delegated API tokens to collaborating peers. The governance policy provides a `collaboration_peer` template as a baseline for these tokens. A separate `replication_peer` template exists for instance-to-instance replication and carries `admin:peers` scope because replication requires full read access; operators should treat replication tokens with the same care as the owner token.
+- The intended usage convention is that collaborator agents interact through the coordination surfaces (handoffs, shared coordination artifacts, messaging) rather than directly reading the owner's continuity capsules. This convention is not enforced at the sub-namespace level — the `collaboration_peer` template grants `memory` namespace read access, which technically includes continuity data. Operators who want stricter isolation should issue tokens with more restricted read namespaces.
 - An agent that wants its own continuity should run its own CogniRelay instance rather than sharing one.
 
 The system should not be read as a peer-equal shared-instance platform. The collaboration layer is a delegated secondary surface built on top of the owner-agent's local continuity home.
@@ -236,8 +236,8 @@ For the complete MCP integration notes, including what is and is not mirrored th
 
 - Prefer narrow peer scopes and namespace restrictions
 - The owner-agent holds `admin:peers` and full namespace access in the default model; collaborator peers receive narrower delegated scopes
-- Do not grant `admin:peers` to collaborator peers — it belongs to the owner/operator role and acts as a superuser bypass for both scope and namespace checks
-- Use the `collaboration_peer` governance template as a baseline for collaborator tokens
+- Do not grant `admin:peers` to collaborator peers — it belongs to the owner/operator role and acts as a superuser bypass for both scope and namespace checks. The `replication_peer` template is the exception: it carries `admin:peers` because instance-to-instance replication requires full read access, and should be treated with the same care as the owner token
+- Use the `collaboration_peer` governance template as a baseline for collaborator tokens; note that it grants `memory` namespace read access, which includes continuity data — operators who need stricter capsule isolation should narrow the read namespaces
 - For collaboration peers, a typical split is read access to shared memory and messages, with write access limited to `messages`
 - Prefer API-driven token lifecycle operations over manual file edits so audit state stays consistent
 - Keep trust transitions explicit through `POST /v1/peers/{peer_id}/trust`

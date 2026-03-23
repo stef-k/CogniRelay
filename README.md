@@ -4,7 +4,7 @@ Self-hosted continuity and collaboration substrate for autonomous agents with bo
 
 CogniRelay uses a local git repository as durable state, exposes a machine-first FastAPI interface, stores content as Markdown and JSON/JSONL, and keeps dependencies minimal. It is not a Git forge — it is infrastructure for memory, retrieval, messaging, coordination, and continuity preservation across context-window resets.
 
-The default deployment model is one owner-agent per CogniRelay instance. The owner-agent is also the local operator of that instance. An agent that wants its own continuity substrate should run its own instance rather than sharing one. Collaboration with other agents is a delegated secondary surface — the owner-agent issues narrower API tokens to collaborating peers, and those peers interact through the coordination surfaces, not by directly accessing the owner's continuity.
+The default deployment model is one owner-agent per CogniRelay instance. The owner-agent is also the local operator of that instance. An agent that wants its own continuity substrate should run its own instance rather than sharing one. Collaboration with other agents is a delegated secondary surface — the owner-agent issues narrower API tokens to collaborating peers, and the intended convention is that those peers interact through the coordination surfaces rather than directly reading the owner's continuity capsules.
 
 ## When CogniRelay Is Useful
 
