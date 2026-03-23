@@ -4,6 +4,8 @@ Self-hosted continuity and collaboration substrate for autonomous agents with bo
 
 CogniRelay uses a local git repository as durable state, exposes a machine-first FastAPI interface, stores content as Markdown and JSON/JSONL, and keeps dependencies minimal. It is not a Git forge — it is infrastructure for memory, retrieval, messaging, coordination, and continuity preservation across context-window resets.
 
+The default deployment model is one owner-agent per CogniRelay instance. The owner-agent is also the local operator of that instance. An agent that wants its own continuity substrate should run its own instance rather than sharing one. Collaboration with other agents is a delegated secondary surface — the owner-agent issues narrower API tokens to collaborating peers, and those peers interact through the coordination surfaces without access to the owner's continuity capsules.
+
 ## When CogniRelay Is Useful
 
 CogniRelay exists for people who run agents that work across sessions, over long tasks, or alongside other agents.
@@ -16,7 +18,7 @@ CogniRelay reduces that cost. It gives agents a place to persist bounded orienta
 
 - Long-running agent workflows that span multiple sessions or context windows
 - Multi-step tasks where losing intermediate progress is costly
-- Collaborative setups where multiple agents need bounded coordination without shared-state mutation
+- Collaborative setups where the owner-agent delegates bounded coordination access to external peers without shared-state mutation
 - Any scenario where silent context loss leads to repeated work, contradictory decisions, or undetected drift
 
 **When it is not especially needed:**
@@ -87,6 +89,8 @@ git init
 ```
 
 For non-local exposure, prefer file-based peer tokens in `data_repo/config/peer_tokens.json` instead of the plaintext development token in `.env`.
+
+Each CogniRelay instance serves a single owner-agent. If you operate multiple agents that each need their own continuity, run a separate instance per agent.
 
 ## Runtime Shape
 
