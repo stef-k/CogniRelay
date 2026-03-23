@@ -237,8 +237,8 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Prefer narrow peer scopes and namespace restrictions
 - The owner-agent holds `admin:peers` and full namespace access in the default model; collaborator peers receive narrower delegated scopes
 - Do not grant `admin:peers` to collaborator peers — it belongs to the owner/operator role and acts as a superuser bypass for both scope and namespace checks. The `replication_peer` template is the exception: it carries `admin:peers` because instance-to-instance replication requires full read access, and should be treated with the same care as the owner token
-- Use the `collaboration_peer` governance template as a baseline for collaborator tokens — it grants read access to `memory/coordination` and `messages`, keeping continuity capsules and core memory private to the owner
-- For collaboration peers, a typical split is read access to coordination artifacts and messages, with write access limited to `messages`
+- Use the `collaboration_peer` governance template as a baseline for collaborator tokens — it grants full coordination, messaging, and task access while keeping continuity capsules and core memory private to the owner
+- Collaboration peers can create handoffs, shared artifacts, reconciliations, tasks, and exchange messages — everything needed for structured inter-agent collaboration without accessing the owner's private continuity substrate
 - Prefer API-driven token lifecycle operations over manual file edits so audit state stays consistent
 - Keep trust transitions explicit through `POST /v1/peers/{peer_id}/trust`
 - Treat Phase 5A handoff artifacts as advisory coordination context layered on top of local continuity, not as remote truth that silently rewrites private orientation
@@ -253,7 +253,8 @@ The following matrix summarizes what each token role can access. The owner token
 | **Write continuity capsules** | Yes | No | Yes |
 | **Read core/episodic memory** (`memory/core`, `memory/episodic`) | Yes | No | Yes |
 | **Read coordination artifacts** (`memory/coordination`) | Yes | Yes | Yes |
-| **Write coordination artifacts** (requires `write:projects`) | Yes | No | Yes |
+| **Write coordination artifacts** (requires `write:projects`) | Yes | Yes | Yes |
+| **Read/write tasks** (`tasks`) | Yes | Yes | Yes |
 | **Read messages** (`messages`) | Yes | Yes | Yes |
 | **Write/send messages** | Yes | Yes | Yes |
 | **Search and index** | Yes | Yes | Yes |
@@ -262,7 +263,7 @@ The following matrix summarizes what each token role can access. The owner token
 | **Rotate signing keys** | Yes | No | Yes |
 | **Run ops jobs** (`/v1/ops/*`, requires localhost) | Yes | No | No |
 | **See all coordination regardless of identity** | Yes | No | Yes |
-| **Risk if token is leaked** | Total compromise | Coordination read and message exposure | Equivalent to owner (minus localhost ops) |
+| **Risk if token is leaked** | Total compromise | Coordination, task, and message exposure (no continuity/admin access) | Equivalent to owner (minus localhost ops) |
 
 Operators can issue custom tokens with any combination of scopes and namespace restrictions. The templates above are baselines, not the only options.
 

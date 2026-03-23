@@ -209,48 +209,138 @@ class TestPathTraversalBlocked(unittest.TestCase):
 
 
 class TestCollaborationPeerIntegration(unittest.TestCase):
-    """End-to-end test using collaboration_peer template values."""
+    """End-to-end test using collaboration_peer template values.
 
-    def test_collaboration_peer_denies_continuity(self) -> None:
-        """AuthContext matching collaboration_peer template cannot read continuity."""
-        ctx = _ctx(
-            scopes={"read:files", "search", "write:messages"},
-            read_namespaces={"memory/coordination", "messages"},
-            write_namespaces={"messages"},
+    Template: scopes=[read:files, search, write:messages, write:projects],
+    read_namespaces=[memory/coordination, messages, tasks],
+    write_namespaces=[memory/coordination, messages, tasks].
+    """
+
+    _COLLAB_SCOPES = {"read:files", "search", "write:messages", "write:projects"}
+    _COLLAB_READ_NS = {"memory/coordination", "messages", "tasks"}
+    _COLLAB_WRITE_NS = {"memory/coordination", "messages", "tasks"}
+
+    def _collab_ctx(self) -> AuthContext:
+        return _ctx(
+            scopes=self._COLLAB_SCOPES,
+            read_namespaces=self._COLLAB_READ_NS,
+            write_namespaces=self._COLLAB_WRITE_NS,
         )
-        ctx.require_read_path("memory/coordination/handoffs/foo.json")
+
+    # --- Continuity privacy: denied ---
+
+    def test_denies_continuity_read(self) -> None:
+        """Collaborator cannot read continuity capsules."""
+        ctx = self._collab_ctx()
         with self.assertRaises(HTTPException):
             ctx.require_read_path("memory/continuity/task-foo.json")
 
-    def test_collaboration_peer_denies_core_memory(self) -> None:
-        """collaboration_peer cannot read core memory."""
-        ctx = _ctx(
-            scopes={"read:files", "search", "write:messages"},
-            read_namespaces={"memory/coordination", "messages"},
-            write_namespaces={"messages"},
-        )
+    def test_denies_continuity_write(self) -> None:
+        """Collaborator cannot write continuity capsules."""
+        ctx = self._collab_ctx()
+        with self.assertRaises(HTTPException):
+            ctx.require_write_path("memory/continuity/task-foo.json")
+
+    def test_denies_core_memory_read(self) -> None:
+        """Collaborator cannot read core memory."""
+        ctx = self._collab_ctx()
         with self.assertRaises(HTTPException):
             ctx.require_read_path("memory/core/identity.md")
 
-    def test_collaboration_peer_denies_episodic(self) -> None:
-        """collaboration_peer cannot read episodic logs."""
-        ctx = _ctx(
-            scopes={"read:files", "search", "write:messages"},
-            read_namespaces={"memory/coordination", "messages"},
-            write_namespaces={"messages"},
-        )
+    def test_denies_episodic_read(self) -> None:
+        """Collaborator cannot read episodic logs."""
+        ctx = self._collab_ctx()
         with self.assertRaises(HTTPException):
             ctx.require_read_path("memory/episodic/2026-03-23.jsonl")
 
-    def test_collaboration_peer_allows_messages(self) -> None:
-        """collaboration_peer can read and write messages."""
-        ctx = _ctx(
-            scopes={"read:files", "search", "write:messages"},
-            read_namespaces={"memory/coordination", "messages"},
-            write_namespaces={"messages"},
-        )
+    def test_denies_summaries_read(self) -> None:
+        """Collaborator cannot read summaries."""
+        ctx = self._collab_ctx()
+        with self.assertRaises(HTTPException):
+            ctx.require_read_path("memory/summaries/weekly.md")
+
+    # --- Admin/owner-private surfaces: denied ---
+
+    def test_denies_journal_write(self) -> None:
+        """Collaborator cannot write to owner's journal."""
+        ctx = self._collab_ctx()
+        with self.assertRaises(HTTPException):
+            ctx.require_write_path("journal/2026-03-23.md")
+
+    def test_denies_config_write(self) -> None:
+        """Collaborator cannot write to config."""
+        ctx = self._collab_ctx()
+        with self.assertRaises(HTTPException):
+            ctx.require_write_path("config/peer_tokens.json")
+
+    def test_denies_peers_write(self) -> None:
+        """Collaborator cannot write to peers registry."""
+        ctx = self._collab_ctx()
+        with self.assertRaises(HTTPException):
+            ctx.require_write_path("peers/registry.json")
+
+    # --- Coordination: full read + write ---
+
+    def test_allows_handoff_read(self) -> None:
+        """Collaborator can read handoff artifacts."""
+        ctx = self._collab_ctx()
+        ctx.require_read_path("memory/coordination/handoffs/handoff_abc123.json")
+
+    def test_allows_handoff_write(self) -> None:
+        """Collaborator can write handoff artifacts (create)."""
+        ctx = self._collab_ctx()
+        ctx.require_write_path("memory/coordination/handoffs/handoff_abc123.json")
+
+    def test_allows_shared_read(self) -> None:
+        """Collaborator can read shared coordination artifacts."""
+        ctx = self._collab_ctx()
+        ctx.require_read_path("memory/coordination/shared/shared_abc123.json")
+
+    def test_allows_shared_write(self) -> None:
+        """Collaborator can write shared coordination artifacts (create)."""
+        ctx = self._collab_ctx()
+        ctx.require_write_path("memory/coordination/shared/shared_abc123.json")
+
+    def test_allows_reconciliation_read(self) -> None:
+        """Collaborator can read reconciliation records."""
+        ctx = self._collab_ctx()
+        ctx.require_read_path("memory/coordination/reconciliations/recon_abc123.json")
+
+    def test_allows_reconciliation_write(self) -> None:
+        """Collaborator can write reconciliation records (open/resolve)."""
+        ctx = self._collab_ctx()
+        ctx.require_write_path("memory/coordination/reconciliations/recon_abc123.json")
+
+    # --- Messages: full read + write ---
+
+    def test_allows_message_read(self) -> None:
+        """Collaborator can read messages."""
+        ctx = self._collab_ctx()
         ctx.require_read_path("messages/inbox/peer-a.jsonl")
+
+    def test_allows_message_write(self) -> None:
+        """Collaborator can write messages (send)."""
+        ctx = self._collab_ctx()
         ctx.require_write_path("messages/inbox/peer-a.jsonl")
+
+    def test_allows_delivery_state_write(self) -> None:
+        """Collaborator can write delivery state (ack)."""
+        ctx = self._collab_ctx()
+        ctx.require_write_path("messages/state/delivery_index.json")
+
+    # --- Tasks: full read + write ---
+
+    def test_allows_task_read(self) -> None:
+        """Collaborator can read tasks."""
+        ctx = self._collab_ctx()
+        ctx.require_read_path("tasks/open/task_abc123.json")
+        ctx.require_read_path("tasks/done/task_abc123.json")
+
+    def test_allows_task_write(self) -> None:
+        """Collaborator can write tasks (create/update)."""
+        ctx = self._collab_ctx()
+        ctx.require_write_path("tasks/open/task_abc123.json")
+        ctx.require_write_path("tasks/done/task_abc123.json")
 
 
 class TestEdgeCasePathFormats(unittest.TestCase):
@@ -286,17 +376,36 @@ class TestEdgeCasePathFormats(unittest.TestCase):
 
 
 class TestGovernanceTemplateUpdate(unittest.TestCase):
-    """Verify the collaboration_peer governance template was updated."""
+    """Verify the collaboration_peer governance template matches intended role model."""
 
-    def test_collaboration_peer_read_namespaces(self) -> None:
-        """collaboration_peer template should use memory/coordination, not memory."""
+    def test_collaboration_peer_scopes(self) -> None:
+        """collaboration_peer has read, search, write:messages, and write:projects."""
         from app.security.service import _default_governance_policy
 
         policy = _default_governance_policy()
         collab = policy["scope_templates"]["collaboration_peer"]
-        self.assertIn("memory/coordination", collab["read_namespaces"])
-        self.assertNotIn("memory", collab["read_namespaces"])
-        self.assertIn("messages", collab["read_namespaces"])
+        scopes = set(collab["scopes"])
+        self.assertEqual(scopes, {"read:files", "search", "write:messages", "write:projects"})
+        self.assertNotIn("admin:peers", scopes)
+
+    def test_collaboration_peer_read_namespaces(self) -> None:
+        """collaboration_peer reads coordination, messages, and tasks — not continuity."""
+        from app.security.service import _default_governance_policy
+
+        policy = _default_governance_policy()
+        collab = policy["scope_templates"]["collaboration_peer"]
+        read_ns = set(collab["read_namespaces"])
+        self.assertEqual(read_ns, {"memory/coordination", "messages", "tasks"})
+        self.assertNotIn("memory", read_ns)
+
+    def test_collaboration_peer_write_namespaces(self) -> None:
+        """collaboration_peer writes coordination, messages, and tasks."""
+        from app.security.service import _default_governance_policy
+
+        policy = _default_governance_policy()
+        collab = policy["scope_templates"]["collaboration_peer"]
+        write_ns = set(collab["write_namespaces"])
+        self.assertEqual(write_ns, {"memory/coordination", "messages", "tasks"})
 
     def test_replication_peer_unchanged(self) -> None:
         """replication_peer template should remain with wildcard read access."""
