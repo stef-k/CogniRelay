@@ -218,7 +218,13 @@ class TestCollaborationPeerIntegration(unittest.TestCase):
 
     _COLLAB_SCOPES = {"read:files", "search", "write:messages", "write:projects"}
     _COLLAB_READ_NS = {"memory/coordination", "messages", "tasks"}
-    _COLLAB_WRITE_NS = {"memory/coordination", "messages", "tasks"}
+    _COLLAB_WRITE_NS = {
+        "memory/coordination/handoffs",
+        "memory/coordination/shared",
+        "memory/coordination/reconciliations",
+        "messages",
+        "tasks",
+    }
 
     def _collab_ctx(self) -> AuthContext:
         return _ctx(
@@ -258,6 +264,14 @@ class TestCollaborationPeerIntegration(unittest.TestCase):
         ctx = self._collab_ctx()
         with self.assertRaises(HTTPException):
             ctx.require_read_path("memory/summaries/weekly.md")
+
+    # --- Arbitrary coordination write: denied ---
+
+    def test_denies_arbitrary_coordination_write(self) -> None:
+        """Collaborator cannot write to arbitrary paths under memory/coordination/."""
+        ctx = self._collab_ctx()
+        with self.assertRaises(HTTPException):
+            ctx.require_write_path("memory/coordination/malicious/payload.json")
 
     # --- Admin/owner-private surfaces: denied ---
 
@@ -399,13 +413,19 @@ class TestGovernanceTemplateUpdate(unittest.TestCase):
         self.assertNotIn("memory", read_ns)
 
     def test_collaboration_peer_write_namespaces(self) -> None:
-        """collaboration_peer writes coordination, messages, and tasks."""
+        """collaboration_peer writes to specific coordination subdirs, messages, and tasks."""
         from app.security.service import _default_governance_policy
 
         policy = _default_governance_policy()
         collab = policy["scope_templates"]["collaboration_peer"]
         write_ns = set(collab["write_namespaces"])
-        self.assertEqual(write_ns, {"memory/coordination", "messages", "tasks"})
+        self.assertEqual(write_ns, {
+            "memory/coordination/handoffs",
+            "memory/coordination/shared",
+            "memory/coordination/reconciliations",
+            "messages",
+            "tasks",
+        })
 
     def test_replication_peer_unchanged(self) -> None:
         """replication_peer template should remain with wildcard read access."""

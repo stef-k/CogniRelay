@@ -67,7 +67,13 @@ def _default_governance_policy() -> dict[str, Any]:
             "collaboration_peer": {
                 "scopes": ["read:files", "search", "write:messages", "write:projects"],
                 "read_namespaces": ["memory/coordination", "messages", "tasks"],
-                "write_namespaces": ["memory/coordination", "messages", "tasks"],
+                "write_namespaces": [
+                    "memory/coordination/handoffs",
+                    "memory/coordination/shared",
+                    "memory/coordination/reconciliations",
+                    "messages",
+                    "tasks",
+                ],
             },
             "replication_peer": {
                 "scopes": ["admin:peers", "read:files", "write:messages"],
