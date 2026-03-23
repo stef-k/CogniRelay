@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -23,10 +24,25 @@ _log = logging.getLogger(__name__)
 
 RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
 
+# ---------------------------------------------------------------------------
+# In-process lock for rate-limit state mutations.
+#
+# All functions that perform read-modify-write on rate_limit_state.json
+# must hold this lock for the entire cycle.  This is correct for the
+# current single-process uvicorn deployment.  If the runtime model
+# changes to multi-process workers, replace with a cross-process
+# mechanism (e.g. fcntl.flock).
+# ---------------------------------------------------------------------------
+_rate_limit_lock = threading.Lock()
+
 
 def audit_event(
-    settings: Any, auth: Any, event: str, detail: dict[str, Any],
-    *, gm: Any = None,
+    settings: Any,
+    auth: Any,
+    event: str,
+    detail: dict[str, Any],
+    *,
+    gm: Any = None,
 ) -> None:
     """Write an audit event when audit logging is enabled.
 
@@ -43,13 +59,20 @@ def audit_event(
             audit_event(settings, auth, evt, det, gm=gm)
 
         append_audit(
-            settings.repo_root, event, auth.peer_id if auth else "anonymous", detail,
-            rollover_bytes=rollover_bytes, gm=gm, audit=_audit_cb,
+            settings.repo_root,
+            event,
+            auth.peer_id if auth else "anonymous",
+            detail,
+            rollover_bytes=rollover_bytes,
+            gm=gm,
+            audit=_audit_cb,
         )
     except (WriteTimeRolloverError, SegmentHistoryAppendError) as exc:
         _log.warning(
             "Audit append failed for event %s: [%s] %s",
-            event, getattr(exc, "code", "unknown"), str(exc),
+            event,
+            getattr(exc, "code", "unknown"),
+            str(exc),
         )
 
 
@@ -206,86 +229,89 @@ def _prune_rate_limit_state(payload: dict[str, Any], now: datetime, max_window_s
 
 def enforce_rate_limit(settings: Any, auth: Any, bucket: str) -> None:
     """Apply per-token and per-IP rate limits for a request bucket."""
-    now = datetime.now(timezone.utc)
-    token_ref, ip_ref = _auth_refs(auth)
-    payload = _load_rate_limit_state(settings.repo_root)
-    max_window = max(60, int(settings.verify_failure_window_seconds))
-    _prune_rate_limit_state(payload, now, max_window)
+    with _rate_limit_lock:
+        now = datetime.now(timezone.utc)
+        token_ref, ip_ref = _auth_refs(auth)
+        payload = _load_rate_limit_state(settings.repo_root)
+        max_window = max(60, int(settings.verify_failure_window_seconds))
+        _prune_rate_limit_state(payload, now, max_window)
 
-    events = payload.setdefault("events", [])
-    token_count = 0
-    ip_count = 0
-    cutoff = now - timedelta(seconds=60)
-    for row in events:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("bucket") or "") != bucket:
-            continue
-        at = parse_iso(row.get("at"))
-        if at is None or at < cutoff:
-            continue
-        if str(row.get("token_ref") or "") == token_ref:
-            token_count += 1
-        if str(row.get("ip_ref") or "") == ip_ref:
-            ip_count += 1
+        events = payload.setdefault("events", [])
+        token_count = 0
+        ip_count = 0
+        cutoff = now - timedelta(seconds=60)
+        for row in events:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("bucket") or "") != bucket:
+                continue
+            at = parse_iso(row.get("at"))
+            if at is None or at < cutoff:
+                continue
+            if str(row.get("token_ref") or "") == token_ref:
+                token_count += 1
+            if str(row.get("ip_ref") or "") == ip_ref:
+                ip_count += 1
 
-    if token_count >= int(settings.token_rate_limit_per_minute):
-        raise HTTPException(status_code=429, detail=f"Token rate limit exceeded for bucket {bucket}")
-    if ip_count >= int(settings.ip_rate_limit_per_minute):
-        raise HTTPException(status_code=429, detail=f"IP rate limit exceeded for bucket {bucket}")
+        if token_count >= int(settings.token_rate_limit_per_minute):
+            raise HTTPException(status_code=429, detail=f"Token rate limit exceeded for bucket {bucket}")
+        if ip_count >= int(settings.ip_rate_limit_per_minute):
+            raise HTTPException(status_code=429, detail=f"IP rate limit exceeded for bucket {bucket}")
 
-    events.append(
-        {
-            "at": format_iso(now),
-            "bucket": bucket,
-            "token_ref": token_ref,
-            "ip_ref": ip_ref,
-            "peer_id": auth.peer_id,
-        }
-    )
-    _write_rate_limit_state(settings.repo_root, payload)
+        events.append(
+            {
+                "at": format_iso(now),
+                "bucket": bucket,
+                "token_ref": token_ref,
+                "ip_ref": ip_ref,
+                "peer_id": auth.peer_id,
+            }
+        )
+        _write_rate_limit_state(settings.repo_root, payload)
 
 
 def record_verification_failure(settings: Any, auth: Any, reason: str) -> None:
     """Record one signed-ingress verification failure for throttling purposes."""
-    now = datetime.now(timezone.utc)
-    token_ref, ip_ref = _auth_refs(auth)
-    payload = _load_rate_limit_state(settings.repo_root)
-    max_window = max(60, int(settings.verify_failure_window_seconds))
-    _prune_rate_limit_state(payload, now, max_window)
-    failures = payload.setdefault("verification_failures", [])
-    failures.append(
-        {
-            "at": format_iso(now),
-            "token_ref": token_ref,
-            "ip_ref": ip_ref,
-            "peer_id": auth.peer_id,
-            "reason": reason,
-        }
-    )
-    _write_rate_limit_state(settings.repo_root, payload)
+    with _rate_limit_lock:
+        now = datetime.now(timezone.utc)
+        token_ref, ip_ref = _auth_refs(auth)
+        payload = _load_rate_limit_state(settings.repo_root)
+        max_window = max(60, int(settings.verify_failure_window_seconds))
+        _prune_rate_limit_state(payload, now, max_window)
+        failures = payload.setdefault("verification_failures", [])
+        failures.append(
+            {
+                "at": format_iso(now),
+                "token_ref": token_ref,
+                "ip_ref": ip_ref,
+                "peer_id": auth.peer_id,
+                "reason": reason,
+            }
+        )
+        _write_rate_limit_state(settings.repo_root, payload)
 
 
 def verification_failure_count(settings: Any, auth: Any) -> int:
     """Count recent verification failures for the current caller."""
-    now = datetime.now(timezone.utc)
-    token_ref, _ = _auth_refs(auth)
-    payload = _load_rate_limit_state(settings.repo_root)
-    max_window = max(60, int(settings.verify_failure_window_seconds))
-    _prune_rate_limit_state(payload, now, max_window)
-    cutoff = now - timedelta(seconds=max_window)
-    count = 0
-    for row in payload.get("verification_failures", []):
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("token_ref") or "") != token_ref:
-            continue
-        at = parse_iso(row.get("at"))
-        if at is None or at < cutoff:
-            continue
-        count += 1
-    _write_rate_limit_state(settings.repo_root, payload)
-    return count
+    with _rate_limit_lock:
+        now = datetime.now(timezone.utc)
+        token_ref, _ = _auth_refs(auth)
+        payload = _load_rate_limit_state(settings.repo_root)
+        max_window = max(60, int(settings.verify_failure_window_seconds))
+        _prune_rate_limit_state(payload, now, max_window)
+        cutoff = now - timedelta(seconds=max_window)
+        count = 0
+        for row in payload.get("verification_failures", []):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("token_ref") or "") != token_ref:
+                continue
+            at = parse_iso(row.get("at"))
+            if at is None or at < cutoff:
+                continue
+            count += 1
+        _write_rate_limit_state(settings.repo_root, payload)
+        return count
 
 
 def run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
