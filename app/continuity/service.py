@@ -3113,7 +3113,18 @@ def build_continuity_state(
         subject_id = item["subject_id"]
         resolution = item["resolution"]
         rel = continuity_rel_path(kind, subject_id)
-        auth.require_read_path(rel)
+        try:
+            auth.require_read_path(rel)
+        except HTTPException as auth_exc:
+            if auth_exc.status_code == 403:
+                selector_label = _format_selector(kind, subject_id)
+                recovery_warnings.append(
+                    _qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
+                    + " (owner only)"
+                )
+                state["omitted_selectors"].append(selector_label)
+                continue
+            raise
         source_state = "active"
         try:
             capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
@@ -3134,7 +3145,17 @@ def build_continuity_state(
             if resilience_policy not in {"allow_fallback", "prefer_active"}:
                 raise HTTPException(status_code=400, detail="Unsupported continuity_resilience_policy")
             fallback_rel = continuity_fallback_rel_path(kind, subject_id)
-            auth.require_read_path(fallback_rel)
+            try:
+                auth.require_read_path(fallback_rel)
+            except HTTPException as fallback_auth_exc:
+                if fallback_auth_exc.status_code == 403:
+                    recovery_warnings.append(
+                        _qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
+                        + " (owner only)"
+                    )
+                    state["omitted_selectors"].append(selector_label)
+                    continue
+                raise
             try:
                 capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(kind, subject_id))
                 recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_USED, kind, subject_id, multi_mode=multi_warning_mode))

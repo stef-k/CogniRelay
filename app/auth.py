@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+import posixpath
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Set
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from .config import get_settings, sha256_token
 from .timestamps import parse_iso as _parse_iso
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,14 +36,30 @@ class AuthContext:
             )
 
     def _require_path_mode(self, relative_path: str, mode: str) -> None:
-        """Require read or write access for a repository-relative path."""
-        top = Path(relative_path).parts[0] if Path(relative_path).parts else ""
+        """Require read or write access for a repository-relative path.
+
+        Access is granted when the normalized path exactly matches an allowed
+        namespace or falls under one as a sub-directory (prefix + '/' boundary).
+        Paths are normalized via posixpath.normpath to collapse '..' and '//'
+        before comparison, preventing traversal-based namespace escapes.
+        """
+        normalized = posixpath.normpath(relative_path) if relative_path else ""
+        if not normalized or normalized == "." or normalized.startswith("/") or normalized.startswith(".."):
+            _log.warning("Namespace %s denied (invalid path): peer=%s path=%r", mode, self.peer_id, relative_path)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Invalid path for namespace check: {relative_path}",
+            )
         allowed = self.write_namespaces if mode == "write" else self.read_namespaces
-        if "*" in allowed or top in allowed or "admin:peers" in self.scopes:
+        if "*" in allowed or "admin:peers" in self.scopes:
             return
+        for ns in allowed:
+            if normalized == ns or normalized.startswith(ns + "/"):
+                return
+        _log.warning("Namespace %s denied: peer=%s path=%s allowed=%s", mode, self.peer_id, normalized, allowed)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"{mode.title()} path namespace not allowed: {top}",
+            detail=f"{mode.title()} path namespace not allowed: {normalized}",
         )
 
     def require_path(self, relative_path: str) -> None:
