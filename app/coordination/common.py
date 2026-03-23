@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from app.auth import AuthContext
 from app.git_locking import repository_mutation_lock
 from app.git_safety import unstage_paths
-from app.storage import canonical_json, write_text_file
+from app.storage import canonical_json, write_bytes_file, write_text_file
 
 _log = logging.getLogger(__name__)
 
@@ -57,21 +57,48 @@ def persist_new_artifact(
     commit_message: str,
     error_detail: str,
 ) -> str:
-    """Persist a newly created coordination artifact and delete it on commit failure."""
-    write_text_file(path, canonical_json(artifact))
+    """Persist a newly created coordination artifact and delete it on commit failure.
+
+    The write and commit happen inside repository_mutation_lock so that
+    concurrent readers never observe an uncommitted file and a lock-timeout
+    cannot leave an orphaned write on disk.
+    """
     with repository_mutation_lock(gm.repo_root):
+        try:
+            write_text_file(path, canonical_json(artifact))
+        except Exception as exc:
+            _log.error(
+                "Coordination artifact write failed for %s: %s",
+                path, exc, exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"{error_detail}: write failed: {exc}",
+            ) from exc
         try:
             committed = gm.commit_file(path, commit_message)
             if not committed:
                 raise RuntimeError("git commit produced no changes")
         except Exception as exc:
-            unstage_paths(gm, [path])
+            _log.error(
+                "Coordination artifact persist failed for %s: %s",
+                path, exc, exc_info=True,
+            )
+            errors: list[str] = []
             try:
-                if path.exists():
-                    path.unlink()
-            except Exception:
+                unstage_paths(gm, [path])
+            except Exception as unstage_exc:
+                errors.append(f"unstage failed: {unstage_exc}")
+                _log.exception("Unstage failed for %s", path)
+            try:
+                path.unlink(missing_ok=True)
+            except Exception as restore_exc:
+                errors.append(f"rollback failed: {restore_exc}")
                 _log.exception("Rollback failed for %s", path)
-            raise HTTPException(status_code=500, detail=error_detail) from exc
+            detail = f"{error_detail}: {exc}"
+            if errors:
+                detail = f"{detail}; {'; '.join(errors)}"
+            raise HTTPException(status_code=500, detail=detail) from exc
     return rel
 
 
@@ -84,23 +111,52 @@ def persist_updated_artifact(
     commit_message: str,
     error_detail: str,
 ) -> str:
-    """Persist an updated coordination artifact and restore prior bytes on failure."""
+    """Persist an updated coordination artifact and restore prior bytes on failure.
+
+    The old-bytes snapshot is captured before the lock (read-only; callers
+    hold artifact_lock which prevents concurrent writes).  The write and
+    commit happen inside repository_mutation_lock so that concurrent readers
+    never observe an uncommitted update and a lock-timeout cannot leave the
+    file in a dirty state.
+    """
     old_bytes = path.read_bytes() if path.exists() else None
-    write_text_file(path, canonical_json(artifact))
     with repository_mutation_lock(gm.repo_root):
+        try:
+            write_text_file(path, canonical_json(artifact))
+        except Exception as exc:
+            _log.error(
+                "Coordination artifact write failed for %s: %s",
+                path, exc, exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"{error_detail}: write failed: {exc}",
+            ) from exc
         try:
             committed = gm.commit_file(path, commit_message)
             if not committed:
                 raise RuntimeError("git commit produced no changes")
         except Exception as exc:
-            unstage_paths(gm, [path])
+            _log.error(
+                "Coordination artifact update persist failed for %s: %s",
+                path, exc, exc_info=True,
+            )
+            errors: list[str] = []
+            try:
+                unstage_paths(gm, [path])
+            except Exception as unstage_exc:
+                errors.append(f"unstage failed: {unstage_exc}")
+                _log.exception("Unstage failed for %s", path)
             try:
                 if old_bytes is None:
-                    if path.exists():
-                        path.unlink()
+                    path.unlink(missing_ok=True)
                 else:
-                    path.write_bytes(old_bytes)
-            except Exception:
+                    write_bytes_file(path, old_bytes)
+            except Exception as restore_exc:
+                errors.append(f"rollback failed: {restore_exc}")
                 _log.exception("Rollback failed for %s", path)
-            raise HTTPException(status_code=500, detail=error_detail) from exc
+            detail = f"{error_detail}: {exc}"
+            if errors:
+                detail = f"{detail}; {'; '.join(errors)}"
+            raise HTTPException(status_code=500, detail=detail) from exc
     return rel

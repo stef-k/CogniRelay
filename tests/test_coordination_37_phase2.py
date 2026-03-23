@@ -335,7 +335,8 @@ class TestCoordination37Phase2(unittest.TestCase):
                     )
 
             self.assertEqual(ctx.exception.status_code, 500)
-            self.assertEqual(ctx.exception.detail, "Failed to commit shared coordination update")
+            self.assertTrue(ctx.exception.detail.startswith("Failed to commit shared coordination update:"))
+            self.assertIn("simulated", ctx.exception.detail)
             self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_update_preserves_frozen_fields_and_replaces_shared_arrays_wholesale(self) -> None:

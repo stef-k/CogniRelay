@@ -591,7 +591,8 @@ class TestCoordination38Phase2(unittest.TestCase):
                     )
 
             self.assertEqual(ctx.exception.status_code, 500)
-            self.assertEqual(ctx.exception.detail, "Failed to commit reconciliation resolve")
+            self.assertTrue(ctx.exception.detail.startswith("Failed to commit reconciliation resolve:"))
+            self.assertIn("simulated", ctx.exception.detail)
             # Verify prior bytes are restored
             self.assertTrue(path.exists())
             self.assertEqual(path.read_bytes(), original_bytes)

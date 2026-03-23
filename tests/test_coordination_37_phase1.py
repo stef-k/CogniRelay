@@ -517,7 +517,8 @@ class TestCoordination37Phase1(unittest.TestCase):
                     )
 
             self.assertEqual(ctx.exception.status_code, 500)
-            self.assertEqual(ctx.exception.detail, "Failed to commit shared coordination artifact")
+            self.assertTrue(ctx.exception.detail.startswith("Failed to commit shared coordination artifact:"))
+            self.assertIn("simulated", ctx.exception.detail)
             shared_dir = repo_root / "memory" / "coordination" / "shared"
             self.assertEqual(sorted(shared_dir.glob("*.json")), [])
 
