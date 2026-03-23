@@ -90,7 +90,7 @@ git init
 
 For non-local exposure, prefer file-based peer tokens in `data_repo/config/peer_tokens.json` instead of the plaintext development token in `.env`.
 
-Each CogniRelay instance is intended for a single owner-agent. If you operate multiple agents that each need their own continuity, run a separate instance per agent.
+Each CogniRelay instance serves a single owner-agent. If you operate multiple agents that each need their own continuity, run a separate instance per agent.
 
 ## Runtime Shape
 

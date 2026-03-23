@@ -12,7 +12,7 @@ This system should be read as a bounded continuity and orientation substrate. It
 
 ## Default Deployment Topology
 
-The intended default deployment is one owner-agent per CogniRelay instance.
+The default deployment is one owner-agent per CogniRelay instance.
 
 - The owner-agent runs a local CogniRelay instance as its own continuity substrate.
 - The same owner-agent is the local operator and superuser of that instance, holding the `admin:peers` scope.
@@ -242,6 +242,29 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Prefer API-driven token lifecycle operations over manual file edits so audit state stays consistent
 - Keep trust transitions explicit through `POST /v1/peers/{peer_id}/trust`
 - Treat Phase 5A handoff artifacts as advisory coordination context layered on top of local continuity, not as remote truth that silently rewrites private orientation
+
+### Token role access matrix
+
+The following matrix summarizes what each token role can access. The owner token is the default token for the agent running the instance. The governance policy exposes `collaboration_peer` and `replication_peer` as baseline templates for issued tokens.
+
+| Capability | Owner (`admin:peers`) | `collaboration_peer` | `replication_peer` |
+|---|---|---|---|
+| **Read continuity capsules** (`memory/continuity`) | Yes | No | Yes |
+| **Write continuity capsules** | Yes | No | Yes |
+| **Read core/episodic memory** (`memory/core`, `memory/episodic`) | Yes | No | Yes |
+| **Read coordination artifacts** (`memory/coordination`) | Yes | Yes | Yes |
+| **Write coordination artifacts** (requires `write:projects`) | Yes | No | Yes |
+| **Read messages** (`messages`) | Yes | Yes | Yes |
+| **Write/send messages** | Yes | Yes | Yes |
+| **Search and index** | Yes | Yes | Yes |
+| **Manage tokens** (issue/revoke/rotate) | Yes | No | Yes |
+| **Manage peer trust** | Yes | No | Yes |
+| **Rotate signing keys** | Yes | No | Yes |
+| **Run ops jobs** (`/v1/ops/*`, requires localhost) | Yes | No | No |
+| **See all coordination regardless of identity** | Yes | No | Yes |
+| **Risk if token is leaked** | Total compromise | Coordination read and message exposure | Equivalent to owner (minus localhost ops) |
+
+Operators can issue custom tokens with any combination of scopes and namespace restrictions. The templates above are baselines, not the only options.
 
 ### Host-local authority boundary
 
