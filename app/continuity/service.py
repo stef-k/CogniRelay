@@ -3120,7 +3120,7 @@ def build_continuity_state(
                 selector_label = _format_selector(kind, subject_id)
                 recovery_warnings.append(
                     _qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
-                    + " (namespace restricted)"
+                    + " (owner only)"
                 )
                 state["omitted_selectors"].append(selector_label)
                 continue
@@ -3151,7 +3151,7 @@ def build_continuity_state(
                 if fallback_auth_exc.status_code == 403:
                     recovery_warnings.append(
                         _qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
-                        + " (namespace restricted)"
+                        + " (owner only)"
                     )
                     state["omitted_selectors"].append(selector_label)
                     continue
