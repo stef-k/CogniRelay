@@ -159,6 +159,132 @@ class TestErrorDetailContainsFullPath(unittest.TestCase):
         self.assertIn("memory/continuity/task-foo.json", cm.exception.detail)
 
 
+class TestPathTraversalBlocked(unittest.TestCase):
+    """Verify path traversal via .. cannot bypass namespace restrictions."""
+
+    def test_dotdot_escapes_subdirectory_namespace(self) -> None:
+        """memory/coordination/../../memory/continuity/secret.json must be denied."""
+        ctx = _ctx(read_namespaces={"memory/coordination"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_read_path("memory/coordination/../../memory/continuity/secret.json")
+        self.assertEqual(cm.exception.status_code, 403)
+
+    def test_dotdot_one_level_escape(self) -> None:
+        """memory/coordination/../continuity/task.json must be denied."""
+        ctx = _ctx(read_namespaces={"memory/coordination"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_read_path("memory/coordination/../continuity/task.json")
+        self.assertEqual(cm.exception.status_code, 403)
+
+    def test_dotdot_at_start_denied(self) -> None:
+        """../etc/passwd must be denied."""
+        ctx = _ctx(read_namespaces={"memory"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_read_path("../etc/passwd")
+        self.assertEqual(cm.exception.status_code, 403)
+
+    def test_double_slash_normalized(self) -> None:
+        """memory//coordination/foo.json normalizes and matches."""
+        ctx = _ctx(read_namespaces={"memory/coordination"})
+        ctx.require_read_path("memory//coordination/foo.json")
+
+    def test_trailing_slash_path_matches(self) -> None:
+        """memory/coordination/ (trailing slash) matches namespace memory/coordination."""
+        ctx = _ctx(read_namespaces={"memory/coordination"})
+        ctx.require_read_path("memory/coordination/")
+
+    def test_absolute_path_denied(self) -> None:
+        """/etc/passwd must be denied."""
+        ctx = _ctx(read_namespaces={"*"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_read_path("/etc/passwd")
+        self.assertEqual(cm.exception.status_code, 403)
+
+    def test_write_traversal_denied(self) -> None:
+        """Write path traversal must also be blocked."""
+        ctx = _ctx(write_namespaces={"messages"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_write_path("messages/../memory/continuity/foo.json")
+        self.assertEqual(cm.exception.status_code, 403)
+
+
+class TestCollaborationPeerIntegration(unittest.TestCase):
+    """End-to-end test using collaboration_peer template values."""
+
+    def test_collaboration_peer_denies_continuity(self) -> None:
+        """AuthContext matching collaboration_peer template cannot read continuity."""
+        ctx = _ctx(
+            scopes={"read:files", "search", "write:messages"},
+            read_namespaces={"memory/coordination", "messages"},
+            write_namespaces={"messages"},
+        )
+        ctx.require_read_path("memory/coordination/handoffs/foo.json")
+        with self.assertRaises(HTTPException):
+            ctx.require_read_path("memory/continuity/task-foo.json")
+
+    def test_collaboration_peer_denies_core_memory(self) -> None:
+        """collaboration_peer cannot read core memory."""
+        ctx = _ctx(
+            scopes={"read:files", "search", "write:messages"},
+            read_namespaces={"memory/coordination", "messages"},
+            write_namespaces={"messages"},
+        )
+        with self.assertRaises(HTTPException):
+            ctx.require_read_path("memory/core/identity.md")
+
+    def test_collaboration_peer_denies_episodic(self) -> None:
+        """collaboration_peer cannot read episodic logs."""
+        ctx = _ctx(
+            scopes={"read:files", "search", "write:messages"},
+            read_namespaces={"memory/coordination", "messages"},
+            write_namespaces={"messages"},
+        )
+        with self.assertRaises(HTTPException):
+            ctx.require_read_path("memory/episodic/2026-03-23.jsonl")
+
+    def test_collaboration_peer_allows_messages(self) -> None:
+        """collaboration_peer can read and write messages."""
+        ctx = _ctx(
+            scopes={"read:files", "search", "write:messages"},
+            read_namespaces={"memory/coordination", "messages"},
+            write_namespaces={"messages"},
+        )
+        ctx.require_read_path("messages/inbox/peer-a.jsonl")
+        ctx.require_write_path("messages/inbox/peer-a.jsonl")
+
+
+class TestEdgeCasePathFormats(unittest.TestCase):
+    """Edge cases for path formatting and case sensitivity."""
+
+    def test_case_sensitive_matching(self) -> None:
+        """Namespace matching must be case-sensitive."""
+        ctx = _ctx(read_namespaces={"memory/coordination"})
+        with self.assertRaises(HTTPException):
+            ctx.require_read_path("Memory/Coordination/foo.json")
+
+    def test_namespace_with_trailing_slash_silently_fails(self) -> None:
+        """Namespace entry with trailing slash should still match after normpath on path side."""
+        ctx = _ctx(read_namespaces={"memory/coordination/"})
+        # This namespace has a trailing slash, so it matches "memory/coordination//" prefix
+        # but not the normalized path "memory/coordination/handoffs/foo.json".
+        # This is a known limitation — namespace values should not have trailing slashes.
+        with self.assertRaises(HTTPException):
+            ctx.require_read_path("memory/coordination/handoffs/foo.json")
+
+    def test_backslash_path_not_matched(self) -> None:
+        """Backslash-separated paths do not match forward-slash namespaces."""
+        ctx = _ctx(read_namespaces={"memory/coordination"})
+        with self.assertRaises(HTTPException):
+            ctx.require_read_path("memory\\coordination\\file.json")
+
+    def test_write_prefix_boundary_safety(self) -> None:
+        """write_namespaces: {'messages/in'} must NOT match messages/inbox/foo.jsonl."""
+        ctx = _ctx(write_namespaces={"messages/in"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_write_path("messages/inbox/foo.jsonl")
+        self.assertEqual(cm.exception.status_code, 403)
+
+
 class TestGovernanceTemplateUpdate(unittest.TestCase):
     """Verify the collaboration_peer governance template was updated."""
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import posixpath
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Set
@@ -33,15 +34,21 @@ class AuthContext:
 
     def _require_path_mode(self, relative_path: str, mode: str) -> None:
         """Require read or write access for a repository-relative path."""
+        normalized = posixpath.normpath(relative_path) if relative_path else ""
+        if not normalized or normalized == "." or normalized.startswith("/") or normalized.startswith(".."):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Invalid path for namespace check: {relative_path}",
+            )
         allowed = self.write_namespaces if mode == "write" else self.read_namespaces
         if "*" in allowed or "admin:peers" in self.scopes:
             return
         for ns in allowed:
-            if relative_path == ns or relative_path.startswith(ns + "/"):
+            if normalized == ns or normalized.startswith(ns + "/"):
                 return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"{mode.title()} path namespace not allowed: {relative_path}",
+            detail=f"{mode.title()} path namespace not allowed: {normalized}",
         )
 
     def require_path(self, relative_path: str) -> None:
