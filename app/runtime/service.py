@@ -32,6 +32,13 @@ RATE_LIMIT_STATE_REL = "logs/rate_limit_state.json"
 # current single-process uvicorn deployment.  If the runtime model
 # changes to multi-process workers, replace with a cross-process
 # mechanism (e.g. fcntl.flock).
+#
+# Lock ordering: _rate_limit_lock must always be the innermost lock.
+# Callers that already hold segment_history_source_lock or artifact_lock
+# may acquire this lock, but the reverse is never permitted.
+#
+# Non-reentrant: none of the locked functions call each other.  Do not
+# add calls between them without switching to threading.RLock.
 # ---------------------------------------------------------------------------
 _rate_limit_lock = threading.Lock()
 
@@ -167,7 +174,8 @@ def _load_rate_limit_state(repo_root: Path) -> dict[str, Any]:
         return {"schema_version": "1.0", "events": [], "verification_failures": []}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
+        _log.warning("Corrupt or unparseable rate-limit state at %s; resetting to default", path)
         return {"schema_version": "1.0", "events": [], "verification_failures": []}
     if not isinstance(data, dict):
         return {"schema_version": "1.0", "events": [], "verification_failures": []}

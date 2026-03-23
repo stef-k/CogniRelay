@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,21 @@ def _make_settings(repo_root: Path, **overrides: Any) -> Settings:
     return Settings(**defaults)
 
 
+def _slow_load(real_load):
+    """Return a wrapper that injects a delay after loading to widen the race window.
+
+    Without the lock, the delay between load and write makes lost updates
+    near-certain under concurrent access.
+    """
+
+    def _wrapper(repo_root):
+        result = real_load(repo_root)
+        time.sleep(0.02)
+        return result
+
+    return _wrapper
+
+
 class TestConcurrentEnforceNoLostEvents(unittest.TestCase):
     """Concurrent enforce_rate_limit calls must not lose events."""
 
@@ -62,6 +78,8 @@ class TestConcurrentEnforceNoLostEvents(unittest.TestCase):
             barrier = threading.Barrier(n_threads, timeout=10)
             errors: list[Exception] = []
 
+            from app.runtime.service import _load_rate_limit_state as real_load
+
             def worker(idx: int) -> None:
                 try:
                     barrier.wait()
@@ -70,11 +88,14 @@ class TestConcurrentEnforceNoLostEvents(unittest.TestCase):
                 except Exception as exc:
                     errors.append(exc)
 
-            threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=10)
+            with patch("app.runtime.service._load_rate_limit_state", side_effect=_slow_load(real_load)):
+                threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+                for t in threads:
+                    self.assertFalse(t.is_alive(), "Thread did not complete within timeout")
 
             self.assertEqual(errors, [], f"Unexpected errors: {errors}")
             state = load_rate_limit_state(repo_root)
@@ -97,6 +118,8 @@ class TestConcurrentRecordFailureNoLostEntries(unittest.TestCase):
             barrier = threading.Barrier(n_threads, timeout=10)
             errors: list[Exception] = []
 
+            from app.runtime.service import _load_rate_limit_state as real_load
+
             def worker(idx: int) -> None:
                 try:
                     barrier.wait()
@@ -105,11 +128,14 @@ class TestConcurrentRecordFailureNoLostEntries(unittest.TestCase):
                 except Exception as exc:
                     errors.append(exc)
 
-            threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=10)
+            with patch("app.runtime.service._load_rate_limit_state", side_effect=_slow_load(real_load)):
+                threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+                for t in threads:
+                    self.assertFalse(t.is_alive(), "Thread did not complete within timeout")
 
             self.assertEqual(errors, [], f"Unexpected errors: {errors}")
             state = load_rate_limit_state(repo_root)
@@ -134,6 +160,8 @@ class TestMixedConcurrentMutationsSerialized(unittest.TestCase):
             barrier = threading.Barrier(total, timeout=10)
             errors: list[Exception] = []
 
+            from app.runtime.service import _load_rate_limit_state as real_load
+
             def enforce_worker(idx: int) -> None:
                 try:
                     barrier.wait()
@@ -150,12 +178,15 @@ class TestMixedConcurrentMutationsSerialized(unittest.TestCase):
                 except Exception as exc:
                     errors.append(exc)
 
-            threads = [threading.Thread(target=enforce_worker, args=(i,)) for i in range(n_enforce)]
-            threads += [threading.Thread(target=record_worker, args=(i,)) for i in range(n_record)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=10)
+            with patch("app.runtime.service._load_rate_limit_state", side_effect=_slow_load(real_load)):
+                threads = [threading.Thread(target=enforce_worker, args=(i,)) for i in range(n_enforce)]
+                threads += [threading.Thread(target=record_worker, args=(i,)) for i in range(n_record)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+                for t in threads:
+                    self.assertFalse(t.is_alive(), "Thread did not complete within timeout")
 
             self.assertEqual(errors, [], f"Unexpected errors: {errors}")
             state = load_rate_limit_state(repo_root)
@@ -178,14 +209,17 @@ class TestLockReleasedOn429(unittest.TestCase):
 
             # Two concurrent threads should both get 429 without deadlocking.
             barrier = threading.Barrier(2, timeout=10)
-            results: list[int] = []
+            results: list[Any] = []
 
             def worker() -> None:
                 barrier.wait()
                 try:
                     enforce_rate_limit(settings, auth, "limited_bucket")
+                    results.append("unexpected_success")
                 except HTTPException as exc:
                     results.append(exc.status_code)
+                except Exception as exc:
+                    results.append(f"unexpected: {type(exc).__name__}: {exc}")
 
             t1 = threading.Thread(target=worker)
             t2 = threading.Thread(target=worker)
@@ -193,8 +227,10 @@ class TestLockReleasedOn429(unittest.TestCase):
             t2.start()
             t1.join(timeout=5)
             t2.join(timeout=5)
+            self.assertFalse(t1.is_alive(), "Thread t1 did not complete within timeout")
+            self.assertFalse(t2.is_alive(), "Thread t2 did not complete within timeout")
 
-            self.assertEqual(sorted(results), [429, 429], "Both threads should receive 429")
+            self.assertEqual(sorted(results), [429, 429], f"Both threads should receive 429, got {results}")
             # Verify the lock is not held after the 429 exceptions.
             self.assertTrue(_rate_limit_lock.acquire(timeout=1), "Lock should be available after 429")
             _rate_limit_lock.release()
