@@ -5,7 +5,6 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Set
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -34,13 +33,15 @@ class AuthContext:
 
     def _require_path_mode(self, relative_path: str, mode: str) -> None:
         """Require read or write access for a repository-relative path."""
-        top = Path(relative_path).parts[0] if Path(relative_path).parts else ""
         allowed = self.write_namespaces if mode == "write" else self.read_namespaces
-        if "*" in allowed or top in allowed or "admin:peers" in self.scopes:
+        if "*" in allowed or "admin:peers" in self.scopes:
             return
+        for ns in allowed:
+            if relative_path == ns or relative_path.startswith(ns + "/"):
+                return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"{mode.title()} path namespace not allowed: {top}",
+            detail=f"{mode.title()} path namespace not allowed: {relative_path}",
         )
 
     def require_path(self, relative_path: str) -> None:
