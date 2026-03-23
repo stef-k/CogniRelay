@@ -184,6 +184,7 @@ Most mutating endpoints require bearer-token scopes plus namespace restrictions.
 
 Implementation notes that matter for operators and client authors:
 
+- tokens carrying `admin:peers` bypass all scope and namespace checks — see the [Reviewer Guide](reviewer-guide.md#operator-and-host-local-boundary) for the full authority model
 - split namespace controls use `read_namespaces` and `write_namespaces`
 - legacy `namespaces` is still supported as a shorthand applying to both read and write
 - signed message verification includes nonce replay protection
