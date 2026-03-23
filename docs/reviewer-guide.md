@@ -133,6 +133,16 @@ When reviewing the system, treat these as key design claims:
 
 The inter-agent model is deliberately conservative.
 
+### Access isolation model
+
+Access isolation between agents is enforced entirely by token scopes and namespace/path restrictions configured by the operator. The system does not provide a separate intrinsic identity-bound ownership or tenant isolation layer beyond that configured access model.
+
+Continuity capsules are namespace-gated, not agent-gated. Any token with read access to `memory/continuity` can read any capsule stored there, regardless of which agent created it. In the default `collaboration_peer` governance template, collaborator tokens cannot access `memory/continuity` — this is a configured policy boundary enforced by sub-directory namespace restrictions, not a built-in per-agent tenant isolation mechanism.
+
+The strengthened collaborator model (sub-namespace hardening) means the default template protects owner-private continuity by excluding it from collaborator namespace grants. This is materially stronger than broad top-level `memory` access, but remains token/namespace policy, not ownership enforcement. Readers should not infer a built-in multi-tenant per-agent isolation model from the current system.
+
+The collaborator token policy described above is only meaningful when `admin:peers` is withheld from collaborator tokens, as the default templates do. Any token carrying `admin:peers` bypasses both scope and namespace checks entirely — see the [Operator and Host-Local Boundary](#operator-and-host-local-boundary) section for details.
+
 ### What crosses the boundary
 
 Current handoff/shared coordination work allows bounded coordination-facing data to cross the peer boundary, especially:
@@ -174,7 +184,7 @@ All three primitives follow the same principle: coordination artifacts are evide
 
 ## Operator and Host-Local Boundary
 
-In the default deployment model, the owner-agent and the local operator are the same principal. The owner-agent holds the `admin:peers` scope and acts as superuser for its own instance. Collaborator agents, if any, are external peers with narrower delegated tokens that do not include `admin:peers`.
+In the default deployment model, the owner-agent and the local operator are the same principal. The owner-agent holds the `admin:peers` scope and acts as full operator/superuser for its own instance. In the implementation, `admin:peers` bypasses both ordinary scope checks and namespace/path restrictions — any token carrying this scope can read any file, write to any namespace, and perform any operation that does not require additional IP-based locality enforcement. Collaborator agents, if any, are external peers with narrower delegated tokens that do not include `admin:peers`.
 
 CogniRelay exposes two distinct operational surfaces:
 
@@ -189,7 +199,7 @@ This surface has two enforcement tiers:
 - **IP-enforced local-only**: ops runner endpoints under `/v1/ops/*` enforce an IP-based local-client check in addition to `admin:peers` scope. These are unreachable from WAN peers even if the scope is present.
 - **Scope-restricted authority**: trust transitions (`/v1/peers/{peer_id}/trust`), token and signing-key lifecycle (`/v1/security/*`), backup creation and restore drills require `admin:peers` scope but do not enforce IP-based locality. They are intended for local use but rely on scope restriction rather than transport-level enforcement.
 
-Both tiers carry system-wide impact — revoking a token, rotating a key, or running a retention job affects every agent using the instance. In the default model, `admin:peers` belongs exclusively to the owner-agent/operator and should not be granted to collaborator peers. The one exception is the `replication_peer` governance template, which carries `admin:peers` because instance-to-instance replication requires full read access — operators should treat replication tokens with the same care as the owner token. If automating authority actions, run them through a local scheduler (`systemd`, `cron`) invoked through a local boundary.
+Both tiers carry system-wide impact — revoking a token, rotating a key, or running a retention job affects every agent using the instance. In the default model, `admin:peers` belongs exclusively to the owner-agent/operator and should not be granted to collaborator peers. The one exception is the `replication_peer` governance template, which carries `admin:peers` because replication requires unrestricted read access across all namespaces. Since `admin:peers` bypasses both scope and namespace checks, a replication token also has equivalent write authority to the owner token outside of IP-enforced localhost operations — operators should treat replication tokens with the same care as the owner token. If automating authority actions, run them through a local scheduler (`systemd`, `cron`) invoked through a local boundary.
 
 The boundary matters for reviewers because it separates what an agent can do to collaborate from what an operator can do to maintain the system. Agents do not have authority over token lifecycle or retention policy unless the operator explicitly grants it.
 

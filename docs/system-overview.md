@@ -17,11 +17,13 @@ The default deployment is one owner-agent per CogniRelay instance.
 - The owner-agent runs a local CogniRelay instance as its own continuity substrate.
 - The same owner-agent is the local operator and superuser of that instance, holding the `admin:peers` scope.
 - Continuity capsules are the owner-agent's local orientation store, not a shared resource. Namespace enforcement supports sub-directory granularity, so tokens can be scoped to specific paths like `memory/coordination` without granting access to `memory/continuity`.
-- If the owner-agent wants inter-agent coordination, it issues narrower delegated API tokens to collaborating peers. The governance policy provides a `collaboration_peer` template as a baseline for these tokens — it grants read and write access to coordination surfaces (`memory/coordination/handoffs`, `memory/coordination/shared`, `memory/coordination/reconciliations`), `messages`, and `tasks`, but not to the full `memory` namespace. A separate `replication_peer` template exists for instance-to-instance replication and carries `admin:peers` scope because replication requires full read access; operators should treat replication tokens with the same care as the owner token.
+- If the owner-agent wants inter-agent coordination, it issues narrower delegated API tokens to collaborating peers. The governance policy provides a `collaboration_peer` template as a baseline for these tokens — it grants read access to all of `memory/coordination` and write access scoped to specific coordination sub-paths (`memory/coordination/handoffs`, `memory/coordination/shared`, `memory/coordination/reconciliations`), plus read and write access to `messages` and `tasks`, but not to the full `memory` namespace. A separate `replication_peer` template exists for instance-to-instance replication and carries `admin:peers` scope because replication requires unrestricted read access across all namespaces. Since `admin:peers` bypasses both scope and namespace checks, a replication token also has equivalent write authority to the owner token outside of IP-enforced localhost operations; operators should treat replication tokens with the same care as the owner token.
 - Collaborator agents interact through the coordination surfaces (handoffs, shared coordination artifacts, reconciliations), messaging, and tasks — not by directly reading the owner's continuity capsules. This separation is enforced by sub-directory namespace restrictions — the `collaboration_peer` template does not grant access to `memory/continuity`, `memory/core`, `memory/episodic`, or `memory/summaries`.
 - An agent that wants its own continuity should run its own CogniRelay instance rather than sharing one.
 
 The system should not be read as a peer-equal shared-instance platform. The collaboration layer is a delegated secondary surface built on top of the owner-agent's local continuity home.
+
+Access isolation between agents is enforced entirely by token scopes and namespace/path restrictions. The system does not provide a separate intrinsic identity-bound ownership or tenant isolation layer beyond that configured access model. Any token with read access to `memory/continuity` can read any capsule in that namespace — capsule privacy depends on the operator not granting that access to collaborator tokens. In the default `collaboration_peer` template this access is excluded, which protects owner-private continuity as configured policy.
 
 ## Architecture
 
@@ -238,6 +240,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - The owner-agent holds `admin:peers` and full namespace access in the default model; collaborator peers receive narrower delegated scopes
 - Do not grant `admin:peers` to collaborator peers — it belongs to the owner/operator role and acts as a superuser bypass for both scope and namespace checks. The `replication_peer` template is the exception: it carries `admin:peers` because instance-to-instance replication requires full read access, and should be treated with the same care as the owner token
 - Use the `collaboration_peer` governance template as a baseline for collaborator tokens — it enables creation and mutation of coordination artifacts (handoffs, shared artifacts, reconciliations), task management, and messaging, while keeping continuity capsules and core memory private to the owner
+- Continuity capsule access is governed by the same token scope and namespace mechanism as all other paths — there is no additional per-agent ownership check. The `collaboration_peer` template excludes `memory/continuity` by default, which protects owner-private continuity as configured policy rather than through a built-in ownership enforcement layer
 - Collaboration peers can create handoffs, shared artifacts, reconciliations, tasks, and exchange messages — everything needed for structured inter-agent collaboration without accessing the owner's private continuity substrate
 - Prefer API-driven token lifecycle operations over manual file edits so audit state stays consistent
 - Keep trust transitions explicit through `POST /v1/peers/{peer_id}/trust`
@@ -264,6 +267,8 @@ The following matrix summarizes what each token role can access. The owner token
 | **Run ops jobs** (`/v1/ops/*`, requires localhost) | Yes | No | No |
 | **See all coordination regardless of identity** | Yes | No | Yes |
 | **Risk if token is leaked** | Total compromise | Coordination, task, and message exposure (no continuity/admin access) | Equivalent to owner (minus localhost ops) |
+
+Owner and `replication_peer` "Yes" entries in capability rows reflect `admin:peers` superuser bypass semantics — `admin:peers` bypasses both scope checks and namespace/path restrictions, so these tokens pass every authorization gate regardless of individually configured grants. For example, the `replication_peer` governance template sets `write_namespaces` to `["messages", "peers", "snapshots"]` and does not include `write:projects` in its scopes — access to all other write paths and scope-gated operations comes from `admin:peers` bypassing enforcement entirely.
 
 Operators can issue custom tokens with any combination of scopes and namespace restrictions. The templates above are baselines, not the only options.
 

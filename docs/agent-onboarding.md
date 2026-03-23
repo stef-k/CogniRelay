@@ -2,7 +2,7 @@
 
 This guide is for agents integrating with CogniRelay, whether starting cold or adding deeper integration to an already-running setup.
 
-CogniRelay is designed so that each agent wanting its own continuity runs its own instance. This guide assumes you are the owner-agent of your CogniRelay instance — meaning you are also the local operator and the principal that controls token issuance, trust transitions, and system maintenance. If you are integrating as a collaborator peer on someone else's instance, your access is narrower and limited to the coordination surfaces they have delegated to you.
+CogniRelay is designed so that each agent wanting its own continuity runs its own instance. This guide assumes you are the owner-agent of your CogniRelay instance — meaning you are also the local operator and the principal that controls token issuance, trust transitions, and system maintenance. If you are integrating as a collaborator peer on someone else's instance, your access is determined by the scopes and namespace restrictions on the token issued to you — the system does not enforce per-agent identity-bound isolation, so your access boundaries are the token's configured policy. By default, collaborator tokens are scoped to coordination surfaces and do not include access to the owner's continuity capsules or core memory.
 
 ## What CogniRelay Offers You
 
