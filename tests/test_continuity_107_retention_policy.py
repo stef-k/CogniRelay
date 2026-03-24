@@ -262,6 +262,10 @@ class TestContinuityRetentionPolicy(unittest.TestCase):
                     f"continuity_retention_skipped_invalid_archive:{invalid_rel}",
                 ],
             )
+            self.assertFalse(
+                any("skipped_unauthorized" in w for w in out["warnings"]),
+                "Unauthorized archives must be silently skipped without warnings",
+            )
             state_path = repo_root / "memory" / "continuity" / "retention_state.json"
             self.assertTrue(state_path.exists())
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
