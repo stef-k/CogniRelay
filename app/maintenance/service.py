@@ -1144,7 +1144,7 @@ def replication_pull_service(
     """Pull a replication bundle from a peer and apply accepted file updates."""
     enforce_rate_limit(settings, auth, "replication_pull")
     enforce_payload_limit(settings, req.model_dump(), "replication_pull")
-    auth.require("admin:peers")
+    auth.require("replication:sync")
 
     _lock_dir = settings.repo_root / ".locks"
     try:
@@ -1405,7 +1405,7 @@ def replication_push_service(
         url_request_factory = UrlRequest
 
     enforce_rate_limit(settings, auth, "replication_push")
-    auth.require("admin:peers")
+    auth.require("replication:sync")
 
     files = iter_replication_files(settings.repo_root, req.include_prefixes, req.max_files, include_deleted=req.include_deleted)
     for row in files:

@@ -26,6 +26,7 @@ ALL_SCOPES = {
     "search",
     "compact:trigger",
     "admin:peers",
+    "replication:sync",
 }
 
 # Default maximum JSONL file size (bytes) that will be fully loaded into

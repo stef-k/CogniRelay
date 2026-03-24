@@ -76,9 +76,12 @@ def _default_governance_policy() -> dict[str, Any]:
                 ],
             },
             "replication_peer": {
-                "scopes": ["admin:peers", "read:files", "write:messages"],
+                "scopes": ["replication:sync", "read:files", "write:messages"],
                 "read_namespaces": ["*"],
-                "write_namespaces": ["messages", "peers", "snapshots"],
+                "write_namespaces": [
+                    "archive", "essays", "journal", "memory", "messages",
+                    "patches", "peers", "projects", "runs", "snapshots", "tasks",
+                ],
             },
         },
         "incident_response": {
