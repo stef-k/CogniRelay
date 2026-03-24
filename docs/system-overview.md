@@ -271,7 +271,8 @@ The following matrix summarizes what each token role can access. The owner token
 | **Read core/episodic memory** (`memory/core`, `memory/episodic`) | Yes | No | Yes (wildcard read) |
 | **Read coordination artifacts** (`memory/coordination`) | Yes | Yes | Yes |
 | **Write coordination artifacts** (requires `write:projects`) | Yes | Yes | No (`write:projects` not granted) |
-| **Read/write tasks** (`tasks`) | Yes | Yes | Yes |
+| **Read tasks** (`tasks`) | Yes | Yes | Yes |
+| **Write tasks** (requires `write:projects`) | Yes | Yes | No (`write:projects` not granted) |
 | **Read messages** (`messages`) | Yes | Yes | Yes |
 | **Write/send messages** | Yes | Yes | Yes |
 | **Search and index** | Yes | Yes | No (`search` not granted) |

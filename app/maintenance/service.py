@@ -1148,6 +1148,8 @@ def replication_pull_service(
     auth.require(SCOPE_REPLICATION_SYNC)
 
     _lock_dir = settings.repo_root / ".locks"
+    committed_files: list[str] = []
+    pull_warnings: list[str] = []
     try:
         with acquire_sorted_source_locks(
             ["registry:replication_state", "registry:replication_tombstones"],
@@ -1171,9 +1173,6 @@ def replication_pull_service(
                         "committed_files": [],
                         "latest_commit": gm.latest_commit(),
                     }
-
-            committed_files: list[str] = []
-            pull_warnings: list[str] = []
             rollback_plan: list[tuple[Path, bytes | None]] = []
             seen_paths: set[Path] = set()
             changed_paths: list[Path] = []
@@ -1481,14 +1480,14 @@ def replication_push_service(
 
     auth.require_write_path(REPLICATION_STATE_REL)
     _push_lock_dir = settings.repo_root / ".locks"
+    _push_history_lost = False
+    _history_extra_paths: list[str] = []
     try:
         with segment_history_source_lock("registry:replication_state", lock_dir=_push_lock_dir):
             state = load_replication_state(settings.repo_root)
 
             # Synchronous pre-write capture per #112: externalize superseded push row
             push_now = datetime.now(timezone.utc)  # single timestamp for shard cut_at and state pushed_at
-            _push_history_lost = False
-            _history_extra_paths: list[str] = []
             previous_push = state.get("last_push")
             if isinstance(previous_push, dict) and previous_push:
                 try:
