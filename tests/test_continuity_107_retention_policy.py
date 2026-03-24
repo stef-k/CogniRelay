@@ -260,8 +260,11 @@ class TestContinuityRetentionPolicy(unittest.TestCase):
                 [
                     f"continuity_retention_partial_cold_conflict:{partial_rel}",
                     f"continuity_retention_skipped_invalid_archive:{invalid_rel}",
-                    f"continuity_retention_skipped_unauthorized:{unauthorized_rel}",
                 ],
+            )
+            self.assertFalse(
+                any("skipped_unauthorized" in w for w in out["warnings"]),
+                "Unauthorized archives must be silently skipped without warnings",
             )
             state_path = repo_root / "memory" / "continuity" / "retention_state.json"
             self.assertTrue(state_path.exists())
@@ -280,7 +283,6 @@ class TestContinuityRetentionPolicy(unittest.TestCase):
                     "warnings": [
                         f"continuity_retention_partial_cold_conflict:{partial_rel}",
                         f"continuity_retention_skipped_invalid_archive:{invalid_rel}",
-                        f"continuity_retention_skipped_unauthorized:{unauthorized_rel}",
                     ],
                     "candidates": [out["candidates"][0]],
                 },
