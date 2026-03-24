@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+from fastapi import HTTPException
+
 from app.auth import AuthContext
 from tests.helpers import AllowAllAuthStub
 
@@ -57,6 +59,13 @@ class TestScopeBypassDetection(unittest.TestCase):
         self.assertEqual(ctx.bypass_events[0]["required"], "write:messages")
         self.assertEqual(ctx.bypass_events[1]["required"], "read:files")
 
+    def test_no_bypass_on_scope_denial(self) -> None:
+        ctx = _ctx(scopes={"read:files"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require("write:messages")
+        self.assertEqual(cm.exception.status_code, 403)
+        self.assertEqual(ctx.bypass_events, [])
+
 
 # ---------------------------------------------------------------------------
 # Namespace bypass detection
@@ -101,6 +110,25 @@ class TestNamespaceBypassDetection(unittest.TestCase):
         self.assertEqual(len(ctx.bypass_events), 2)
         self.assertEqual(ctx.bypass_events[0]["kind"], "scope")
         self.assertEqual(ctx.bypass_events[1]["kind"], "namespace")
+
+    def test_no_bypass_when_admin_peers_and_namespace_matches(self) -> None:
+        ctx = _ctx(scopes={"admin:peers"}, read_namespaces={"memory"})
+        ctx.require_read_path("memory/foo.json")
+        self.assertEqual(ctx.bypass_events, [])
+
+    def test_no_bypass_on_path_traversal_denial(self) -> None:
+        ctx = _ctx(scopes={"admin:peers"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_read_path("../secret")
+        self.assertEqual(cm.exception.status_code, 403)
+        self.assertEqual(ctx.bypass_events, [])
+
+    def test_require_path_alias_records_bypass(self) -> None:
+        ctx = _ctx(scopes={"admin:peers"}, write_namespaces=set())
+        ctx.require_path("journal/entry.json")
+        self.assertEqual(len(ctx.bypass_events), 1)
+        self.assertEqual(ctx.bypass_events[0]["kind"], "namespace")
+        self.assertEqual(ctx.bypass_events[0]["mode"], "write")
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +214,60 @@ class TestAuditEventBypassInjection(unittest.TestCase):
         mock_append.assert_called_once()
         detail = mock_append.call_args[1].get("detail") or mock_append.call_args[0][3]
         self.assertNotIn("admin_bypass", detail)
+
+    @patch("app.runtime.service.append_audit")
+    def test_auth_none_does_not_crash(self, mock_append: MagicMock) -> None:
+        from app.runtime.service import audit_event
+
+        settings = self._make_settings()
+        audit_event(settings, None, "test_event", {"key": "value"})
+
+        mock_append.assert_called_once()
+        detail = mock_append.call_args[1].get("detail") or mock_append.call_args[0][3]
+        self.assertNotIn("admin_bypass", detail)
+
+    @patch("app.runtime.service.append_audit")
+    def test_bypass_events_cleared_when_audit_disabled(self, _mock_append: MagicMock) -> None:
+        from app.runtime.service import audit_event
+
+        settings = self._make_settings()
+        settings.audit_log_enabled = False
+        ctx = _ctx(scopes={"admin:peers"})
+        ctx.require("write:messages")
+        self.assertEqual(len(ctx.bypass_events), 1)
+
+        audit_event(settings, ctx, "message_send", {"thread_id": "t1"})
+
+        self.assertEqual(ctx.bypass_events, [])
+        _mock_append.assert_not_called()
+
+    @patch("app.runtime.service.append_audit")
+    def test_rollover_callback_does_not_double_report_bypasses(self, mock_append: MagicMock) -> None:
+        from app.runtime.service import audit_event
+
+        settings = self._make_settings()
+        ctx = _ctx(scopes={"admin:peers"})
+        ctx.require("write:messages")
+
+        # Simulate append_audit triggering its audit callback once (rollover).
+        call_count = {"n": 0}
+
+        def side_effect(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                cb = kwargs.get("audit")
+                if cb is not None:
+                    cb("audit_log_rollover", {"segment": "test"})
+
+        mock_append.side_effect = side_effect
+        audit_event(settings, ctx, "message_send", {"thread_id": "t1"})
+
+        # Two calls: primary event + rollover event.
+        self.assertEqual(mock_append.call_count, 2)
+        primary_detail = mock_append.call_args_list[0][1].get("detail") or mock_append.call_args_list[0][0][3]
+        rollover_detail = mock_append.call_args_list[1][1].get("detail") or mock_append.call_args_list[1][0][3]
+        self.assertIn("admin_bypass", primary_detail)
+        self.assertNotIn("admin_bypass", rollover_detail)
 
 
 # ---------------------------------------------------------------------------

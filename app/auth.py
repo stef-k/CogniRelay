@@ -54,9 +54,15 @@ class AuthContext:
                 detail=f"Invalid path for namespace check: {relative_path}",
             )
         allowed = self.write_namespaces if mode == "write" else self.read_namespaces
-        if "*" in allowed or "admin:peers" in self.scopes:
-            if "admin:peers" in self.scopes and "*" not in allowed:
-                self.bypass_events.append({"kind": "namespace", "mode": mode, "path": normalized})
+        if "*" in allowed:
+            return
+        namespace_matched = any(
+            normalized == ns or normalized.startswith(ns + "/") for ns in allowed
+        )
+        if namespace_matched:
+            return
+        if "admin:peers" in self.scopes:
+            self.bypass_events.append({"kind": "namespace", "mode": mode, "path": normalized})
             return
         for ns in allowed:
             if normalized == ns or normalized.startswith(ns + "/"):

@@ -56,13 +56,14 @@ def audit_event(
     When *gm* is provided and ``audit_log_rollover_bytes`` > 0, triggers
     write-time rollover of the audit log before appending.
     """
-    if not settings.audit_log_enabled:
-        return
     # Capture and clear any accumulated admin:peers bypass events.
+    # Clear unconditionally so events do not accumulate when audit is disabled.
     bypasses: list[dict[str, str]] = []
     if auth is not None and hasattr(auth, "bypass_events") and auth.bypass_events:
         bypasses = list(auth.bypass_events)
         auth.bypass_events.clear()
+    if not settings.audit_log_enabled:
+        return
     if bypasses:
         detail = {**detail, "admin_bypass": bypasses}
     rollover_bytes = getattr(settings, "audit_log_rollover_bytes", 0)
@@ -72,6 +73,8 @@ def audit_event(
         def _audit_cb(evt: str, det: dict[str, Any]) -> None:
             audit_event(settings, auth, evt, det, gm=gm)
 
+        # bypass_events was cleared above so the re-entrant _audit_cb call
+        # during write-time rollover will not double-report the same events.
         append_audit(
             settings.repo_root,
             event,
@@ -88,6 +91,11 @@ def audit_event(
             getattr(exc, "code", "unknown"),
             str(exc),
         )
+        if bypasses:
+            _log.warning(
+                "Lost admin:peers bypass events due to audit append failure: %s",
+                bypasses,
+            )
 
 
 def scope_for_path(path: str) -> str:
