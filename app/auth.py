@@ -64,9 +64,6 @@ class AuthContext:
         if "admin:peers" in self.scopes:
             self.bypass_events.append({"kind": "namespace", "mode": mode, "path": normalized})
             return
-        for ns in allowed:
-            if normalized == ns or normalized.startswith(ns + "/"):
-                return
         _log.warning("Namespace %s denied: peer=%s path=%s allowed=%s", mode, self.peer_id, normalized, allowed)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

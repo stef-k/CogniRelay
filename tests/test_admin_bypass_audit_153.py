@@ -103,6 +103,18 @@ class TestNamespaceBypassDetection(unittest.TestCase):
         ctx.require_read_path("memory/foo.json")
         self.assertEqual(ctx.bypass_events, [])
 
+    def test_non_admin_non_matching_namespace_denied(self) -> None:
+        ctx = _ctx(scopes={"read:files"}, read_namespaces={"memory"})
+        with self.assertRaises(HTTPException) as cm:
+            ctx.require_read_path("journal/entry.json")
+        self.assertEqual(cm.exception.status_code, 403)
+        self.assertEqual(ctx.bypass_events, [])
+
+    def test_exact_namespace_match_no_bypass(self) -> None:
+        ctx = _ctx(scopes={"admin:peers"}, read_namespaces={"memory"})
+        ctx.require_read_path("memory")
+        self.assertEqual(ctx.bypass_events, [])
+
     def test_mixed_scope_and_namespace_bypass(self) -> None:
         ctx = _ctx(scopes={"admin:peers"}, write_namespaces=set())
         ctx.require("write:messages")
@@ -177,7 +189,7 @@ class TestAuditEventBypassInjection(unittest.TestCase):
         self.assertNotIn("admin_bypass", detail)
 
     @patch("app.runtime.service.append_audit")
-    def test_bypass_events_cleared_after_audit(self, mock_append: MagicMock) -> None:
+    def test_bypass_events_persist_across_audit_calls(self, mock_append: MagicMock) -> None:
         from app.runtime.service import audit_event
 
         settings = self._make_settings()
@@ -185,9 +197,17 @@ class TestAuditEventBypassInjection(unittest.TestCase):
         ctx.require("write:messages")
         self.assertEqual(len(ctx.bypass_events), 1)
 
-        audit_event(settings, ctx, "message_send", {"thread_id": "t1"})
+        audit_event(settings, ctx, "event_a", {"key": "a"})
+        audit_event(settings, ctx, "event_b", {"key": "b"})
 
-        self.assertEqual(ctx.bypass_events, [])
+        # Both audit calls should carry the same bypass context.
+        self.assertEqual(mock_append.call_count, 2)
+        detail_a = mock_append.call_args_list[0][1].get("detail") or mock_append.call_args_list[0][0][3]
+        detail_b = mock_append.call_args_list[1][1].get("detail") or mock_append.call_args_list[1][0][3]
+        self.assertIn("admin_bypass", detail_a)
+        self.assertIn("admin_bypass", detail_b)
+        # Events remain on the AuthContext (per-request lifecycle).
+        self.assertEqual(len(ctx.bypass_events), 1)
 
     @patch("app.runtime.service.append_audit")
     def test_original_detail_not_mutated(self, mock_append: MagicMock) -> None:
@@ -227,7 +247,7 @@ class TestAuditEventBypassInjection(unittest.TestCase):
         self.assertNotIn("admin_bypass", detail)
 
     @patch("app.runtime.service.append_audit")
-    def test_bypass_events_cleared_when_audit_disabled(self, _mock_append: MagicMock) -> None:
+    def test_bypass_events_preserved_when_audit_disabled(self, _mock_append: MagicMock) -> None:
         from app.runtime.service import audit_event
 
         settings = self._make_settings()
@@ -238,11 +258,12 @@ class TestAuditEventBypassInjection(unittest.TestCase):
 
         audit_event(settings, ctx, "message_send", {"thread_id": "t1"})
 
-        self.assertEqual(ctx.bypass_events, [])
+        # Events remain on the AuthContext (per-request lifecycle, GC'd at end).
+        self.assertEqual(len(ctx.bypass_events), 1)
         _mock_append.assert_not_called()
 
     @patch("app.runtime.service.append_audit")
-    def test_rollover_callback_does_not_double_report_bypasses(self, mock_append: MagicMock) -> None:
+    def test_rollover_callback_carries_same_bypass_context(self, mock_append: MagicMock) -> None:
         from app.runtime.service import audit_event
 
         settings = self._make_settings()
@@ -266,8 +287,47 @@ class TestAuditEventBypassInjection(unittest.TestCase):
         self.assertEqual(mock_append.call_count, 2)
         primary_detail = mock_append.call_args_list[0][1].get("detail") or mock_append.call_args_list[0][0][3]
         rollover_detail = mock_append.call_args_list[1][1].get("detail") or mock_append.call_args_list[1][0][3]
+        # Both carry bypass context since they share the same request.
         self.assertIn("admin_bypass", primary_detail)
-        self.assertNotIn("admin_bypass", rollover_detail)
+        self.assertIn("admin_bypass", rollover_detail)
+
+    def test_lost_bypass_warning_on_append_failure(self) -> None:
+        from app.audit import WriteTimeRolloverError
+        from app.runtime.service import audit_event
+
+        settings = self._make_settings()
+        ctx = _ctx(scopes={"admin:peers"})
+        ctx.require("write:messages")
+
+        with patch(
+            "app.runtime.service.append_audit",
+            side_effect=WriteTimeRolloverError("test", "disk full"),
+        ):
+            with self.assertLogs("app.runtime.service", level="WARNING") as log_ctx:
+                audit_event(settings, ctx, "message_send", {"thread_id": "t1"})
+
+        messages = "\n".join(log_ctx.output)
+        self.assertIn("Audit append failed", messages)
+        self.assertIn("Lost admin:peers bypass events", messages)
+
+    def test_append_failure_without_bypass_no_lost_warning(self) -> None:
+        from app.audit import WriteTimeRolloverError
+        from app.runtime.service import audit_event
+
+        settings = self._make_settings()
+        ctx = _ctx(scopes={"write:messages"})
+        ctx.require("write:messages")
+
+        with patch(
+            "app.runtime.service.append_audit",
+            side_effect=WriteTimeRolloverError("test", "disk full"),
+        ):
+            with self.assertLogs("app.runtime.service", level="WARNING") as log_ctx:
+                audit_event(settings, ctx, "message_send", {"thread_id": "t1"})
+
+        messages = "\n".join(log_ctx.output)
+        self.assertIn("Audit append failed", messages)
+        self.assertNotIn("Lost admin:peers bypass events", messages)
 
 
 # ---------------------------------------------------------------------------
