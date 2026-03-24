@@ -623,7 +623,6 @@ def _retention_warning_sort_key(warning: str) -> tuple[int, str]:
     prefix_order = {
         "continuity_retention_partial_cold_conflict:": 0,
         "continuity_retention_skipped_invalid_archive:": 1,
-        "continuity_retention_skipped_unauthorized:": 2,
         "duplicate_source_archive_path:": 3,
     }
     for prefix, rank in prefix_order.items():
@@ -2108,7 +2107,6 @@ def _scan_retention_candidates(
         try:
             auth.require_read_path(rel)
         except HTTPException:
-            warnings.append(f"continuity_retention_skipped_unauthorized:{rel}")
             continue
         try:
             envelope = _load_archive_envelope(repo_root, rel)
