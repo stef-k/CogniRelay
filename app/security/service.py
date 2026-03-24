@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.timestamps import format_compact, format_iso, iso_now, parse_iso as _pa
 
 from app.auth import AuthContext
 from app.config import ALL_SCOPES
+from app.maintenance.service import REPLICATION_ALLOWED_PREFIXES
 from app.models import (
     MessageVerifyRequest,
     SecurityKeysRotateRequest,
@@ -27,6 +29,8 @@ from app.models import (
 from app.git_safety import safe_commit_updated_file, try_commit_file
 from app.segment_history.locking import segment_history_source_lock, SegmentHistoryLockTimeout, LockInfrastructureError
 from app.storage import safe_path, write_text_file
+
+_log = logging.getLogger(__name__)
 
 TOKEN_CONFIG_REL = "config/peer_tokens.json"
 SECURITY_KEYS_REL = "config/security_keys.json"
@@ -76,9 +80,14 @@ def _default_governance_policy() -> dict[str, Any]:
                 ],
             },
             "replication_peer": {
-                "scopes": ["admin:peers", "read:files", "write:messages"],
+                # write:messages is included so replication peers can also
+                # exchange messages alongside data sync (e.g. coordination).
+                "scopes": ["replication:sync", "read:files", "write:messages"],
                 "read_namespaces": ["*"],
-                "write_namespaces": ["messages", "peers", "snapshots"],
+                # Derived from REPLICATION_ALLOWED_PREFIXES + "peers" (for
+                # replication state tracking).  Keep in sync with the constant
+                # in app/maintenance/service.py.
+                "write_namespaces": sorted(REPLICATION_ALLOWED_PREFIXES | {"peers"}),
             },
         },
         "incident_response": {
@@ -391,6 +400,9 @@ def security_tokens_issue_service(
     token_sha = hashlib.sha256(token_plain.encode("utf-8")).hexdigest()
     expires_at = _resolve_token_expiry(req.expires_at, req.ttl_seconds)
     scopes = sorted(set(str(s) for s in (req.scopes or []) if str(s))) or sorted(ALL_SCOPES)
+    unknown_scopes = set(scopes) - ALL_SCOPES
+    if unknown_scopes:
+        _log.warning("Token issuance for %s includes unknown scopes: %s", req.peer_id, sorted(unknown_scopes))
     read_ns = sorted(set(str(s) for s in (req.read_namespaces or []) if str(s))) or ["*"]
     write_ns = sorted(set(str(s) for s in (req.write_namespaces or []) if str(s))) or ["*"]
 

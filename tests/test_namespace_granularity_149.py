@@ -427,13 +427,18 @@ class TestGovernanceTemplateUpdate(unittest.TestCase):
             "tasks",
         })
 
-    def test_replication_peer_unchanged(self) -> None:
-        """replication_peer template should remain with wildcard read access."""
+    def test_replication_peer_uses_replication_sync_scope(self) -> None:
+        """replication_peer template should use replication:sync, not admin:peers."""
         from app.security.service import _default_governance_policy
 
         policy = _default_governance_policy()
         repl = policy["scope_templates"]["replication_peer"]
         self.assertIn("*", repl["read_namespaces"])
+        self.assertIn("replication:sync", repl["scopes"])
+        self.assertNotIn("admin:peers", repl["scopes"])
+        from app.maintenance.service import REPLICATION_ALLOWED_PREFIXES
+        expected_write = set(REPLICATION_ALLOWED_PREFIXES) | {"peers"}
+        self.assertEqual(set(repl["write_namespaces"]), expected_write)
 
 
 if __name__ == "__main__":

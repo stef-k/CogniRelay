@@ -17,15 +17,26 @@ _log = logging.getLogger(__name__)
 load_dotenv()
 
 
+SCOPE_READ_FILES = "read:files"
+SCOPE_READ_INDEX = "read:index"
+SCOPE_WRITE_JOURNAL = "write:journal"
+SCOPE_WRITE_MESSAGES = "write:messages"
+SCOPE_WRITE_PROJECTS = "write:projects"
+SCOPE_SEARCH = "search"
+SCOPE_COMPACT_TRIGGER = "compact:trigger"
+SCOPE_ADMIN_PEERS = "admin:peers"
+SCOPE_REPLICATION_SYNC = "replication:sync"
+
 ALL_SCOPES = {
-    "read:files",
-    "read:index",
-    "write:journal",
-    "write:messages",
-    "write:projects",
-    "search",
-    "compact:trigger",
-    "admin:peers",
+    SCOPE_READ_FILES,
+    SCOPE_READ_INDEX,
+    SCOPE_WRITE_JOURNAL,
+    SCOPE_WRITE_MESSAGES,
+    SCOPE_WRITE_PROJECTS,
+    SCOPE_SEARCH,
+    SCOPE_COMPACT_TRIGGER,
+    SCOPE_ADMIN_PEERS,
+    SCOPE_REPLICATION_SYNC,
 }
 
 # Default maximum JSONL file size (bytes) that will be fully loaded into
@@ -184,6 +195,9 @@ def _parse_tokens_inline(raw: str | None) -> Dict[str, PeerToken]:
         if ":" in item and "|" in item:
             token, scopes_raw = item.split(":", 1)
             scopes = {s.strip() for s in scopes_raw.split("|") if s.strip()}
+            unknown = scopes - ALL_SCOPES
+            if unknown:
+                _log.warning("Inline token peer-%d has unknown scopes: %s", idx + 1, sorted(unknown))
             result[token] = PeerToken(peer_id=peer_id, scopes=scopes or set(ALL_SCOPES), read_namespaces={"*"}, write_namespaces={"*"})
         else:
             result[item] = PeerToken(peer_id=peer_id, scopes=set(ALL_SCOPES), read_namespaces={"*"}, write_namespaces={"*"})
@@ -203,6 +217,9 @@ def _load_tokens_file(repo_root: Path) -> Dict[str, PeerToken]:
             continue
         peer_id = str(item.get("peer_id", "unknown"))
         scopes = {str(s) for s in item.get("scopes", []) if str(s)} or set(ALL_SCOPES)
+        unknown = scopes - ALL_SCOPES
+        if unknown:
+            _log.warning("Token %s (peer %s) has unknown scopes: %s", item.get("token_id", "?"), peer_id, sorted(unknown))
         legacy_namespaces = {str(n) for n in item.get("namespaces", []) if str(n)}
         read_namespaces = {str(n) for n in item.get("read_namespaces", []) if str(n)}
         write_namespaces = {str(n) for n in item.get("write_namespaces", []) if str(n)}

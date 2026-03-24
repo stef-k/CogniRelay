@@ -29,7 +29,7 @@ from app.artifact_lifecycle.service import (
     _family_summary,
     artifact_history_payload_rel_path_from_cold_artifact,
 )
-from app.config import DEFAULT_MAX_JSONL_READ_BYTES
+from app.config import DEFAULT_MAX_JSONL_READ_BYTES, SCOPE_REPLICATION_SYNC
 from app.continuity.service import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
@@ -886,7 +886,7 @@ def iter_replication_files(repo_root: Path, include_prefixes: list[str], max_fil
             continue
         prefixes.append(rel)
     if not prefixes:
-        prefixes = ["memory", "messages", "projects", "essays", "journal", "tasks", "patches", "runs", "snapshots"]
+        prefixes = sorted(REPLICATION_ALLOWED_PREFIXES)
 
     items = []
     for prefix in prefixes:
@@ -900,6 +900,7 @@ def iter_replication_files(repo_root: Path, include_prefixes: list[str], max_fil
             try:
                 content = path.read_text(encoding="utf-8")
             except Exception:
+                _logger.warning("Skipping unreadable replication file: %s", rel, exc_info=True)
                 continue
             stat = path.stat()
             items.append(
@@ -1144,9 +1145,11 @@ def replication_pull_service(
     """Pull a replication bundle from a peer and apply accepted file updates."""
     enforce_rate_limit(settings, auth, "replication_pull")
     enforce_payload_limit(settings, req.model_dump(), "replication_pull")
-    auth.require("admin:peers")
+    auth.require(SCOPE_REPLICATION_SYNC)
 
     _lock_dir = settings.repo_root / ".locks"
+    committed_files: list[str] = []
+    pull_warnings: list[str] = []
     try:
         with acquire_sorted_source_locks(
             ["registry:replication_state", "registry:replication_tombstones"],
@@ -1170,8 +1173,6 @@ def replication_pull_service(
                         "committed_files": [],
                         "latest_commit": gm.latest_commit(),
                     }
-
-            committed_files: list[str] = []
             rollback_plan: list[tuple[Path, bytes | None]] = []
             seen_paths: set[Path] = set()
             changed_paths: list[Path] = []
@@ -1294,6 +1295,7 @@ def replication_pull_service(
                             json.dumps(previous_pull, ensure_ascii=False, default=str),
                             exc_info=True,
                         )
+                        pull_warnings.append("replication_history_lost: failed to externalize superseded pull row; previous state overwritten")
 
                 pull_by_source[req.source_peer] = {
                     "pulled_at": format_iso(now),
@@ -1319,6 +1321,7 @@ def replication_pull_service(
                         "skipped_count": skipped,
                     }
 
+                auth.require_write_path(REPLICATION_TOMBSTONES_REL)
                 tomb_path = safe_path(settings.repo_root, REPLICATION_TOMBSTONES_REL)
                 track_change(tomb_path, REPLICATION_TOMBSTONES_REL)
                 _write_replication_tombstones(settings.repo_root, tombstones)
@@ -1338,6 +1341,7 @@ def replication_pull_service(
                         changed_paths.append(extra_path)
                         changed_rels.append(extra_rel)
 
+                auth.require_write_path(REPLICATION_STATE_REL)
                 state_path = safe_path(settings.repo_root, REPLICATION_STATE_REL)
                 track_change(state_path, REPLICATION_STATE_REL)
                 _write_replication_state(settings.repo_root, state)
@@ -1371,7 +1375,7 @@ def replication_pull_service(
             "idempotency_key": idempotency_key,
         },
     )
-    return {
+    result = {
         "ok": True,
         "idempotent_replay": False,
         "source_peer": req.source_peer,
@@ -1383,6 +1387,9 @@ def replication_pull_service(
         "committed_files": committed_files,
         "latest_commit": gm.latest_commit(),
     }
+    if pull_warnings:
+        result["warnings"] = pull_warnings
+    return result
 
 
 def replication_push_service(
@@ -1405,7 +1412,7 @@ def replication_push_service(
         url_request_factory = UrlRequest
 
     enforce_rate_limit(settings, auth, "replication_push")
-    auth.require("admin:peers")
+    auth.require(SCOPE_REPLICATION_SYNC)
 
     files = iter_replication_files(settings.repo_root, req.include_prefixes, req.max_files, include_deleted=req.include_deleted)
     for row in files:
@@ -1473,13 +1480,14 @@ def replication_push_service(
 
     auth.require_write_path(REPLICATION_STATE_REL)
     _push_lock_dir = settings.repo_root / ".locks"
+    _push_history_lost = False
+    _history_extra_paths: list[str] = []
     try:
         with segment_history_source_lock("registry:replication_state", lock_dir=_push_lock_dir):
             state = load_replication_state(settings.repo_root)
 
             # Synchronous pre-write capture per #112: externalize superseded push row
             push_now = datetime.now(timezone.utc)  # single timestamp for shard cut_at and state pushed_at
-            _history_extra_paths: list[str] = []
             previous_push = state.get("last_push")
             if isinstance(previous_push, dict) and previous_push:
                 try:
@@ -1508,6 +1516,7 @@ def replication_push_service(
                         json.dumps(previous_push, ensure_ascii=False, default=str),
                         exc_info=True,
                     )
+                    _push_history_lost = True
 
             state["last_push"] = {
                 "pushed_at": format_iso(push_now),
@@ -1530,6 +1539,8 @@ def replication_push_service(
     except (SegmentHistoryLockTimeout, LockInfrastructureError) as lock_exc:
         raise HTTPException(status_code=503, detail="Replication state lock unavailable; retry") from lock_exc
     warnings: list[str] = []
+    if _push_history_lost:
+        warnings.append("replication_history_lost: failed to externalize superseded push row; previous state overwritten")
     if _history_extra_paths:
         push_commit_paths = [state_path] + [safe_path(settings.repo_root, p) for p in _history_extra_paths]
         if try_commit_paths(paths=push_commit_paths, gm=gm, commit_message="replication: update push state"):
