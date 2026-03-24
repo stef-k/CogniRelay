@@ -58,6 +58,14 @@ def audit_event(
     """
     if not settings.audit_log_enabled:
         return
+    # Snapshot any accumulated admin:peers bypass events.  The list is
+    # kept on auth so that every audit call within the same request
+    # carries the same bypass context (AuthContext is per-request).
+    bypasses: list[dict[str, str]] = []
+    if auth is not None and hasattr(auth, "bypass_events") and auth.bypass_events:
+        bypasses = list(auth.bypass_events)
+    if bypasses:
+        detail = {**detail, "admin_bypass": bypasses}
     rollover_bytes = getattr(settings, "audit_log_rollover_bytes", 0)
     try:
         # Create audit callback for write-time rollover event emission.
@@ -81,6 +89,11 @@ def audit_event(
             getattr(exc, "code", "unknown"),
             str(exc),
         )
+        if bypasses:
+            _log.warning(
+                "Lost admin:peers bypass events due to audit append failure: %s",
+                bypasses,
+            )
 
 
 def scope_for_path(path: str) -> str:

@@ -12,6 +12,7 @@ class AllowAllAuthStub:
         """Store the caller identity exposed to route and service code."""
         self.peer_id = peer_id
         self.client_ip = client_ip
+        self.bypass_events: list[dict[str, str]] = []
 
     def require(self, _scope: str) -> None:
         """Accept any requested scope for test purposes."""
