@@ -11,7 +11,7 @@ from typing import Set
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from .config import get_settings, sha256_token
+from .config import SCOPE_ADMIN_PEERS, get_settings, sha256_token
 from .timestamps import parse_iso as _parse_iso
 
 _log = logging.getLogger(__name__)
@@ -30,12 +30,12 @@ class AuthContext:
 
     def require(self, scope: str) -> None:
         """Require a scope or raise an HTTP 403 error."""
-        if scope not in self.scopes and "admin:peers" not in self.scopes:
+        if scope not in self.scopes and SCOPE_ADMIN_PEERS not in self.scopes:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Missing scope: {scope}",
             )
-        if scope not in self.scopes and "admin:peers" in self.scopes:
+        if scope not in self.scopes and SCOPE_ADMIN_PEERS in self.scopes:
             self.bypass_events.append({"kind": "scope", "required": scope})
 
     def _require_path_mode(self, relative_path: str, mode: str) -> None:
@@ -61,7 +61,7 @@ class AuthContext:
         )
         if namespace_matched:
             return
-        if "admin:peers" in self.scopes:
+        if SCOPE_ADMIN_PEERS in self.scopes:
             self.bypass_events.append({"kind": "namespace", "mode": mode, "path": normalized})
             return
         _log.warning("Namespace %s denied: peer=%s path=%s allowed=%s", mode, self.peer_id, normalized, allowed)
