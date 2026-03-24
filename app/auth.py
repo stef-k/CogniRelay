@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import posixpath
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Set
 
@@ -26,6 +26,7 @@ class AuthContext:
     read_namespaces: Set[str]
     write_namespaces: Set[str]
     client_ip: str | None = None
+    bypass_events: list[dict[str, str]] = field(default_factory=list, repr=False)
 
     def require(self, scope: str) -> None:
         """Require a scope or raise an HTTP 403 error."""
@@ -34,6 +35,8 @@ class AuthContext:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Missing scope: {scope}",
             )
+        if scope not in self.scopes and "admin:peers" in self.scopes:
+            self.bypass_events.append({"kind": "scope", "required": scope})
 
     def _require_path_mode(self, relative_path: str, mode: str) -> None:
         """Require read or write access for a repository-relative path.
@@ -52,6 +55,8 @@ class AuthContext:
             )
         allowed = self.write_namespaces if mode == "write" else self.read_namespaces
         if "*" in allowed or "admin:peers" in self.scopes:
+            if "admin:peers" in self.scopes and "*" not in allowed:
+                self.bypass_events.append({"kind": "namespace", "mode": mode, "path": normalized})
             return
         for ns in allowed:
             if normalized == ns or normalized.startswith(ns + "/"):

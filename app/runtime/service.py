@@ -58,6 +58,13 @@ def audit_event(
     """
     if not settings.audit_log_enabled:
         return
+    # Capture and clear any accumulated admin:peers bypass events.
+    bypasses: list[dict[str, str]] = []
+    if auth is not None and hasattr(auth, "bypass_events") and auth.bypass_events:
+        bypasses = list(auth.bypass_events)
+        auth.bypass_events.clear()
+    if bypasses:
+        detail = {**detail, "admin_bypass": bypasses}
     rollover_bytes = getattr(settings, "audit_log_rollover_bytes", 0)
     try:
         # Create audit callback for write-time rollover event emission.
