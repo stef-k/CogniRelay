@@ -25,6 +25,20 @@ The system should not be read as a peer-equal shared-instance platform. The coll
 
 Access isolation between agents is enforced entirely by token scopes and namespace/path restrictions. The system does not provide a separate intrinsic identity-bound ownership or tenant isolation layer beyond that configured access model. Any token with read access to `memory/continuity` can read any capsule in that namespace — capsule privacy depends on the operator not granting that access to collaborator tokens. In the default `collaboration_peer` template this access is excluded, which protects owner-private continuity as configured policy.
 
+### Runtime Concurrency Model
+
+The default deployment runs a single uvicorn worker process (no `--workers` flag). This is intentional: the rate-limit state protection in `app/runtime/service.py` uses a `threading.Lock` to serialize read-modify-write cycles on `logs/rate_limit_state.json`. This lock is correct within a single process but does not protect across OS processes.
+
+If the deployment model changes to multiple uvicorn workers, the rate-limit lock must be replaced with a cross-process mechanism. The recommended strategy is `fcntl.flock` on a dedicated lockfile, following the pattern already established by:
+
+- `app/coordination/locking.py` — per-artifact advisory locks
+- `app/git_locking.py` — repository-level mutation lock
+- `app/segment_history/locking.py` — per-source file locks
+
+The existing lock-ordering rule applies: the rate-limit lock must remain the innermost lock in any acquisition chain.
+
+Do not add `--workers` to the uvicorn command without completing this migration.
+
 ## Architecture
 
 CogniRelay combines a small number of building blocks:

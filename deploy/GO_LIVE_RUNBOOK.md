@@ -145,6 +145,8 @@ sudo systemctl enable --now \
   cognirelay-ops-compact-plan.timer
 ```
 
+> **Single-worker requirement:** The service unit runs one uvicorn process (no `--workers` flag). Do not add multiple workers without first migrating the rate-limit lock to cross-process file locking. See [Runtime Concurrency Model](../docs/system-overview.md#runtime-concurrency-model).
+
 ### 3.7 nginx reverse proxy + TLS
 
 ```bash
