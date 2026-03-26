@@ -23,7 +23,10 @@ def resolve_token(args):
     Returns the token string or calls sys.exit(3) on failure.
     """
     # 1. Explicit --token
-    if args.token:
+    if args.token is not None:
+        if not args.token:
+            print("Error: --token value is empty", file=sys.stderr)
+            sys.exit(3)
         return args.token
 
     # 2. --token-file
@@ -138,6 +141,9 @@ def format_startup(data):
         lines.append("(no capsule available)")
         return "\n".join(lines) + "\n"
 
+    # Continuity fields are nested under capsule.continuity
+    continuity = capsule.get("continuity") or {}
+
     # Capsule sections
     section_map = [
         ("top_priorities", "Top Priorities"),
@@ -150,7 +156,7 @@ def format_startup(data):
     for field, header in section_map:
         lines.append("")
         lines.append(f"=== {header} ===")
-        items = capsule.get(field) or []
+        items = continuity.get(field) or []
         if not items:
             lines.append("(none)")
         elif field == "negative_decisions":
@@ -259,6 +265,9 @@ def cmd_token_hash(args):
         sys.exit(2)
 
     if args.value is not None:
+        if not args.value:
+            print("Error: --value is empty", file=sys.stderr)
+            sys.exit(6)
         token = args.value
     elif args.file is not None:
         try:
@@ -266,6 +275,9 @@ def cmd_token_hash(args):
                 token = f.read().rstrip()
         except OSError as exc:
             print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(6)
+        if not token:
+            print(f"Error: token file '{args.file}' is empty", file=sys.stderr)
             sys.exit(6)
     else:
         token = os.environ.get(args.env, "").rstrip()
@@ -318,7 +330,6 @@ def build_parser():
     add_connection_args(upsert_parser)
     upsert_parser.add_argument("--input", default=None)
     upsert_parser.add_argument("--stdin", action="store_true", default=False)
-    upsert_parser.add_argument("--format", default="json", choices=["json"])
 
     # -- token (parent) -> hash (child) --
     token_parser = subparsers.add_parser("token", help="Token utilities")

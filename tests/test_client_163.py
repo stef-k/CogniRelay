@@ -135,6 +135,12 @@ class TestTokenResolution(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_explicit_empty_token_exits_3(self):
+        ns = _make_namespace(token="")
+        with self.assertRaises(SystemExit) as ctx:
+            client.resolve_token(ns)
+        self.assertEqual(ctx.exception.code, 3)
+
 
 # ===========================================================================
 # Base URL tests
@@ -194,13 +200,18 @@ SAMPLE_READ_RESPONSE = {
     "source_state": "active",
     "recovery_warnings": [],
     "capsule": {
-        "top_priorities": ["Priority A", "Priority B"],
-        "active_constraints": ["Constraint 1"],
-        "open_loops": [],
-        "negative_decisions": [
-            {"decision": "No caching", "rationale": "Adds complexity"},
-        ],
-        "session_trajectory": ["Step 1", "Step 2"],
+        "schema_version": "1.0",
+        "subject_kind": "user",
+        "subject_id": "agent-1",
+        "continuity": {
+            "top_priorities": ["Priority A", "Priority B"],
+            "active_constraints": ["Constraint 1"],
+            "open_loops": [],
+            "negative_decisions": [
+                {"decision": "No caching", "rationale": "Adds complexity"},
+            ],
+            "session_trajectory": ["Step 1", "Step 2"],
+        },
     },
 }
 
@@ -304,12 +315,14 @@ class TestReadSubcommand(unittest.TestCase):
             "source_state": "active",
             "recovery_warnings": [],
             "capsule": {
-                # All optional fields missing or null
-                "top_priorities": None,
-                # active_constraints absent
-                "open_loops": [],
-                "negative_decisions": None,
-                # session_trajectory absent
+                "continuity": {
+                    # All optional fields missing or null
+                    "top_priorities": None,
+                    # active_constraints absent
+                    "open_loops": [],
+                    "negative_decisions": None,
+                    # session_trajectory absent
+                },
             },
         }
         mock_urlopen.return_value = _mock_urlopen(body=json.dumps(response).encode())
@@ -482,15 +495,17 @@ class TestReadSubcommand(unittest.TestCase):
             "source_state": "active",
             "recovery_warnings": [],
             "capsule": {
-                "top_priorities": [],
-                "active_constraints": [],
-                "open_loops": [],
-                "negative_decisions": [
-                    {"decision": "Good"},  # missing rationale
-                    {"rationale": "reason"},  # missing decision
-                    "bare-string",  # not a dict
-                ],
-                "session_trajectory": [],
+                "continuity": {
+                    "top_priorities": [],
+                    "active_constraints": [],
+                    "open_loops": [],
+                    "negative_decisions": [
+                        {"decision": "Good"},  # missing rationale
+                        {"rationale": "reason"},  # missing decision
+                        "bare-string",  # not a dict
+                    ],
+                    "session_trajectory": [],
+                },
             },
         }
         mock_urlopen.return_value = _mock_urlopen(body=json.dumps(response).encode())
@@ -559,7 +574,6 @@ class TestUpsertSubcommand(unittest.TestCase):
                 command="upsert",
                 input=inpath,
                 stdin=False,
-                format="json",
             )
             with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
                 client.cmd_upsert(args)
@@ -580,7 +594,6 @@ class TestUpsertSubcommand(unittest.TestCase):
             command="upsert",
             input=None,
             stdin=True,
-            format="json",
         )
         stdin_data = json.dumps(SAMPLE_UPSERT_PAYLOAD).encode()
         with patch("sys.stdin", new_callable=lambda: MagicMock()) as mock_stdin:
@@ -598,7 +611,6 @@ class TestUpsertSubcommand(unittest.TestCase):
             command="upsert",
             input="/some/file",
             stdin=True,
-            format="json",
         )
         with self.assertRaises(SystemExit) as ctx:
             client.cmd_upsert(args)
@@ -611,7 +623,6 @@ class TestUpsertSubcommand(unittest.TestCase):
             command="upsert",
             input=None,
             stdin=False,
-            format="json",
         )
         with self.assertRaises(SystemExit) as ctx:
             client.cmd_upsert(args)
@@ -624,7 +635,6 @@ class TestUpsertSubcommand(unittest.TestCase):
             command="upsert",
             input="/nonexistent/file.json",
             stdin=False,
-            format="json",
         )
         with self.assertRaises(SystemExit) as ctx:
             client.cmd_upsert(args)
@@ -642,7 +652,6 @@ class TestUpsertSubcommand(unittest.TestCase):
                 command="upsert",
                 input=inpath,
                 stdin=False,
-                format="json",
             )
             with self.assertRaises(SystemExit) as ctx:
                 client.cmd_upsert(args)
@@ -666,7 +675,6 @@ class TestUpsertSubcommand(unittest.TestCase):
                 command="upsert",
                 input=inpath,
                 stdin=False,
-                format="json",
             )
             with self.assertRaises(SystemExit) as ctx:
                 client.cmd_upsert(args)
@@ -690,7 +698,6 @@ class TestUpsertSubcommand(unittest.TestCase):
                 command="upsert",
                 input=inpath,
                 stdin=False,
-                format="json",
             )
             with patch("sys.stdout", new_callable=io.StringIO):
                 client.cmd_upsert(args)
@@ -749,6 +756,24 @@ class TestTokenHash(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             client.cmd_token_hash(args)
         self.assertEqual(ctx.exception.code, 2)
+
+    def test_hash_empty_value_exits_6(self):
+        args = _make_namespace(value="", file=None, env=None)
+        with self.assertRaises(SystemExit) as ctx:
+            client.cmd_token_hash(args)
+        self.assertEqual(ctx.exception.code, 6)
+
+    def test_hash_whitespace_only_file_exits_6(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("   \n")
+            path = f.name
+        try:
+            args = _make_namespace(value=None, file=path, env=None)
+            with self.assertRaises(SystemExit) as ctx:
+                client.cmd_token_hash(args)
+            self.assertEqual(ctx.exception.code, 6)
+        finally:
+            os.unlink(path)
 
     def test_hash_missing_file_exits_6(self):
         args = _make_namespace(value=None, file="/nonexistent/token.txt", env=None)

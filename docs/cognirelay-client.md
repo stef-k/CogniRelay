@@ -123,10 +123,10 @@ Use this to generate token hashes for `peer_tokens.json` and other config files.
 | 0 | Success (including degraded/fallback reads) |
 | 1 | HTTP error (4xx/5xx) — stderr shows `Error: HTTP {code}: {body}` |
 | 2 | Usage or argument error |
-| 3 | Token resolution failed (no source, unreadable `--token-file`, or empty token file) |
+| 3 | Token resolution failed (no source, empty `--token`, unreadable or empty `--token-file`, or `--token-env` naming an unset/empty variable) |
 | 4 | Connection or network error (timeout, DNS, refused) |
 | 5 | Response parse error (non-JSON body) |
-| 6 | Token source unreadable (`token hash` only — file not found, env var unset) |
+| 6 | Token source unreadable or empty (`token hash` only — file not found, empty file, env var unset or empty, empty `--value`) |
 
 ## Environment Variables
 
