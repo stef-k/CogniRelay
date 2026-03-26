@@ -117,5 +117,5 @@ Local quality commands:
 
 ```bash
 ./.venv/bin/python -m unittest discover -s tests -v
-./.venv/bin/python -m ruff check app tests tools tools_hash_token.py
+./.venv/bin/python -m ruff check app tests tools
 ```

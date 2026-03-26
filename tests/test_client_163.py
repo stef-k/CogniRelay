@@ -781,8 +781,8 @@ class TestTokenHash(unittest.TestCase):
         self.assertRegex(hex_part, r"^[0-9a-f]{64}$")
         self.assertEqual(len(output), 65)  # 64 hex chars + 1 newline
 
-    def test_hash_matches_tools_hash_token(self):
-        """Digest must match existing tools_hash_token.py for same input."""
+    def test_hash_known_answer(self):
+        """Digest must match known SHA-256 for a given input."""
         token = "compatibility-test-token"
         expected = hashlib.sha256(token.encode("utf-8")).hexdigest()
         args = _make_namespace(value=token, file=None, env=None)

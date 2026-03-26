@@ -114,7 +114,7 @@ python tools/cognirelay_client.py token hash --value "my-secret-token"
 
 Prints the lowercase hex SHA-256 digest to stdout. Use `--file` or `--env` instead of `--value` to read the token from a file or environment variable. Exactly one source is required.
 
-This produces the same SHA-256 hex digest as the existing `tools_hash_token.py` for the same input string, but uses named flags (`--value`/`--file`/`--env`) rather than a positional argument. Either tool can be used to generate token hashes for `peer_tokens.json` and other config files.
+Use this to generate token hashes for `peer_tokens.json` and other config files.
 
 ## Exit Codes
 
