@@ -1516,17 +1516,19 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
     """Build a startup-oriented summary from an assembled continuity read result.
 
     Pure function: no I/O, no side effects.  Same input always produces
-    identical output with identical key order.
+    identical output with identical key order.  All list values are shallow
+    copies so mutations to the returned summary cannot affect the source
+    capsule dict.
     """
     capsule = out.get("capsule")
-    source_state = out["source_state"]
-    recovery_warnings = out["recovery_warnings"]
+    source_state = out.get("source_state", "missing")
+    recovery_warnings = list(out.get("recovery_warnings", []))
 
     # --- Tier 1: Recovery (always present, never null) ---
     if capsule is not None:
-        health = capsule.get("capsule_health") or {}
+        health = capsule.get("capsule_health", {})
         capsule_health_status = health.get("status")  # None when absent
-        capsule_health_reasons = health.get("reasons", [])
+        capsule_health_reasons = list(health.get("reasons", []))
     else:
         capsule_health_status = None
         capsule_health_reasons: list[str] = []
@@ -1544,17 +1546,17 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
         context = None
         updated_at = None
     else:
-        cont = capsule.get("continuity", {})
+        cont = capsule["continuity"]
         orientation = {
-            "top_priorities": cont.get("top_priorities", []),
-            "active_constraints": cont.get("active_constraints", []),
-            "open_loops": cont.get("open_loops", []),
-            "negative_decisions": cont.get("negative_decisions", []),
+            "top_priorities": list(cont.get("top_priorities", [])),
+            "active_constraints": list(cont.get("active_constraints", [])),
+            "open_loops": list(cont.get("open_loops", [])),
+            "negative_decisions": [dict(d) for d in cont.get("negative_decisions", [])],
         }
         context = {
-            "session_trajectory": cont.get("session_trajectory", []),
+            "session_trajectory": list(cont.get("session_trajectory", [])),
             "stance_summary": cont.get("stance_summary", ""),
-            "active_concerns": cont.get("active_concerns", []),
+            "active_concerns": list(cont.get("active_concerns", [])),
         }
         updated_at = capsule.get("updated_at")
 
@@ -1637,7 +1639,11 @@ def continuity_read_service(
         },
     )
     if req.view == "startup":
-        out["startup_summary"] = _build_startup_summary(out)
+        try:
+            out["startup_summary"] = _build_startup_summary(out)
+        except Exception:
+            _logger.warning("startup_summary build failed; degrading to omitted summary", exc_info=True)
+            out.setdefault("recovery_warnings", []).append("startup_summary_build_failed")
     return out
 
 

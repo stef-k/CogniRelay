@@ -309,7 +309,7 @@ class TestStartupView(unittest.TestCase):
                 "stance_summary": "stance",
                 "active_concerns": ["a1"],
             },
-            "capsule_health": {"status": "healthy", "reasons": []},
+            "capsule_health": {"status": "healthy", "reasons": ["r1"]},
             "updated_at": "2026-03-24T18:06:26Z",
         }
         out = {
@@ -318,15 +318,104 @@ class TestStartupView(unittest.TestCase):
             "capsule": capsule,
             "archived": False,
             "source_state": "active",
-            "recovery_warnings": [],
+            "recovery_warnings": ["w1"],
         }
+        import copy
+        out_snapshot = copy.deepcopy(out)
+
         result1 = _build_startup_summary(out)
         result2 = _build_startup_summary(out)
         self.assertEqual(result1, result2)
         # Verify key order
         self.assertEqual(list(result1.keys()), ["recovery", "orientation", "context", "updated_at"])
-        # Verify input dict was not mutated
+        # Verify input dict was not mutated (outer and nested)
         self.assertNotIn("startup_summary", out)
+        self.assertEqual(out, out_snapshot)
+
+    # --- Test 11: summary lists are independent copies, not aliases ---
+    def test_startup_summary_lists_are_copies(self) -> None:
+        """Mutating the returned summary must not affect the source capsule."""
+        capsule = {
+            "continuity": {
+                "top_priorities": ["p1"],
+                "active_constraints": ["c1"],
+                "open_loops": ["l1"],
+                "negative_decisions": [{"decision": "d", "rationale": "r"}],
+                "session_trajectory": ["t1"],
+                "stance_summary": "stance",
+                "active_concerns": ["a1"],
+            },
+            "capsule_health": {"status": "healthy", "reasons": ["r1"]},
+            "updated_at": "2026-03-24T18:06:26Z",
+        }
+        out = {
+            "ok": True,
+            "path": "memory/continuity/user-stef.json",
+            "capsule": capsule,
+            "archived": False,
+            "source_state": "active",
+            "recovery_warnings": ["w1"],
+        }
+        result = _build_startup_summary(out)
+        # Mutate every list in the summary
+        result["recovery"]["recovery_warnings"].append("injected")
+        result["recovery"]["capsule_health_reasons"].append("injected")
+        result["orientation"]["top_priorities"].append("injected")
+        result["orientation"]["active_constraints"].append("injected")
+        result["orientation"]["open_loops"].append("injected")
+        result["orientation"]["negative_decisions"].append({"decision": "x", "rationale": "y"})
+        result["orientation"]["negative_decisions"][0]["decision"] = "MUTATED"
+        result["context"]["session_trajectory"].append("injected")
+        result["context"]["active_concerns"].append("injected")
+        # Source capsule must be unchanged
+        self.assertEqual(capsule["continuity"]["top_priorities"], ["p1"])
+        self.assertEqual(capsule["continuity"]["negative_decisions"], [{"decision": "d", "rationale": "r"}])
+        self.assertEqual(capsule["capsule_health"]["reasons"], ["r1"])
+        self.assertEqual(out["recovery_warnings"], ["w1"])
+
+    # --- Test 12: capsule is byte-identical with and without view ---
+    def test_capsule_byte_identical_with_and_without_view(self) -> None:
+        """The capsule value must be identical whether view is set or not."""
+        neg = [{"decision": "d", "rationale": "r"}]
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            payload = self._capsule_payload(
+                negative_decisions=neg,
+                session_trajectory=["t"],
+                capsule_health={"status": "healthy", "reasons": [], "last_checked_at": "2026-03-24T18:00:00Z"},
+            )
+            self._write_capsule(repo_root, payload)
+            with patch("app.main._services", return_value=(settings, gm)):
+                out_plain = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="stef"),
+                    auth=_AuthStub(),
+                )
+                out_startup = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="stef", view="startup"),
+                    auth=_AuthStub(),
+                )
+            self.assertEqual(
+                json.dumps(out_plain["capsule"], sort_keys=True),
+                json.dumps(out_startup["capsule"], sort_keys=True),
+            )
+
+    # --- Test 13: allow_fallback=False with view="startup" still raises on missing ---
+    def test_startup_view_without_fallback_still_raises_on_missing(self) -> None:
+        """view='startup' must not suppress the 404 when allow_fallback is False."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            with patch("app.main._services", return_value=(settings, gm)):
+                from fastapi import HTTPException as _H
+                with self.assertRaises(_H) as err:
+                    continuity_read(
+                        req=ContinuityReadRequest(subject_kind="user", subject_id="gone", view="startup"),
+                        auth=_AuthStub(),
+                    )
+                self.assertEqual(err.exception.status_code, 404)
 
 
 if __name__ == "__main__":
