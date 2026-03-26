@@ -70,6 +70,8 @@ If your agent is already running and you want to integrate CogniRelay incrementa
 
 4. **Use MCP if your runtime speaks JSON-RPC.** The same capabilities are available through `POST /v1/mcp` as through the HTTP endpoints. See [MCP Guide](mcp.md) for the bootstrap flow.
 
+5. **Use the CLI client for shell-based hooks.** If your agent runtime invokes hooks as shell commands, `tools/cognirelay_client.py` can read and upsert capsules without a third-party HTTP library. See [CLI Client](cognirelay-client.md) for usage.
+
 ## The Responsibility Boundary
 
 CogniRelay does not control when you invoke it. You own invocation timing and all decisions about what to persist, what to retrieve, and how to act on what you get back.
@@ -95,4 +97,5 @@ Concretely:
 - [API Surface](api-surface.md) for the complete HTTP endpoint reference
 - [Payload Reference](payload-reference.md) for capsule structure, request/response schemas, and field constraints
 - [MCP Guide](mcp.md) if your runtime uses JSON-RPC tool protocols
+- [CLI Client](cognirelay-client.md) for shell-based continuity read, upsert, and token hashing
 - [Reviewer Guide](reviewer-guide.md) for the system thesis, recovery model, and authority boundaries
