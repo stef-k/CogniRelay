@@ -234,7 +234,7 @@ Response:
 
 #### Startup view (`view="startup"`)
 
-When `view` is set to `"startup"`, the response includes one additional top-level key `startup_summary` alongside the unchanged full `capsule`. The summary mechanically extracts startup-relevant fields from the already-loaded capsule into a fixed-order structure. The `capsule` value is byte-identical to the response without a view parameter.
+When `view` is set to `"startup"`, the response includes one additional top-level key `startup_summary` alongside the unchanged full `capsule`. The summary mechanically extracts startup-relevant fields from the already-loaded capsule into a fixed-order structure. The `capsule` value is identical to the response without a view parameter.
 
 **`startup_summary` shape (active/fallback capsule):**
 

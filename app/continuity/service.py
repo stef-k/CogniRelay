@@ -69,6 +69,7 @@ CONTINUITY_WARNING_ACTIVE_INVALID = "continuity_active_invalid"
 CONTINUITY_WARNING_FALLBACK_WRITE_FAILED = "continuity_fallback_write_failed"
 CONTINUITY_WARNING_FALLBACK_USED = "continuity_fallback_used"
 CONTINUITY_WARNING_FALLBACK_MISSING = "continuity_fallback_missing"
+CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED = "startup_summary_build_failed"
 CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
 CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
 CONTINUITY_ARCHIVE_SCHEMA_TYPE = "continuity_archive_envelope"
@@ -1645,7 +1646,8 @@ def continuity_read_service(
         except Exception:
             _logger.warning("startup_summary build failed; degrading to null summary", exc_info=True)
             out["startup_summary"] = None
-            out["recovery_warnings"].append("startup_summary_build_failed")
+            # out["recovery_warnings"] is the same list object populated earlier in this function.
+            out["recovery_warnings"].append(CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED)
     return out
 
 
