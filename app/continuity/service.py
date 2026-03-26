@@ -1512,6 +1512,60 @@ def continuity_upsert_service(
     }
 
 
+def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
+    """Build a startup-oriented summary from an assembled continuity read result.
+
+    Pure function: no I/O, no side effects.  Same input always produces
+    identical output with identical key order.
+    """
+    capsule = out.get("capsule")
+    source_state = out["source_state"]
+    recovery_warnings = out["recovery_warnings"]
+
+    # --- Tier 1: Recovery (always present, never null) ---
+    if capsule is not None:
+        health = capsule.get("capsule_health") or {}
+        capsule_health_status = health.get("status")  # None when absent
+        capsule_health_reasons = health.get("reasons", [])
+    else:
+        capsule_health_status = None
+        capsule_health_reasons: list[str] = []
+
+    recovery = {
+        "source_state": source_state,
+        "recovery_warnings": recovery_warnings,
+        "capsule_health_status": capsule_health_status,
+        "capsule_health_reasons": capsule_health_reasons,
+    }
+
+    # --- Tier 2 & 3: Orientation / Context (null when missing) ---
+    if source_state == "missing" or capsule is None:
+        orientation = None
+        context = None
+        updated_at = None
+    else:
+        cont = capsule.get("continuity", {})
+        orientation = {
+            "top_priorities": cont.get("top_priorities", []),
+            "active_constraints": cont.get("active_constraints", []),
+            "open_loops": cont.get("open_loops", []),
+            "negative_decisions": cont.get("negative_decisions", []),
+        }
+        context = {
+            "session_trajectory": cont.get("session_trajectory", []),
+            "stance_summary": cont.get("stance_summary", ""),
+            "active_concerns": cont.get("active_concerns", []),
+        }
+        updated_at = capsule.get("updated_at")
+
+    return {
+        "recovery": recovery,
+        "orientation": orientation,
+        "context": context,
+        "updated_at": updated_at,
+    }
+
+
 def continuity_read_service(
     *,
     repo_root: Path,
@@ -1582,6 +1636,8 @@ def continuity_read_service(
             "recovery_warnings": out["recovery_warnings"],
         },
     )
+    if req.view == "startup":
+        out["startup_summary"] = _build_startup_summary(out)
     return out
 
 
