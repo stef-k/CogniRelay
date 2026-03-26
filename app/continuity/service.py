@@ -1551,6 +1551,7 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
             "top_priorities": list(cont.get("top_priorities", [])),
             "active_constraints": list(cont.get("active_constraints", [])),
             "open_loops": list(cont.get("open_loops", [])),
+            # One-level shallow copy; NegativeDecision has only scalar (str) fields.
             "negative_decisions": [dict(d) for d in cont.get("negative_decisions", [])],
         }
         context = {
@@ -1642,8 +1643,9 @@ def continuity_read_service(
         try:
             out["startup_summary"] = _build_startup_summary(out)
         except Exception:
-            _logger.warning("startup_summary build failed; degrading to omitted summary", exc_info=True)
-            out.setdefault("recovery_warnings", []).append("startup_summary_build_failed")
+            _logger.warning("startup_summary build failed; degrading to null summary", exc_info=True)
+            out["startup_summary"] = None
+            out["recovery_warnings"].append("startup_summary_build_failed")
     return out
 
 

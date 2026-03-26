@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from app.config import Settings
 from app.continuity.service import _build_startup_summary
 from app.main import continuity_read
@@ -364,6 +366,8 @@ class TestStartupView(unittest.TestCase):
         result["orientation"]["active_constraints"].append("injected")
         result["orientation"]["open_loops"].append("injected")
         result["orientation"]["negative_decisions"].append({"decision": "x", "rationale": "y"})
+        # dict(d) is a one-level shallow copy — sufficient because
+        # NegativeDecision has only scalar (str) fields.
         result["orientation"]["negative_decisions"][0]["decision"] = "MUTATED"
         result["context"]["session_trajectory"].append("injected")
         result["context"]["active_concerns"].append("injected")
@@ -373,9 +377,9 @@ class TestStartupView(unittest.TestCase):
         self.assertEqual(capsule["capsule_health"]["reasons"], ["r1"])
         self.assertEqual(out["recovery_warnings"], ["w1"])
 
-    # --- Test 12: capsule is byte-identical with and without view ---
-    def test_capsule_byte_identical_with_and_without_view(self) -> None:
-        """The capsule value must be identical whether view is set or not."""
+    # --- Test 12: capsule is value-identical with and without view ---
+    def test_capsule_value_identical_with_and_without_view(self) -> None:
+        """The capsule dict must be equal whether view is set or not."""
         neg = [{"decision": "d", "rationale": "r"}]
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -396,10 +400,7 @@ class TestStartupView(unittest.TestCase):
                     req=ContinuityReadRequest(subject_kind="user", subject_id="stef", view="startup"),
                     auth=_AuthStub(),
                 )
-            self.assertEqual(
-                json.dumps(out_plain["capsule"], sort_keys=True),
-                json.dumps(out_startup["capsule"], sort_keys=True),
-            )
+            self.assertEqual(out_plain["capsule"], out_startup["capsule"])
 
     # --- Test 13: allow_fallback=False with view="startup" still raises on missing ---
     def test_startup_view_without_fallback_still_raises_on_missing(self) -> None:
@@ -409,13 +410,35 @@ class TestStartupView(unittest.TestCase):
             settings = self._settings(repo_root)
             gm = _GitManagerStub()
             with patch("app.main._services", return_value=(settings, gm)):
-                from fastapi import HTTPException as _H
-                with self.assertRaises(_H) as err:
+                with self.assertRaises(HTTPException) as err:
                     continuity_read(
                         req=ContinuityReadRequest(subject_kind="user", subject_id="gone", view="startup"),
                         auth=_AuthStub(),
                     )
                 self.assertEqual(err.exception.status_code, 404)
+
+    # --- Test 14: startup_summary_build_failed degradation path ---
+    def test_startup_summary_build_failure_degrades_gracefully(self) -> None:
+        """When _build_startup_summary raises, response must have null summary and warning."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            payload = self._capsule_payload()
+            self._write_capsule(repo_root, payload)
+            with (
+                patch("app.main._services", return_value=(settings, gm)),
+                patch("app.continuity.service._build_startup_summary", side_effect=RuntimeError("boom")),
+            ):
+                out = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="stef", view="startup"),
+                    auth=_AuthStub(),
+                )
+            self.assertTrue(out["ok"])
+            self.assertIsNone(out["startup_summary"])
+            self.assertIn("startup_summary_build_failed", out["recovery_warnings"])
+            # Capsule must still be present and valid
+            self.assertIsNotNone(out["capsule"])
 
 
 if __name__ == "__main__":

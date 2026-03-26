@@ -284,6 +284,8 @@ When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`
 
 **Response overhead:** The `startup_summary` block adds approximately **~1.0–1.5 KB** and **~250–370 tokens** to the response, depending on capsule content density. This is a mechanical extraction — no additional I/O or computation is performed beyond building the summary dict from the already-loaded capsule.
 
+**Degradation:** If building the `startup_summary` fails unexpectedly (e.g., a malformed capsule bypassing validation), `startup_summary` is set to `null` in the response and `"startup_summary_build_failed"` is appended to `recovery_warnings`. The full `capsule` is always unaffected. An agent receiving this warning should fall back to reading orientation fields directly from `capsule.continuity`.
+
 ### Compare — `POST /v1/continuity/compare`
 
 | Field | Type | Required | Constraints |
