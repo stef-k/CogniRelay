@@ -215,6 +215,7 @@ Response includes `recovery_warnings` (list of strings) when the fallback snapsh
 | `subject_kind` | `"user"` \| `"peer"` \| `"thread"` \| `"task"` | yes | |
 | `subject_id` | string | yes | 1–200 chars |
 | `allow_fallback` | boolean | no | default `false` |
+| `view` | `"startup"` | no | default `null` — when omitted the response is unchanged from the current contract |
 
 Response:
 
@@ -230,6 +231,58 @@ Response:
 ```
 
 `source_state` is `"active"`, `"fallback"`, or `"missing"`. When `allow_fallback` is `false` (default) and the active capsule is missing, the response is an HTTP error. When `true`, the response degrades to fallback or missing state with appropriate `recovery_warnings`.
+
+#### Startup view (`view="startup"`)
+
+When `view` is set to `"startup"`, the response includes one additional top-level key `startup_summary` alongside the unchanged full `capsule`. The summary mechanically extracts startup-relevant fields from the already-loaded capsule into a fixed-order structure. The `capsule` value is byte-identical to the response without a view parameter.
+
+**`startup_summary` shape (active/fallback capsule):**
+
+```json
+{
+  "startup_summary": {
+    "recovery": {
+      "source_state": "active",
+      "recovery_warnings": [],
+      "capsule_health_status": "healthy",
+      "capsule_health_reasons": []
+    },
+    "orientation": {
+      "top_priorities": ["..."],
+      "active_constraints": ["..."],
+      "open_loops": ["..."],
+      "negative_decisions": [{"decision": "...", "rationale": "..."}]
+    },
+    "context": {
+      "session_trajectory": ["..."],
+      "stance_summary": "...",
+      "active_concerns": ["..."]
+    },
+    "updated_at": "2026-03-24T18:06:26Z"
+  }
+}
+```
+
+**`startup_summary` shape (missing capsule):**
+
+When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`, `updated_at` is `null`. The `recovery` block is always present and never null.
+
+**Key order contract:** Top-level keys are always `recovery`, `orientation`, `context`, `updated_at` in that order. Within each block, keys appear in the order shown above. Python 3.7+ dict insertion order is preserved through FastAPI/JSON serialization.
+
+**Field defaults:**
+
+| Condition | Field | Value |
+|-----------|-------|-------|
+| Capsule is `null` (missing) | `capsule_health_status` | `null` |
+| Capsule is `null` (missing) | `capsule_health_reasons` | `[]` |
+| Capsule has no `capsule_health` | `capsule_health_status` | `null` |
+| Capsule has no `capsule_health` | `capsule_health_reasons` | `[]` |
+| Legacy capsule missing `negative_decisions` | `orientation.negative_decisions` | `[]` |
+| Legacy capsule missing `session_trajectory` | `context.session_trajectory` | `[]` |
+
+**`negative_decisions` pass-through:** Each element in `orientation.negative_decisions` is the same `{"decision": str, "rationale": str}` object stored in the capsule — no transformation, flattening, or summarization.
+
+**Response overhead:** The `startup_summary` block adds approximately **~1.0–1.5 KB** and **~250–370 tokens** to the response, depending on capsule content density. This is a mechanical extraction — no additional I/O or computation is performed beyond building the summary dict from the already-loaded capsule.
 
 ### Compare — `POST /v1/continuity/compare`
 
