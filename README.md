@@ -68,6 +68,7 @@ For the full cold-start endpoint sequence, see [System Overview: Agent Usage](do
 - [API Surface](docs/api-surface.md): currently implemented HTTP behavior grouped by domain
 - [Payload Reference](docs/payload-reference.md): capsule structure, request/response schemas, and field constraints
 - [MCP Guide](docs/mcp.md): MCP bootstrap flow and tool mapping
+- [CLI Client](docs/cognirelay-client.md): stdlib-only command-line tool for continuity read, upsert, and token hashing
 - [Go-live Runbook](deploy/GO_LIVE_RUNBOOK.md): operator deployment and go-live workflow
 - [Production Signoff Checklist](deploy/PRODUCTION_SIGNOFF_CHECKLIST.md): production verification and data-safety checks
 
@@ -116,5 +117,5 @@ Local quality commands:
 
 ```bash
 ./.venv/bin/python -m unittest discover -s tests -v
-./.venv/bin/python -m ruff check app tests tools_hash_token.py
+./.venv/bin/python -m ruff check app tests tools
 ```

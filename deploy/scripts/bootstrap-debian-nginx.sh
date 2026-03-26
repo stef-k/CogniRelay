@@ -161,8 +161,8 @@ systemctl enable --now \
 echo "[7/9] Generating local host tokens"
 HOST_ADMIN_TOKEN="$(generate_or_read_token "$HOST_ADMIN_TOKEN_FILE")"
 OPS_TOKEN="$(generate_or_read_token "$OPS_TOKEN_FILE")"
-HOST_ADMIN_SHA="$(python3 "$APP_DIR/tools_hash_token.py" "$HOST_ADMIN_TOKEN")"
-OPS_SHA="$(python3 "$APP_DIR/tools_hash_token.py" "$OPS_TOKEN")"
+HOST_ADMIN_SHA="$(python3 "$APP_DIR/tools/cognirelay_client.py" token hash --value "$HOST_ADMIN_TOKEN")"
+OPS_SHA="$(python3 "$APP_DIR/tools/cognirelay_client.py" token hash --value "$OPS_TOKEN")"
 
 if [[ -f "$PEER_TOKENS_FILE" ]]; then
   echo "Existing $PEER_TOKENS_FILE detected; leaving it unchanged."

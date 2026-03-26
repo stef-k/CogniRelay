@@ -87,8 +87,8 @@ Set at minimum:
 HOST_ADMIN_TOKEN="$(openssl rand -hex 32)"
 HOST_OPS_TOKEN="$(openssl rand -hex 32)"
 
-HOST_ADMIN_SHA="$(python3 /opt/cognirelay/tools_hash_token.py "$HOST_ADMIN_TOKEN")"
-HOST_OPS_SHA="$(python3 /opt/cognirelay/tools_hash_token.py "$HOST_OPS_TOKEN")"
+HOST_ADMIN_SHA="$(python3 /opt/cognirelay/tools/cognirelay_client.py token hash --value "$HOST_ADMIN_TOKEN")"
+HOST_OPS_SHA="$(python3 /opt/cognirelay/tools/cognirelay_client.py token hash --value "$HOST_OPS_TOKEN")"
 
 sudo install -d -o cognirelay -g cognirelay -m 0750 /var/lib/cognirelay/repo/config
 cat <<JSON | sudo tee /var/lib/cognirelay/repo/config/peer_tokens.json >/dev/null
