@@ -28,9 +28,9 @@ Running with no subcommand prints usage to stderr and exits 2.
 | Argument | Default | Notes |
 |---|---|---|
 | `--base-url` | `COGNIRELAY_BASE_URL` env, else required | One trailing slash stripped before use |
-| `--token` | — | Raw bearer token |
-| `--token-file` | — | Path to file containing token |
-| `--token-env` | — | Name of env var containing token |
+| `--token` | — | Raw bearer token (visible in process listings; prefer `--token-file` or `--token-env` in production) |
+| `--token-file` | — | Path to file containing token (stripped of trailing whitespace) |
+| `--token-env` | — | Name of env var containing token (stripped of trailing whitespace) |
 | `--timeout` | `30.0` | HTTP timeout in seconds |
 
 ### Token resolution order
@@ -55,7 +55,7 @@ python tools/cognirelay_client.py read \
   --format startup
 ```
 
-This calls `POST /v1/continuity/read` with `allow_fallback: true` and prints the response.
+`--subject-kind` accepts: `user`, `peer`, `thread`, `task`. This calls `POST /v1/continuity/read` with `allow_fallback: true` and prints the response.
 
 ### Output formats
 
@@ -114,7 +114,7 @@ python tools/cognirelay_client.py token hash --value "my-secret-token"
 
 Prints the lowercase hex SHA-256 digest to stdout. Use `--file` or `--env` instead of `--value` to read the token from a file or environment variable. Exactly one source is required.
 
-This produces the same output as the existing `tools_hash_token.py` and is the recommended way to generate token hashes for `peer_tokens.json` and other config files.
+This produces the same SHA-256 hex digest as the existing `tools_hash_token.py` for the same input string, but uses named flags (`--value`/`--file`/`--env`) rather than a positional argument. Either tool can be used to generate token hashes for `peer_tokens.json` and other config files.
 
 ## Exit Codes
 
@@ -123,7 +123,7 @@ This produces the same output as the existing `tools_hash_token.py` and is the r
 | 0 | Success (including degraded/fallback reads) |
 | 1 | HTTP error (4xx/5xx) — stderr shows `Error: HTTP {code}: {body}` |
 | 2 | Usage or argument error |
-| 3 | Token resolution failed |
+| 3 | Token resolution failed (no source, unreadable `--token-file`, or empty token file) |
 | 4 | Connection or network error (timeout, DNS, refused) |
 | 5 | Response parse error (non-JSON body) |
 | 6 | Token source unreadable (`token hash` only — file not found, env var unset) |

@@ -30,7 +30,7 @@ _spec.loader.exec_module(client)
 def _make_namespace(**kwargs):
     """Build an argparse-like namespace with defaults for connection args."""
     defaults = {
-        "token": "test-token",
+        "token": None,
         "token_file": None,
         "token_env": None,
         "base_url": None,
@@ -123,6 +123,18 @@ class TestTokenResolution(unittest.TestCase):
                 client.resolve_token(ns)
             self.assertEqual(ctx.exception.code, 3)
 
+    def test_token_file_empty_exits_3(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("")
+            path = f.name
+        try:
+            ns = _make_namespace(token=None, token_file=path)
+            with self.assertRaises(SystemExit) as ctx:
+                client.resolve_token(ns)
+            self.assertEqual(ctx.exception.code, 3)
+        finally:
+            os.unlink(path)
+
 
 # ===========================================================================
 # Base URL tests
@@ -168,6 +180,11 @@ class TestNoSubcommand(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("usage", stderr.lower())
 
+    def test_token_no_subcommand_exits_2(self):
+        rc, stdout, stderr = _run_client("token")
+        self.assertEqual(rc, 2)
+        self.assertIn("usage", stderr.lower())
+
 
 # ===========================================================================
 # read subcommand tests
@@ -197,36 +214,12 @@ SAMPLE_NULL_CAPSULE_RESPONSE = {
 class TestReadSubcommand(unittest.TestCase):
 
     @patch("tools.cognirelay_client.urllib.request.urlopen")
-    def test_read_json_format(self, mock_urlopen):
-        mock_urlopen.return_value = _mock_urlopen(
-            body=json.dumps(SAMPLE_READ_RESPONSE).encode()
-        )
-        rc, stdout, stderr = _run_client(
-            "read",
-            "--subject-kind", "user",
-            "--subject-id", "agent-1",
-            "--format", "json",
-            env_override={"COGNIRELAY_BASE_URL": "http://localhost:8000", "COGNIRELAY_TOKEN": "tok"},
-        )
-        # We can't mock urlopen in a subprocess, so use unit-level test instead
-        # This test uses subprocess for argument parsing only — see unit test below
-
-    @patch("tools.cognirelay_client.urllib.request.urlopen")
-    def _do_read(self, args_ns, mock_urlopen, response_body=None):
-        """Helper: run cmd_read with mocked HTTP."""
-        if response_body is None:
-            response_body = SAMPLE_READ_RESPONSE
-        mock_urlopen.return_value = _mock_urlopen(
-            body=json.dumps(response_body).encode()
-        )
-        return args_ns
-
-    @patch("tools.cognirelay_client.urllib.request.urlopen")
     def test_read_json_unit(self, mock_urlopen):
         mock_urlopen.return_value = _mock_urlopen(
             body=json.dumps(SAMPLE_READ_RESPONSE).encode()
         )
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -247,6 +240,7 @@ class TestReadSubcommand(unittest.TestCase):
             body=json.dumps(SAMPLE_READ_RESPONSE).encode()
         )
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -284,6 +278,7 @@ class TestReadSubcommand(unittest.TestCase):
             body=json.dumps(SAMPLE_NULL_CAPSULE_RESPONSE).encode()
         )
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -319,6 +314,7 @@ class TestReadSubcommand(unittest.TestCase):
         }
         mock_urlopen.return_value = _mock_urlopen(body=json.dumps(response).encode())
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -346,6 +342,7 @@ class TestReadSubcommand(unittest.TestCase):
             outpath = f.name
         try:
             args = _make_namespace(
+                token="test-token",
                 base_url="http://localhost:8000",
                 command="read",
                 subject_kind="user",
@@ -370,6 +367,7 @@ class TestReadSubcommand(unittest.TestCase):
         )
         mock_urlopen.side_effect = exc
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -388,6 +386,7 @@ class TestReadSubcommand(unittest.TestCase):
         )
         mock_urlopen.side_effect = exc
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -403,6 +402,7 @@ class TestReadSubcommand(unittest.TestCase):
     def test_read_connection_refused_exits_4(self, mock_urlopen):
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -418,6 +418,7 @@ class TestReadSubcommand(unittest.TestCase):
     def test_read_timeout_exits_4(self, mock_urlopen):
         mock_urlopen.side_effect = TimeoutError("timed out")
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -433,6 +434,7 @@ class TestReadSubcommand(unittest.TestCase):
     def test_read_non_json_response_exits_5(self, mock_urlopen):
         mock_urlopen.return_value = _mock_urlopen(body=b"<html>not json</html>")
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -457,6 +459,7 @@ class TestReadSubcommand(unittest.TestCase):
             body=json.dumps(SAMPLE_READ_RESPONSE).encode()
         )
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="read",
             subject_kind="user",
@@ -471,6 +474,59 @@ class TestReadSubcommand(unittest.TestCase):
         request_obj = call_args[0][0]
         body = json.loads(request_obj.data.decode())
         self.assertTrue(body["allow_fallback"])
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_read_startup_malformed_negative_decisions(self, mock_urlopen):
+        """Malformed negative_decisions items degrade gracefully, no crash."""
+        response = {
+            "source_state": "active",
+            "recovery_warnings": [],
+            "capsule": {
+                "top_priorities": [],
+                "active_constraints": [],
+                "open_loops": [],
+                "negative_decisions": [
+                    {"decision": "Good"},  # missing rationale
+                    {"rationale": "reason"},  # missing decision
+                    "bare-string",  # not a dict
+                ],
+                "session_trajectory": [],
+            },
+        }
+        mock_urlopen.return_value = _mock_urlopen(body=json.dumps(response).encode())
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="read",
+            subject_kind="user",
+            subject_id="agent-1",
+            format="startup",
+            output=None,
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            client.cmd_read(args)
+            output = mock_out.getvalue()
+        self.assertIn("- Good: ", output)
+        self.assertIn("- : reason", output)
+        self.assertIn("- bare-string: ", output)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_read_output_unwritable_exits_2(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(SAMPLE_READ_RESPONSE).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="read",
+            subject_kind="user",
+            subject_id="agent-1",
+            format="json",
+            output="/nonexistent/dir/output.json",
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            client.cmd_read(args)
+        self.assertEqual(ctx.exception.code, 2)
 
 
 # ===========================================================================
@@ -498,6 +554,7 @@ class TestUpsertSubcommand(unittest.TestCase):
             inpath = f.name
         try:
             args = _make_namespace(
+                token="test-token",
                 base_url="http://localhost:8000",
                 command="upsert",
                 input=inpath,
@@ -518,6 +575,7 @@ class TestUpsertSubcommand(unittest.TestCase):
             body=json.dumps(SAMPLE_UPSERT_RESPONSE).encode()
         )
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="upsert",
             input=None,
@@ -535,6 +593,7 @@ class TestUpsertSubcommand(unittest.TestCase):
 
     def test_upsert_both_input_and_stdin_exits_2(self):
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="upsert",
             input="/some/file",
@@ -547,6 +606,7 @@ class TestUpsertSubcommand(unittest.TestCase):
 
     def test_upsert_neither_input_nor_stdin_exits_2(self):
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="upsert",
             input=None,
@@ -559,6 +619,7 @@ class TestUpsertSubcommand(unittest.TestCase):
 
     def test_upsert_input_file_not_found_exits_2(self):
         args = _make_namespace(
+            token="test-token",
             base_url="http://localhost:8000",
             command="upsert",
             input="/nonexistent/file.json",
@@ -576,6 +637,7 @@ class TestUpsertSubcommand(unittest.TestCase):
             inpath = f.name
         try:
             args = _make_namespace(
+                token="test-token",
                 base_url="http://localhost:8000",
                 command="upsert",
                 input=inpath,
@@ -599,6 +661,7 @@ class TestUpsertSubcommand(unittest.TestCase):
             inpath = f.name
         try:
             args = _make_namespace(
+                token="test-token",
                 base_url="http://localhost:8000",
                 command="upsert",
                 input=inpath,
@@ -622,6 +685,7 @@ class TestUpsertSubcommand(unittest.TestCase):
             inpath = f.name
         try:
             args = _make_namespace(
+                token="test-token",
                 base_url="http://localhost:8000",
                 command="upsert",
                 input=inpath,
@@ -695,6 +759,13 @@ class TestTokenHash(unittest.TestCase):
     def test_hash_unset_env_exits_6(self):
         args = _make_namespace(value=None, file=None, env="NONEXISTENT_VAR_XYZ")
         with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit) as ctx:
+                client.cmd_token_hash(args)
+            self.assertEqual(ctx.exception.code, 6)
+
+    def test_hash_whitespace_only_env_exits_6(self):
+        args = _make_namespace(value=None, file=None, env="WS_ONLY_VAR")
+        with patch.dict(os.environ, {"WS_ONLY_VAR": "   \n"}):
             with self.assertRaises(SystemExit) as ctx:
                 client.cmd_token_hash(args)
             self.assertEqual(ctx.exception.code, 6)

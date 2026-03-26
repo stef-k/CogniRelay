@@ -36,6 +36,8 @@ def resolve_token(args):
             sys.exit(3)
         if value:
             return value
+        print(f"Error: token file '{args.token_file}' is empty", file=sys.stderr)
+        sys.exit(3)
 
     # 3. --token-env
     if args.token_env:
@@ -78,10 +80,9 @@ def resolve_base_url(args):
 # ---------------------------------------------------------------------------
 
 def do_request(base_url, path, token, body_bytes, timeout):
-    """Send a POST request and return (status, response_body_str).
+    """Send a POST request and return the response body string.
 
-    On success returns the response body string.
-    On HTTP error exits 1, on connection error exits 4, on parse error exits 5.
+    On HTTP error exits 1, on connection error exits 4.
     """
     url = f"{base_url}{path}"
     req = urllib.request.Request(
@@ -154,7 +155,9 @@ def format_startup(data):
             lines.append("(none)")
         elif field == "negative_decisions":
             for nd in items:
-                lines.append(f"- {nd['decision']}: {nd['rationale']}")
+                decision = nd.get("decision", "") if isinstance(nd, dict) else str(nd)
+                rationale = nd.get("rationale", "") if isinstance(nd, dict) else ""
+                lines.append(f"- {decision}: {rationale}")
         else:
             for item in items:
                 lines.append(f"- {item}")
@@ -192,8 +195,12 @@ def cmd_read(args):
         output = format_startup(resp_data)
 
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output)
+        try:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(output)
+        except OSError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
     else:
         sys.stdout.write(output)
 
@@ -261,14 +268,13 @@ def cmd_token_hash(args):
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(6)
     else:
-        token = os.environ.get(args.env, "")
+        token = os.environ.get(args.env, "").rstrip()
         if not token:
             print(
                 f"Error: environment variable '{args.env}' is not set or empty",
                 file=sys.stderr,
             )
             sys.exit(6)
-        token = token.rstrip()
 
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     sys.stdout.write(digest + "\n")
@@ -279,7 +285,11 @@ def cmd_token_hash(args):
 # ---------------------------------------------------------------------------
 
 def build_parser():
-    """Build the top-level argparse parser with subcommands."""
+    """Build the top-level argparse parser with subcommands.
+
+    Returns (parser, token_parser) so callers can print token-specific
+    usage when 'token' is invoked without a sub-subcommand.
+    """
     parser = argparse.ArgumentParser(
         prog="cognirelay-client",
         description="CogniRelay CLI client",
@@ -319,12 +329,12 @@ def build_parser():
     hash_parser.add_argument("--file", default=None)
     hash_parser.add_argument("--env", default=None)
 
-    return parser
+    return parser, token_parser
 
 
 def main():
     """CLI entry point."""
-    parser = build_parser()
+    parser, token_parser = build_parser()
     args = parser.parse_args()
 
     if args.command is None:
@@ -337,9 +347,8 @@ def main():
         cmd_upsert(args)
     elif args.command == "token":
         if not getattr(args, "token_command", None):
-            # Print token subparser help to stderr
-            # Re-parse to get the token parser for its help
-            parser.parse_args(["token", "--help"])
+            token_parser.print_usage(sys.stderr)
+            sys.exit(2)
         elif args.token_command == "hash":
             cmd_token_hash(args)
     else:
