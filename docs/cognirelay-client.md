@@ -60,7 +60,7 @@ python tools/cognirelay_client.py read \
 ### Output formats
 
 - `--format json` (default): pretty-printed JSON response body
-- `--format startup`: compact section-based text showing source state, recovery warnings, top priorities, active constraints, open loops, negative decisions, and session trajectory
+- `--format startup`: compact section-based text showing source state, recovery warnings, top priorities, active constraints, open loops, negative decisions, and session trajectory. This is a client-side text renderer operating on the full capsule response body — it does not send `view="startup"` to the server and does not use the server-side `startup_summary` block. To get the server-side `startup_summary` extraction (with its fixed key-order contract), call `POST /v1/continuity/read` directly with `view="startup"`
 
 Use `--output <path>` to write to a file instead of stdout.
 

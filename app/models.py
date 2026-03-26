@@ -712,6 +712,7 @@ class ContinuityReadRequest(BaseModel):
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     allow_fallback: bool = False
+    view: Optional[Literal["startup"]] = None
 
 
 class ContinuityListRequest(BaseModel):

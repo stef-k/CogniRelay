@@ -69,6 +69,7 @@ CONTINUITY_WARNING_ACTIVE_INVALID = "continuity_active_invalid"
 CONTINUITY_WARNING_FALLBACK_WRITE_FAILED = "continuity_fallback_write_failed"
 CONTINUITY_WARNING_FALLBACK_USED = "continuity_fallback_used"
 CONTINUITY_WARNING_FALLBACK_MISSING = "continuity_fallback_missing"
+CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED = "startup_summary_build_failed"
 CONTINUITY_FALLBACK_SCHEMA_TYPE = "continuity_fallback_snapshot"
 CONTINUITY_FALLBACK_SCHEMA_VERSION = "1.0"
 CONTINUITY_ARCHIVE_SCHEMA_TYPE = "continuity_archive_envelope"
@@ -1512,6 +1513,63 @@ def continuity_upsert_service(
     }
 
 
+def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
+    """Build a startup-oriented summary from an assembled continuity read result.
+
+    Pure function: no I/O, no side effects.  Same input always produces
+    identical output with identical key order.  All list values are shallow
+    copies so mutations to the returned summary cannot affect the source
+    capsule dict.
+    """
+    capsule = out.get("capsule")
+    source_state = out.get("source_state", "missing")
+    recovery_warnings = list(out.get("recovery_warnings", []))
+
+    # --- Tier 1: Recovery (always present, never null) ---
+    if capsule is not None:
+        health = capsule.get("capsule_health", {})
+        capsule_health_status = health.get("status")  # None when absent
+        capsule_health_reasons = list(health.get("reasons", []))
+    else:
+        capsule_health_status = None
+        capsule_health_reasons: list[str] = []
+
+    recovery = {
+        "source_state": source_state,
+        "recovery_warnings": recovery_warnings,
+        "capsule_health_status": capsule_health_status,
+        "capsule_health_reasons": capsule_health_reasons,
+    }
+
+    # --- Tier 2 & 3: Orientation / Context (null when missing) ---
+    if source_state == "missing" or capsule is None:
+        orientation = None
+        context = None
+        updated_at = None
+    else:
+        cont = capsule["continuity"]
+        orientation = {
+            "top_priorities": list(cont.get("top_priorities", [])),
+            "active_constraints": list(cont.get("active_constraints", [])),
+            "open_loops": list(cont.get("open_loops", [])),
+            # One-level shallow copy; NegativeDecision has only scalar (str) fields.
+            "negative_decisions": [dict(d) for d in cont.get("negative_decisions", [])],
+        }
+        context = {
+            "session_trajectory": list(cont.get("session_trajectory", [])),
+            "stance_summary": cont.get("stance_summary", ""),
+            "active_concerns": list(cont.get("active_concerns", [])),
+        }
+        updated_at = capsule.get("updated_at")
+
+    return {
+        "recovery": recovery,
+        "orientation": orientation,
+        "context": context,
+        "updated_at": updated_at,
+    }
+
+
 def continuity_read_service(
     *,
     repo_root: Path,
@@ -1582,6 +1640,14 @@ def continuity_read_service(
             "recovery_warnings": out["recovery_warnings"],
         },
     )
+    if req.view == "startup":
+        try:
+            out["startup_summary"] = _build_startup_summary(out)
+        except Exception:
+            _logger.warning("startup_summary build failed; degrading to null summary", exc_info=True)
+            out["startup_summary"] = None
+            # out["recovery_warnings"] is the same list object populated earlier in this function.
+            out["recovery_warnings"].append(CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED)
     return out
 
 

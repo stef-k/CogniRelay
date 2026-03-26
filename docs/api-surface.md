@@ -74,6 +74,7 @@ Notable behavior:
 - successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` now refresh a recovery-only fallback snapshot under `memory/continuity/fallback/`
 - `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` surface fallback snapshot failures through additive `recovery_warnings` instead of failing the already durable active write
 - `POST /v1/continuity/read` now returns `source_state` plus `recovery_warnings`; exact-active behavior remains the default and structured fallback or missing-state degradation is enabled with `allow_fallback=true`
+- `POST /v1/continuity/read` now accepts an optional `view="startup"` parameter; when set, the response includes a `startup_summary` block alongside the unchanged full capsule — a mechanical extraction of startup-relevant orientation fields with no additional I/O
 - `POST /v1/continuity/refresh/plan` now returns deterministic refresh candidates and persists the latest plan under `memory/continuity/refresh_state.json`
 - `POST /v1/continuity/retention/plan` now returns a bounded next-action stale-archive window, persists it under `memory/continuity/retention_state.json`, and exposes `total_candidates` plus `has_more` so operators can drain backlog through repeated plan/apply cycles
 - `POST /v1/continuity/compare` returns deterministic changed fields, strongest signal, and a recommended verification outcome without mutating the active capsule

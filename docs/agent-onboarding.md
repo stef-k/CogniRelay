@@ -25,7 +25,7 @@ If you are adding CogniRelay to an existing agent loop and want the smallest use
 
 **On startup (or after any context reset):**
 
-1. `POST /v1/continuity/read` with your selector — returns your last persisted orientation capsule
+1. `POST /v1/continuity/read` with your selector — returns your last persisted orientation capsule. Pass `view="startup"` to include a pre-structured `startup_summary` with recovery, orientation, and context tiers alongside the full capsule (see [Payload Reference: Startup view](payload-reference.md#startup-view-viewstartup))
 2. `POST /v1/context/retrieve` for your active task — returns a continuity-shaped context bundle including relevant memory, recent items, and any loaded capsule state
 
 Use the returned capsule to restore your constraints, drift signals, open loops, and stance before you begin working.
