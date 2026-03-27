@@ -205,8 +205,35 @@ When `update_reason` is `"interaction_boundary"`, the capsule must also include 
 | `capsule` | ContinuityCapsule | yes | |
 | `commit_message` | string | no | max 240 chars |
 | `idempotency_key` | string | no | max 200 chars |
+| `session_end_snapshot` | SessionEndSnapshot | no | See below |
 
 Response includes `recovery_warnings` (list of strings) when the fallback snapshot refresh fails after the active write has already committed.
+
+#### Session-end snapshot helper
+
+When `session_end_snapshot` is provided, the server merges its fields into `capsule.continuity` before validation and persistence. This reduces caller burden at session end by focusing on the six startup-critical fields. The base capsule carries forward all non-snapshot fields unchanged.
+
+**`SessionEndSnapshot` fields:**
+
+| Field | Type | Required | Maps to | Override behavior |
+|-------|------|----------|---------|-------------------|
+| `open_loops` | list of strings (max 5, each ≤ 160 chars) | yes | `capsule.continuity.open_loops` | Always overrides |
+| `top_priorities` | list of strings (max 5, each ≤ 160 chars) | yes | `capsule.continuity.top_priorities` | Always overrides |
+| `active_constraints` | list of strings (max 5, each ≤ 160 chars) | yes | `capsule.continuity.active_constraints` | Always overrides |
+| `stance_summary` | string (≤ 240 chars) | yes | `capsule.continuity.stance_summary` | Always overrides |
+| `negative_decisions` | list of NegativeDecision (max 4) | no | `capsule.continuity.negative_decisions` | `null` = preserve capsule value; explicit value = override |
+| `session_trajectory` | list of strings (max 5, each ≤ 80 chars) | no | `capsule.continuity.session_trajectory` | `null` = preserve capsule value; explicit value = override |
+
+**Merge algorithm:** P0 fields (required) always override their `capsule.continuity` counterparts. P1 fields (optional) override only when non-null; null means the capsule's existing value is preserved. All other `ContinuityState` fields remain from the capsule unchanged. The merged capsule is then validated and persisted through the standard path.
+
+**Additional response fields** (only when `session_end_snapshot` is provided):
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `session_end_snapshot_applied` | boolean | `true` confirms the merge was applied |
+| `resume_quality` | `{"adequate": bool}` | `true` iff all P0 fields are non-empty and `stance_summary` ≥ 30 chars |
+
+When `session_end_snapshot` is omitted or null, behavior and response are identical to the baseline — no merge, no additional response keys.
 
 ### Read — `POST /v1/continuity/read`
 

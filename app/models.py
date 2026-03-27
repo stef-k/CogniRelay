@@ -698,6 +698,24 @@ class ContinuityCapsule(BaseModel):
     capsule_health: Optional[ContinuityCapsuleHealth] = None
 
 
+class SessionEndSnapshot(BaseModel):
+    """Compact session-end helper targeting startup-critical fields.
+
+    P0 fields are required — the helper funnels caller attention to these
+    at session end. P1 fields are optional: None means 'preserve whatever
+    the base capsule already has'; an explicit list (even empty) overrides.
+    """
+    # P0 — required, always override capsule.continuity counterparts
+    open_loops: List[str] = Field(max_length=5)
+    top_priorities: List[str] = Field(max_length=5)
+    active_constraints: List[str] = Field(max_length=5)
+    stance_summary: str = Field(max_length=240)
+
+    # P1 — optional; None = preserve capsule value, explicit value = override
+    negative_decisions: Optional[List[NegativeDecision]] = Field(default=None, max_length=4)
+    session_trajectory: Optional[List[str]] = Field(default=None, max_length=5)
+
+
 class ContinuityUpsertRequest(BaseModel):
     """Top-level request for storing or replacing a continuity capsule."""
     subject_kind: Literal["user", "peer", "thread", "task"]
@@ -705,6 +723,7 @@ class ContinuityUpsertRequest(BaseModel):
     capsule: ContinuityCapsule
     commit_message: Optional[str] = Field(default=None, max_length=240)
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
+    session_end_snapshot: Optional[SessionEndSnapshot] = None
 
 
 class ContinuityReadRequest(BaseModel):

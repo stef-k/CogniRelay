@@ -34,6 +34,8 @@ Use the returned capsule to restore your constraints, drift signals, open loops,
 
 1. `POST /v1/continuity/upsert` with your current orientation — persists your active constraints, drift signals, open loops, stance summary, and any negative decisions you want to survive the reset
 
+You can include an optional `session_end_snapshot` in the upsert request to focus on the six startup-critical fields without rebuilding the entire capsule. Send your base capsule (from the last read — stale continuity fields are fine) and a snapshot containing fresh values for `open_loops`, `top_priorities`, `active_constraints`, `stance_summary`, and optionally `negative_decisions` and `session_trajectory`. The server merges the snapshot into the capsule before persisting. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for details.
+
 This is enough for basic orientation recovery. Your next startup will retrieve what you persisted here.
 
 ### Recommended fuller integration: four hook points
