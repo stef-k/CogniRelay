@@ -39,6 +39,7 @@ from app.models import (
     ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
+    SessionEndSnapshot,
     ContinuityVerificationState,
     ContinuityVerificationSignal,
     ContextRetrieveRequest,
@@ -1419,6 +1420,47 @@ def _reject_stale_or_conflicting_write(path: Path, req: ContinuityUpsertRequest)
         raise HTTPException(status_code=409, detail="Incoming continuity capsule conflicts with the current stored capsule timestamp")
 
 
+def _apply_session_end_snapshot(capsule: ContinuityCapsule, snapshot: SessionEndSnapshot) -> None:
+    """Merge session-end snapshot fields into capsule.continuity in place.
+
+    P0 fields (always present in the snapshot) unconditionally override.
+    P1 fields override only when not None; None means preserve capsule value.
+    All other ContinuityState fields are left untouched.
+    """
+    cont = capsule.continuity
+    # P0 — always override
+    cont.open_loops = list(snapshot.open_loops)
+    cont.top_priorities = list(snapshot.top_priorities)
+    cont.active_constraints = list(snapshot.active_constraints)
+    cont.stance_summary = snapshot.stance_summary
+    # P1 — override only when explicitly provided
+    if snapshot.negative_decisions is not None:
+        cont.negative_decisions = list(snapshot.negative_decisions)
+    if snapshot.session_trajectory is not None:
+        cont.session_trajectory = list(snapshot.session_trajectory)
+
+
+# Spec (#167): adequate requires stance_summary >= 30 chars.
+_RESUME_QUALITY_STANCE_MIN_LEN = 30
+
+
+def _compute_resume_quality(capsule: ContinuityCapsule) -> dict[str, Any]:
+    """Return a minimal resume-quality diagnostic for the merged capsule.
+
+    adequate is True iff open_loops, top_priorities, and active_constraints
+    are each non-empty and stance_summary is at least
+    _RESUME_QUALITY_STANCE_MIN_LEN characters long.
+    """
+    cont = capsule.continuity
+    adequate = bool(
+        cont.open_loops
+        and cont.top_priorities
+        and cont.active_constraints
+        and len(cont.stance_summary) >= _RESUME_QUALITY_STANCE_MIN_LEN
+    )
+    return {"adequate": adequate}
+
+
 def continuity_upsert_service(
     *,
     repo_root: Path,
@@ -1432,6 +1474,15 @@ def continuity_upsert_service(
     capsule = _strip_verification_fields_for_upsert(req.capsule)
     if capsule.subject_kind != req.subject_kind or capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
+    # Apply session-end snapshot merge before validation and before the
+    # subject lock.  The snapshot only mutates capsule.continuity fields —
+    # never updated_at or other capsule-level fields — so
+    # _reject_stale_or_conflicting_write (which compares updated_at inside
+    # the lock) remains correct after this in-memory merge.
+    snapshot_applied = False
+    if req.session_end_snapshot is not None:
+        _apply_session_end_snapshot(capsule, req.session_end_snapshot)
+        snapshot_applied = True
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_write_path(rel)
     _validate_capsule(repo_root, capsule)
@@ -1475,23 +1526,23 @@ def continuity_upsert_service(
                 fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
         else:
             fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
-    audit(
-        auth,
-        "continuity_upsert",
-        {
-            "subject_kind": req.subject_kind,
-            "subject_id": req.subject_id,
-            "path": rel,
-            "created": created,
-            "updated": bool(changed and not created),
-            "capsule_sha256": capsule_sha256,
-            "idempotency_key": req.idempotency_key,
-            "committed": committed,
-            "fallback_path": fallback_rel,
-            "fallback_warning": fallback_warning,
-            "fallback_warning_detail": fallback_warning_detail,
-        },
-    )
+    audit_detail: dict[str, Any] = {
+        "subject_kind": req.subject_kind,
+        "subject_id": req.subject_id,
+        "path": rel,
+        "created": created,
+        "updated": bool(changed and not created),
+        "capsule_sha256": capsule_sha256,
+        "idempotency_key": req.idempotency_key,
+        "committed": committed,
+        "fallback_path": fallback_rel,
+        "fallback_warning": fallback_warning,
+        "fallback_warning_detail": fallback_warning_detail,
+    }
+    if snapshot_applied:
+        audit_detail["session_end_snapshot_applied"] = True
+        audit_detail["resume_quality_adequate"] = _compute_resume_quality(capsule)["adequate"]
+    audit(auth, "continuity_upsert", audit_detail)
     _warnings: list[dict[str, Any]] = []
     if fallback_warning:
         _warnings.append(make_warning(
@@ -1499,7 +1550,7 @@ def continuity_upsert_service(
             fallback_warning_detail or "Fallback snapshot write failed",
             path=rel,
         ))
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "path": rel,
         "created": created,
@@ -1511,6 +1562,10 @@ def continuity_upsert_service(
         "recovery_warnings": [fallback_warning] if fallback_warning else [],
         "fallback_warning_detail": fallback_warning_detail,
     }
+    if snapshot_applied:
+        result["session_end_snapshot_applied"] = True
+        result["resume_quality"] = _compute_resume_quality(capsule)
+    return result
 
 
 def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
