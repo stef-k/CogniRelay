@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from app.config import Settings
 from app.main import continuity_upsert
 from app.models import ContinuityUpsertRequest
@@ -293,9 +295,9 @@ class TestSessionEndSnapshot(unittest.TestCase):
         """Per-item string length limits are enforced via _validate_capsule after merge."""
         with tempfile.TemporaryDirectory() as td:
             snap = _snapshot_payload(open_loops=["x" * 161])
-            with self.assertRaises(Exception) as ctx:
+            with self.assertRaises(HTTPException) as ctx:
                 _do_upsert(Path(td), _base_capsule(), snap)
-            self.assertIn("400", str(ctx.exception.status_code))
+            self.assertEqual(ctx.exception.status_code, 400)
 
     def test_upsert_snapshot_empty_p0_persists_with_adequate_false(self) -> None:
         """Empty P0 lists are accepted (matching ContinuityState) but adequate is False."""
@@ -352,6 +354,26 @@ class TestSessionEndSnapshot(unittest.TestCase):
             cont = written["continuity"]
             self.assertEqual(cont["session_trajectory"], [])
             self.assertEqual(cont["negative_decisions"], [])
+
+
+    def test_upsert_snapshot_validation_failure_preserves_disk(self) -> None:
+        """When merged capsule fails validation, no file is written or modified."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            # First, write a valid capsule
+            _do_upsert(repo, _base_capsule())
+            capsule_path = repo / "memory" / "continuity" / "user-test-agent.json"
+            self.assertTrue(capsule_path.exists())
+            original_bytes = capsule_path.read_bytes()
+
+            # Now attempt a snapshot with an item exceeding 160 chars — should fail
+            snap = _snapshot_payload(top_priorities=["x" * 161])
+            with self.assertRaises(HTTPException) as ctx:
+                _do_upsert(repo, _base_capsule(), snap)
+            self.assertEqual(ctx.exception.status_code, 400)
+
+            # Original file must be unchanged
+            self.assertEqual(capsule_path.read_bytes(), original_bytes)
 
 
 if __name__ == "__main__":

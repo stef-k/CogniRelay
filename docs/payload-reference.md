@@ -224,7 +224,9 @@ When `session_end_snapshot` is provided, the server merges its fields into `caps
 | `negative_decisions` | list of NegativeDecision (max 4) | no | `capsule.continuity.negative_decisions` | `null` = preserve capsule value; explicit value = override |
 | `session_trajectory` | list of strings (max 5, each ≤ 80 chars) | no | `capsule.continuity.session_trajectory` | `null` = preserve capsule value; explicit value = override |
 
-**Merge algorithm:** P0 fields (required) always override their `capsule.continuity` counterparts. P1 fields (optional) override only when non-null; null means the capsule's existing value is preserved. All other `ContinuityState` fields remain from the capsule unchanged. The merged capsule is then validated and persisted through the standard path.
+**Merge algorithm:** P0 fields (required) always override their `capsule.continuity` counterparts. P1 fields (optional) override only when non-null; null means the capsule's existing value is preserved. All other `ContinuityState` fields remain from the capsule unchanged. The merged capsule is then validated and persisted through the standard path. Note: the snapshot does not update `capsule.updated_at` — the caller must still set `updated_at` to the current time on the base capsule to avoid a 409 conflict rejection.
+
+Per-item string length constraints (e.g. each ≤ 160 chars for list fields, each ≤ 80 chars for `session_trajectory`) are enforced by capsule validation after the merge, consistent with `ContinuityState` validation. See [NegativeDecision](#negativedecision) for per-item constraints on `negative_decisions` items.
 
 **Additional response fields** (only when `session_end_snapshot` is provided):
 

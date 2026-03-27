@@ -1474,10 +1474,11 @@ def continuity_upsert_service(
     capsule = _strip_verification_fields_for_upsert(req.capsule)
     if capsule.subject_kind != req.subject_kind or capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
-    # Apply session-end snapshot merge before validation if provided.
-    # The snapshot only mutates capsule.continuity fields — never updated_at
-    # or other capsule-level fields — so _reject_stale_or_conflicting_write
-    # (which compares updated_at) remains correct after this merge.
+    # Apply session-end snapshot merge before validation and before the
+    # subject lock.  The snapshot only mutates capsule.continuity fields —
+    # never updated_at or other capsule-level fields — so
+    # _reject_stale_or_conflicting_write (which compares updated_at inside
+    # the lock) remains correct after this in-memory merge.
     snapshot_applied = False
     if req.session_end_snapshot is not None:
         _apply_session_end_snapshot(capsule, req.session_end_snapshot)
@@ -1525,24 +1526,23 @@ def continuity_upsert_service(
                 fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
         else:
             fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
-    audit(
-        auth,
-        "continuity_upsert",
-        {
-            "subject_kind": req.subject_kind,
-            "subject_id": req.subject_id,
-            "path": rel,
-            "created": created,
-            "updated": bool(changed and not created),
-            "capsule_sha256": capsule_sha256,
-            "idempotency_key": req.idempotency_key,
-            "committed": committed,
-            "fallback_path": fallback_rel,
-            "fallback_warning": fallback_warning,
-            "fallback_warning_detail": fallback_warning_detail,
-            "session_end_snapshot_applied": snapshot_applied,
-        },
-    )
+    audit_detail: dict[str, Any] = {
+        "subject_kind": req.subject_kind,
+        "subject_id": req.subject_id,
+        "path": rel,
+        "created": created,
+        "updated": bool(changed and not created),
+        "capsule_sha256": capsule_sha256,
+        "idempotency_key": req.idempotency_key,
+        "committed": committed,
+        "fallback_path": fallback_rel,
+        "fallback_warning": fallback_warning,
+        "fallback_warning_detail": fallback_warning_detail,
+    }
+    if snapshot_applied:
+        audit_detail["session_end_snapshot_applied"] = True
+        audit_detail["resume_quality_adequate"] = _compute_resume_quality(capsule)["adequate"]
+    audit(auth, "continuity_upsert", audit_detail)
     _warnings: list[dict[str, Any]] = []
     if fallback_warning:
         _warnings.append(make_warning(
