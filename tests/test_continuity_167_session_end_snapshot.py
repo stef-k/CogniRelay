@@ -153,7 +153,19 @@ class TestSessionEndSnapshot(unittest.TestCase):
     def test_upsert_snapshot_null_unchanged_behavior(self) -> None:
         """Explicitly passing null snapshot is the same as omitting it."""
         with tempfile.TemporaryDirectory() as td:
-            out = _do_upsert(Path(td), _base_capsule(), snapshot=None)
+            # Build request with explicit session_end_snapshot=None in the dict
+            # to exercise the Pydantic explicit-null path.
+            gm = _GitManagerStub()
+            s = _settings(Path(td))
+            req_data: dict = {
+                "subject_kind": "user",
+                "subject_id": "test-agent",
+                "capsule": _base_capsule(),
+                "session_end_snapshot": None,
+            }
+            req = ContinuityUpsertRequest(**req_data)  # type: ignore[arg-type]
+            with patch("app.main._services", return_value=(s, gm)):
+                out = continuity_upsert(req=req, auth=_AuthStub())
         self.assertTrue(out["ok"])
         self.assertNotIn("session_end_snapshot_applied", out)
         self.assertNotIn("resume_quality", out)
@@ -276,6 +288,70 @@ class TestSessionEndSnapshot(unittest.TestCase):
                 active_constraints=["c" * 20],
                 stance_summary="d" * 241,
             )
+
+    def test_upsert_snapshot_per_item_length_rejected(self) -> None:
+        """Per-item string length limits are enforced via _validate_capsule after merge."""
+        with tempfile.TemporaryDirectory() as td:
+            snap = _snapshot_payload(open_loops=["x" * 161])
+            with self.assertRaises(Exception) as ctx:
+                _do_upsert(Path(td), _base_capsule(), snap)
+            self.assertIn("400", str(ctx.exception.status_code))
+
+    def test_upsert_snapshot_empty_p0_persists_with_adequate_false(self) -> None:
+        """Empty P0 lists are accepted (matching ContinuityState) but adequate is False."""
+        with tempfile.TemporaryDirectory() as td:
+            snap = _snapshot_payload(
+                open_loops=[],
+                top_priorities=[],
+                active_constraints=[],
+                stance_summary="Short.",
+            )
+            out = _do_upsert(Path(td), _base_capsule(), snap)
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["resume_quality"]["adequate"])
+
+    def test_upsert_snapshot_empty_stance_persists_with_adequate_false(self) -> None:
+        """Empty stance_summary is accepted (matching ContinuityState) but adequate is False."""
+        with tempfile.TemporaryDirectory() as td:
+            snap = _snapshot_payload()
+            snap["stance_summary"] = ""
+            out = _do_upsert(Path(td), _base_capsule(), snap)
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["resume_quality"]["adequate"])
+
+    def test_upsert_snapshot_no_change_still_reports_applied(self) -> None:
+        """When snapshot merge produces byte-identical capsule, response still reports applied."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            # First write: create the capsule via snapshot
+            snap = _snapshot_payload()
+            out1 = _do_upsert(repo, _base_capsule(), snap)
+            self.assertTrue(out1["created"])
+            sha1 = out1["capsule_sha256"]
+
+            # Second write: same base capsule + same snapshot = byte-identical
+            out2 = _do_upsert(repo, _base_capsule(), snap)
+            self.assertTrue(out2["session_end_snapshot_applied"])
+            self.assertIn("resume_quality", out2)
+            # No change: updated should be False
+            self.assertFalse(out2["updated"])
+            self.assertEqual(out2["capsule_sha256"], sha1)
+
+    def test_upsert_snapshot_p1_empty_list_overrides(self) -> None:
+        """Explicit empty list for P1 field overrides capsule value (not preserved like None)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            snap = _snapshot_payload(
+                session_trajectory=[],
+                negative_decisions=[],
+            )
+            _do_upsert(repo, _base_capsule(), snap)
+            written = json.loads(
+                (repo / "memory" / "continuity" / "user-test-agent.json").read_text("utf-8")
+            )
+            cont = written["continuity"]
+            self.assertEqual(cont["session_trajectory"], [])
+            self.assertEqual(cont["negative_decisions"], [])
 
 
 if __name__ == "__main__":

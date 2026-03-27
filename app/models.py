@@ -723,7 +723,7 @@ class ContinuityUpsertRequest(BaseModel):
     capsule: ContinuityCapsule
     commit_message: Optional[str] = Field(default=None, max_length=240)
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
-    session_end_snapshot: Optional[SessionEndSnapshot] = None
+    session_end_snapshot: Optional[SessionEndSnapshot] = Field(default=None)
 
 
 class ContinuityReadRequest(BaseModel):

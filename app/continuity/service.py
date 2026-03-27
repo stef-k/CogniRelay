@@ -1440,14 +1440,16 @@ def _apply_session_end_snapshot(capsule: ContinuityCapsule, snapshot: SessionEnd
         cont.session_trajectory = list(snapshot.session_trajectory)
 
 
+# Spec (#167): adequate requires stance_summary >= 30 chars.
 _RESUME_QUALITY_STANCE_MIN_LEN = 30
 
 
 def _compute_resume_quality(capsule: ContinuityCapsule) -> dict[str, Any]:
     """Return a minimal resume-quality diagnostic for the merged capsule.
 
-    adequate is True iff all four P0 fields are non-empty and stance_summary
-    is at least _RESUME_QUALITY_STANCE_MIN_LEN characters.
+    adequate is True iff open_loops, top_priorities, and active_constraints
+    are each non-empty and stance_summary is at least
+    _RESUME_QUALITY_STANCE_MIN_LEN characters long.
     """
     cont = capsule.continuity
     adequate = bool(
@@ -1473,6 +1475,9 @@ def continuity_upsert_service(
     if capsule.subject_kind != req.subject_kind or capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
     # Apply session-end snapshot merge before validation if provided.
+    # The snapshot only mutates capsule.continuity fields — never updated_at
+    # or other capsule-level fields — so _reject_stale_or_conflicting_write
+    # (which compares updated_at) remains correct after this merge.
     snapshot_applied = False
     if req.session_end_snapshot is not None:
         _apply_session_end_snapshot(capsule, req.session_end_snapshot)
@@ -1535,6 +1540,7 @@ def continuity_upsert_service(
             "fallback_path": fallback_rel,
             "fallback_warning": fallback_warning,
             "fallback_warning_detail": fallback_warning_detail,
+            "session_end_snapshot_applied": snapshot_applied,
         },
     )
     _warnings: list[dict[str, Any]] = []
