@@ -218,14 +218,14 @@ class TestContinuityV2Phase3(unittest.TestCase):
             self._write_capsule(repo_root, subject_kind="user", subject_id="allowed")
             self._write_capsule(repo_root, subject_kind="user", subject_id="gone")
 
-            real_loader = __import__("app.continuity.service", fromlist=["_load_capsule"])._load_capsule
+            real_loader = __import__("app.continuity.listing", fromlist=["_load_capsule"])._load_capsule
 
             def _flaky_load(repo_root_arg: Path, rel: str, **kwargs):
                 if rel.endswith("user-gone.json"):
                     raise HTTPException(status_code=404, detail="Continuity capsule not found")
                 return real_loader(repo_root_arg, rel, **kwargs)
 
-            with patch("app.continuity.service._load_capsule", side_effect=_flaky_load):
+            with patch("app.continuity.listing._load_capsule", side_effect=_flaky_load):
                 out = continuity_list_service(
                     repo_root=repo_root,
                     auth=_AuthStub(),

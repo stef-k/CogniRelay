@@ -42,7 +42,6 @@ from app.storage import canonical_json, safe_path, write_bytes_file, write_text_
 from app.continuity.constants import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
-    CONTINUITY_COLD_INDEX_DIR_REL,
     CONTINUITY_DIR_REL,
     CONTINUITY_HEALTH_ORDER,
     CONTINUITY_REFRESH_STATE_REL,
@@ -110,6 +109,12 @@ from app.continuity.retention import (
     _scan_retention_candidates,
 )
 from app.continuity.cold import _build_cold_stub_text, _load_cold_stub
+from app.continuity.listing import (
+    _scan_active_summaries,
+    _scan_archive_summaries,
+    _scan_cold_summaries,
+    _scan_fallback_summaries,
+)
 from app.continuity.retrieval import (
     _effective_selectors,
     _format_selector,
@@ -387,188 +392,13 @@ def continuity_list_service(
 ) -> dict[str, Any]:
     """List active, fallback, and archive continuity summaries under the repository namespace."""
     auth.require("read:files")
-    base = repo_root / CONTINUITY_DIR_REL
-    summaries: list[dict[str, Any]] = []
-    if base.exists() and base.is_dir():
-        for path in sorted(base.iterdir(), key=lambda item: item.name):
-            if path.is_dir() or path.suffix.lower() != ".json":
-                continue
-            if path.name in CONTINUITY_STATE_METADATA_FILES:
-                continue
-            if req.subject_kind and not path.name.startswith(f"{req.subject_kind}-"):
-                continue
-            rel = str(path.relative_to(repo_root))
-            try:
-                auth.require_read_path(rel)
-            except HTTPException:
-                continue
-            try:
-                capsule = _load_capsule(repo_root, rel)
-            except HTTPException as exc:
-                if exc.status_code in {400, 404}:
-                    continue
-                raise
-            phase, _ = _continuity_phase(capsule, now)
-            freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
-            verification_status = _verification_status(capsule)
-            health_status, health_reasons = _capsule_health_summary(capsule)
-            summaries.append(
-                {
-                    "subject_kind": capsule["subject_kind"],
-                    "subject_id": capsule["subject_id"],
-                    "path": rel,
-                    "updated_at": capsule["updated_at"],
-                    "verified_at": capsule["verified_at"],
-                    "verification_kind": capsule.get("verification_kind"),
-                    "freshness_class": freshness.get("freshness_class"),
-                    "phase": phase,
-                    "verification_status": verification_status,
-                    "health_status": health_status,
-                    "health_reasons": health_reasons,
-                    "artifact_state": "active",
-                    "retention_class": "active",
-                    "stable_preference_count": len(capsule.get("stable_preferences", [])),
-                    "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
-                }
-            )
+    summaries: list[dict[str, Any]] = _scan_active_summaries(repo_root, auth, req.subject_kind, now)
     if req.include_fallback:
-        fallback_base = repo_root / CONTINUITY_DIR_REL / "fallback"
-        if fallback_base.exists() and fallback_base.is_dir():
-            for path in sorted(fallback_base.iterdir(), key=lambda item: item.name):
-                if path.is_dir() or path.suffix.lower() != ".json":
-                    continue
-                rel = str(path.relative_to(repo_root))
-                try:
-                    auth.require_read_path(rel)
-                except HTTPException:
-                    continue
-                try:
-                    envelope = _load_fallback_envelope_payload(repo_root, rel)
-                except HTTPException as exc:
-                    if exc.status_code in {400, 404}:
-                        continue
-                    raise
-                capsule = envelope["capsule"]
-                if req.subject_kind and capsule["subject_kind"] != req.subject_kind:
-                    continue
-                phase, _ = _continuity_phase(capsule, now)
-                freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
-                verification_status = _verification_status(capsule)
-                health_status, health_reasons = _capsule_health_summary(capsule)
-                summaries.append(
-                    {
-                        "subject_kind": capsule["subject_kind"],
-                        "subject_id": capsule["subject_id"],
-                        "path": rel,
-                        "updated_at": capsule["updated_at"],
-                        "verified_at": capsule["verified_at"],
-                        "verification_kind": capsule.get("verification_kind"),
-                        "freshness_class": freshness.get("freshness_class"),
-                        "phase": phase,
-                        "verification_status": verification_status,
-                        "health_status": health_status,
-                        "health_reasons": health_reasons,
-                        "artifact_state": "fallback",
-                        "retention_class": "fallback",
-                        "stable_preference_count": len(capsule.get("stable_preferences", [])),
-                        "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
-                    }
-                )
+        summaries.extend(_scan_fallback_summaries(repo_root, auth, req.subject_kind, now))
     if req.include_archived:
-        archive_base = repo_root / CONTINUITY_DIR_REL / "archive"
-        if archive_base.exists() and archive_base.is_dir():
-            for path in sorted(archive_base.iterdir(), key=lambda item: item.name):
-                if path.is_dir() or path.suffix.lower() != ".json":
-                    continue
-                rel = str(path.relative_to(repo_root))
-                try:
-                    auth.require_read_path(rel)
-                except HTTPException:
-                    continue
-                try:
-                    envelope = _load_archive_envelope(repo_root, rel)
-                except HTTPException as exc:
-                    if exc.status_code in {400, 404}:
-                        continue
-                    raise
-                capsule = envelope["capsule"]
-                if req.subject_kind and capsule["subject_kind"] != req.subject_kind:
-                    continue
-                phase, _ = _continuity_phase(capsule, now)
-                freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
-                verification_status = _verification_status(capsule)
-                health_status, health_reasons = _capsule_health_summary(capsule)
-                archived_at = _parse_iso(str(envelope.get("archived_at") or ""))
-                retention_class = "archive_recent"
-                if _is_archive_stale(archived_at=archived_at, now=now, retention_archive_days=retention_archive_days):
-                    retention_class = "archive_stale"
-                summaries.append(
-                    {
-                        "subject_kind": capsule["subject_kind"],
-                        "subject_id": capsule["subject_id"],
-                        "path": str(envelope.get("active_path") or rel),
-                        "updated_at": capsule["updated_at"],
-                        "verified_at": capsule["verified_at"],
-                        "verification_kind": capsule.get("verification_kind"),
-                        "freshness_class": freshness.get("freshness_class"),
-                        "phase": phase,
-                        "verification_status": verification_status,
-                        "health_status": health_status,
-                        "health_reasons": health_reasons,
-                        "artifact_state": "archived",
-                        "retention_class": retention_class,
-                        "stable_preference_count": len(capsule.get("stable_preferences", [])),
-                        "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
-                    }
-                )
+        summaries.extend(_scan_archive_summaries(repo_root, auth, req.subject_kind, now, retention_archive_days))
     if req.include_cold:
-        cold_stub_base = repo_root / CONTINUITY_COLD_INDEX_DIR_REL
-        if cold_stub_base.exists() and cold_stub_base.is_dir():
-            for path in sorted(cold_stub_base.iterdir(), key=lambda item: item.name):
-                if path.is_dir() or path.suffix.lower() != ".md":
-                    continue
-                rel = str(path.relative_to(repo_root))
-                try:
-                    auth.require_read_path(rel)
-                except HTTPException:
-                    continue
-                try:
-                    frontmatter = _load_cold_stub(repo_root, rel)
-                except HTTPException as exc:
-                    if exc.status_code in {400, 404}:
-                        continue
-                    raise
-                source_archive_path = frontmatter["source_archive_path"]
-                try:
-                    auth.require_read_path(source_archive_path)
-                except HTTPException:
-                    continue
-                if req.subject_kind and frontmatter["subject_kind"] != req.subject_kind:
-                    continue
-                summaries.append(
-                    {
-                        "subject_kind": frontmatter["subject_kind"],
-                        "subject_id": frontmatter["subject_id"],
-                        "path": rel,
-                        "source_archive_path": source_archive_path,
-                        "updated_at": None,
-                        "verified_at": None,
-                        "verification_kind": frontmatter["verification_kind"] or None,
-                        "freshness_class": frontmatter["freshness_class"] or None,
-                        "phase": frontmatter["phase"],
-                        "verification_status": frontmatter["verification_status"],
-                        "health_status": frontmatter["health_status"],
-                        "health_reasons": [],
-                        "artifact_state": "cold",
-                        "retention_class": "cold",
-                        "cold_stub_path": rel,
-                        "cold_storage_path": frontmatter["cold_storage_path"],
-                        "archived_at": frontmatter["archived_at"],
-                        "cold_stored_at": frontmatter["cold_stored_at"],
-                        "stable_preference_count": None,
-                        "rationale_entry_count": None,
-                    }
-                )
+        summaries.extend(_scan_cold_summaries(repo_root, auth, req.subject_kind))
     artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
     summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
     summaries = summaries[: req.limit]
