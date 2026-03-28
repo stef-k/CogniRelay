@@ -792,7 +792,8 @@ class TestMalformedTimestampEndpoint(unittest.TestCase):
                     return original_phase(capsule, now)
                 raise RuntimeError("simulated phase failure")
 
-            with patch("app.continuity.service._continuity_phase", side_effect=_failing_phase):
+            with patch("app.continuity.service._continuity_phase", side_effect=_failing_phase), \
+                 patch("app.continuity.trust._continuity_phase", side_effect=_failing_phase):
                 state = build_continuity_state(
                     repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
                 )
