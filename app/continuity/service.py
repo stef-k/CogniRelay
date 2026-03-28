@@ -3500,7 +3500,19 @@ def build_continuity_state(
     req: ContextRetrieveRequest,
     now: datetime,
 ) -> dict[str, Any]:
-    """Load, trim, and package continuity state for context retrieval."""
+    """Load, trim, and package continuity state for context retrieval.
+
+    Each returned capsule includes a per-capsule ``trust_signals`` block
+    (full or compact depending on token budget) that mechanically derives
+    trust assessments from existing capsule state — recency from
+    timestamps, completeness from orientation fields and trimming,
+    integrity from health/verification metadata, and scope_match from
+    selector resolution.  An aggregate ``trust_signals`` block summarises
+    the worst-case across all per-capsule signals.
+
+    The *now* parameter anchors all age computations so every signal in
+    the response shares the same reference instant.
+    """
     budget = _budget(req.max_tokens_estimate)
     state = {
         "present": False,

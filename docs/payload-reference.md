@@ -283,7 +283,14 @@ Response:
 }
 ```
 
-`trust_signals` is an objective, mechanical trust assessment of the returned capsule across four dimensions: recency, completeness, integrity, and scope_match. It is `null` when `capsule` is `null` (i.e. `source_state == "missing"`). No dimension produces a score — each exposes enumerated states and counts that consumers interpret. `completeness.trimmed` is always `false` on the read path (no token-budget trimming applies).
+`trust_signals` is an objective, mechanical trust assessment of the returned capsule across four dimensions: recency, completeness, integrity, and scope_match. It is `null` when `capsule` is `null` (i.e. `source_state == "missing"`). No dimension produces a score — each exposes enumerated states and counts that consumers interpret. `completeness.trimmed` is always `false` on the read path (no token-budget trimming applies). All fields are deterministically derived from existing capsule state and retrieval metadata — there is no model inference, heuristic scoring, or hidden weighting.
+
+**Derivation sources by dimension:**
+
+- `recency`: `updated_at` and `verified_at` timestamps (age computation), `freshness.freshness_class` and `freshness.stale_after_seconds` (phase thresholds), `freshness.expires_at` (hard expiry)
+- `completeness`: `continuity.*` orientation fields — `top_priorities`, `active_constraints`, `open_loops`, `active_concerns`, `stance_summary`, `drift_signals` (adequacy and empty-field tracking); token-budget trimming metadata (trimmed flag and field list)
+- `integrity`: `capsule_health.status` and `capsule_health.reasons` (health), `verification_state.status` (verification), active-vs-fallback resolution (source state)
+- `scope_match`: selector resolution outcome (exact match flag); on the multi-capsule path, selector request/return/omit counts
 
 **Age field nullability:** `recency.updated_age_seconds` and `recency.verified_age_seconds` are `null` (not `0`) when the corresponding timestamp is missing or malformed. A `null` age means the age could not be computed — consumers must not treat it as zero (maximally fresh). When `verified_at` is malformed, `recency.phase` falls back to `"expired"` rather than crashing or producing misleading freshness.
 
