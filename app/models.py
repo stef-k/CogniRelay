@@ -661,6 +661,26 @@ class NegativeDecision(BaseModel):
     rationale: str = Field(description="1-240 chars, validated at the continuity service layer.")
 
 
+class RationaleEntry(BaseModel):
+    """One bounded, agent-authored decision rationale or unresolved tension.
+
+    Tags must be unique within a capsule's ``rationale_entries`` list.
+    Field-length bounds for ``summary``, ``reasoning``,
+    ``alternatives_considered`` items, and ``depends_on`` items are
+    enforced at the service layer (HTTP 400), consistent with
+    ``NegativeDecision``.
+    """
+    tag: str = Field(min_length=1, max_length=80)
+    kind: Literal["decision", "assumption", "tension"]
+    status: Literal["active", "superseded", "retired"]
+    summary: str
+    reasoning: str
+    alternatives_considered: List[str] = Field(default_factory=list, max_length=3)
+    depends_on: List[str] = Field(default_factory=list, max_length=3)
+    supersedes: Optional[str] = Field(default=None, max_length=80)
+    set_at: str
+
+
 class ContinuityState(BaseModel):
     """Operational orientation state preserved across resets and compaction."""
     top_priorities: List[str] = Field(max_length=5)
@@ -675,6 +695,7 @@ class ContinuityState(BaseModel):
     negative_decisions: List[NegativeDecision] = Field(default_factory=list, max_length=4)
     trailing_notes: List[str] = Field(default_factory=list, max_length=3)
     curiosity_queue: List[str] = Field(default_factory=list, max_length=5)
+    rationale_entries: List[RationaleEntry] = Field(default_factory=list, max_length=6)
     relationship_model: Optional[ContinuityRelationshipModel] = None
     retrieval_hints: Optional[ContinuityRetrievalHints] = None
 
@@ -727,6 +748,7 @@ class SessionEndSnapshot(BaseModel):
     # P1 — optional; None = preserve capsule value, explicit value = override
     negative_decisions: Optional[List[NegativeDecision]] = Field(default=None, max_length=4)
     session_trajectory: Optional[List[str]] = Field(default=None, max_length=5)
+    rationale_entries: Optional[List[RationaleEntry]] = Field(default=None, max_length=6)
 
 
 class ContinuityUpsertRequest(BaseModel):
