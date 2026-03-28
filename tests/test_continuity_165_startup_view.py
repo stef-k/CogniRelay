@@ -165,7 +165,7 @@ class TestStartupView(unittest.TestCase):
                     auth=_AuthStub(),
                 )
             ss = out["startup_summary"]
-            self.assertEqual(list(ss.keys()), ["recovery", "orientation", "context", "updated_at"])
+            self.assertEqual(list(ss.keys()), ["recovery", "orientation", "context", "updated_at", "trust_signals"])
             self.assertEqual(
                 list(ss["recovery"].keys()),
                 ["source_state", "recovery_warnings", "capsule_health_status", "capsule_health_reasons"],
@@ -332,7 +332,7 @@ class TestStartupView(unittest.TestCase):
         result2 = _build_startup_summary(out)
         self.assertEqual(result1, result2)
         # Verify key order
-        self.assertEqual(list(result1.keys()), ["recovery", "orientation", "context", "updated_at"])
+        self.assertEqual(list(result1.keys()), ["recovery", "orientation", "context", "updated_at", "trust_signals"])
         # Verify input dict was not mutated (outer and nested)
         self.assertNotIn("startup_summary", out)
         self.assertEqual(out, out_snapshot)

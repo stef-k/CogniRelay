@@ -821,6 +821,7 @@ def continuity_read(req: ContinuityReadRequest, auth: AuthContext = Depends(requ
         repo_root=settings.repo_root,
         auth=auth,
         req=req,
+        now=datetime.now(timezone.utc),
         audit=_make_audit(settings, gm),
     )
 

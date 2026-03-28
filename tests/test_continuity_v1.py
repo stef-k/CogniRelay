@@ -455,7 +455,7 @@ class TestContinuityV1(unittest.TestCase):
         capsule["metadata"] = {"trace": "z" * 400}
         capsule["canonical_sources"] = ["memory/core/identity.md"]
         capsule["attention_policy"] = {"presence_bias_overrides": ["long-horizon work first"]}
-        trimmed = _trim_capsule(capsule, 180)
+        trimmed, _ = _trim_capsule(capsule, 180)
         self.assertIsNotNone(trimmed)
         assert trimmed is not None
         self.assertEqual(trimmed["continuity"]["active_constraints"], ["do not regress current workflows"])

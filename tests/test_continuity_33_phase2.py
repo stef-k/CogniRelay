@@ -221,7 +221,7 @@ class TestContinuity33Phase2(unittest.TestCase):
         boundary["continuity"].pop("negative_decisions", None)
         max_tokens = _estimated_tokens(_render_value(boundary))
 
-        trimmed = _trim_capsule(payload, max_tokens)
+        trimmed, _ = _trim_capsule(payload, max_tokens)
 
         self.assertIsNotNone(trimmed)
         assert trimmed is not None
@@ -240,7 +240,7 @@ class TestContinuity33Phase2(unittest.TestCase):
         boundary["continuity"].pop("trailing_notes", None)
         max_tokens = _estimated_tokens(_render_value(boundary))
 
-        trimmed = _trim_capsule(payload, max_tokens)
+        trimmed, _ = _trim_capsule(payload, max_tokens)
 
         self.assertIsNotNone(trimmed)
         assert trimmed is not None
@@ -258,7 +258,7 @@ class TestContinuity33Phase2(unittest.TestCase):
         boundary["continuity"].pop("curiosity_queue", None)
         max_tokens = _estimated_tokens(_render_value(boundary))
 
-        trimmed = _trim_capsule(payload, max_tokens)
+        trimmed, _ = _trim_capsule(payload, max_tokens)
 
         self.assertIsNotNone(trimmed)
         assert trimmed is not None

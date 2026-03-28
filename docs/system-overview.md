@@ -110,6 +110,25 @@ Continuity artifacts move through four tiers:
 
 Retention planning and cold-store/rehydrate operations are explicit and operator-visible. The system aims for inspectable loss, not imaginary losslessness.
 
+#### Trust signals
+
+When a continuity capsule is returned through `POST /v1/continuity/read` or `POST /v1/context/retrieve`, the response includes a `trust_signals` block — an objective, mechanical trust assessment that the consuming agent can use to calibrate how much weight it places on the returned orientation data.
+
+Trust signals are **not** heuristic confidence scores, AI-generated quality ratings, or probabilistic estimates. Every field is deterministically derived from data already present on the capsule or computed during retrieval. The same capsule at the same instant always produces the same signals. There is no model inference, no learned weighting, and no hidden state.
+
+The four dimensions are:
+
+- **Recency** — derived from the capsule's `updated_at` and `verified_at` timestamps relative to the request time, plus the `freshness` metadata (freshness class, stale threshold, explicit expiry). Produces concrete ages in seconds and a phase label (`fresh`, `stale_soft`, `stale_hard`, `expired_by_age`, `expired`). A `null` age means the timestamp was missing or malformed — consumers must not treat it as zero.
+- **Completeness** — derived from the capsule's `continuity` orientation fields (`top_priorities`, `active_constraints`, `open_loops`, `active_concerns`, `stance_summary`, `drift_signals`) and from whether token-budget trimming removed content during retrieval. Reports which orientation fields are empty or inadequate and which fields were trimmed.
+- **Integrity** — derived from the capsule's `capsule_health` status/reasons and `verification_state`, plus whether the capsule was loaded from the active path or a fallback snapshot. Reports health status, verification status, and source state without interpreting what they mean for the consumer's task.
+- **Scope match** — derived from selector resolution: whether the returned capsule matched the requested selector exactly or was a fallback substitute. On the multi-capsule retrieval path, the aggregate also reports how many selectors were requested, returned, and omitted.
+
+On the context-retrieval path, trust signals participate in token-budget accounting. When the full shape would consume too much of the capsule's allocation, a compact form is emitted instead (phase, orientation adequacy, trimmed flag, source state, health status, exact match — no ages or field lists). If even the compact form cannot fit, trust signals are `null`. This degradation is deterministic and surfaced via `recovery_warnings`.
+
+An aggregate `trust_signals` block at the `continuity_state` level summarises the worst-case across all per-capsule signals: worst phase, oldest ages, any-fallback/any-degraded flags, and selector coverage counts. It handles mixed full/compact per-capsule shapes.
+
+Trust signals tell the consumer what the system mechanically knows about the capsule's state. They do not tell the consumer what to do about it — that decision belongs to the agent.
+
 ### Coordination model
 
 CogniRelay provides three bounded coordination primitives. All are additive records that do not mutate local continuity capsules or automatically synchronize state between agents.
@@ -200,6 +219,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `continuity_verification_policy` on `POST /v1/context/retrieve` when you need to allow degraded continuity, prefer healthy continuity first, or require healthy capsules only
 - Use `continuity_resilience_policy` on `POST /v1/context/retrieve` when you need to permit fallback snapshots, explicitly prefer active continuity first, or insist on active continuity only
 - Expect `POST /v1/context/retrieve` to degrade deterministically when search indexes are stale or missing: stale keeps indexed retrieval with warnings, missing falls back to a bounded raw scan
+- Both `POST /v1/continuity/read` and `POST /v1/context/retrieve` include per-capsule `trust_signals` alongside capsule data; on the multi-capsule retrieval path, an aggregate `trust_signals` block summarises the worst-case across all capsules — see the [Continuity model § Trust signals](#trust-signals) section for the derivation model and [Payload Reference](payload-reference.md) for field-level structure
 - Use `POST /v1/continuity/read` when you need the full capsule for one exact selector; set `allow_fallback=true` when you want structured fallback or missing-state degradation; pass `view="startup"` to include a pre-structured `startup_summary` extraction alongside the full capsule
 - Use `POST /v1/continuity/refresh/plan` when you need a deterministic list of the next continuity capsules that should be refreshed
 - Use `POST /v1/continuity/retention/plan` when you need the next deterministic window of stale archived continuity eligible for explicit cold-store policy application

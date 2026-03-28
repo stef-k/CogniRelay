@@ -195,6 +195,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
                     repo_root=repo_root,
                     auth=_AuthStub(),
                     req=ContinuityReadRequest(subject_kind="user", subject_id="stef"),
+                    now=datetime.now(timezone.utc),
                     audit=lambda *_args: None,
                 )
 

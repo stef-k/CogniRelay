@@ -255,9 +255,50 @@ Response:
   "capsule": { },
   "archived": false,
   "source_state": "active",
-  "recovery_warnings": []
+  "recovery_warnings": [],
+  "trust_signals": {
+    "recency": {
+      "updated_age_seconds": 3600,
+      "verified_age_seconds": 7200,
+      "phase": "fresh",
+      "freshness_class": "durable",
+      "stale_threshold_seconds": 15552000
+    },
+    "completeness": {
+      "orientation_adequate": true,
+      "empty_orientation_fields": [],
+      "trimmed": false,
+      "trimmed_fields": []
+    },
+    "integrity": {
+      "source_state": "active",
+      "health_status": "healthy",
+      "health_reasons": [],
+      "verification_status": "self_attested"
+    },
+    "scope_match": {
+      "exact": true
+    }
+  }
 }
 ```
+
+`trust_signals` is an objective, mechanical trust assessment of the returned capsule across four dimensions: recency, completeness, integrity, and scope_match. It is `null` when `capsule` is `null` (i.e. `source_state == "missing"`). No dimension produces a score — each exposes enumerated states and counts that consumers interpret. `completeness.trimmed` is always `false` on the read path (no token-budget trimming applies). All fields are deterministically derived from existing capsule state and retrieval metadata — there is no model inference, heuristic scoring, or hidden weighting.
+
+**Derivation sources by dimension:**
+
+- `recency`: `updated_at` and `verified_at` timestamps (age computation), `freshness.freshness_class` and `freshness.stale_after_seconds` (phase thresholds), `freshness.expires_at` (hard expiry)
+- `completeness`: `continuity.*` orientation fields — `top_priorities`, `active_constraints`, `open_loops`, `active_concerns`, `stance_summary`, `drift_signals` (adequacy and empty-field tracking); token-budget trimming metadata (trimmed flag and field list)
+- `integrity`: `capsule_health.status` and `capsule_health.reasons` (health), `verification_state.status` (verification), active-vs-fallback resolution (source state)
+- `scope_match`: selector resolution outcome (exact match flag); on the multi-capsule path, selector request/return/omit counts
+
+**Age field nullability:** `recency.updated_age_seconds` and `recency.verified_age_seconds` are `null` (not `0`) when the corresponding timestamp is missing or malformed. A `null` age means the age could not be computed — consumers must not treat it as zero (maximally fresh). When `verified_at` is malformed, `recency.phase` falls back to `"expired"` rather than crashing or producing misleading freshness.
+
+On the context-retrieval path (`build_continuity_state`), trust_signals are budgeted as part of the delivered continuity token allocation. When the full trust_signals shape would leave insufficient room for capsule content, a **compact** form is emitted instead. The compact shape sets `"compact": true` and includes only the minimum subfields: `recency.phase`, `completeness.orientation_adequate`, `completeness.trimmed`, `integrity.source_state`, `integrity.health_status`, and `scope_match.exact`. If even the compact form cannot fit alongside minimum capsule content, trust_signals is `null` and the capsule is trimmed normally. When compact trust_signals are used, `recovery_warnings` includes `"trust_signals_compact"`.
+
+**Aggregate trust_signals** (`continuity_state.trust_signals`) aggregates per-capsule signals across all returned capsules. It correctly handles a mix of full and compact per-capsule shapes. `oldest_updated_age_seconds` and `oldest_verified_age_seconds` are `null` when no per-capsule signal provides a known age value (e.g. all compact, or all with malformed timestamps). `completeness.total_count` counts capsules with non-null trust_signals; it may be less than `scope_match.selectors_returned` when some capsules have `trust_signals: null`. If aggregate computation fails, `recovery_warnings` includes `"trust_signals_aggregate_failed"` and `continuity_state.trust_signals` is `null`.
+
+**`continuity_state.trust_signals` on early-return paths:** When `continuity_state.present` is `false` (continuity mode is `"off"`, no selectors resolved, no capsules loaded, or all capsules omitted), `continuity_state.trust_signals` is always `null`. The key is present on every response shape — consumers can unconditionally access `continuity_state["trust_signals"]` without checking `present` first.
 
 `source_state` is `"active"`, `"fallback"`, or `"missing"`. When `allow_fallback` is `false` (default) and the active capsule is missing, the response is an HTTP error. When `true`, the response degrades to fallback or missing state with appropriate `recovery_warnings`.
 
@@ -287,16 +328,24 @@ When `view` is set to `"startup"`, the response includes one additional top-leve
       "stance_summary": "...",
       "active_concerns": ["..."]
     },
-    "updated_at": "2026-03-24T18:06:26Z"
+    "updated_at": "2026-03-24T18:06:26Z",
+    "trust_signals": {
+      "recency": { "updated_age_seconds": 60, "verified_age_seconds": 120, "phase": "fresh", "freshness_class": "situational", "stale_threshold_seconds": 2592000 },
+      "completeness": { "orientation_adequate": true, "empty_orientation_fields": [], "trimmed": false, "trimmed_fields": [] },
+      "integrity": { "source_state": "active", "health_status": "healthy", "health_reasons": [], "verification_status": "self_attested" },
+      "scope_match": { "exact": true }
+    }
   }
 }
 ```
 
+`startup_summary.trust_signals` is the same trust_signals block as the top-level response key. It is `null` when `source_state` is `"missing"` or capsule is `null`.
+
 **`startup_summary` shape (missing capsule):**
 
-When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`, `updated_at` is `null`. The `recovery` block is always present and never null.
+When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`, `updated_at` is `null`, `trust_signals` is `null`. The `recovery` block is always present and never null.
 
-**Key order contract:** Top-level keys are always `recovery`, `orientation`, `context`, `updated_at` in that order. Within each block, keys appear in the order shown above. Python 3.7+ dict insertion order is preserved through FastAPI/JSON serialization.
+**Key order contract:** Top-level keys are always `recovery`, `orientation`, `context`, `updated_at`, `trust_signals` in that order. Within each block, keys appear in the order shown above. Python 3.7+ dict insertion order is preserved through FastAPI/JSON serialization.
 
 **Field defaults:**
 
@@ -407,7 +456,8 @@ Response:
     "notes": ["..."],
     "continuity_state": {
       "present": true,
-      "capsules": [{"source_state": "active", "...": "..."}],
+      "capsules": [{"source_state": "active", "trust_signals": {"recency": {"updated_age_seconds": 60, "verified_age_seconds": 120, "phase": "fresh", "freshness_class": "situational", "stale_threshold_seconds": 2592000}, "completeness": {"orientation_adequate": true, "empty_orientation_fields": [], "trimmed": false, "trimmed_fields": []}, "integrity": {"source_state": "active", "health_status": "healthy", "health_reasons": [], "verification_status": "self_attested"}, "scope_match": {"exact": true}}, "...": "..."}],
+      "trust_signals": {"recency": {"worst_phase": "fresh", "oldest_updated_age_seconds": 0, "oldest_verified_age_seconds": 0}, "completeness": {"all_adequate": true, "adequate_count": 1, "total_count": 1, "any_trimmed": false}, "integrity": {"worst_health": "healthy", "any_fallback": false, "any_degraded": false, "any_conflicted": false}, "scope_match": {"selectors_requested": 1, "selectors_returned": 1, "selectors_omitted": 0, "all_returned": true}},
       "warnings": [],
       "fallback_used": false,
       "recovery_warnings": []
