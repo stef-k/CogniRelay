@@ -85,6 +85,17 @@ Concretely:
 - **You decide** when to read or write continuity, what constraints matter, what negative decisions to record, and whether to act on a coordination artifact.
 - **CogniRelay decides** how to degrade when indexes are stale (warnings, not failures), how to fall back when an active capsule is missing (structured fallback, not silence), and how to bound what crosses a coordination boundary (only the fields defined by each primitive, never the full capsule).
 
+## Stable Preferences vs Relationship Model
+
+User/peer capsules support two complementary but distinct fields for cross-thread knowledge:
+
+- **`stable_preferences`** (capsule-level): Explicit, user-stated standing instructions that apply across unrelated threads. Examples: "always use metric units", "UTC+2 timezone", "never auto-commit". The agent records these from explicit user statements. CogniRelay never adds, removes, or modifies preferences autonomously.
+- **`relationship_model`** (inside `ContinuityState`): The agent's inferred model of the relationship — `trust_level`, `preferred_style`, `sensitivity_notes`. These are the agent's observations, not the user's explicit statements.
+
+**Litmus test:** If the subject explicitly stated or confirmed it and it applies across unrelated threads, it belongs in `stable_preferences`. If the agent inferred it from observation, it belongs in `relationship_model`.
+
+Both may describe the same thing from different perspectives (e.g., user says "be concise" → `stable_preferences`; agent observes short responses work best → `relationship_model.preferred_style`). When they conflict, an explicit preference supersedes an inferred style. CogniRelay does not auto-reconcile — the agent is responsible for composition.
+
 ## What CogniRelay Does Not Do
 
 - It does not persist everything — continuity is bounded and subject to write-time curation
