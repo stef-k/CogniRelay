@@ -401,8 +401,8 @@ class TestBuildContinuityStateTrustSignals(unittest.TestCase):
             self.assertEqual(agg["scope_match"]["selectors_returned"], 1)
             self.assertFalse(agg["scope_match"]["all_returned"])
 
-    def test_no_capsules_loaded_trust_signals_absent(self) -> None:
-        """When no capsules load, trust_signals should not appear in state."""
+    def test_no_capsules_loaded_trust_signals_null(self) -> None:
+        """When no capsules load, trust_signals should be null (key always present)."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             settings = _settings(repo)
@@ -417,10 +417,10 @@ class TestBuildContinuityStateTrustSignals(unittest.TestCase):
                 out = context_retrieve(req=req, auth=_AuthStub())
             state = out["bundle"]["continuity_state"]
             self.assertFalse(state["present"])
-            # trust_signals key not expected in early-return paths
-            self.assertNotIn("trust_signals", state)
+            self.assertIn("trust_signals", state)
+            self.assertIsNone(state["trust_signals"])
 
-    def test_continuity_off_no_trust_signals(self) -> None:
+    def test_continuity_off_trust_signals_null(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             settings = _settings(repo)
@@ -433,6 +433,8 @@ class TestBuildContinuityStateTrustSignals(unittest.TestCase):
                 out = context_retrieve(req=req, auth=_AuthStub())
             state = out["bundle"]["continuity_state"]
             self.assertFalse(state["present"])
+            self.assertIn("trust_signals", state)
+            self.assertIsNone(state["trust_signals"])
 
     def test_multi_capsule_aggregate(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -525,6 +527,88 @@ class TestBudgetAccountingWithTrustSignals(unittest.TestCase):
             reserved = state["budget"]["continuity_tokens_reserved"]
             used = state["budget"]["continuity_tokens_used"]
             self.assertLessEqual(used, reserved)
+
+    def test_tokens_within_budget_after_heavy_trimming(self) -> None:
+        """Budget honesty must hold when trimming drops many fields (growing trimmed_fields)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            # Build a capsule that fills every trimmable field to the model max,
+            # using long strings to force substantial trimming and a long
+            # trimmed_fields list that grows the trust_signals payload after
+            # the initial token estimate.
+            payload = _capsule_payload()
+            payload["metadata"] = {"trace": "x" * 500, "context_id": "y" * 300}
+            payload["canonical_sources"] = ["file-" + "x" * 50 + f"-{i}.md" for i in range(8)]
+            payload["continuity"]["trailing_notes"] = ["note-" + "y" * 80 for _ in range(3)]
+            payload["continuity"]["curiosity_queue"] = ["q-" + "z" * 80 for _ in range(5)]
+            payload["continuity"]["negative_decisions"] = [
+                {"decision": "nd-" + "w" * 60, "rationale": "r" * 40} for _ in range(4)
+            ]
+            payload["continuity"]["working_hypotheses"] = ["wh-" + "v" * 80 for _ in range(5)]
+            payload["continuity"]["long_horizon_commitments"] = ["lhc-" + "u" * 80 for _ in range(5)]
+            payload["continuity"]["retrieval_hints"] = {
+                "must_include": ["hint-" + "t" * 60 for _ in range(8)],
+            }
+            payload["continuity"]["relationship_model"] = {
+                "trust_level": "high",
+                "communication_style": "direct" * 20,
+                "history": "long" * 30,
+            }
+            _write_capsule(repo, payload)
+            # Use a moderate budget that forces substantial trimming.
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+                max_tokens_estimate=2000,
+            )
+            state = build_continuity_state(
+                repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+            )
+            reserved = state["budget"]["continuity_tokens_reserved"]
+            used = state["budget"]["continuity_tokens_used"]
+            self.assertLessEqual(
+                used,
+                reserved,
+                f"tokens_used ({used}) exceeded reserved ({reserved}) after heavy trimming",
+            )
+            # Verify we actually got a capsule with trust_signals
+            if state["present"] and state["capsules"]:
+                self.assertIn("trust_signals", state["capsules"][0])
+
+    def test_tokens_within_budget_multi_capsule_heavy_trimming(self) -> None:
+        """Budget honesty under multi-capsule heavy trimming."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            for sid in ("a", "b"):
+                payload = _capsule_payload(subject_id=sid)
+                payload["metadata"] = {"trace": "x" * 400}
+                payload["canonical_sources"] = ["file-" + "x" * 50 + f"-{i}.md" for i in range(8)]
+                payload["continuity"]["trailing_notes"] = ["note-" + "y" * 80 for _ in range(3)]
+                payload["continuity"]["curiosity_queue"] = ["q-" + "z" * 80 for _ in range(5)]
+                payload["continuity"]["negative_decisions"] = [
+                    {"decision": "nd-" + "w" * 60, "rationale": "r" * 40} for _ in range(4)
+                ]
+                payload["continuity"]["working_hypotheses"] = ["wh-" + "v" * 80 for _ in range(5)]
+                _write_capsule(repo, payload)
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[
+                    {"subject_kind": "user", "subject_id": "a"},
+                    {"subject_kind": "user", "subject_id": "b"},
+                ],
+                continuity_max_capsules=2,
+                max_tokens_estimate=2000,
+            )
+            state = build_continuity_state(
+                repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+            )
+            reserved = state["budget"]["continuity_tokens_reserved"]
+            used = state["budget"]["continuity_tokens_used"]
+            self.assertLessEqual(
+                used,
+                reserved,
+                f"tokens_used ({used}) exceeded reserved ({reserved}) with multi-capsule heavy trimming",
+            )
 
 
 # ---------------------------------------------------------------------------
