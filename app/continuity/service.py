@@ -41,7 +41,6 @@ from app.continuity.constants import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
     CONTINUITY_DIR_REL,
-    CONTINUITY_HEALTH_ORDER,
     CONTINUITY_REFRESH_STATE_REL,
     CONTINUITY_RETENTION_ARCHIVE_DAYS,
     CONTINUITY_RETENTION_STATE_REL,
@@ -49,18 +48,11 @@ from app.continuity.constants import (
     CONTINUITY_STATE_METADATA_FILES,
     CONTINUITY_WARNING_ACTIVE_INVALID,
     CONTINUITY_WARNING_ACTIVE_MISSING,
-    CONTINUITY_WARNING_CONFLICTED,
-    CONTINUITY_WARNING_DEGRADED,
     CONTINUITY_WARNING_FALLBACK_MISSING,
     CONTINUITY_WARNING_FALLBACK_USED,
     CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
-    CONTINUITY_WARNING_INVALID,
     CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED,
-    CONTINUITY_WARNING_TRUNCATED_MULTI,
-    CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED,
-    CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT,
     CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
-    _TRUST_SIGNALS_NULL_OVERHEAD_TOKENS,
 )
 from app.continuity.paths import (
     _archive_rel_path_from_envelope,
@@ -107,6 +99,12 @@ from app.continuity.retention import (
     _scan_retention_candidates,
 )
 from app.continuity.cold import _build_cold_stub_text, _load_cold_stub
+from app.continuity.context_state import (
+    _assemble_aggregate_trust,
+    _filter_by_verification_policy,
+    _load_selectors_with_fallback,
+    _trim_and_attach_trust,
+)
 from app.continuity.revalidation import (
     _apply_verification_outcome,
     _resolve_revalidation_capsule,
@@ -119,14 +117,11 @@ from app.continuity.listing import (
 )
 from app.continuity.retrieval import (
     _effective_selectors,
-    _format_selector,
-    _qualify_warning,
     _selector_key,
     _warning_mode_is_multi,
 )
 from app.continuity.freshness import (
     _capsule_health_summary,
-    _continuity_phase,
     _verification_status,
 )
 from app.continuity.refresh import (
@@ -139,11 +134,8 @@ from app.continuity.trimming import (
     _budget,
     _estimated_tokens,
     _render_value,
-    _trim_capsule,
 )
 from app.continuity.trust import (
-    _build_aggregate_trust_signals,
-    _build_compact_trust_signals,
     _build_startup_summary,
     _build_trust_signals,
     _compute_resume_quality,
@@ -1627,91 +1619,15 @@ def build_continuity_state(
             raise HTTPException(status_code=404, detail="Continuity capsule not found")
         return state
 
-    loaded: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    recovery_warnings: list[str] = []
-    fallback_used = False
-    for item in selectors:
-        kind = item["subject_kind"]
-        subject_id = item["subject_id"]
-        resolution = item["resolution"]
-        rel = continuity_rel_path(kind, subject_id)
-        try:
-            auth.require_read_path(rel)
-        except HTTPException as auth_exc:
-            if auth_exc.status_code == 403:
-                selector_label = _format_selector(kind, subject_id)
-                recovery_warnings.append(
-                    _qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
-                    + " (owner only)"
-                )
-                state["omitted_selectors"].append(selector_label)
-                continue
-            raise
-        source_state = "active"
-        try:
-            capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
-        except HTTPException as exc:
-            selector_label = _format_selector(kind, subject_id)
-            if exc.status_code == 404:
-                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode))
-            elif exc.status_code == 400:
-                if "subject does not match" in str(exc.detail):
-                    raise
-                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
-            else:
-                raise
-            resilience_policy = req.continuity_resilience_policy
-            if resilience_policy == "require_active":
-                state["omitted_selectors"].append(selector_label)
-                continue
-            if resilience_policy not in {"allow_fallback", "prefer_active"}:
-                raise HTTPException(status_code=400, detail="Unsupported continuity_resilience_policy")
-            fallback_rel = continuity_fallback_rel_path(kind, subject_id)
-            try:
-                auth.require_read_path(fallback_rel)
-            except HTTPException as fallback_auth_exc:
-                if fallback_auth_exc.status_code == 403:
-                    recovery_warnings.append(
-                        _qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
-                        + " (owner only)"
-                    )
-                    state["omitted_selectors"].append(selector_label)
-                    continue
-                raise
-            try:
-                capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(kind, subject_id))
-                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_USED, kind, subject_id, multi_mode=multi_warning_mode))
-                fallback_used = True
-                source_state = "fallback"
-            except HTTPException as fallback_exc:
-                if fallback_exc.status_code in {400, 404}:
-                    if exc.status_code == 404:
-                        recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode))
-                        state["omitted_selectors"].append(selector_label)
-                        continue
-                    if len(selectors) > 1:
-                        warnings.append(_qualify_warning(CONTINUITY_WARNING_INVALID, kind, subject_id, multi_mode=multi_warning_mode))
-                        state["omitted_selectors"].append(selector_label)
-                        continue
-                    raise exc
-                raise
-        phase, phase_warnings = _continuity_phase(capsule, now)
-        warnings.extend(_qualify_warning(warning, kind, subject_id, multi_mode=multi_warning_mode) for warning in phase_warnings)
-        if phase in {"expired", "expired_by_age"}:
-            state["omitted_selectors"].append(_format_selector(kind, subject_id))
-            continue
-        health_status, health_reasons = _capsule_health_summary(capsule)
-        loaded.append(
-            {
-                "selector": item,
-                "capsule": capsule,
-                "verification_status": _verification_status(capsule),
-                "health_status": health_status,
-                "health_reasons": health_reasons,
-                "source_state": source_state,
-            }
-        )
+    loaded, warnings, recovery_warnings, fallback_used = _load_selectors_with_fallback(
+        repo_root=repo_root,
+        auth=auth,
+        selectors=selectors,
+        req=req,
+        now=now,
+        multi_warning_mode=multi_warning_mode,
+        omitted_selectors=state["omitted_selectors"],
+    )
 
     if not loaded:
         if req.continuity_mode == "required":
@@ -1721,20 +1637,9 @@ def build_continuity_state(
         state["fallback_used"] = fallback_used
         return state
 
-    if req.continuity_verification_policy == "prefer_healthy":
-        loaded = sorted(
-            loaded,
-            key=lambda row: CONTINUITY_HEALTH_ORDER.get(str(row["health_status"]), CONTINUITY_HEALTH_ORDER["conflicted"]),
-        )
-    elif req.continuity_verification_policy == "require_healthy":
-        filtered: list[dict[str, Any]] = []
-        for row in loaded:
-            if row["health_status"] == "healthy":
-                filtered.append(row)
-                continue
-            selector = row["selector"]
-            state["omitted_selectors"].append(_format_selector(selector["subject_kind"], selector["subject_id"]))
-        loaded = filtered
+    loaded = _filter_by_verification_policy(
+        loaded, req.continuity_verification_policy, state["omitted_selectors"],
+    )
 
     if not loaded:
         if req.continuity_mode == "required":
@@ -1744,104 +1649,15 @@ def build_continuity_state(
         state["fallback_used"] = fallback_used
         return state
 
-    reserve = budget["continuity_tokens_reserved"]
-    count = len(loaded)
-    base = reserve // count
-    remainder = reserve % count
-
-    trimmed_capsules: list[dict[str, Any]] = []
-    trimmed_selection_order: list[str] = []
-    for idx, row in enumerate(loaded):
-        allocation = base + (1 if idx < remainder else 0)
-        selector = row["selector"]
-        kind = selector["subject_kind"]
-        subject_id = selector["subject_id"]
-        resolution = selector["resolution"]
-
-        # --- Build trust_signals BEFORE trimming to budget honestly ---
-        # Reserve a small overhead for the "trust_signals": <value> key
-        # that will be added to the capsule dict regardless of whether the
-        # trust builder succeeds (null takes a few tokens too).
-        trust_signals_obj: dict[str, Any] | None = None
-        trust_tokens = _TRUST_SIGNALS_NULL_OVERHEAD_TOKENS
-        is_compact = False
-        full_ts: dict[str, Any] | None = None
-        compact_ts: dict[str, Any] | None = None
-        compact_ts_tokens = 0
-        try:
-            full_ts = _build_trust_signals(
-                row["capsule"],
-                now,
-                source_state=row["source_state"],
-                # trimmed/trimmed_fields filled in after trim pass below
-            )
-            compact_ts = _build_compact_trust_signals(
-                row["capsule"],
-                now,
-                source_state=row["source_state"],
-            )
-            compact_ts_tokens = _estimated_tokens(_render_value(compact_ts))
-            full_ts_tokens = _estimated_tokens(_render_value(full_ts))
-            # Choose full or compact based on whether full leaves room for capsule content
-            if full_ts_tokens < allocation:
-                trust_signals_obj = full_ts
-                trust_tokens = full_ts_tokens
-            elif compact_ts_tokens < allocation:
-                trust_signals_obj = compact_ts
-                trust_tokens = compact_ts_tokens
-                is_compact = True
-            # else: trust_signals_obj stays None — even compact doesn't fit;
-            # trust_tokens stays at _TS_KEY_OVERHEAD for the null value.
-        except Exception:
-            _logger.warning("per-capsule trust_signals failed; degrading to null", exc_info=True)
-            recovery_warnings.append(
-                _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED, kind, subject_id, multi_mode=multi_warning_mode)
-            )
-
-        capsule_allocation = allocation - trust_tokens
-        trimmed, trimmed_fields = _trim_capsule(row["capsule"], capsule_allocation)
-        if trimmed is None:
-            state["omitted_selectors"].append(_format_selector(kind, subject_id))
-            warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUNCATED_MULTI, kind, subject_id, multi_mode=multi_warning_mode))
-            continue
-        trimmed["source_state"] = row["source_state"]
-
-        # Attach trust_signals — update trimmed/trimmed_fields on full signals,
-        # then re-check that the post-mutation cost still fits within allocation.
-        # The compact shape is structurally smaller than full (tested by
-        # test_compact_smaller_than_full), so the compact downgrade always
-        # absorbs any trimmed_fields growth — no further re-trim is needed.
-        if trust_signals_obj is not None:
-            if not is_compact and not trust_signals_obj.get("compact"):
-                trust_signals_obj["completeness"]["trimmed"] = bool(trimmed_fields)
-                trust_signals_obj["completeness"]["trimmed_fields"] = list(trimmed_fields) if trimmed_fields else []
-                # Re-estimate after mutation; downgrade to compact if overshot.
-                updated_ts_tokens = _estimated_tokens(_render_value(trust_signals_obj))
-                if updated_ts_tokens > trust_tokens and compact_ts is not None:
-                    compact_ts["completeness"]["trimmed"] = bool(trimmed_fields)
-                    fallback_compact_tokens = _estimated_tokens(_render_value(compact_ts))
-                    capsule_tokens = _estimated_tokens(_render_value(trimmed))
-                    if capsule_tokens + updated_ts_tokens > allocation and capsule_tokens + fallback_compact_tokens <= allocation:
-                        trust_signals_obj = compact_ts
-                        is_compact = True
-                        recovery_warnings.append(
-                            _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode)
-                        )
-            elif is_compact:
-                trust_signals_obj["completeness"]["trimmed"] = bool(trimmed_fields)
-                recovery_warnings.append(
-                    _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode)
-                )
-            trimmed["trust_signals"] = trust_signals_obj
-        else:
-            trimmed["trust_signals"] = None
-
-        trimmed_capsules.append(trimmed)
-        trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
-        if row["health_status"] == "degraded":
-            warnings.append(_qualify_warning(CONTINUITY_WARNING_DEGRADED, kind, subject_id, multi_mode=multi_warning_mode))
-        elif row["health_status"] == "conflicted":
-            warnings.append(_qualify_warning(CONTINUITY_WARNING_CONFLICTED, kind, subject_id, multi_mode=multi_warning_mode))
+    trimmed_capsules, trimmed_selection_order, trim_warnings, trim_recovery = _trim_and_attach_trust(
+        loaded=loaded,
+        reserve=budget["continuity_tokens_reserved"],
+        now=now,
+        multi_warning_mode=multi_warning_mode,
+        omitted_selectors=state["omitted_selectors"],
+    )
+    warnings.extend(trim_warnings)
+    recovery_warnings.extend(trim_recovery)
 
     if not trimmed_capsules:
         if req.continuity_mode == "required":
@@ -1851,24 +1667,13 @@ def build_continuity_state(
         state["fallback_used"] = fallback_used
         return state
 
-    # --- aggregate trust signals ---
-    per_capsule_signals = [
-        c["trust_signals"] for c in trimmed_capsules if c.get("trust_signals") is not None
-    ]
-    if per_capsule_signals:
-        try:
-            aggregate_trust = _build_aggregate_trust_signals(
-                per_capsule_signals,
-                selectors_requested=len(requested_selectors),
-                selectors_returned=len(trimmed_capsules),
-                selectors_omitted=len(state["omitted_selectors"]),
-            )
-        except Exception:
-            _logger.warning("aggregate trust_signals failed; degrading to null", exc_info=True)
-            aggregate_trust = None
-            recovery_warnings.append(CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED)
-    else:
-        aggregate_trust = None
+    aggregate_trust, agg_recovery = _assemble_aggregate_trust(
+        trimmed_capsules,
+        selectors_requested=len(requested_selectors),
+        selectors_returned=len(trimmed_capsules),
+        selectors_omitted=len(state["omitted_selectors"]),
+    )
+    recovery_warnings.extend(agg_recovery)
 
     state["present"] = True
     state["capsules"] = trimmed_capsules

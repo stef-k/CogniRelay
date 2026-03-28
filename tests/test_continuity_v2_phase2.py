@@ -185,7 +185,7 @@ class TestContinuityV2Phase2(unittest.TestCase):
                 continuity_max_capsules=2,
                 max_tokens_estimate=4000,
             )
-            with patch("app.continuity.service._trim_capsule", side_effect=_record_trim):
+            with patch("app.continuity.context_state._trim_capsule", side_effect=_record_trim):
                 state = build_continuity_state(repo_root=repo_root, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc))
 
             # Both capsules get equal allocation after subtracting trust_signals overhead
