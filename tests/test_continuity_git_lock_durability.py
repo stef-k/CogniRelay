@@ -117,7 +117,7 @@ class TestPersistActiveCapsuleLockDurability(unittest.TestCase):
 
             # Attempt persist with lock that will fail
             new_content = json.dumps(_make_active_capsule(), indent=2)
-            with patch("app.continuity.service.repository_mutation_lock", lock_mock):
+            with patch("app.continuity.persistence.repository_mutation_lock", lock_mock):
                 with self.assertRaises((GitLockTimeout, GitLockInfrastructureError)):
                     _persist_active_capsule(
                         repo_root=repo,
@@ -185,7 +185,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
             original_bytes = capsule_path.read_bytes()
 
             new_content = json.dumps(_make_active_capsule(), indent=2)
-            with patch("app.continuity.service.repository_mutation_lock", _passthrough_lock):
+            with patch("app.continuity.persistence.repository_mutation_lock", _passthrough_lock):
                 with self.assertRaises(HTTPException) as ctx:
                     _persist_active_capsule(
                         repo_root=repo,
@@ -216,8 +216,8 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
             new_content = json.dumps(_make_active_capsule(), indent=2)
             with (
-                patch("app.continuity.service.repository_mutation_lock", _passthrough_lock),
-                patch("app.continuity.service.write_bytes_file", side_effect=OSError("disk full")),
+                patch("app.continuity.persistence.repository_mutation_lock", _passthrough_lock),
+                patch("app.continuity.persistence.write_bytes_file", side_effect=OSError("disk full")),
             ):
                 with self.assertRaises(HTTPException) as ctx:
                     _persist_active_capsule(
@@ -247,7 +247,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
             write_text_file(capsule_path, original)
 
             new_content = json.dumps(_make_active_capsule(), indent=2)
-            with patch("app.continuity.service.repository_mutation_lock", _passthrough_lock):
+            with patch("app.continuity.persistence.repository_mutation_lock", _passthrough_lock):
                 # Should NOT raise — content is already durable in git
                 _persist_active_capsule(
                     repo_root=repo,

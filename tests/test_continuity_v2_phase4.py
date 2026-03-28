@@ -264,7 +264,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
             gm = _FailingGitManagerStub()
             self._write_capsule(repo_root, subject_kind="user", subject_id="stef")
 
-            with patch("app.continuity.service.write_bytes_file", side_effect=OSError("disk full")):
+            with patch("app.continuity.persistence.write_bytes_file", side_effect=OSError("disk full")):
                 with self.assertRaises(HTTPException) as cm:
                     continuity_archive_service(
                         repo_root=repo_root,
