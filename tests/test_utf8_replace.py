@@ -184,7 +184,7 @@ class TestUtf8ReplacementContinuity(unittest.TestCase):
             bad = b'{"ts": "2026-01-01T00:00:00Z", "event": "read\xfe"}\n'
             (logs_dir / "api_audit.jsonl").write_bytes(good + bad)
 
-            with self.assertLogs("app.continuity.service", level=logging.WARNING) as cm:
+            with self.assertLogs("app.continuity.refresh", level=logging.WARNING) as cm:
                 _audit_recent_selectors(repo, datetime.now(timezone.utc))
 
             self.assertTrue(any("U+FFFD" in msg for msg in cm.output))
@@ -199,7 +199,7 @@ class TestUtf8ReplacementContinuity(unittest.TestCase):
             path.write_text("{}\n")
             path.chmod(0o000)
             try:
-                with self.assertLogs("app.continuity.service", level=logging.WARNING):
+                with self.assertLogs("app.continuity.refresh", level=logging.WARNING):
                     result = _audit_recent_selectors(repo, datetime.now(timezone.utc))
                 self.assertEqual(result, set())
             finally:
