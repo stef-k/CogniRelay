@@ -12,11 +12,15 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.continuity.service import (
+    CONTINUITY_COLD_STUB_FRONTMATTER_ORDER,
     _build_startup_summary,
     _estimated_tokens,
     _render_value,
     _trim_capsule,
     _validate_capsule,
+    build_continuity_state,
+    continuity_cold_storage_rel_path,
+    continuity_cold_stub_rel_path,
 )
 from app.main import continuity_list, continuity_read, continuity_upsert
 from app.models import (
@@ -24,6 +28,7 @@ from app.models import (
     ContinuityListRequest,
     ContinuityReadRequest,
     ContinuityUpsertRequest,
+    ContextRetrieveRequest,
     StablePreference,
 )
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -309,39 +314,46 @@ class TestTrimCapsuleStablePreferences(unittest.TestCase):
     def test_tight_budget_drops_prefs_as_unit(self) -> None:
         """When budget is tight, stable_preferences is dropped entirely (all-or-nothing)."""
         capsule = self._capsule_with_prefs()
-        # Find a budget that forces trimming into phase 1 far enough to reach stable_preferences.
-        # Start with enough for just core orientation fields.
-        budget = _estimated_tokens(_render_value(capsule)) // 3
-        trimmed, dropped = _trim_capsule(capsule, budget)
-        if trimmed is not None and "stable_preferences" not in trimmed:
-            self.assertIn("stable_preferences", dropped)
-        elif trimmed is not None and "stable_preferences" in trimmed:
-            # Budget was generous enough to keep prefs -- shrink further.
-            trimmed2, dropped2 = _trim_capsule(capsule, budget // 2)
-            if trimmed2 is not None:
-                self.assertNotIn("stable_preferences", trimmed2)
-                self.assertIn("stable_preferences", dropped2)
+        # Walk the budget down from full until stable_preferences is dropped.
+        full_tokens = _estimated_tokens(_render_value(capsule))
+        found_drop = False
+        for budget in range(full_tokens, 0, -5):
+            trimmed, dropped = _trim_capsule(capsule, budget)
+            if trimmed is None:
+                # Capsule completely unrepresentable; stable_preferences must
+                # have been dropped at a higher budget — fail if we never saw it.
+                break
+            if "stable_preferences" in dropped:
+                # All-or-nothing: the key must be entirely absent from the trimmed capsule.
+                self.assertNotIn("stable_preferences", trimmed)
+                found_drop = True
+                break
+            # While not yet dropped, the full list must remain intact.
+            self.assertEqual(len(trimmed.get("stable_preferences", [])), 5)
+        self.assertTrue(found_drop, "stable_preferences was never dropped during budget walk — test fixture too small")
 
     def test_drop_order_after_working_hypotheses(self) -> None:
         """stable_preferences must be trimmed after continuity.working_hypotheses."""
         capsule = self._capsule_with_prefs()
         capsule["continuity"]["working_hypotheses"] = ["hypo " * 20] * 5
-        # Use a budget that forces partial trimming.
         full_tokens = _estimated_tokens(_render_value(capsule))
         # Walk budget down to find where working_hypotheses and stable_preferences drop.
         wh_dropped_at = None
         sp_dropped_at = None
-        for budget in range(full_tokens, 0, -10):
-            _, dropped = _trim_capsule(capsule, budget)
+        for budget in range(full_tokens, 0, -5):
+            trimmed, dropped = _trim_capsule(capsule, budget)
+            if trimmed is None:
+                break
             if "continuity.working_hypotheses" in dropped and wh_dropped_at is None:
                 wh_dropped_at = budget
             if "stable_preferences" in dropped and sp_dropped_at is None:
                 sp_dropped_at = budget
             if wh_dropped_at is not None and sp_dropped_at is not None:
                 break
+        self.assertIsNotNone(wh_dropped_at, "working_hypotheses was never dropped — test fixture too small")
+        self.assertIsNotNone(sp_dropped_at, "stable_preferences was never dropped — test fixture too small")
         # stable_preferences should be dropped at same budget or lower (i.e. after) working_hypotheses.
-        if wh_dropped_at is not None and sp_dropped_at is not None:
-            self.assertGreaterEqual(wh_dropped_at, sp_dropped_at)
+        self.assertGreaterEqual(wh_dropped_at, sp_dropped_at)
 
     def test_trimmed_fields_includes_stable_preferences(self) -> None:
         capsule = self._capsule_with_prefs()
@@ -733,6 +745,164 @@ class TestArchivePreservesPrefs(unittest.TestCase):
             archived = [e for e in out["capsules"] if e["artifact_state"] == "archived"]
             self.assertTrue(len(archived) > 0)
             self.assertEqual(archived[0]["stable_preference_count"], 4)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: build_continuity_state (context/retrieve path)
+# ---------------------------------------------------------------------------
+
+class TestBuildContinuityStateStablePreferences(unittest.TestCase):
+    """Validate stable_preferences through build_continuity_state (context/retrieve)."""
+
+    def test_active_capsule_includes_prefs_in_bundle(self) -> None:
+        """A capsule with stable_preferences loaded via build_continuity_state
+        must include them in the returned capsule bundle."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            payload = _base_capsule_payload(stable_preferences=_sample_prefs(3))
+            _write_capsule(repo_root, payload)
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "test-agent"}],
+                max_tokens_estimate=4000,
+            )
+            state = build_continuity_state(
+                repo_root=repo_root, auth=_AuthStub(), req=req,
+                now=datetime.now(timezone.utc),
+            )
+            self.assertTrue(state["present"])
+            capsule = state["capsules"][0]
+            prefs = capsule.get("stable_preferences", [])
+            self.assertEqual(len(prefs), 3)
+            tags = {p["tag"] for p in prefs}
+            self.assertEqual(tags, {"pref_0", "pref_1", "pref_2"})
+
+    def test_trimming_reflects_in_trust_signals(self) -> None:
+        """When stable_preferences is trimmed under a tight budget, the
+        per-capsule trust_signals.completeness.trimmed_fields must include it."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            # Build a capsule heavy enough that a tight budget forces trimming
+            # of stable_preferences specifically.  At mte=1500 the reserved
+            # continuity budget is ~300 tokens; the ~1,050-token capsule must
+            # trim deep into phase 1, dropping stable_preferences.
+            payload = _base_capsule_payload(stable_preferences=_sample_prefs(12))
+            payload["continuity"]["working_hypotheses"] = ["wh " * 40] * 5
+            payload["continuity"]["trailing_notes"] = ["tn " * 40] * 3
+            payload["continuity"]["curiosity_queue"] = ["cq " * 40] * 5
+            payload["continuity"]["negative_decisions"] = [
+                {"decision": "d" * 100, "rationale": "r" * 100}
+                for _ in range(4)
+            ]
+            _write_capsule(repo_root, payload)
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "test-agent"}],
+                max_tokens_estimate=1500,
+            )
+            state = build_continuity_state(
+                repo_root=repo_root, auth=_AuthStub(), req=req,
+                now=datetime.now(timezone.utc),
+            )
+            self.assertTrue(state["present"], "capsule must survive trimming at mte=1500")
+            capsule = state["capsules"][0]
+            # stable_preferences must have been trimmed away.
+            self.assertNotIn("stable_preferences", capsule,
+                             "stable_preferences should be trimmed at mte=1500")
+            ts = capsule.get("trust_signals")
+            self.assertIsNotNone(ts, "trust_signals must be present at mte=1500")
+            completeness = ts.get("completeness", {})
+            trimmed_fields = completeness.get("trimmed_fields", [])
+            self.assertIn("stable_preferences", trimmed_fields)
+            self.assertTrue(completeness.get("trimmed", False))
+
+    def test_fallback_capsule_preserves_prefs(self) -> None:
+        """A fallback capsule loaded via build_continuity_state must
+        preserve stable_preferences."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            payload = _base_capsule_payload(stable_preferences=_sample_prefs(2))
+            _write_fallback(repo_root, payload)
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "test-agent"}],
+                max_tokens_estimate=4000,
+                continuity_resilience_policy="allow_fallback",
+            )
+            state = build_continuity_state(
+                repo_root=repo_root, auth=_AuthStub(), req=req,
+                now=datetime.now(timezone.utc),
+            )
+            self.assertTrue(state["present"])
+            capsule = state["capsules"][0]
+            self.assertEqual(capsule.get("source_state"), "fallback")
+            prefs = capsule.get("stable_preferences", [])
+            self.assertEqual(len(prefs), 2)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: cold-stub stable_preference_count
+# ---------------------------------------------------------------------------
+
+def _write_cold_stub(repo_root: Path, *, subject_id: str = "test-agent") -> str:
+    """Write a valid cold stub and its referenced archive, return the stub rel path."""
+    now = _now_iso()
+    source_archive_path = f"memory/continuity/archive/user-{subject_id}-20260328T120000Z.json"
+    cold_storage_path = continuity_cold_storage_rel_path(source_archive_path)
+    stub_rel = continuity_cold_stub_rel_path(source_archive_path)
+    stub_path = repo_root / stub_rel
+    stub_path.parent.mkdir(parents=True, exist_ok=True)
+    frontmatter_values = {
+        "type": "continuity_cold_stub",
+        "schema_version": '"1.0"',
+        "artifact_state": "cold",
+        "subject_kind": "user",
+        "subject_id": subject_id,
+        "source_archive_path": source_archive_path,
+        "cold_storage_path": cold_storage_path,
+        "archived_at": now,
+        "cold_stored_at": now,
+        "verification_kind": "self_review",
+        "verification_status": "self_attested",
+        "health_status": "healthy",
+        "freshness_class": "current",
+        "phase": "current",
+        "update_reason": "pre_compaction",
+    }
+    lines = ["---"]
+    for key in CONTINUITY_COLD_STUB_FRONTMATTER_ORDER:
+        lines.append(f"{key}: {frontmatter_values[key]}")
+    lines.append("---")
+    lines.append("## top_priorities")
+    lines.append("- priority one")
+    lines.append("")
+    stub_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Write the gzip file so the cold_storage_path exists (not required for list,
+    # but keeps the fixture realistic).
+    import gzip
+    gz_path = repo_root / cold_storage_path
+    gz_path.parent.mkdir(parents=True, exist_ok=True)
+    gz_path.write_bytes(gzip.compress(b"{}"))
+    return stub_rel
+
+
+class TestColdStubStablePreferenceCount(unittest.TestCase):
+    """Verify stable_preference_count is None for cold storage stub entries."""
+
+    def test_cold_stub_has_null_count(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            _write_cold_stub(repo_root)
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_list(
+                    req=ContinuityListRequest(subject_kind="user", include_cold=True),
+                    auth=_AuthStub(),
+                )
+            cold_entries = [e for e in out["capsules"] if e["artifact_state"] == "cold"]
+            self.assertEqual(len(cold_entries), 1)
+            self.assertIsNone(cold_entries[0]["stable_preference_count"])
 
 
 if __name__ == "__main__":

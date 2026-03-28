@@ -71,7 +71,9 @@ The system is designed so that a fully-populated capsule with practical content 
 | `stable_preferences` (max 12 entries) | ~960 | up to 36 fields | Trimmed as whole unit under token pressure |
 | `verification_state` + `capsule_health` + `confidence` | ~185 | ~10 fields | |
 | Top-level metadata (`subject_kind`, `subject_id`, timestamps, etc.) | ~60 | ~6 fields | |
-| **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON** |
+| **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON (theoretical; see note below)** |
+
+> **Note on write-time size limit:** The server enforces a 12 KB serialized-UTF-8 cap on each capsule at write time. The ~14 KB figure above is the theoretical maximum when *every* optional field is populated at its maximum length simultaneously — a shape that exceeds the write limit and would be rejected. In practice a fully-featured capsule with realistic content fits within 10–11 KB. When populating both `stable_preferences` (up to ~4.6 KB at max lengths) and the full set of continuity fields, agents should expect to trade off less-critical optional content to stay within the 12 KB cap.
 
 ### Context window impact
 
@@ -89,7 +91,7 @@ The system is designed so that a fully-populated capsule with practical content 
 
 **Full capsule** — populate every field including `relationship_model`, `retrieval_hints`, `attention_policy`, `negative_decisions`, `session_trajectory`, `verification_state`, and `capsule_health`. This costs approximately **~2,400–2,800 tokens** and provides the richest possible orientation.
 
-**Under token pressure** — the system trims optional fields in deterministic order starting from the bottom of the `ContinuityState` table: `retrieval_hints` first, then `relationship_model`, `curiosity_queue`, `trailing_notes`, `negative_decisions`, `working_hypotheses`, then `stable_preferences` (dropped as a whole unit — all-or-nothing). The 6 required core lists and `stance_summary` are never trimmed. When `stable_preferences` is trimmed, `"stable_preferences"` appears in `trimmed_fields`.
+**Under token pressure** — the system trims optional fields in two phases. Phase 1 drops whole optional sections in deterministic order: `metadata`, `canonical_sources`, `freshness`, `attention_policy.presence_bias_overrides`, `relationship_model` sub-fields (`sensitivity_notes`, `preferred_style`), `retrieval_hints` sub-fields (`avoid`, `load_next`), `trailing_notes`, `curiosity_queue`, `negative_decisions`, `working_hypotheses`, then `stable_preferences` (dropped as a whole unit — all-or-nothing). Phase 2, if still over budget, progressively trims `retrieval_hints.must_include`, the remaining `relationship_model`, `long_horizon_commitments`, `stance_summary`, `drift_signals`, and finally the core lists. The 6 required core lists and `stance_summary` are trimmed only as a last resort. When `stable_preferences` is trimmed, `"stable_preferences"` appears in `trimmed_fields`.
 
 **Multi-capsule retrieval** — `POST /v1/context/retrieve` supports loading up to 4 capsules via `continuity_selectors` and `continuity_max_capsules`. At full population, 4 capsules would cost ~10,000–11,000 tokens. The `max_tokens_estimate` parameter (default 4,000) controls the total continuity token budget, and the system trims each capsule to fit.
 
