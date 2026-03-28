@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.context.service import _raw_scan_recent_relevant
-from app.continuity.service import _audit_recent_selectors
+from app.continuity.refresh import _audit_recent_selectors
 from app.indexer import _record_for_file
 from app.config import Settings
 from app.maintenance.service import _candidate_policy, _load_access_stats, metrics_service

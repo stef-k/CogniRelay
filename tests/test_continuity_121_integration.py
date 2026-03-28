@@ -16,13 +16,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
-from app.continuity.service import (
-    CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT,
-    CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
-    _estimated_tokens,
-    _render_value,
-    build_continuity_state,
-)
+from app.continuity.constants import CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, CONTINUITY_WARNING_TRUST_SIGNALS_FAILED
+from app.continuity.service import build_continuity_state
+from app.continuity.trimming import _estimated_tokens, _render_value
 from app.main import continuity_read, context_retrieve
 from app.models import ContinuityReadRequest, ContextRetrieveRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -732,7 +728,7 @@ class TestAggregateTrustFailureWarning(unittest.TestCase):
             # Aggregate is null
             self.assertIsNone(state["trust_signals"])
             # Warning was emitted
-            from app.continuity.service import CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED
+            from app.continuity.constants import CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED
             agg_warnings = [w for w in state["recovery_warnings"] if CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED in w]
             self.assertTrue(len(agg_warnings) > 0)
             # Per-capsule trust_signals still present

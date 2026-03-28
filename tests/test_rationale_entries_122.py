@@ -11,21 +11,13 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.continuity.service import (
-    CONTINUITY_COLD_STUB_FRONTMATTER_ORDER,
-    CONTINUITY_COLD_STUB_SECTION_ORDER,
-    _build_cold_stub_text,
-    _build_startup_summary,
-    _estimated_tokens,
-    _render_cold_rationale_entries,
-    _render_value,
-    _trim_capsule,
-    _validate_capsule,
-    continuity_cold_storage_rel_path,
-    continuity_cold_stub_rel_path,
-    continuity_compare_service,
-    continuity_revalidate_service,
-)
+from app.continuity.cold import _build_cold_stub_text, _render_cold_rationale_entries
+from app.continuity.constants import CONTINUITY_COLD_STUB_FRONTMATTER_ORDER, CONTINUITY_COLD_STUB_SECTION_ORDER
+from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
+from app.continuity.service import continuity_compare_service, continuity_revalidate_service
+from app.continuity.trimming import _estimated_tokens, _render_value, _trim_capsule
+from app.continuity.trust import _build_startup_summary
+from app.continuity.validation import _validate_capsule
 from app.main import continuity_list, continuity_read, continuity_upsert
 from app.models import (
     ContinuityCapsule,

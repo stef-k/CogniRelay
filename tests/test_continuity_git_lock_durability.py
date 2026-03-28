@@ -102,7 +102,7 @@ class TestPersistActiveCapsuleLockDurability(unittest.TestCase):
     def _run_persist_with_lock_failure(self, lock_mock):
         """Helper: write an original capsule, attempt persist with a failing lock,
         and assert the original content survives."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -172,7 +172,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
     def test_commit_failure_returns_structured_error(self) -> None:
         """Commit exception → 500 with continuity_persist_commit_failed, file restored."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -203,7 +203,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
     def test_commit_and_rollback_failure_returns_rollback_error(self) -> None:
         """Commit + rollback failure → 500 with continuity_persist_rollback_failed."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -235,7 +235,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
     def test_no_changes_is_success(self) -> None:
         """commit_file returning False (no diff) must not trigger rollback."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)

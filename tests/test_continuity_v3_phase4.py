@@ -10,7 +10,8 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.config import Settings
-from app.continuity.service import _trim_capsule, continuity_list_service
+from app.continuity.service import continuity_list_service
+from app.continuity.trimming import _trim_capsule
 from app.main import context_retrieve
 from app.models import ContextRetrieveRequest, ContinuityListRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub

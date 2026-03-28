@@ -39,21 +39,11 @@ from app.models import (
     ContextRetrieveRequest,
 )
 from app.storage import canonical_json, safe_path, write_bytes_file, write_text_file
-
-_logger = logging.getLogger(__name__)
-
-# --- Re-exported from app.continuity.constants (backward-compat shim) ---
-from app.continuity.constants import (  # noqa: E402
+from app.continuity.constants import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
-    CONTINUITY_COLD_DIR_REL,  # noqa: F401 — re-exported for maintenance/service.py
     CONTINUITY_COLD_INDEX_DIR_REL,
-    CONTINUITY_COLD_STUB_FRONTMATTER_ORDER,  # noqa: F401 — re-exported for tests
-    CONTINUITY_COLD_STUB_SCHEMA_TYPE,  # noqa: F401 — re-exported for tests
-    CONTINUITY_COLD_STUB_SECTION_ORDER,  # noqa: F401 — re-exported for tests
     CONTINUITY_DIR_REL,
-    CONTINUITY_FALLBACK_SCHEMA_TYPE,  # noqa: F401 — re-exported for maintenance/service.py
-    CONTINUITY_FALLBACK_SCHEMA_VERSION,  # noqa: F401 — re-exported for maintenance/service.py
     CONTINUITY_HEALTH_ORDER,
     CONTINUITY_REFRESH_STATE_REL,
     CONTINUITY_RETENTION_ARCHIVE_DAYS,
@@ -75,25 +65,17 @@ from app.continuity.constants import (  # noqa: E402
     CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
     _TRUST_SIGNALS_NULL_OVERHEAD_TOKENS,
 )
-
-
-# --- Re-exported from app.continuity.paths (backward-compat shim) ---
-from app.continuity.paths import (  # noqa: E402
+from app.continuity.paths import (
     _archive_rel_path_from_envelope,
     _continuity_subject_lock,
     _normalize_subject_id,
     _validate_archive_rel_path,
-    continuity_archive_rel_path_from_cold_artifact,  # noqa: F401 — re-exported for maintenance/service.py
     continuity_cold_storage_rel_path,
-    continuity_cold_stub_rel_path,  # noqa: F401 — re-exported for maintenance/service.py
+    continuity_cold_stub_rel_path,
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-
-
-
-# --- Re-exported from app.continuity.validation (backward-compat shim) ---
-from app.continuity.validation import (  # noqa: E402
+from app.continuity.validation import (
     _final_capsule_payload,
     _normalize_compare_payload,
     _strip_verification_fields_for_upsert,
@@ -101,24 +83,15 @@ from app.continuity.validation import (  # noqa: E402
     _validate_candidate_selector_match,
     _validate_verification_signals,
 )
-
-
-# --- Re-exported from app.continuity.compare (backward-compat shim) ---
-from app.continuity.compare import (  # noqa: E402
+from app.continuity.compare import (
     _compare_capsules,
     _signals_to_evidence_refs,
     _strongest_signal_kind,
 )
-
-
-
-
-
-# --- Re-exported from app.continuity.persistence (backward-compat shim) ---
-from app.continuity.persistence import (  # noqa: E402
+from app.continuity.persistence import (
     _delete_commit_message,
     _load_archive_envelope,
-    _load_capsule,  # noqa: F401 — re-exported for coordination/handoff_service.py
+    _load_capsule,
     _load_fallback_envelope_payload,
     _load_fallback_snapshot,
     _persist_active_capsule,
@@ -129,64 +102,47 @@ from app.continuity.persistence import (  # noqa: E402
     _restore_failed_refresh_state,
     _restore_failed_retention_state,
 )
-
-
-
-# --- Re-exported from app.continuity.retention (backward-compat shim) ---
-from app.continuity.retention import (  # noqa: E402
+from app.continuity.retention import (
     _is_archive_stale,
     _retention_cold_state,
     _retention_plan_payload,
     _retention_warning_sort_key,
     _scan_retention_candidates,
 )
-
-
-# --- Re-exported from app.continuity.cold (backward-compat shim) ---
-from app.continuity.cold import (  # noqa: E402
-    _build_cold_stub_text,
-    _load_cold_stub,  # noqa: F401 — re-exported for maintenance/service.py
-    _render_cold_rationale_entries,  # noqa: F401 — re-exported for tests
-)
-
-
-# --- Re-exported from app.continuity.retrieval (backward-compat shim) ---
-from app.continuity.retrieval import (  # noqa: E402
+from app.continuity.cold import _build_cold_stub_text, _load_cold_stub
+from app.continuity.retrieval import (
     _effective_selectors,
     _format_selector,
     _qualify_warning,
     _selector_key,
     _warning_mode_is_multi,
 )
-
-
-# --- Re-exported from app.continuity.freshness (backward-compat shim) ---
-from app.continuity.freshness import (  # noqa: E402
+from app.continuity.freshness import (
     _capsule_health_summary,
     _continuity_phase,
     _verification_status,
 )
-
-
-
-# --- Re-exported from app.continuity.refresh (backward-compat shim) ---
-from app.continuity.refresh import (  # noqa: E402
-    _audit_recent_selectors,  # noqa: F401 — re-exported for tests
+from app.continuity.refresh import (
+    _audit_recent_selectors,
     _refresh_priority,
     _refresh_reason_codes,
     _refresh_state_payload,
 )
-
-
-
-
-# --- Re-exported from app.continuity.trimming (backward-compat shim) ---
-from app.continuity.trimming import (  # noqa: E402
+from app.continuity.trimming import (
     _budget,
     _estimated_tokens,
     _render_value,
     _trim_capsule,
 )
+from app.continuity.trust import (
+    _build_aggregate_trust_signals,
+    _build_compact_trust_signals,
+    _build_startup_summary,
+    _build_trust_signals,
+    _compute_resume_quality,
+)
+
+_logger = logging.getLogger(__name__)
 
 
 def _apply_session_end_snapshot(capsule: ContinuityCapsule, snapshot: SessionEndSnapshot) -> None:
@@ -209,17 +165,6 @@ def _apply_session_end_snapshot(capsule: ContinuityCapsule, snapshot: SessionEnd
         cont.session_trajectory = list(snapshot.session_trajectory)
     if snapshot.rationale_entries is not None:
         cont.rationale_entries = list(snapshot.rationale_entries)
-
-
-
-# --- Re-exported from app.continuity.trust (backward-compat shim) ---
-from app.continuity.trust import (  # noqa: E402
-    _build_aggregate_trust_signals,  # noqa: F401 — re-exported for tests
-    _build_compact_trust_signals,
-    _build_startup_summary,  # noqa: F401 — re-exported for tests
-    _build_trust_signals,
-    _compute_resume_quality,
-)
 
 
 def continuity_upsert_service(

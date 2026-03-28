@@ -13,11 +13,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.continuity.service import (
-    CONTINUITY_ARCHIVE_SCHEMA_TYPE,
-    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
-    continuity_delete_service,
-)
+from app.continuity.constants import CONTINUITY_ARCHIVE_SCHEMA_TYPE, CONTINUITY_ARCHIVE_SCHEMA_VERSION
+from app.continuity.service import continuity_delete_service
 from app.main import continuity_delete, continuity_list
 from app.models import ContinuityDeleteRequest, ContinuityListRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
