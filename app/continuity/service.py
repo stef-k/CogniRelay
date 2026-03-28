@@ -23,7 +23,6 @@ from app.models import (
     ContinuityArchiveRequest,
     ContinuityColdRehydrateRequest,
     ContinuityColdStoreRequest,
-    ContinuityCapsuleHealth,
     ContinuityCapsule,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
@@ -35,7 +34,6 @@ from app.models import (
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     SessionEndSnapshot,
-    ContinuityVerificationState,
     ContextRetrieveRequest,
 )
 from app.storage import canonical_json, safe_path, write_bytes_file, write_text_file
@@ -109,6 +107,10 @@ from app.continuity.retention import (
     _scan_retention_candidates,
 )
 from app.continuity.cold import _build_cold_stub_text, _load_cold_stub
+from app.continuity.revalidation import (
+    _apply_verification_outcome,
+    _resolve_revalidation_capsule,
+)
 from app.continuity.listing import (
     _scan_active_summaries,
     _scan_archive_summaries,
@@ -1016,67 +1018,22 @@ def continuity_revalidate_service(
         strongest_signal = _strongest_signal_kind(req.signals)
         derived_status = CONTINUITY_SIGNAL_STATUS[strongest_signal]
         evidence_refs = _signals_to_evidence_refs(req.signals)
-        compare_changed_fields: list[str] = []
-        result_outcome = req.outcome
-        updated = False
 
-        if req.outcome == "correct":
-            candidate = req.candidate_capsule
-            if candidate is None:
-                raise HTTPException(status_code=400, detail="candidate_capsule is required for outcome=correct")
-            compare_changed_fields = _compare_capsules(
-                _normalize_compare_payload(repo_root, active),
-                _normalize_compare_payload(repo_root, candidate),
-            )
-            if not compare_changed_fields:
-                result_outcome = "confirm"
-                final_capsule = active.model_copy(deep=True)
-            else:
-                updated = True
-                final_capsule = candidate.model_copy(deep=True)
-        else:
-            final_capsule = active.model_copy(deep=True)
-
-        final_capsule.verified_at = now_iso
-        final_capsule.verification_kind = strongest_signal  # type: ignore[assignment]
-
-        if result_outcome == "conflict":
-            final_capsule.verification_state = ContinuityVerificationState.model_validate({
-                "status": "conflicted",
-                "last_revalidated_at": now_iso,
-                "strongest_signal": strongest_signal,
-                "evidence_refs": evidence_refs,
-                "conflict_summary": req.reason,
-            })
-            final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
-                "status": "conflicted",
-                "reasons": [req.reason],
-                "last_checked_at": now_iso,
-            })
-        elif result_outcome == "degrade":
-            final_capsule.verification_state = ContinuityVerificationState.model_validate({
-                "status": derived_status,
-                "last_revalidated_at": now_iso,
-                "strongest_signal": strongest_signal,
-                "evidence_refs": evidence_refs,
-            })
-            final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
-                "status": "degraded",
-                "reasons": [req.reason],
-                "last_checked_at": now_iso,
-            })
-        else:
-            final_capsule.verification_state = ContinuityVerificationState.model_validate({
-                "status": derived_status,
-                "last_revalidated_at": now_iso,
-                "strongest_signal": strongest_signal,
-                "evidence_refs": evidence_refs,
-            })
-            final_capsule.capsule_health = ContinuityCapsuleHealth.model_validate({
-                "status": "healthy",
-                "reasons": [],
-                "last_checked_at": now_iso,
-            })
+        final_capsule, result_outcome, updated, compare_changed_fields = _resolve_revalidation_capsule(
+            outcome=req.outcome,
+            active=active,
+            candidate=req.candidate_capsule,
+            repo_root=repo_root,
+        )
+        _apply_verification_outcome(
+            final_capsule,
+            result_outcome=result_outcome,
+            now_iso=now_iso,
+            strongest_signal=strongest_signal,
+            derived_status=derived_status,
+            evidence_refs=evidence_refs,
+            reason=req.reason,
+        )
 
         _, canonical = _final_capsule_payload(repo_root, final_capsule)
         _persist_active_capsule(
