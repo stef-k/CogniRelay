@@ -291,6 +291,8 @@ On the context-retrieval path (`build_continuity_state`), trust_signals are budg
 
 **Aggregate trust_signals** (`continuity_state.trust_signals`) aggregates per-capsule signals across all returned capsules. It correctly handles a mix of full and compact per-capsule shapes. `oldest_updated_age_seconds` and `oldest_verified_age_seconds` are `null` when no per-capsule signal provides a known age value (e.g. all compact, or all with malformed timestamps). `completeness.total_count` counts capsules with non-null trust_signals; it may be less than `scope_match.selectors_returned` when some capsules have `trust_signals: null`. If aggregate computation fails, `recovery_warnings` includes `"trust_signals_aggregate_failed"` and `continuity_state.trust_signals` is `null`.
 
+**`continuity_state.trust_signals` on early-return paths:** When `continuity_state.present` is `false` (continuity mode is `"off"`, no selectors resolved, no capsules loaded, or all capsules omitted), `continuity_state.trust_signals` is always `null`. The key is present on every response shape — consumers can unconditionally access `continuity_state["trust_signals"]` without checking `present` first.
+
 `source_state` is `"active"`, `"fallback"`, or `"missing"`. When `allow_fallback` is `false` (default) and the active capsule is missing, the response is an HTTP error. When `true`, the response degrades to fallback or missing state with appropriate `recovery_warnings`.
 
 #### Startup view (`view="startup"`)

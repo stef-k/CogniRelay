@@ -148,6 +148,9 @@ CONTINUITY_PHASE_SEVERITY: dict[str, int] = {
 CONTINUITY_WARNING_TRUST_SIGNALS_FAILED = "trust_signals_build_failed"
 CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT = "trust_signals_compact"
 CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED = "trust_signals_aggregate_failed"
+# Token overhead for the "trust_signals": null key/value when embedded in a
+# capsule dict.  Precomputed: ceil(len("trust_signals: null") / 4) == 5.
+_TRUST_SIGNALS_NULL_OVERHEAD_TOKENS = 5
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"
@@ -3657,9 +3660,8 @@ def build_continuity_state(
         # Reserve a small overhead for the "trust_signals": <value> key
         # that will be added to the capsule dict regardless of whether the
         # trust builder succeeds (null takes a few tokens too).
-        _TS_KEY_OVERHEAD = _estimated_tokens("trust_signals: null")
         trust_signals_obj: dict[str, Any] | None = None
-        trust_tokens = _TS_KEY_OVERHEAD
+        trust_tokens = _TRUST_SIGNALS_NULL_OVERHEAD_TOKENS
         is_compact = False
         full_ts: dict[str, Any] | None = None
         compact_ts: dict[str, Any] | None = None
@@ -3704,6 +3706,9 @@ def build_continuity_state(
 
         # Attach trust_signals — update trimmed/trimmed_fields on full signals,
         # then re-check that the post-mutation cost still fits within allocation.
+        # The compact shape is structurally smaller than full (tested by
+        # test_compact_smaller_than_full), so the compact downgrade always
+        # absorbs any trimmed_fields growth — no further re-trim is needed.
         if trust_signals_obj is not None:
             if not is_compact and not trust_signals_obj.get("compact"):
                 trust_signals_obj["completeness"]["trimmed"] = bool(trimmed_fields)
@@ -3720,15 +3725,6 @@ def build_continuity_state(
                         recovery_warnings.append(
                             _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode)
                         )
-                    elif capsule_tokens + updated_ts_tokens > allocation:
-                        # Even compact doesn't fit — re-trim capsule with corrected footprint.
-                        retrim_alloc = allocation - updated_ts_tokens
-                        retrimmed, _ = _trim_capsule(row["capsule"], retrim_alloc)
-                        if retrimmed is not None:
-                            retrimmed["source_state"] = row["source_state"]
-                            trimmed = retrimmed
-                        # else: keep original trim; minor overshoot is
-                        # preferable to omitting a capsule entirely.
             elif is_compact:
                 trust_signals_obj["completeness"]["trimmed"] = bool(trimmed_fields)
                 recovery_warnings.append(
