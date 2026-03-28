@@ -13,19 +13,26 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.continuity.service import (
     CONTINUITY_COLD_STUB_FRONTMATTER_ORDER,
+    CONTINUITY_COLD_STUB_SECTION_ORDER,
+    _build_cold_stub_text,
     _build_startup_summary,
     _estimated_tokens,
+    _render_cold_rationale_entries,
     _render_value,
     _trim_capsule,
     _validate_capsule,
     continuity_cold_storage_rel_path,
     continuity_cold_stub_rel_path,
+    continuity_compare_service,
+    continuity_revalidate_service,
 )
 from app.main import continuity_list, continuity_read, continuity_upsert
 from app.models import (
     ContinuityCapsule,
+    ContinuityCompareRequest,
     ContinuityListRequest,
     ContinuityReadRequest,
+    ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     RationaleEntry,
 )
@@ -503,6 +510,34 @@ class TestValidateRationaleEntries(unittest.TestCase):
                 _validate_capsule(Path(td), capsule)
             self.assertEqual(ctx.exception.status_code, 400)
             self.assertIn("too short", str(ctx.exception.detail).lower())
+
+    def test_tag_too_long_service_layer(self) -> None:
+        """Service-layer guard rejects tag > 80 chars independently of Pydantic."""
+        entry = _sample_entry()
+        # Bypass Pydantic by constructing a valid capsule then mutating the model
+        with tempfile.TemporaryDirectory() as td:
+            payload = _base_capsule_payload(rationale_entries=[entry])
+            capsule = ContinuityCapsule(**payload)
+            # Force an overlong tag past Pydantic
+            capsule.continuity.rationale_entries[0].tag = "x" * 81
+            with self.assertRaises(HTTPException) as ctx:
+                _validate_capsule(Path(td), capsule)
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("too long", ctx.exception.detail.lower())
+            self.assertIn("tag", ctx.exception.detail.lower())
+
+    def test_tag_empty_service_layer(self) -> None:
+        """Service-layer guard rejects empty tag independently of Pydantic."""
+        entry = _sample_entry()
+        with tempfile.TemporaryDirectory() as td:
+            payload = _base_capsule_payload(rationale_entries=[entry])
+            capsule = ContinuityCapsule(**payload)
+            capsule.continuity.rationale_entries[0].tag = ""
+            with self.assertRaises(HTTPException) as ctx:
+                _validate_capsule(Path(td), capsule)
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("too short", ctx.exception.detail.lower())
+            self.assertIn("tag", ctx.exception.detail.lower())
 
     def test_invalid_set_at_rejected(self) -> None:
         entry = _sample_entry()
@@ -1147,6 +1182,339 @@ class TestRetirementLifecycle(unittest.TestCase):
         re = summary["orientation"]["rationale_entries"]
         self.assertEqual(len(re), 1)
         self.assertEqual(re[0]["tag"], "active_one")
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: compare/revalidate detect rationale-entry changes
+# ---------------------------------------------------------------------------
+
+class TestCompareDetectsRationaleChanges(unittest.TestCase):
+    """Validate compare detects rationale_entries differences."""
+
+    def _settings(self, repo_root: Path) -> Settings:
+        return _settings(repo_root)
+
+    def _signals(self) -> list[dict]:
+        now = _now_iso()
+        return [
+            {"kind": "system_check", "source_ref": "ref", "observed_at": now, "summary": "ok"},
+        ]
+
+    def test_compare_detects_added_rationale_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            active = _base_capsule_payload()
+            _write_capsule(repo, active)
+            candidate = _base_capsule_payload(rationale_entries=_sample_entries(2))
+            out = continuity_compare_service(
+                repo_root=repo,
+                auth=_AuthStub(),
+                req=ContinuityCompareRequest(
+                    subject_kind="user", subject_id="test-agent",
+                    candidate_capsule=candidate, signals=self._signals(),
+                ),
+                audit=lambda *_args: None,
+            )
+            self.assertFalse(out["identical"])
+            self.assertIn("continuity.rationale_entries", out["changed_fields"])
+
+    def test_compare_detects_modified_rationale_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            active = _base_capsule_payload(rationale_entries=_sample_entries(1))
+            _write_capsule(repo, active)
+            candidate = _base_capsule_payload(rationale_entries=[
+                _sample_entry(tag="auth_choice", summary="Changed decision"),
+            ])
+            out = continuity_compare_service(
+                repo_root=repo,
+                auth=_AuthStub(),
+                req=ContinuityCompareRequest(
+                    subject_kind="user", subject_id="test-agent",
+                    candidate_capsule=candidate, signals=self._signals(),
+                ),
+                audit=lambda *_args: None,
+            )
+            self.assertFalse(out["identical"])
+            self.assertIn("continuity.rationale_entries", out["changed_fields"])
+
+    def test_compare_identical_rationale_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            entries = _sample_entries(2)
+            active = _base_capsule_payload(rationale_entries=entries)
+            _write_capsule(repo, active)
+            candidate = _base_capsule_payload(rationale_entries=entries)
+            out = continuity_compare_service(
+                repo_root=repo,
+                auth=_AuthStub(),
+                req=ContinuityCompareRequest(
+                    subject_kind="user", subject_id="test-agent",
+                    candidate_capsule=candidate, signals=self._signals(),
+                ),
+                audit=lambda *_args: None,
+            )
+            self.assertTrue(out["identical"])
+
+
+class TestRevalidateDetectsRationaleChanges(unittest.TestCase):
+    """Validate revalidate detects rationale_entries differences on correct outcome."""
+
+    def _signals(self) -> list[dict]:
+        now = _now_iso()
+        return [
+            {"kind": "system_check", "source_ref": "ref", "observed_at": now, "summary": "ok"},
+        ]
+
+    def test_revalidate_correct_detects_rationale_changes(self) -> None:
+        """When candidate has different rationale_entries, revalidate must detect the diff
+        and produce outcome='correct' with updated=True (not collapse to 'confirm')."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            active = _base_capsule_payload()
+            _write_capsule(repo, active)
+            candidate = _base_capsule_payload(rationale_entries=_sample_entries(2))
+            gm = _GitManagerStub(repo)
+            out = continuity_revalidate_service(
+                repo_root=repo,
+                gm=gm,
+                auth=_AuthStub(),
+                req=ContinuityRevalidateRequest(
+                    subject_kind="user", subject_id="test-agent",
+                    outcome="correct",
+                    candidate_capsule=candidate, signals=self._signals(),
+                ),
+                audit=lambda *_args: None,
+            )
+            self.assertTrue(out["ok"])
+            # If the compare detected the rationale change, outcome stays "correct" and updated=True.
+            # If it missed the change, outcome collapses to "confirm" and updated=False.
+            self.assertEqual(out["outcome"], "correct")
+            self.assertTrue(out["updated"])
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: cold-stub rendering preserves rationale entries
+# ---------------------------------------------------------------------------
+
+class TestColdStubRationaleRendering(unittest.TestCase):
+    """Validate cold-stub rendering includes rationale_entries section."""
+
+    def test_section_order_includes_rationale_entries(self) -> None:
+        self.assertIn("rationale_entries", CONTINUITY_COLD_STUB_SECTION_ORDER)
+
+    def test_render_cold_rationale_entries_active_only(self) -> None:
+        items = [
+            {"tag": "auth", "kind": "decision", "status": "active", "summary": "Chose JWT"},
+            {"tag": "old", "kind": "assumption", "status": "superseded", "summary": "Old thing"},
+            {"tag": "done", "kind": "tension", "status": "retired", "summary": "Resolved"},
+            {"tag": "cache", "kind": "decision", "status": "active", "summary": "Redis added"},
+        ]
+        lines = _render_cold_rationale_entries(items)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("[decision] auth: Chose JWT", lines[0])
+        self.assertIn("[decision] cache: Redis added", lines[1])
+
+    def test_render_cold_rationale_entries_max_3(self) -> None:
+        items = [
+            {"tag": f"t{i}", "kind": "decision", "status": "active", "summary": f"S{i}"}
+            for i in range(6)
+        ]
+        lines = _render_cold_rationale_entries(items)
+        self.assertEqual(len(lines), 3)
+
+    def test_render_cold_rationale_entries_empty(self) -> None:
+        self.assertEqual(_render_cold_rationale_entries([]), [])
+        self.assertEqual(_render_cold_rationale_entries(None), [])
+
+    def test_render_cold_rationale_entries_truncates(self) -> None:
+        items = [
+            {"tag": "x" * 200, "kind": "decision", "status": "active", "summary": "y" * 300},
+        ]
+        lines = _render_cold_rationale_entries(items)
+        self.assertEqual(len(lines), 1)
+        # Tag truncated to 80, summary to 160
+        self.assertLessEqual(len(lines[0]), 80 + 20 + 160 + 10)
+
+    def test_cold_stub_text_includes_rationale_section(self) -> None:
+        """Full cold stub builder includes rationale_entries section in output."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        entries = [_sample_entry(tag="auth_choice", status="active")]
+        payload = _base_capsule_payload(rationale_entries=entries)
+        envelope = {
+            "capsule": payload,
+            "archived_at": _now_iso(),
+        }
+        stub_text = _build_cold_stub_text(
+            envelope=envelope,
+            source_archive_path="memory/continuity/archive/user-test-agent-20260328T120000Z.json",
+            cold_storage_path="memory/continuity/cold/user-test-agent-20260328T120000Z.json.gz",
+            cold_stored_at=_now_iso(),
+            now=now,
+        )
+        self.assertIn("## rationale_entries", stub_text)
+        self.assertIn("auth_choice", stub_text)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: rationale_entry_count semantics (total count)
+# ---------------------------------------------------------------------------
+
+class TestListSummaryRationaleEntryCountSemantics(unittest.TestCase):
+    """Validate rationale_entry_count counts all entries regardless of status."""
+
+    def test_count_includes_all_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            entries = [
+                _sample_entry(tag="a", status="active"),
+                _sample_entry(tag="b", status="superseded"),
+                _sample_entry(tag="c", status="retired"),
+            ]
+            payload = _base_capsule_payload(rationale_entries=entries)
+            _write_capsule(repo, payload)
+            settings = _settings(repo)
+            gm = _GitManagerStub(repo)
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_list(
+                    req=ContinuityListRequest(subject_kind="user"),
+                    auth=_AuthStub(),
+                )
+            # Total count = 3, not just active count (1)
+            self.assertEqual(out["capsules"][0]["rationale_entry_count"], 3)
+
+
+# ---------------------------------------------------------------------------
+# Finding 4: startup summary copy isolation
+# ---------------------------------------------------------------------------
+
+class TestStartupSummaryCopyIsolation(unittest.TestCase):
+    """Verify startup summary entries are fully isolated from source capsule."""
+
+    def test_mutating_summary_alternatives_does_not_affect_source(self) -> None:
+        entries = [
+            _sample_entry(tag="x", status="active", alternatives=["alt1", "alt2"]),
+        ]
+        payload = _base_capsule_payload(rationale_entries=entries)
+        out = {
+            "capsule": payload,
+            "source_state": "active",
+            "recovery_warnings": [],
+            "trust_signals": {},
+        }
+        summary = _build_startup_summary(out)
+        # Mutate the summary copy
+        summary["orientation"]["rationale_entries"][0]["alternatives_considered"].append("injected")
+        # Source capsule must be unaffected
+        source_alts = payload["continuity"]["rationale_entries"][0]["alternatives_considered"]
+        self.assertEqual(source_alts, ["alt1", "alt2"])
+
+    def test_mutating_summary_depends_on_does_not_affect_source(self) -> None:
+        entries = [
+            _sample_entry(tag="x", status="active", depends_on=["dep1"]),
+        ]
+        payload = _base_capsule_payload(rationale_entries=entries)
+        out = {
+            "capsule": payload,
+            "source_state": "active",
+            "recovery_warnings": [],
+            "trust_signals": {},
+        }
+        summary = _build_startup_summary(out)
+        summary["orientation"]["rationale_entries"][0]["depends_on"].append("injected")
+        source_deps = payload["continuity"]["rationale_entries"][0]["depends_on"]
+        self.assertEqual(source_deps, ["dep1"])
+
+
+# ---------------------------------------------------------------------------
+# Finding 5: self-referential supersedes rejected
+# ---------------------------------------------------------------------------
+
+class TestSelfReferentialSupersedesRejected(unittest.TestCase):
+    """Validate that an entry cannot supersede itself."""
+
+    def test_self_supersedes_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            entries = [
+                _sample_entry(tag="self_ref", status="superseded", supersedes="self_ref"),
+            ]
+            payload = _base_capsule_payload(rationale_entries=entries)
+            capsule = ContinuityCapsule(**payload)
+            with self.assertRaises(HTTPException) as ctx:
+                _validate_capsule(Path(td), capsule)
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("must not reference its own tag", ctx.exception.detail)
+
+    def test_non_self_supersedes_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            entries = [
+                _sample_entry(tag="old_one", status="superseded"),
+                _sample_entry(tag="new_one", supersedes="old_one"),
+            ]
+            payload = _base_capsule_payload(rationale_entries=entries)
+            capsule = ContinuityCapsule(**payload)
+            result, _ = _validate_capsule(Path(td), capsule)
+            self.assertEqual(len(result["continuity"]["rationale_entries"]), 2)
+
+
+# ---------------------------------------------------------------------------
+# Finding 7: session-end snapshot with invalid supersession is rejected
+# ---------------------------------------------------------------------------
+
+class TestSnapshotInvalidSupersessionRejected(unittest.TestCase):
+    """Validate that post-merge validation rejects invalid supersession in snapshot."""
+
+    def _do_upsert(self, repo_root: Path, payload: dict, snapshot: dict) -> dict:
+        settings = _settings(repo_root)
+        gm = _GitManagerStub(repo_root)
+        req_data: dict = {
+            "subject_kind": payload["subject_kind"],
+            "subject_id": payload["subject_id"],
+            "capsule": payload,
+            "session_end_snapshot": snapshot,
+        }
+        req = ContinuityUpsertRequest(**req_data)
+        with patch("app.main._services", return_value=(settings, gm)):
+            return continuity_upsert(req=req, auth=_AuthStub())
+
+    def test_snapshot_with_dangling_supersedes_rejected(self) -> None:
+        """Snapshot rationale_entries with supersedes pointing to nonexistent tag must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            payload = _base_capsule_payload()
+            snapshot = {
+                "open_loops": ["loop"],
+                "top_priorities": ["p"],
+                "active_constraints": ["c"],
+                "stance_summary": "Fresh stance for testing snapshot supersession.",
+                "rationale_entries": [
+                    _sample_entry(tag="new_one", supersedes="nonexistent"),
+                ],
+            }
+            with self.assertRaises(HTTPException) as ctx:
+                self._do_upsert(repo, payload, snapshot)
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("supersedes", ctx.exception.detail)
+
+    def test_snapshot_with_self_supersedes_rejected(self) -> None:
+        """Snapshot rationale_entries with self-referential supersedes must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            payload = _base_capsule_payload()
+            snapshot = {
+                "open_loops": ["loop"],
+                "top_priorities": ["p"],
+                "active_constraints": ["c"],
+                "stance_summary": "Fresh stance for testing snapshot self ref.",
+                "rationale_entries": [
+                    _sample_entry(tag="self_ref", status="superseded", supersedes="self_ref"),
+                ],
+            }
+            with self.assertRaises(HTTPException) as ctx:
+                self._do_upsert(repo, payload, snapshot)
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("must not reference its own tag", ctx.exception.detail)
 
 
 if __name__ == "__main__":

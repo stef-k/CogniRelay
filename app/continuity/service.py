@@ -123,6 +123,7 @@ CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
         "negative_decisions",
         "trailing_notes",
         "curiosity_queue",
+        "rationale_entries",
         "relationship_model",
         "retrieval_hints",
     ],
@@ -173,6 +174,7 @@ CONTINUITY_COLD_STUB_SECTION_ORDER = [
     "trailing_notes",
     "curiosity_queue",
     "negative_decisions",
+    "rationale_entries",
 ]
 CONTINUITY_COLD_STUB_FRONTMATTER_ORDER = [
     "type",
@@ -330,6 +332,10 @@ def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
         if len(decision.rationale) > 240:
             raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.rationale")
     for entry in list(capsule.continuity.rationale_entries):
+        if len(entry.tag) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].tag")
+        if len(entry.tag) > 80:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].tag")
         if len(entry.summary) < 1:
             raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].summary")
         if len(entry.summary) > 240:
@@ -439,6 +445,11 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
         all_re_tags = {e.tag: e for e in capsule.continuity.rationale_entries}
         for entry in capsule.continuity.rationale_entries:
             if entry.supersedes is not None:
+                if entry.supersedes == entry.tag:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"rationale_entries[].supersedes must not reference its own tag '{entry.tag}'",
+                    )
                 target = all_re_tags.get(entry.supersedes)
                 if target is None or target.status != "superseded":
                     raise HTTPException(
@@ -924,6 +935,25 @@ def _render_cold_negative_decisions(items: Any) -> list[str]:
     return lines
 
 
+def _render_cold_rationale_entries(items: Any) -> list[str]:
+    """Project rationale entries into bounded stub bullets (active entries only, max 3)."""
+    if not isinstance(items, list):
+        return []
+    lines: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") != "active":
+            continue
+        tag = _truncate_stub_text(item.get("tag"), 80)
+        kind = _truncate_stub_text(item.get("kind"), 20)
+        summary = _truncate_stub_text(item.get("summary"), 160)
+        lines.append(f"[{kind}] {tag}: {summary}")
+        if len(lines) >= 3:
+            break
+    return lines
+
+
 def _build_cold_stub_text(*, envelope: dict[str, Any], source_archive_path: str, cold_storage_path: str, cold_stored_at: str, now: datetime) -> str:
     """Build the deterministic searchable stub for one cold-stored archive envelope."""
     capsule = envelope["capsule"]
@@ -960,6 +990,7 @@ def _build_cold_stub_text(*, envelope: dict[str, Any], source_archive_path: str,
         "trailing_notes": _render_cold_stub_list(continuity.get("trailing_notes"), count=3, limit=160),
         "curiosity_queue": _render_cold_stub_list(continuity.get("curiosity_queue"), count=3, limit=120),
         "negative_decisions": _render_cold_negative_decisions(continuity.get("negative_decisions")),
+        "rationale_entries": _render_cold_rationale_entries(continuity.get("rationale_entries")),
     }
     lines = ["---"]
     for key in CONTINUITY_COLD_STUB_FRONTMATTER_ORDER:
@@ -1723,8 +1754,11 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
             "open_loops": list(cont.get("open_loops", [])),
             # One-level shallow copy; NegativeDecision has only scalar (str) fields.
             "negative_decisions": [dict(d) for d in cont.get("negative_decisions", [])],
+            # Deep copy: RationaleEntry has nested lists (alternatives_considered, depends_on).
             "rationale_entries": [
-                dict(r) for r in cont.get("rationale_entries", [])
+                {**r, "alternatives_considered": list(r.get("alternatives_considered", [])),
+                 "depends_on": list(r.get("depends_on", []))}
+                for r in cont.get("rationale_entries", [])
                 if r.get("status") == "active"
             ],
         }

@@ -65,7 +65,7 @@ The system is designed so that a fully-populated capsule with practical content 
 | Section | ~Tokens | Fields | Notes |
 |---------|---------|--------|-------|
 | Core orientation (6 required lists + `stance_summary`) | ~670 | 31 strings + 1 scalar | Always present — the essential orientation |
-| Optional lists (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `negative_decisions`, `trailing_notes`, `curiosity_queue`, `rationale_entries`) | ~1,920 | 27 strings + 4+6 objects | Trimmed first under token pressure |
+| Optional lists (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `negative_decisions`, `trailing_notes`, `curiosity_queue`, `rationale_entries`) | ~1,400–2,800 | 27 strings + 4+6 objects | Trimmed first under token pressure; upper bound assumes all `rationale_entries` slots fully populated |
 | `retrieval_hints` (`must_include`, `avoid`, `load_next`) | ~270 | up to 24 strings | Dropped early in trim order |
 | `relationship_model` (`trust_level`, `preferred_style`, `sensitivity_notes`) | ~200 | up to 11 fields | Dropped early in trim order |
 | `attention_policy` (`early_load`, `presence_bias_overrides`) | ~175 | up to 13 strings | |
@@ -91,7 +91,7 @@ The system is designed so that a fully-populated capsule with practical content 
 
 **Minimum viable capsule** — populate only the 6 required `ContinuityState` lists, `stance_summary`, `source`, and `confidence`. This costs approximately **~900–1,000 tokens** and provides enough orientation for basic restart recovery.
 
-**Full capsule** — populate every field including `relationship_model`, `retrieval_hints`, `attention_policy`, `negative_decisions`, `session_trajectory`, `verification_state`, and `capsule_health`. This costs approximately **~2,400–2,800 tokens** and provides the richest possible orientation.
+**Full capsule** — populate every field including `relationship_model`, `retrieval_hints`, `attention_policy`, `negative_decisions`, `rationale_entries`, `session_trajectory`, `verification_state`, and `capsule_health`. This costs approximately **~2,800–3,600 tokens** and provides the richest possible orientation.
 
 **Under token pressure** — the system trims optional fields in two phases. Phase 1 drops whole optional sections in deterministic order: `metadata`, `canonical_sources`, `freshness`, `attention_policy.presence_bias_overrides`, `relationship_model` sub-fields (`sensitivity_notes`, `preferred_style`), `retrieval_hints` sub-fields (`avoid`, `load_next`), `trailing_notes`, `curiosity_queue`, `rationale_entries`, `negative_decisions`, `working_hypotheses`, then `stable_preferences` (dropped as a whole unit — all-or-nothing). Phase 2, if still over budget, progressively trims `retrieval_hints.must_include`, the remaining `relationship_model`, `long_horizon_commitments`, `stance_summary`, `drift_signals`, and finally the core lists. The 6 required core lists and `stance_summary` are trimmed only as a last resort. When `stable_preferences` is trimmed, `"stable_preferences"` appears in `trimmed_fields`; when `rationale_entries` is trimmed, `"continuity.rationale_entries"` appears in `trimmed_fields`.
 
@@ -455,7 +455,7 @@ Response includes `recovery_warnings` when the fallback snapshot refresh fails a
 | `include_archived` | boolean | no | default `false` |
 | `include_cold` | boolean | no | default `false` |
 
-Response includes `artifact_state` and `retention_class` for each entry. Archive entries include `archive_stale` classification based on `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`. Each summary entry includes `stable_preference_count` (integer, 0 when empty, `null` for cold stubs where the count cannot be determined without decompression) and `rationale_entry_count` (integer, 0 when empty or pre-feature, `null` for cold stubs).
+Response includes `artifact_state` and `retention_class` for each entry. Archive entries include `archive_stale` classification based on `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`. Each summary entry includes `stable_preference_count` (integer, 0 when empty, `null` for cold stubs where the count cannot be determined without decompression) and `rationale_entry_count` (total count of all entries regardless of status — active, superseded, and retired are all counted; integer, 0 when empty or pre-feature, `null` for cold stubs).
 
 ### Archive — `POST /v1/continuity/archive`
 
