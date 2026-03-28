@@ -172,7 +172,7 @@ class TestStartupView(unittest.TestCase):
             )
             self.assertEqual(
                 list(ss["orientation"].keys()),
-                ["top_priorities", "active_constraints", "open_loops", "negative_decisions"],
+                ["top_priorities", "active_constraints", "open_loops", "negative_decisions", "rationale_entries"],
             )
             self.assertEqual(
                 list(ss["context"].keys()),

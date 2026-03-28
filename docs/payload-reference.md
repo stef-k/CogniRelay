@@ -13,8 +13,9 @@ ContinuityCapsule (top-level): 16 fields
 Nested objects when all optional fields are populated:
 
 - ContinuitySource: 3 fields
-- ContinuityState: 14 fields
+- ContinuityState: 15 fields
   - NegativeDecision (×4): 2 fields each = 8 fields
+  - RationaleEntry (×6): 9 fields each = 54 fields
   - ContinuityRelationshipModel: 3 fields
   - ContinuityRetrievalHints: 3 fields
 - ContinuityConfidence: 2 fields
@@ -33,6 +34,7 @@ Total: **~94 distinct fields** across all nested objects.
 | ContinuityState lists (6 required) | 5 each = 30 strings | no per-item limit |
 | ContinuityState optional lists (5) | 3–5 each = 23 strings | no per-item limit |
 | `negative_decisions` | 4 × (160 + 240) = 1,600 chars | structured |
+| `rationale_entries` | 6 × (80 + 240 + 400 + 3×160 + 3×120 + 80) = ~7,680 chars | structured |
 | `stable_preferences` | 12 × (80 + 240) = 3,840 chars | structured |
 | `stance_summary` | 1 string | 240 chars |
 | `relationship_model` lists (2) | 5 each = 10 strings | no per-item limit |
@@ -63,7 +65,7 @@ The system is designed so that a fully-populated capsule with practical content 
 | Section | ~Tokens | Fields | Notes |
 |---------|---------|--------|-------|
 | Core orientation (6 required lists + `stance_summary`) | ~670 | 31 strings + 1 scalar | Always present — the essential orientation |
-| Optional lists (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `negative_decisions`, `trailing_notes`, `curiosity_queue`) | ~840 | 27 strings + 4 objects | Trimmed first under token pressure |
+| Optional lists (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `negative_decisions`, `trailing_notes`, `curiosity_queue`, `rationale_entries`) | ~1,920 | 27 strings + 4+6 objects | Trimmed first under token pressure |
 | `retrieval_hints` (`must_include`, `avoid`, `load_next`) | ~270 | up to 24 strings | Dropped early in trim order |
 | `relationship_model` (`trust_level`, `preferred_style`, `sensitivity_notes`) | ~200 | up to 11 fields | Dropped early in trim order |
 | `attention_policy` (`early_load`, `presence_bias_overrides`) | ~175 | up to 13 strings | |
@@ -91,7 +93,7 @@ The system is designed so that a fully-populated capsule with practical content 
 
 **Full capsule** — populate every field including `relationship_model`, `retrieval_hints`, `attention_policy`, `negative_decisions`, `session_trajectory`, `verification_state`, and `capsule_health`. This costs approximately **~2,400–2,800 tokens** and provides the richest possible orientation.
 
-**Under token pressure** — the system trims optional fields in two phases. Phase 1 drops whole optional sections in deterministic order: `metadata`, `canonical_sources`, `freshness`, `attention_policy.presence_bias_overrides`, `relationship_model` sub-fields (`sensitivity_notes`, `preferred_style`), `retrieval_hints` sub-fields (`avoid`, `load_next`), `trailing_notes`, `curiosity_queue`, `negative_decisions`, `working_hypotheses`, then `stable_preferences` (dropped as a whole unit — all-or-nothing). Phase 2, if still over budget, progressively trims `retrieval_hints.must_include`, the remaining `relationship_model`, `long_horizon_commitments`, `stance_summary`, `drift_signals`, and finally the core lists. The 6 required core lists and `stance_summary` are trimmed only as a last resort. When `stable_preferences` is trimmed, `"stable_preferences"` appears in `trimmed_fields`.
+**Under token pressure** — the system trims optional fields in two phases. Phase 1 drops whole optional sections in deterministic order: `metadata`, `canonical_sources`, `freshness`, `attention_policy.presence_bias_overrides`, `relationship_model` sub-fields (`sensitivity_notes`, `preferred_style`), `retrieval_hints` sub-fields (`avoid`, `load_next`), `trailing_notes`, `curiosity_queue`, `rationale_entries`, `negative_decisions`, `working_hypotheses`, then `stable_preferences` (dropped as a whole unit — all-or-nothing). Phase 2, if still over budget, progressively trims `retrieval_hints.must_include`, the remaining `relationship_model`, `long_horizon_commitments`, `stance_summary`, `drift_signals`, and finally the core lists. The 6 required core lists and `stance_summary` are trimmed only as a last resort. When `stable_preferences` is trimmed, `"stable_preferences"` appears in `trimmed_fields`; when `rationale_entries` is trimmed, `"continuity.rationale_entries"` appears in `trimmed_fields`.
 
 **Multi-capsule retrieval** — `POST /v1/context/retrieve` supports loading up to 4 capsules via `continuity_selectors` and `continuity_max_capsules`. At full population, 4 capsules would cost ~10,000–11,000 tokens. The `max_tokens_estimate` parameter (default 4,000) controls the total continuity token budget, and the system trims each capsule to fit.
 
@@ -104,6 +106,11 @@ Most list item strings in `ContinuityState` do not have a per-item character lim
 | `stance_summary` | 240 chars |
 | `negative_decisions[].decision` | 160 chars |
 | `negative_decisions[].rationale` | 240 chars |
+| `rationale_entries[].tag` | 80 chars |
+| `rationale_entries[].summary` | 240 chars |
+| `rationale_entries[].reasoning` | 400 chars |
+| `rationale_entries[].alternatives_considered[]` | 160 chars |
+| `rationale_entries[].depends_on[]` | 120 chars |
 | `conflict_summary` (in `verification_state`) | 240 chars |
 | `subject_id` | 200 chars |
 | `source.producer` | 100 chars |
@@ -165,10 +172,31 @@ These are the core orientation fields that an agent writes to preserve working s
 | `negative_decisions` | list of NegativeDecision | no | max 4, default `[]` | Decisions not to act |
 | `trailing_notes` | list of strings | no | max 3, default `[]` | Low-priority context worth preserving |
 | `curiosity_queue` | list of strings | no | max 5, default `[]` | Questions to revisit later |
+| `rationale_entries` | list of RationaleEntry | no | max 6, default `[]` | Decision rationale, assumptions, and unresolved tensions |
 | `relationship_model` | ContinuityRelationshipModel | no | | Relationship-specific hints |
 | `retrieval_hints` | ContinuityRetrievalHints | no | | Preferences for what to load next |
 
-Optional fields have a deterministic trim order under token pressure. When the capsule must fit within a budget, the system trims from the bottom of the table upward — `retrieval_hints` first, then `relationship_model`, then `curiosity_queue`, and so on.
+Optional fields have a deterministic trim order under token pressure. When the capsule must fit within a budget, the system trims from the bottom of the table upward — `retrieval_hints` first, then `relationship_model`, then `curiosity_queue`, then `rationale_entries`, and so on.
+
+### RationaleEntry
+
+One bounded, agent-authored decision rationale or unresolved tension. Tags must be unique within a capsule's `rationale_entries` list.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `tag` | string | yes | 1–80 chars, unique within the list |
+| `kind` | `"decision"` \| `"assumption"` \| `"tension"` | yes | |
+| `status` | `"active"` \| `"superseded"` \| `"retired"` | yes | |
+| `summary` | string | yes | 1–240 chars |
+| `reasoning` | string | yes | 1–400 chars |
+| `alternatives_considered` | list of strings | no | max 3 items, each 1–160 chars |
+| `depends_on` | list of strings | no | max 3 items, each 1–120 chars |
+| `supersedes` | string | no | max 80 chars. Must reference a tag in the same list with `status: "superseded"` |
+| `set_at` | ISO datetime string | yes | UTC (Z suffix) |
+
+**Supersession:** to supersede an entry, set the old entry's `status` to `"superseded"` and add a new entry with `supersedes` pointing to the old tag. The old entry remains in the list for auditability; full history is preserved in git commits.
+
+**Startup summary filtering:** only `status: "active"` entries appear in the startup summary orientation tier. Superseded and retired entries are filtered out at summary-build time but remain in the capsule for direct-read access.
 
 ### NegativeDecision
 
@@ -241,6 +269,7 @@ When `session_end_snapshot` is provided, the server merges its fields into `caps
 | `stance_summary` | string (≤ 240 chars) | yes | `capsule.continuity.stance_summary` | Always overrides |
 | `negative_decisions` | list of NegativeDecision (max 4) | no | `capsule.continuity.negative_decisions` | `null` = preserve capsule value; explicit value = override |
 | `session_trajectory` | list of strings (max 5, each ≤ 80 chars) | no | `capsule.continuity.session_trajectory` | `null` = preserve capsule value; explicit value = override |
+| `rationale_entries` | list of RationaleEntry (max 6) | no | `capsule.continuity.rationale_entries` | `null` = preserve capsule value; explicit value = override |
 
 **Merge algorithm:** P0 fields (required) always override their `capsule.continuity` counterparts. P1 fields (optional) override only when non-null; null means the capsule's existing value is preserved. All other `ContinuityState` fields remain from the capsule unchanged. The merged capsule is then validated and persisted through the standard path. Note: the snapshot does not update `capsule.updated_at` — the caller must still set `updated_at` to the current time on the base capsule to avoid a 409 conflict rejection.
 
@@ -339,7 +368,8 @@ When `view` is set to `"startup"`, the response includes one additional top-leve
       "top_priorities": ["..."],
       "active_constraints": ["..."],
       "open_loops": ["..."],
-      "negative_decisions": [{"decision": "...", "rationale": "..."}]
+      "negative_decisions": [{"decision": "...", "rationale": "..."}],
+      "rationale_entries": [{"tag": "...", "kind": "decision", "status": "active", "summary": "...", "reasoning": "...", "set_at": "..."}]
     },
     "context": {
       "session_trajectory": ["..."],
@@ -380,9 +410,12 @@ When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`
 | Capsule has no `capsule_health` | `capsule_health_status` | `null` |
 | Capsule has no `capsule_health` | `capsule_health_reasons` | `[]` |
 | Legacy capsule missing `negative_decisions` | `orientation.negative_decisions` | `[]` |
+| Legacy capsule missing `rationale_entries` | `orientation.rationale_entries` | `[]` |
 | Legacy capsule missing `session_trajectory` | `context.session_trajectory` | `[]` |
 
 **`negative_decisions` pass-through:** Each element in `orientation.negative_decisions` is the same `{"decision": str, "rationale": str}` object stored in the capsule — no transformation, flattening, or summarization.
+
+**`rationale_entries` filtering:** The startup summary `orientation.rationale_entries` contains only entries with `status: "active"`. Superseded and retired entries are filtered out at summary-build time but remain available in the full capsule read.
 
 **Response overhead:** The `startup_summary` block adds approximately **~1.0–1.5 KB** and **~250–370 tokens** to the response, depending on capsule content density. This is a mechanical extraction — no additional I/O or computation is performed beyond building the summary dict from the already-loaded capsule.
 
@@ -422,7 +455,7 @@ Response includes `recovery_warnings` when the fallback snapshot refresh fails a
 | `include_archived` | boolean | no | default `false` |
 | `include_cold` | boolean | no | default `false` |
 
-Response includes `artifact_state` and `retention_class` for each entry. Archive entries include `archive_stale` classification based on `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`. Each summary entry includes `stable_preference_count` (integer, 0 when empty, `null` for cold stubs where the count cannot be determined without decompression).
+Response includes `artifact_state` and `retention_class` for each entry. Archive entries include `archive_stale` classification based on `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`. Each summary entry includes `stable_preference_count` (integer, 0 when empty, `null` for cold stubs where the count cannot be determined without decompression) and `rationale_entry_count` (integer, 0 when empty or pre-feature, `null` for cold stubs).
 
 ### Archive — `POST /v1/continuity/archive`
 
