@@ -96,6 +96,18 @@ User/peer capsules support two complementary but distinct fields for cross-threa
 
 Both may describe the same thing from different perspectives (e.g., user says "be concise" → `stable_preferences`; agent observes short responses work best → `relationship_model.preferred_style`). When they conflict, an explicit preference supersedes an inferred style. CogniRelay does not auto-reconcile — the agent is responsible for composition.
 
+## Rationale Entries
+
+`rationale_entries` (inside `ContinuityState`, max 6) captures structured *why* alongside the *what* of orientation. Each entry records a decision, assumption, or unresolved tension with its reasoning, rejected alternatives, and dependencies.
+
+**When to author rationale entries:** At session-end or handoff, record decisions that a future session would need to understand — not just what was decided, but why, what else was considered, and what assumptions hold. Use `kind: "decision"` for choices made, `kind: "assumption"` for conditions relied upon, and `kind: "tension"` for unresolved trade-offs deferred.
+
+**Relationship to `negative_decisions`:** `negative_decisions` remains for compact deliberate non-actions. `rationale_entries` is broader — positive decisions, trade-off reasoning, assumptions, and tensions. Use either or both. CogniRelay does not auto-reconcile between them.
+
+**Lifecycle:** Set `status: "active"` for current entries. To supersede: set the old entry to `status: "superseded"` and add a new entry with `supersedes` pointing to the old tag. To retire (no longer relevant): set `status: "retired"`. The agent manages the list; CogniRelay enforces the max-6 cap.
+
+**Capture via session-end snapshot:** Include `rationale_entries` in the snapshot as a P1 field — `null` preserves existing entries, an explicit list overrides.
+
 ## What CogniRelay Does Not Do
 
 - It does not persist everything — continuity is bounded and subject to write-time curation

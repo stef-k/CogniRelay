@@ -123,6 +123,7 @@ CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
         "negative_decisions",
         "trailing_notes",
         "curiosity_queue",
+        "rationale_entries",
         "relationship_model",
         "retrieval_hints",
     ],
@@ -173,6 +174,7 @@ CONTINUITY_COLD_STUB_SECTION_ORDER = [
     "trailing_notes",
     "curiosity_queue",
     "negative_decisions",
+    "rationale_entries",
 ]
 CONTINUITY_COLD_STUB_FRONTMATTER_ORDER = [
     "type",
@@ -329,6 +331,29 @@ def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
             raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.rationale")
         if len(decision.rationale) > 240:
             raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.rationale")
+    for entry in list(capsule.continuity.rationale_entries):
+        if len(entry.tag) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].tag")
+        if len(entry.tag) > 80:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].tag")
+        if len(entry.summary) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].summary")
+        if len(entry.summary) > 240:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].summary")
+        if len(entry.reasoning) < 1:
+            raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].reasoning")
+        if len(entry.reasoning) > 400:
+            raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].reasoning")
+        for alt in list(entry.alternatives_considered):
+            if len(alt) < 1:
+                raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].alternatives_considered")
+            if len(alt) > 160:
+                raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].alternatives_considered")
+        for dep in list(entry.depends_on):
+            if len(dep) < 1:
+                raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].depends_on")
+            if len(dep) > 120:
+                raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].depends_on")
 
 
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
@@ -407,6 +432,30 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
                     detail=f"Duplicate stable_preferences tag: {pref.tag}",
                 )
             seen_tags.add(pref.tag)
+    if capsule.continuity.rationale_entries:
+        seen_re_tags: set[str] = set()
+        for entry in capsule.continuity.rationale_entries:
+            _require_utc_timestamp(entry.set_at, "rationale_entries[].set_at")
+            if entry.tag in seen_re_tags:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Duplicate rationale_entries tag: {entry.tag}",
+                )
+            seen_re_tags.add(entry.tag)
+        all_re_tags = {e.tag: e for e in capsule.continuity.rationale_entries}
+        for entry in capsule.continuity.rationale_entries:
+            if entry.supersedes is not None:
+                if entry.supersedes == entry.tag:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"rationale_entries[].supersedes must not reference its own tag '{entry.tag}'",
+                    )
+                target = all_re_tags.get(entry.supersedes)
+                if target is None or target.status != "superseded":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"rationale_entries[].supersedes references tag '{entry.supersedes}' which does not exist with status 'superseded'",
+                    )
     payload = capsule.model_dump(mode="json", exclude_none=True)
     canonical = canonical_json(payload)
     if len(canonical.encode("utf-8")) > 12 * 1024:
@@ -886,6 +935,25 @@ def _render_cold_negative_decisions(items: Any) -> list[str]:
     return lines
 
 
+def _render_cold_rationale_entries(items: Any) -> list[str]:
+    """Project rationale entries into bounded stub bullets (active entries only, max 3)."""
+    if not isinstance(items, list):
+        return []
+    lines: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") != "active":
+            continue
+        tag = _truncate_stub_text(item.get("tag"), 80)
+        kind = _truncate_stub_text(item.get("kind"), 20)
+        summary = _truncate_stub_text(item.get("summary"), 160)
+        lines.append(f"[{kind}] {tag}: {summary}")
+        if len(lines) >= 3:
+            break
+    return lines
+
+
 def _build_cold_stub_text(*, envelope: dict[str, Any], source_archive_path: str, cold_storage_path: str, cold_stored_at: str, now: datetime) -> str:
     """Build the deterministic searchable stub for one cold-stored archive envelope."""
     capsule = envelope["capsule"]
@@ -922,6 +990,7 @@ def _build_cold_stub_text(*, envelope: dict[str, Any], source_archive_path: str,
         "trailing_notes": _render_cold_stub_list(continuity.get("trailing_notes"), count=3, limit=160),
         "curiosity_queue": _render_cold_stub_list(continuity.get("curiosity_queue"), count=3, limit=120),
         "negative_decisions": _render_cold_negative_decisions(continuity.get("negative_decisions")),
+        "rationale_entries": _render_cold_rationale_entries(continuity.get("rationale_entries")),
     }
     lines = ["---"]
     for key in CONTINUITY_COLD_STUB_FRONTMATTER_ORDER:
@@ -1378,6 +1447,7 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> tuple[dict[str, A
         "continuity.retrieval_hints.load_next",
         "continuity.trailing_notes",
         "continuity.curiosity_queue",
+        "continuity.rationale_entries",
         "continuity.negative_decisions",
         "continuity.working_hypotheses",
         "stable_preferences",
@@ -1510,6 +1580,8 @@ def _apply_session_end_snapshot(capsule: ContinuityCapsule, snapshot: SessionEnd
         cont.negative_decisions = list(snapshot.negative_decisions)
     if snapshot.session_trajectory is not None:
         cont.session_trajectory = list(snapshot.session_trajectory)
+    if snapshot.rationale_entries is not None:
+        cont.rationale_entries = list(snapshot.rationale_entries)
 
 
 # Spec (#167): adequate requires stance_summary >= 30 chars.
@@ -1682,6 +1754,13 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
             "open_loops": list(cont.get("open_loops", [])),
             # One-level shallow copy; NegativeDecision has only scalar (str) fields.
             "negative_decisions": [dict(d) for d in cont.get("negative_decisions", [])],
+            # Deep copy: RationaleEntry has nested lists (alternatives_considered, depends_on).
+            "rationale_entries": [
+                {**r, "alternatives_considered": list(r.get("alternatives_considered", [])),
+                 "depends_on": list(r.get("depends_on", []))}
+                for r in cont.get("rationale_entries", [])
+                if r.get("status") == "active"
+            ],
         }
         context = {
             "session_trajectory": list(cont.get("session_trajectory", [])),
@@ -2078,6 +2157,7 @@ def continuity_list_service(
                     "artifact_state": "active",
                     "retention_class": "active",
                     "stable_preference_count": len(capsule.get("stable_preferences", [])),
+                    "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
                 }
             )
     if req.include_fallback:
@@ -2120,6 +2200,7 @@ def continuity_list_service(
                         "artifact_state": "fallback",
                         "retention_class": "fallback",
                         "stable_preference_count": len(capsule.get("stable_preferences", [])),
+                        "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
                     }
                 )
     if req.include_archived:
@@ -2166,6 +2247,7 @@ def continuity_list_service(
                         "artifact_state": "archived",
                         "retention_class": retention_class,
                         "stable_preference_count": len(capsule.get("stable_preferences", [])),
+                        "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
                     }
                 )
     if req.include_cold:
@@ -2213,6 +2295,7 @@ def continuity_list_service(
                         "archived_at": frontmatter["archived_at"],
                         "cold_stored_at": frontmatter["cold_stored_at"],
                         "stable_preference_count": None,
+                        "rationale_entry_count": None,
                     }
                 )
     artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
