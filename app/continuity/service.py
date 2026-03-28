@@ -138,6 +138,14 @@ CONTINUITY_SIGNAL_STATUS = {
     "system_check": "system_confirmed",
 }
 CONTINUITY_HEALTH_ORDER = {"healthy": 0, "degraded": 1, "conflicted": 2}
+CONTINUITY_PHASE_SEVERITY: dict[str, int] = {
+    "fresh": 0,
+    "stale_soft": 1,
+    "stale_hard": 2,
+    "expired_by_age": 3,
+    "expired": 4,
+}
+CONTINUITY_WARNING_TRUST_SIGNALS_FAILED = "trust_signals_build_failed"
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"
@@ -1304,6 +1312,17 @@ def _truncate_list(items: list[str], max_tokens: int) -> list[str]:
     return out
 
 
+def _has_nested(payload: dict[str, Any], dotted: str) -> bool:
+    """Return True if a dotted nested key exists in a JSON-like payload."""
+    parts = dotted.split(".")
+    cur: Any = payload
+    for key in parts[:-1]:
+        if not isinstance(cur, dict):
+            return False
+        cur = cur.get(key)
+    return isinstance(cur, dict) and parts[-1] in cur
+
+
 def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
     """Drop a dotted nested key from a JSON-like payload when present."""
     parts = dotted.split(".")
@@ -1316,9 +1335,15 @@ def _drop_nested(payload: dict[str, Any], dotted: str) -> None:
         cur.pop(parts[-1], None)
 
 
-def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | None:
-    """Trim a capsule deterministically to fit the reserved continuity budget."""
+def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> tuple[dict[str, Any] | None, list[str]]:
+    """Trim a capsule deterministically to fit the reserved continuity budget.
+
+    Returns ``(trimmed_capsule_or_None, trimmed_fields)`` where
+    *trimmed_fields* lists dotted paths of fields that were dropped or
+    truncated during trimming.
+    """
     payload = json.loads(json.dumps(capsule, ensure_ascii=False))
+    dropped: list[str] = []
     # Lower-commitment fields (trailing_notes, curiosity_queue, negative_decisions) trim before
     # working_hypotheses so deliberate non-action survives longer than residual notes/curiosity,
     # while hypotheses still outlive all three.
@@ -1338,11 +1363,13 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | 
     ):
         if _estimated_tokens(_render_value(payload)) <= max_tokens:
             break
-        _drop_nested(payload, dotted)
+        if _has_nested(payload, dotted):
+            _drop_nested(payload, dotted)
+            dropped.append(dotted)
 
     continuity = payload.get("continuity")
     if not isinstance(continuity, dict):
-        return None
+        return None, dropped
     for field in (
         "retrieval_hints.must_include",
         "relationship_model",
@@ -1356,27 +1383,46 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | 
     ):
         if _estimated_tokens(_render_value(payload)) <= max_tokens:
             break
+        dotted_field = f"continuity.{field}"
         if field == "retrieval_hints.must_include":
             hints = continuity.get("retrieval_hints")
             if isinstance(hints, dict):
-                hints["must_include"] = _truncate_list(list(hints.get("must_include") or []), max(1, max_tokens // 4))
+                before = list(hints.get("must_include") or [])
+                hints["must_include"] = _truncate_list(list(before), max(1, max_tokens // 4))
                 if not hints["must_include"]:
                     hints.pop("must_include", None)
+                    if before:
+                        dropped.append("continuity.retrieval_hints.must_include")
+                elif len(hints["must_include"]) < len(before):
+                    dropped.append("continuity.retrieval_hints.must_include")
         elif field == "relationship_model":
             model = continuity.get("relationship_model")
             if isinstance(model, dict):
                 if model.get("trust_level") is not None:
                     model.pop("trust_level", None)
+                    dropped.append("continuity.relationship_model.trust_level")
                 elif model:
-                    model.pop(sorted(model)[0], None)
+                    removed_key = sorted(model)[0]
+                    model.pop(removed_key, None)
+                    dropped.append(f"continuity.relationship_model.{removed_key}")
                 if not model:
                     continuity.pop("relationship_model", None)
+        elif field == "long_horizon_commitments":
+            if field in continuity:
+                continuity.pop(field, None)
+                dropped.append(dotted_field)
         elif field == "stance_summary":
-            continuity["stance_summary"] = _truncate_string(str(continuity.get("stance_summary", "")), max(1, max_tokens // 4))
+            before_val = str(continuity.get("stance_summary", ""))
+            continuity["stance_summary"] = _truncate_string(before_val, max(1, max_tokens // 4))
+            if continuity["stance_summary"] != before_val:
+                dropped.append(dotted_field)
         else:
             current = continuity.get(field)
             if isinstance(current, list):
+                before_len = len(current)
                 continuity[field] = _truncate_list(list(current), max(1, max_tokens // 4))
+                if len(continuity[field]) < before_len:
+                    dropped.append(dotted_field)
         if field in {"drift_signals", "open_loops", "active_constraints", "active_concerns", "top_priorities"} and not continuity.get(field):
             continuity[field] = []
 
@@ -1385,8 +1431,8 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> dict[str, Any] | 
         for name in ("top_priorities", "active_concerns", "active_constraints", "open_loops", "drift_signals", "stance_summary")
     )
     if not min_required or _estimated_tokens(_render_value(payload)) > max_tokens:
-        return None
-    return payload
+        return None, dropped
+    return payload, dropped
 
 
 def _budget(requested_max_tokens: int) -> dict[str, int]:
@@ -1622,6 +1668,172 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
         "orientation": orientation,
         "context": context,
         "updated_at": updated_at,
+        "trust_signals": out.get("trust_signals"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trust signals — per-capsule and aggregate
+# ---------------------------------------------------------------------------
+
+_ORIENTATION_FIELDS = (
+    "top_priorities",
+    "active_constraints",
+    "open_loops",
+    "active_concerns",
+    "stance_summary",
+    "drift_signals",
+)
+
+
+def _build_trust_signals(
+    capsule: dict[str, Any],
+    now: datetime,
+    *,
+    source_state: str,
+    trimmed: bool = False,
+    trimmed_fields: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build per-capsule trust signals from objective, mechanical checks.
+
+    Pure function: deterministic, no I/O, no side effects.  Same capsule
+    and *now* always produce an identical result with identical key order.
+
+    Args:
+        capsule: Raw capsule dict (pre-trim for ``build_continuity_state``).
+        now: Current UTC time for age computation.
+        source_state: ``"active"`` or ``"fallback"``.
+        trimmed: Whether token-budget trimming was applied.
+        trimmed_fields: Dotted paths of fields removed by trimming.
+    """
+    # -- recency --
+    updated_dt = _parse_iso(str(capsule.get("updated_at", "")))
+    verified_dt = _parse_iso(str(capsule.get("verified_at", "")))
+    updated_age = max(0, int((now - updated_dt).total_seconds())) if updated_dt else 0
+    verified_age = max(0, int((now - verified_dt).total_seconds())) if verified_dt else 0
+    phase, _ = _continuity_phase(capsule, now)
+    freshness_raw = capsule.get("freshness")
+    freshness_dict = freshness_raw if isinstance(freshness_raw, dict) else {}
+    fc = freshness_dict.get("freshness_class")
+    freshness_class = fc if isinstance(fc, str) and fc else None
+    stale_threshold = _effective_stale_seconds(capsule)
+
+    recency = {
+        "updated_age_seconds": updated_age,
+        "verified_age_seconds": verified_age,
+        "phase": phase,
+        "freshness_class": freshness_class,
+        "stale_threshold_seconds": stale_threshold,
+    }
+
+    # -- completeness --
+    cont = capsule.get("continuity")
+    cont_dict = cont if isinstance(cont, dict) else {}
+    ol = cont_dict.get("open_loops")
+    tp = cont_dict.get("top_priorities")
+    ac = cont_dict.get("active_constraints")
+    ss = str(cont_dict.get("stance_summary", ""))
+    adequate = bool(ol and tp and ac and len(ss) >= _RESUME_QUALITY_STANCE_MIN_LEN)
+
+    empty_fields: list[str] = []
+    for fname in _ORIENTATION_FIELDS:
+        val = cont_dict.get(fname)
+        if fname == "stance_summary":
+            if not isinstance(val, str) or len(val) < _RESUME_QUALITY_STANCE_MIN_LEN:
+                empty_fields.append(fname)
+        elif not val:
+            empty_fields.append(fname)
+
+    completeness = {
+        "orientation_adequate": adequate,
+        "empty_orientation_fields": empty_fields,
+        "trimmed": trimmed,
+        "trimmed_fields": list(trimmed_fields) if trimmed_fields else [],
+    }
+
+    # -- integrity --
+    health_status, health_reasons = _capsule_health_summary(capsule)
+    verification = _verification_status(capsule)
+
+    integrity = {
+        "source_state": source_state,
+        "health_status": health_status,
+        "health_reasons": list(health_reasons),
+        "verification_status": verification,
+    }
+
+    # -- scope_match --
+    scope_match = {
+        "exact": source_state == "active",
+    }
+
+    return {
+        "recency": recency,
+        "completeness": completeness,
+        "integrity": integrity,
+        "scope_match": scope_match,
+    }
+
+
+def _build_aggregate_trust_signals(
+    per_capsule_signals: list[dict[str, Any]],
+    *,
+    selectors_requested: int,
+    selectors_returned: int,
+    selectors_omitted: int,
+) -> dict[str, Any]:
+    """Build aggregate trust signals from a list of per-capsule trust signals.
+
+    Pure function: deterministic, no I/O, no side effects.  Same inputs
+    always produce an identical result with identical key order.
+    """
+    # -- recency --
+    phases = [s["recency"]["phase"] for s in per_capsule_signals]
+    worst_phase = max(phases, key=lambda p: CONTINUITY_PHASE_SEVERITY.get(p, CONTINUITY_PHASE_SEVERITY["expired"]))
+    oldest_updated = max(s["recency"]["updated_age_seconds"] for s in per_capsule_signals)
+    oldest_verified = max(s["recency"]["verified_age_seconds"] for s in per_capsule_signals)
+
+    recency = {
+        "worst_phase": worst_phase,
+        "oldest_updated_age_seconds": oldest_updated,
+        "oldest_verified_age_seconds": oldest_verified,
+    }
+
+    # -- completeness --
+    adequate_flags = [s["completeness"]["orientation_adequate"] for s in per_capsule_signals]
+    completeness = {
+        "all_adequate": all(adequate_flags),
+        "adequate_count": sum(1 for f in adequate_flags if f),
+        "total_count": len(per_capsule_signals),
+        "any_trimmed": any(s["completeness"]["trimmed"] for s in per_capsule_signals),
+    }
+
+    # -- integrity --
+    health_values = [s["integrity"]["health_status"] for s in per_capsule_signals]
+    worst_health = max(
+        health_values,
+        key=lambda h: CONTINUITY_HEALTH_ORDER.get(h, CONTINUITY_HEALTH_ORDER["conflicted"]),
+    )
+    integrity = {
+        "worst_health": worst_health,
+        "any_fallback": any(s["integrity"]["source_state"] == "fallback" for s in per_capsule_signals),
+        "any_degraded": any(s["integrity"]["health_status"] == "degraded" for s in per_capsule_signals),
+        "any_conflicted": any(s["integrity"]["health_status"] == "conflicted" for s in per_capsule_signals),
+    }
+
+    # -- scope_match --
+    scope_match = {
+        "selectors_requested": selectors_requested,
+        "selectors_returned": selectors_returned,
+        "selectors_omitted": selectors_omitted,
+        "all_returned": selectors_requested == selectors_returned and selectors_requested > 0,
+    }
+
+    return {
+        "recency": recency,
+        "completeness": completeness,
+        "integrity": integrity,
+        "scope_match": scope_match,
     }
 
 
@@ -1630,9 +1842,16 @@ def continuity_read_service(
     repo_root: Path,
     auth: AuthContext,
     req: ContinuityReadRequest,
+    now: datetime,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """Read one active continuity capsule by exact selector with fallback degradation."""
+    """Read one active continuity capsule by exact selector with fallback degradation.
+
+    The *now* parameter is used to compute ``trust_signals`` recency and
+    phase.  Callers pass ``datetime.now(timezone.utc)`` at the request
+    boundary so all age computations within a single response share the
+    same reference instant.
+    """
     auth.require("read:files")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_read_path(rel)
@@ -1684,6 +1903,20 @@ def continuity_read_service(
                 }
             else:
                 raise
+    # --- trust signals (before audit and view handling) ---
+    if out.get("capsule") is not None:
+        try:
+            out["trust_signals"] = _build_trust_signals(
+                out["capsule"],
+                now,
+                source_state=out["source_state"],
+            )
+        except Exception:
+            _logger.warning("trust_signals build failed; degrading to null", exc_info=True)
+            out["trust_signals"] = None
+            out["recovery_warnings"].append(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED)
+    else:
+        out["trust_signals"] = None
     audit(
         auth,
         "continuity_read",
@@ -3353,12 +3586,23 @@ def build_continuity_state(
         kind = selector["subject_kind"]
         subject_id = selector["subject_id"]
         resolution = selector["resolution"]
-        trimmed = _trim_capsule(row["capsule"], allocation)
+        trimmed, trimmed_fields = _trim_capsule(row["capsule"], allocation)
         if trimmed is None:
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUNCATED_MULTI, kind, subject_id, multi_mode=multi_warning_mode))
             continue
         trimmed["source_state"] = row["source_state"]
+        try:
+            trimmed["trust_signals"] = _build_trust_signals(
+                row["capsule"],
+                now,
+                source_state=row["source_state"],
+                trimmed=bool(trimmed_fields),
+                trimmed_fields=trimmed_fields,
+            )
+        except Exception:
+            _logger.warning("per-capsule trust_signals failed; degrading to null", exc_info=True)
+            trimmed["trust_signals"] = None
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
         if row["health_status"] == "degraded":
@@ -3374,11 +3618,30 @@ def build_continuity_state(
         state["fallback_used"] = fallback_used
         return state
 
+    # --- aggregate trust signals ---
+    per_capsule_signals = [
+        c["trust_signals"] for c in trimmed_capsules if c.get("trust_signals") is not None
+    ]
+    if per_capsule_signals:
+        try:
+            aggregate_trust = _build_aggregate_trust_signals(
+                per_capsule_signals,
+                selectors_requested=len(requested_selectors),
+                selectors_returned=len(trimmed_capsules),
+                selectors_omitted=len(state["omitted_selectors"]),
+            )
+        except Exception:
+            _logger.warning("aggregate trust_signals failed; degrading to null", exc_info=True)
+            aggregate_trust = None
+    else:
+        aggregate_trust = None
+
     state["present"] = True
     state["capsules"] = trimmed_capsules
     state["selection_order"] = trimmed_selection_order
     state["warnings"] = warnings
     state["recovery_warnings"] = recovery_warnings
     state["fallback_used"] = fallback_used
+    state["trust_signals"] = aggregate_trust
     state["budget"]["continuity_tokens_used"] = sum(_estimated_tokens(_render_value(item)) for item in trimmed_capsules)
     return state
