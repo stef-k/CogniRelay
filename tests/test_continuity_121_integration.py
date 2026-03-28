@@ -620,5 +620,103 @@ class TestAllTrustSignalsFail(unittest.TestCase):
             self.assertTrue(len(failed_warnings) > 0)
 
 
+# ---------------------------------------------------------------------------
+# Aggregate trust failure emits recovery warning
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateTrustFailureWarning(unittest.TestCase):
+    """When aggregate trust computation fails, a recovery_warning is emitted."""
+
+    def test_aggregate_failure_emits_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write_capsule(repo, _capsule_payload())
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+            )
+
+            def _boom(*args, **kwargs):
+                raise RuntimeError("aggregate exploded")
+
+            with patch("app.continuity.service._build_aggregate_trust_signals", side_effect=_boom):
+                state = build_continuity_state(
+                    repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+                )
+            self.assertTrue(state["present"])
+            # Aggregate is null
+            self.assertIsNone(state["trust_signals"])
+            # Warning was emitted
+            from app.continuity.service import CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED
+            agg_warnings = [w for w in state["recovery_warnings"] if CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED in w]
+            self.assertTrue(len(agg_warnings) > 0)
+            # Per-capsule trust_signals still present
+            self.assertIsNotNone(state["capsules"][0]["trust_signals"])
+
+
+# ---------------------------------------------------------------------------
+# Malformed/missing verified_at through endpoint — no crash
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedTimestampEndpoint(unittest.TestCase):
+    """Malformed verified_at in a stored capsule should not crash retrieval."""
+
+    def test_read_malformed_verified_at_still_returns_trust_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            settings = _settings(repo)
+            gm = _GitManagerStub()
+            payload = _capsule_payload(verified_at="not-a-valid-date")
+            _write_capsule(repo, payload)
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="stef"),
+                    auth=_AuthStub(),
+                )
+            # Trust signals should be present (not null) with expired phase
+            ts = out["trust_signals"]
+            self.assertIsNotNone(ts)
+            self.assertEqual(ts["recency"]["phase"], "expired")
+            self.assertIsNone(ts["recency"]["verified_age_seconds"])
+
+    def test_retrieval_phase_raise_caught_by_trust_builder(self) -> None:
+        """Trust builder catches _continuity_phase failures and falls back to expired."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write_capsule(repo, _capsule_payload())
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+            )
+
+            # Simulate _continuity_phase raising inside the trust builder
+            original_phase = None
+            import app.continuity.service as svc
+
+            original_phase = svc._continuity_phase
+
+            call_count = 0
+
+            def _failing_phase(capsule, now):
+                nonlocal call_count
+                call_count += 1
+                # First call is from the loading loop — let it pass.
+                # Subsequent calls are from trust builders — make them fail.
+                if call_count <= 1:
+                    return original_phase(capsule, now)
+                raise RuntimeError("simulated phase failure")
+
+            with patch("app.continuity.service._continuity_phase", side_effect=_failing_phase):
+                state = build_continuity_state(
+                    repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+                )
+            self.assertTrue(state["present"])
+            ts = state["capsules"][0]["trust_signals"]
+            self.assertIsNotNone(ts)
+            self.assertEqual(ts["recency"]["phase"], "expired")
+
+
 if __name__ == "__main__":
     unittest.main()

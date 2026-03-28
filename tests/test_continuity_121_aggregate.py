@@ -49,6 +49,61 @@ def _per_capsule(
     }
 
 
+def _compact_capsule(
+    *,
+    phase: str = "fresh",
+    adequate: bool = True,
+    trimmed: bool = False,
+    health: str = "healthy",
+    source_state: str = "active",
+    exact: bool = True,
+) -> dict:
+    """Compact trust-signals shape — no age fields in recency."""
+    return {
+        "compact": True,
+        "recency": {"phase": phase},
+        "completeness": {"orientation_adequate": adequate, "trimmed": trimmed},
+        "integrity": {"source_state": source_state, "health_status": health},
+        "scope_match": {"exact": exact},
+    }
+
+
+def _per_capsule_null_ages(
+    *,
+    phase: str = "expired",
+    adequate: bool = True,
+    trimmed: bool = False,
+    health: str = "healthy",
+    source_state: str = "active",
+    exact: bool = True,
+) -> dict:
+    """Full trust-signals shape with null age fields (malformed timestamps)."""
+    return {
+        "recency": {
+            "updated_age_seconds": None,
+            "verified_age_seconds": None,
+            "phase": phase,
+            "freshness_class": None,
+            "stale_threshold_seconds": 2592000,
+        },
+        "completeness": {
+            "orientation_adequate": adequate,
+            "empty_orientation_fields": [] if adequate else ["open_loops"],
+            "trimmed": trimmed,
+            "trimmed_fields": [],
+        },
+        "integrity": {
+            "source_state": source_state,
+            "health_status": health,
+            "health_reasons": [],
+            "verification_status": "unverified",
+        },
+        "scope_match": {
+            "exact": exact,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Structure and key order
 # ---------------------------------------------------------------------------
@@ -305,6 +360,107 @@ class TestAggregatePurity(unittest.TestCase):
         snapshot = copy.deepcopy(signals)
         _build_aggregate_trust_signals(signals, selectors_requested=1, selectors_returned=1, selectors_omitted=0)
         self.assertEqual(signals, snapshot)
+
+
+# ---------------------------------------------------------------------------
+# Compact trust signals in aggregate
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateWithCompactSignals(unittest.TestCase):
+    """Aggregate must handle a mix of full and compact per-capsule signals."""
+
+    def test_compact_only_ages_null(self) -> None:
+        """All compact signals → aggregate age fields are null."""
+        signals = [_compact_capsule(phase="fresh"), _compact_capsule(phase="stale_soft")]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertEqual(agg["recency"]["worst_phase"], "stale_soft")
+        self.assertIsNone(agg["recency"]["oldest_updated_age_seconds"])
+        self.assertIsNone(agg["recency"]["oldest_verified_age_seconds"])
+
+    def test_mixed_full_and_compact(self) -> None:
+        """Full + compact mix → ages come from the full signal only."""
+        signals = [
+            _per_capsule(phase="fresh", updated_age=100, verified_age=200),
+            _compact_capsule(phase="stale_hard"),
+        ]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertEqual(agg["recency"]["worst_phase"], "stale_hard")
+        self.assertEqual(agg["recency"]["oldest_updated_age_seconds"], 100)
+        self.assertEqual(agg["recency"]["oldest_verified_age_seconds"], 200)
+
+    def test_compact_completeness_aggregates(self) -> None:
+        """Compact signals contribute to completeness aggregation."""
+        signals = [
+            _per_capsule(adequate=True),
+            _compact_capsule(adequate=False),
+        ]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertFalse(agg["completeness"]["all_adequate"])
+        self.assertEqual(agg["completeness"]["adequate_count"], 1)
+        self.assertEqual(agg["completeness"]["total_count"], 2)
+
+    def test_compact_integrity_aggregates(self) -> None:
+        """Compact signals contribute to integrity aggregation."""
+        signals = [
+            _per_capsule(health="healthy"),
+            _compact_capsule(health="degraded"),
+        ]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertEqual(agg["integrity"]["worst_health"], "degraded")
+        self.assertTrue(agg["integrity"]["any_degraded"])
+
+    def test_compact_fallback_detected(self) -> None:
+        """Compact fallback signals surface in aggregate."""
+        signals = [
+            _per_capsule(source_state="active"),
+            _compact_capsule(source_state="fallback", exact=False),
+        ]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertTrue(agg["integrity"]["any_fallback"])
+
+    def test_compact_trimmed_aggregates(self) -> None:
+        signals = [
+            _per_capsule(trimmed=False),
+            _compact_capsule(trimmed=True),
+        ]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertTrue(agg["completeness"]["any_trimmed"])
+
+
+# ---------------------------------------------------------------------------
+# Null age fields in aggregate
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateWithNullAges(unittest.TestCase):
+    """Aggregate handles null age fields from malformed-timestamp signals."""
+
+    def test_all_null_ages(self) -> None:
+        """All signals with null ages → aggregate ages are null."""
+        signals = [_per_capsule_null_ages(), _per_capsule_null_ages()]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertIsNone(agg["recency"]["oldest_updated_age_seconds"])
+        self.assertIsNone(agg["recency"]["oldest_verified_age_seconds"])
+
+    def test_mixed_null_and_valid_ages(self) -> None:
+        """Null ages are excluded; aggregate uses valid ages only."""
+        signals = [
+            _per_capsule(updated_age=300, verified_age=600),
+            _per_capsule_null_ages(),
+        ]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertEqual(agg["recency"]["oldest_updated_age_seconds"], 300)
+        self.assertEqual(agg["recency"]["oldest_verified_age_seconds"], 600)
+
+    def test_null_age_phase_still_aggregated(self) -> None:
+        """Phase from null-age signal still counts toward worst_phase."""
+        signals = [
+            _per_capsule(phase="fresh"),
+            _per_capsule_null_ages(phase="expired"),
+        ]
+        agg = _build_aggregate_trust_signals(signals, selectors_requested=2, selectors_returned=2, selectors_omitted=0)
+        self.assertEqual(agg["recency"]["worst_phase"], "expired")
 
 
 if __name__ == "__main__":

@@ -410,6 +410,60 @@ class TestTrustSignalsPurity(unittest.TestCase):
         self.assertFalse(ts["completeness"]["orientation_adequate"])
         self.assertEqual(len(ts["completeness"]["empty_orientation_fields"]), 6)
 
+    def test_missing_verified_at_does_not_crash(self) -> None:
+        """Malformed verified_at should produce trust signals, not crash."""
+        capsule = _capsule()
+        capsule["verified_at"] = "not-a-date"
+        ts = _build_trust_signals(capsule, _now(), source_state="active")
+        self.assertIsNotNone(ts)
+        self.assertEqual(ts["recency"]["phase"], "expired")
+        self.assertIsNone(ts["recency"]["verified_age_seconds"])
+
+    def test_empty_verified_at_does_not_crash(self) -> None:
+        """Empty verified_at should produce trust signals with null age."""
+        capsule = _capsule()
+        capsule["verified_at"] = ""
+        ts = _build_trust_signals(capsule, _now(), source_state="active")
+        self.assertIsNotNone(ts)
+        self.assertEqual(ts["recency"]["phase"], "expired")
+        self.assertIsNone(ts["recency"]["verified_age_seconds"])
+
+    def test_missing_updated_at_age_is_null(self) -> None:
+        """Missing updated_at produces null age, not zero."""
+        capsule = _capsule()
+        capsule["updated_at"] = ""
+        ts = _build_trust_signals(capsule, _now(), source_state="active")
+        self.assertIsNone(ts["recency"]["updated_age_seconds"])
+
+    def test_valid_timestamps_age_is_int(self) -> None:
+        """Valid timestamps produce integer ages (not null)."""
+        ts = _build_trust_signals(_capsule(), _now(), source_state="active")
+        self.assertIsInstance(ts["recency"]["updated_age_seconds"], int)
+        self.assertIsInstance(ts["recency"]["verified_age_seconds"], int)
+
+    def test_malformed_verified_at_completeness_still_computed(self) -> None:
+        """Completeness is still computed even when verified_at is malformed."""
+        capsule = _capsule(open_loops=["ol1"], top_priorities=["p1"])
+        capsule["verified_at"] = "garbage"
+        ts = _build_trust_signals(capsule, _now(), source_state="active")
+        self.assertTrue(ts["completeness"]["orientation_adequate"])
+
+    def test_malformed_verified_at_integrity_still_computed(self) -> None:
+        """Integrity is still computed even when verified_at is malformed."""
+        capsule = _capsule(capsule_health={"status": "degraded", "reasons": ["drift"]})
+        capsule["verified_at"] = "garbage"
+        ts = _build_trust_signals(capsule, _now(), source_state="active")
+        self.assertEqual(ts["integrity"]["health_status"], "degraded")
+
+    def test_compact_malformed_verified_at_does_not_crash(self) -> None:
+        """Compact builder also handles malformed verified_at gracefully."""
+        capsule = _capsule()
+        capsule["verified_at"] = "not-a-date"
+        ts = _build_compact_trust_signals(capsule, _now(), source_state="active")
+        self.assertIsNotNone(ts)
+        self.assertTrue(ts["compact"])
+        self.assertEqual(ts["recency"]["phase"], "expired")
+
 
 # ---------------------------------------------------------------------------
 # _trim_capsule — trimmed_fields tracking

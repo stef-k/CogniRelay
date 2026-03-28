@@ -147,6 +147,7 @@ CONTINUITY_PHASE_SEVERITY: dict[str, int] = {
 }
 CONTINUITY_WARNING_TRUST_SIGNALS_FAILED = "trust_signals_build_failed"
 CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT = "trust_signals_compact"
+CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED = "trust_signals_aggregate_failed"
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"
@@ -1704,9 +1705,11 @@ def _build_trust_signals(
 
     Deterministic for valid capsules — no I/O, no side effects.  Same
     capsule and *now* always produce an identical result with identical
-    key order.  May raise ``HTTPException`` on malformed capsule
-    timestamps (via ``_continuity_phase`` → ``_require_utc_timestamp``);
-    callers must wrap in try/except when graceful degradation is needed.
+    key order.
+
+    When ``verified_at`` is missing or malformed, the function does not
+    raise — it falls back to ``phase="expired"`` and ``null`` age fields
+    so the consumer never sees a misleadingly fresh signal.
 
     Args:
         capsule: Raw capsule dict (pre-trim for ``build_continuity_state``).
@@ -1718,9 +1721,12 @@ def _build_trust_signals(
     # -- recency --
     updated_dt = _parse_iso(str(capsule.get("updated_at", "")))
     verified_dt = _parse_iso(str(capsule.get("verified_at", "")))
-    updated_age = max(0, int((now - updated_dt).total_seconds())) if updated_dt else 0
-    verified_age = max(0, int((now - verified_dt).total_seconds())) if verified_dt else 0
-    phase, _ = _continuity_phase(capsule, now)
+    updated_age: int | None = max(0, int((now - updated_dt).total_seconds())) if updated_dt else None
+    verified_age: int | None = max(0, int((now - verified_dt).total_seconds())) if verified_dt else None
+    try:
+        phase, _ = _continuity_phase(capsule, now)
+    except Exception:
+        phase = "expired"
     freshness_raw = capsule.get("freshness")
     freshness_dict = freshness_raw if isinstance(freshness_raw, dict) else {}
     fc = freshness_dict.get("freshness_class")
@@ -1793,10 +1799,14 @@ def _build_compact_trust_signals(
 ) -> dict[str, Any]:
     """Build a reduced trust-signals shape for tight token budgets.
 
-    Contains the minimum subfields needed for trust assessment.  May raise
-    on malformed capsule timestamps (callers wrap in try/except).
+    Contains the minimum subfields needed for trust assessment.  Falls
+    back to ``phase="expired"`` on malformed timestamps rather than
+    raising.
     """
-    phase, _ = _continuity_phase(capsule, now)
+    try:
+        phase, _ = _continuity_phase(capsule, now)
+    except Exception:
+        phase = "expired"
     cont = capsule.get("continuity")
     cont_dict = cont if isinstance(cont, dict) else {}
     ol = cont_dict.get("open_loops")
@@ -1827,6 +1837,11 @@ def _build_aggregate_trust_signals(
     Pure function: deterministic, no I/O, no side effects.  Same inputs
     always produce an identical result with identical key order.
 
+    Handles a mix of full and compact per-capsule trust shapes.  Compact
+    signals omit ``updated_age_seconds`` and ``verified_age_seconds`` —
+    these are treated as ``None`` for aggregation purposes and the
+    aggregate age fields are ``null`` when no full signal provides them.
+
     Raises ``ValueError`` if *per_capsule_signals* is empty — callers
     must guard against the empty case before invoking.
     """
@@ -1835,8 +1850,13 @@ def _build_aggregate_trust_signals(
     # -- recency --
     phases = [s["recency"]["phase"] for s in per_capsule_signals]
     worst_phase = max(phases, key=lambda p: CONTINUITY_PHASE_SEVERITY.get(p, CONTINUITY_PHASE_SEVERITY["expired"]))
-    oldest_updated = max(s["recency"]["updated_age_seconds"] for s in per_capsule_signals)
-    oldest_verified = max(s["recency"]["verified_age_seconds"] for s in per_capsule_signals)
+    # Age fields may be absent (compact signals) or null (malformed timestamps).
+    updated_ages = [s["recency"].get("updated_age_seconds") for s in per_capsule_signals]
+    verified_ages = [s["recency"].get("verified_age_seconds") for s in per_capsule_signals]
+    known_updated = [a for a in updated_ages if a is not None]
+    known_verified = [a for a in verified_ages if a is not None]
+    oldest_updated: int | None = max(known_updated) if known_updated else None
+    oldest_verified: int | None = max(known_verified) if known_verified else None
 
     recency = {
         "worst_phase": worst_phase,
@@ -3717,6 +3737,7 @@ def build_continuity_state(
         except Exception:
             _logger.warning("aggregate trust_signals failed; degrading to null", exc_info=True)
             aggregate_trust = None
+            recovery_warnings.append(CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED)
     else:
         aggregate_trust = None
 
