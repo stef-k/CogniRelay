@@ -59,7 +59,6 @@ from app.continuity.constants import (  # noqa: E402
     CONTINUITY_COMPARE_IGNORED_FIELDS,
     CONTINUITY_COMPARE_NESTED_ORDERS,
     CONTINUITY_COMPARE_TOP_LEVEL_ORDER,
-    CONTINUITY_DEFAULT_STALE,
     CONTINUITY_DIR_REL,
     CONTINUITY_FALLBACK_SCHEMA_TYPE,
     CONTINUITY_FALLBACK_SCHEMA_VERSION,
@@ -81,13 +80,10 @@ from app.continuity.constants import (  # noqa: E402
     CONTINUITY_WARNING_ACTIVE_MISSING,
     CONTINUITY_WARNING_CONFLICTED,
     CONTINUITY_WARNING_DEGRADED,
-    CONTINUITY_WARNING_EXPIRED,
     CONTINUITY_WARNING_FALLBACK_MISSING,
     CONTINUITY_WARNING_FALLBACK_USED,
     CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
     CONTINUITY_WARNING_INVALID,
-    CONTINUITY_WARNING_STALE_HARD,
-    CONTINUITY_WARNING_STALE_SOFT,
     CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED,
     CONTINUITY_WARNING_TRUNCATED,
     CONTINUITY_WARNING_TRUNCATED_MULTI,
@@ -1011,36 +1007,13 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
         raise HTTPException(status_code=400, detail=f"Invalid continuity capsule: {e}") from e
 
 
-def _effective_stale_seconds(capsule: dict[str, Any]) -> int | None:
-    """Compute the effective stale threshold for a capsule."""
-    freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
-    explicit = freshness.get("stale_after_seconds")
-    if explicit is not None:
-        return int(explicit)
-    freshness_class = str(freshness.get("freshness_class") or "situational")
-    return CONTINUITY_DEFAULT_STALE.get(freshness_class)
-
-
-def _verification_status(capsule: dict[str, Any]) -> str:
-    """Return the persisted or implicit verification status for one capsule."""
-    verification_state = capsule.get("verification_state")
-    if isinstance(verification_state, dict):
-        status = verification_state.get("status")
-        if isinstance(status, str) and status:
-            return status
-    return "unverified"
-
-
-def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
-    """Return the persisted or implicit capsule health summary."""
-    capsule_health = capsule.get("capsule_health")
-    if isinstance(capsule_health, dict):
-        status = capsule_health.get("status")
-        reasons = capsule_health.get("reasons")
-        if isinstance(status, str) and status:
-            return status, list(reasons or [])
-        return "degraded", ["invalid capsule_health payload"]
-    return "healthy", []
+# --- Re-exported from app.continuity.freshness (backward-compat shim) ---
+from app.continuity.freshness import (  # noqa: E402
+    _capsule_health_summary,
+    _continuity_phase,
+    _effective_stale_seconds,
+    _verification_status,
+)
 
 
 def _audit_recent_selectors(repo_root: Path, now: datetime) -> set[tuple[str, str]]:
@@ -1147,30 +1120,6 @@ def _refresh_state_payload(now: datetime, candidates: list[dict[str, Any]]) -> d
     }
 
 
-def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list[str]]:
-    """Determine freshness phase and warnings for the given capsule."""
-    warnings: list[str] = []
-    freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
-    verified_at = _require_utc_timestamp(str(capsule.get("verified_at", "")), "verified_at")
-    expires_at = freshness.get("expires_at")
-    expires_dt = _parse_iso(str(expires_at)) if expires_at else None
-    if expires_dt is not None and now > expires_dt:
-        warnings.append(CONTINUITY_WARNING_EXPIRED)
-        return "expired", warnings
-    stale_after = _effective_stale_seconds(capsule)
-    if stale_after is None:
-        return "fresh", warnings
-    age_seconds = max(0.0, (now - verified_at).total_seconds())
-    if age_seconds <= stale_after:
-        return "fresh", warnings
-    if age_seconds <= stale_after * 1.5:
-        warnings.append(CONTINUITY_WARNING_STALE_SOFT)
-        return "stale_soft", warnings
-    if age_seconds <= stale_after * 2.0:
-        warnings.append(CONTINUITY_WARNING_STALE_HARD)
-        return "stale_hard", warnings
-    warnings.append(CONTINUITY_WARNING_EXPIRED)
-    return "expired_by_age", warnings
 
 
 def _estimated_tokens(text: str) -> int:
