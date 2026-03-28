@@ -113,8 +113,7 @@ def _continuity_subject_lock(*, repo_root: Path, subject_kind: str, subject_id: 
 def _archive_rel_path_from_envelope(payload: dict[str, Any]) -> str:
     """Derive the canonical archive-envelope path from a validated envelope payload."""
     # Function-level import to avoid circular dependency.
-    # Will point to app.continuity.validation after slice 6.
-    from app.continuity.service import _require_utc_timestamp
+    from app.continuity.validation import _require_utc_timestamp
 
     capsule = payload.get("capsule")
     if not isinstance(capsule, dict):

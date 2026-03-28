@@ -49,7 +49,7 @@ def _capsule_health_summary(capsule: dict[str, Any]) -> tuple[str, list[str]]:
 def _continuity_phase(capsule: dict[str, Any], now: datetime) -> tuple[str, list[str]]:
     """Determine freshness phase and warnings for the given capsule."""
     # Function-level import to avoid circular dependency with validation.py
-    from app.continuity.service import _require_utc_timestamp
+    from app.continuity.validation import _require_utc_timestamp
 
     warnings: list[str] = []
     freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
