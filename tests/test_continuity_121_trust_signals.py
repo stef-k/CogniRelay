@@ -11,13 +11,8 @@ import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from app.continuity.service import (
-    _build_compact_trust_signals,
-    _build_trust_signals,
-    _estimated_tokens,
-    _render_value,
-    _trim_capsule,
-)
+from app.continuity.trimming import _estimated_tokens, _render_value, _trim_capsule
+from app.continuity.trust import _build_compact_trust_signals, _build_trust_signals
 
 
 def _now() -> datetime:

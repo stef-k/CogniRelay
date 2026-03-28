@@ -102,7 +102,7 @@ class TestPersistActiveCapsuleLockDurability(unittest.TestCase):
     def _run_persist_with_lock_failure(self, lock_mock):
         """Helper: write an original capsule, attempt persist with a failing lock,
         and assert the original content survives."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -117,7 +117,7 @@ class TestPersistActiveCapsuleLockDurability(unittest.TestCase):
 
             # Attempt persist with lock that will fail
             new_content = json.dumps(_make_active_capsule(), indent=2)
-            with patch("app.continuity.service.repository_mutation_lock", lock_mock):
+            with patch("app.continuity.persistence.repository_mutation_lock", lock_mock):
                 with self.assertRaises((GitLockTimeout, GitLockInfrastructureError)):
                     _persist_active_capsule(
                         repo_root=repo,
@@ -172,7 +172,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
     def test_commit_failure_returns_structured_error(self) -> None:
         """Commit exception → 500 with continuity_persist_commit_failed, file restored."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -185,7 +185,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
             original_bytes = capsule_path.read_bytes()
 
             new_content = json.dumps(_make_active_capsule(), indent=2)
-            with patch("app.continuity.service.repository_mutation_lock", _passthrough_lock):
+            with patch("app.continuity.persistence.repository_mutation_lock", _passthrough_lock):
                 with self.assertRaises(HTTPException) as ctx:
                     _persist_active_capsule(
                         repo_root=repo,
@@ -203,7 +203,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
     def test_commit_and_rollback_failure_returns_rollback_error(self) -> None:
         """Commit + rollback failure → 500 with continuity_persist_rollback_failed."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -216,8 +216,8 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
             new_content = json.dumps(_make_active_capsule(), indent=2)
             with (
-                patch("app.continuity.service.repository_mutation_lock", _passthrough_lock),
-                patch("app.continuity.service.write_bytes_file", side_effect=OSError("disk full")),
+                patch("app.continuity.persistence.repository_mutation_lock", _passthrough_lock),
+                patch("app.continuity.persistence.write_bytes_file", side_effect=OSError("disk full")),
             ):
                 with self.assertRaises(HTTPException) as ctx:
                     _persist_active_capsule(
@@ -235,7 +235,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
 
     def test_no_changes_is_success(self) -> None:
         """commit_file returning False (no diff) must not trigger rollback."""
-        from app.continuity.service import _persist_active_capsule
+        from app.continuity.persistence import _persist_active_capsule
 
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -247,7 +247,7 @@ class TestPersistActiveCapsuleCommitFailure(unittest.TestCase):
             write_text_file(capsule_path, original)
 
             new_content = json.dumps(_make_active_capsule(), indent=2)
-            with patch("app.continuity.service.repository_mutation_lock", _passthrough_lock):
+            with patch("app.continuity.persistence.repository_mutation_lock", _passthrough_lock):
                 # Should NOT raise — content is already durable in git
                 _persist_active_capsule(
                     repo_root=repo,

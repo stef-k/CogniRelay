@@ -11,11 +11,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.continuity.service import (
-    _strongest_signal_kind,
-    _validate_candidate_selector_match,
-    _validate_verification_signals,
-)
+from app.continuity.compare import _strongest_signal_kind
+from app.continuity.validation import _validate_candidate_selector_match, _validate_verification_signals
 from app.main import continuity_upsert
 from app.models import (
     ContinuityCompareRequest,

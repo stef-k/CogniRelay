@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.context.service import _raw_scan_recent_relevant
-from app.continuity.service import _audit_recent_selectors
+from app.continuity.refresh import _audit_recent_selectors
 from app.indexer import _record_for_file
 from app.config import Settings
 from app.maintenance.service import _candidate_policy, _load_access_stats, metrics_service
@@ -184,7 +184,7 @@ class TestUtf8ReplacementContinuity(unittest.TestCase):
             bad = b'{"ts": "2026-01-01T00:00:00Z", "event": "read\xfe"}\n'
             (logs_dir / "api_audit.jsonl").write_bytes(good + bad)
 
-            with self.assertLogs("app.continuity.service", level=logging.WARNING) as cm:
+            with self.assertLogs("app.continuity.refresh", level=logging.WARNING) as cm:
                 _audit_recent_selectors(repo, datetime.now(timezone.utc))
 
             self.assertTrue(any("U+FFFD" in msg for msg in cm.output))
@@ -199,7 +199,7 @@ class TestUtf8ReplacementContinuity(unittest.TestCase):
             path.write_text("{}\n")
             path.chmod(0o000)
             try:
-                with self.assertLogs("app.continuity.service", level=logging.WARNING):
+                with self.assertLogs("app.continuity.refresh", level=logging.WARNING):
                     result = _audit_recent_selectors(repo, datetime.now(timezone.utc))
                 self.assertEqual(result, set())
             finally:

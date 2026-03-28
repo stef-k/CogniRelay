@@ -13,12 +13,9 @@ from pydantic import ValidationError
 
 from app.auth import AuthContext
 from app.timestamps import iso_to_posix
-from app.continuity.service import (
-    _capsule_health_summary,
-    _load_capsule,
-    _verification_status,
-    continuity_rel_path,
-)
+from app.continuity.freshness import _capsule_health_summary, _verification_status
+from app.continuity.persistence import _load_capsule
+from app.continuity.paths import continuity_rel_path
 from app.coordination.common import is_admin, persist_new_artifact, persist_updated_artifact, query_identity_allowed, utc_now, validate_prefixed_hex_id
 from app.coordination.locking import ArtifactLockInfrastructureError, ArtifactLockTimeout, artifact_lock
 from app.lifecycle_warnings import make_lock_error

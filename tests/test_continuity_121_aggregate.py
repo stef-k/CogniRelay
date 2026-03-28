@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from app.continuity.service import _build_aggregate_trust_signals
+from app.continuity.trust import _build_aggregate_trust_signals
 
 
 def _per_capsule(

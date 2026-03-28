@@ -522,12 +522,9 @@ class TestContinuityColdStoreCrashRecovery(unittest.TestCase):
 
     def _create_cold_stored_state(self):
         """Create valid cold files (no archive) simulating post-archive-delete crash."""
-        from app.continuity.service import (
-            continuity_cold_storage_rel_path,
-            continuity_cold_stub_rel_path,
-            CONTINUITY_DIR_REL,
-            _build_cold_stub_text,
-        )
+        from app.continuity.cold import _build_cold_stub_text
+        from app.continuity.constants import CONTINUITY_DIR_REL
+        from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
         from app.timestamps import format_iso, format_compact
         now = _now()
 
@@ -592,12 +589,9 @@ class TestContinuityColdStoreCrashRecovery(unittest.TestCase):
 
     def test_crash_recovery_archive_missing_cold_invalid(self):
         """Archive deleted, invalid cold stub → falls through to 404."""
-        from app.continuity.service import (
-            continuity_cold_store_service,
-            continuity_cold_storage_rel_path,
-            continuity_cold_stub_rel_path,
-            CONTINUITY_DIR_REL,
-        )
+        from app.continuity.constants import CONTINUITY_DIR_REL
+        from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
+        from app.continuity.service import continuity_cold_store_service
         from app.models import ContinuityColdStoreRequest
         from app.timestamps import format_compact
 
@@ -626,11 +620,9 @@ class TestContinuityColdStoreCrashRecovery(unittest.TestCase):
 
     def test_crash_recovery_archive_missing_cold_partial(self):
         """Archive deleted, only cold payload (no stub) → falls through to 404."""
-        from app.continuity.service import (
-            continuity_cold_store_service,
-            continuity_cold_storage_rel_path,
-            CONTINUITY_DIR_REL,
-        )
+        from app.continuity.constants import CONTINUITY_DIR_REL
+        from app.continuity.paths import continuity_cold_storage_rel_path
+        from app.continuity.service import continuity_cold_store_service
         from app.models import ContinuityColdStoreRequest
         from app.timestamps import format_compact
 
@@ -670,14 +662,13 @@ class TestContinuityColdRehydrateCrashRecovery(unittest.TestCase):
 
     def _create_rehydrate_crash_state(self):
         """Create state simulating crash after archive write but before cold cleanup."""
-        from app.continuity.service import (
-            continuity_cold_storage_rel_path,
-            continuity_cold_stub_rel_path,
-            CONTINUITY_DIR_REL,
+        from app.continuity.cold import _build_cold_stub_text
+        from app.continuity.constants import (
             CONTINUITY_ARCHIVE_SCHEMA_TYPE,
             CONTINUITY_ARCHIVE_SCHEMA_VERSION,
-            _build_cold_stub_text,
+            CONTINUITY_DIR_REL,
         )
+        from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
         from app.timestamps import format_iso, format_compact
         now = _now()
 
@@ -750,13 +741,10 @@ class TestContinuityColdRehydrateCrashRecovery(unittest.TestCase):
 
     def test_crash_recovery_invalid_archive(self):
         """Corrupt archive + cold files → falls through to 409."""
-        from app.continuity.service import (
-            continuity_cold_rehydrate_service,
-            continuity_cold_storage_rel_path,
-            continuity_cold_stub_rel_path,
-            CONTINUITY_DIR_REL,
-            _build_cold_stub_text,
-        )
+        from app.continuity.cold import _build_cold_stub_text
+        from app.continuity.constants import CONTINUITY_DIR_REL
+        from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
+        from app.continuity.service import continuity_cold_rehydrate_service
         from app.models import ContinuityColdRehydrateRequest
         from app.timestamps import format_iso, format_compact
         now = _now()

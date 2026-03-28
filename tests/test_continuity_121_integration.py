@@ -16,13 +16,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
-from app.continuity.service import (
-    CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT,
-    CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
-    _estimated_tokens,
-    _render_value,
-    build_continuity_state,
-)
+from app.continuity.constants import CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, CONTINUITY_WARNING_TRUST_SIGNALS_FAILED
+from app.continuity.service import build_continuity_state
+from app.continuity.trimming import _estimated_tokens, _render_value
 from app.main import continuity_read, context_retrieve
 from app.models import ContinuityReadRequest, ContextRetrieveRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -688,8 +684,8 @@ class TestAllTrustSignalsFail(unittest.TestCase):
                 raise RuntimeError("trust signals exploded")
 
             with (
-                patch("app.continuity.service._build_trust_signals", side_effect=_boom),
-                patch("app.continuity.service._build_compact_trust_signals", side_effect=_boom),
+                patch("app.continuity.context_state._build_trust_signals", side_effect=_boom),
+                patch("app.continuity.context_state._build_compact_trust_signals", side_effect=_boom),
             ):
                 state = build_continuity_state(
                     repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
@@ -724,7 +720,7 @@ class TestAggregateTrustFailureWarning(unittest.TestCase):
             def _boom(*args, **kwargs):
                 raise RuntimeError("aggregate exploded")
 
-            with patch("app.continuity.service._build_aggregate_trust_signals", side_effect=_boom):
+            with patch("app.continuity.context_state._build_aggregate_trust_signals", side_effect=_boom):
                 state = build_continuity_state(
                     repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
                 )
@@ -732,7 +728,7 @@ class TestAggregateTrustFailureWarning(unittest.TestCase):
             # Aggregate is null
             self.assertIsNone(state["trust_signals"])
             # Warning was emitted
-            from app.continuity.service import CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED
+            from app.continuity.constants import CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED
             agg_warnings = [w for w in state["recovery_warnings"] if CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED in w]
             self.assertTrue(len(agg_warnings) > 0)
             # Per-capsule trust_signals still present
@@ -777,9 +773,9 @@ class TestMalformedTimestampEndpoint(unittest.TestCase):
 
             # Simulate _continuity_phase raising inside the trust builder
             original_phase = None
-            import app.continuity.service as svc
+            import app.continuity.context_state as ctx_state
 
-            original_phase = svc._continuity_phase
+            original_phase = ctx_state._continuity_phase
 
             call_count = 0
 
@@ -792,7 +788,8 @@ class TestMalformedTimestampEndpoint(unittest.TestCase):
                     return original_phase(capsule, now)
                 raise RuntimeError("simulated phase failure")
 
-            with patch("app.continuity.service._continuity_phase", side_effect=_failing_phase):
+            with patch("app.continuity.context_state._continuity_phase", side_effect=_failing_phase), \
+                 patch("app.continuity.trust._continuity_phase", side_effect=_failing_phase):
                 state = build_continuity_state(
                     repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
                 )

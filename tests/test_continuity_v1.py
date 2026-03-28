@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.continuity.service import _render_value, _trim_capsule
+from app.continuity.trimming import _render_value, _trim_capsule
 from app.main import continuity_upsert, context_retrieve
 from app.models import ContinuityUpsertRequest, ContextRetrieveRequest
 

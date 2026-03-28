@@ -30,7 +30,7 @@ from app.artifact_lifecycle.service import (
     artifact_history_payload_rel_path_from_cold_artifact,
 )
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES, SCOPE_REPLICATION_SYNC
-from app.continuity.service import (
+from app.continuity.constants import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
     CONTINUITY_COLD_DIR_REL,
@@ -38,13 +38,15 @@ from app.continuity.service import (
     CONTINUITY_DIR_REL,
     CONTINUITY_FALLBACK_SCHEMA_TYPE,
     CONTINUITY_FALLBACK_SCHEMA_VERSION,
+)
+from app.continuity.paths import (
     _archive_rel_path_from_envelope,
     continuity_archive_rel_path_from_cold_artifact,
     continuity_cold_stub_rel_path,
-    _load_cold_stub,
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
+from app.continuity.cold import _load_cold_stub
 from app.git_safety import safe_commit_paths, try_commit_file, try_commit_paths
 from app.segment_history.locking import acquire_sorted_source_locks, segment_history_source_lock, SegmentHistoryLockTimeout, LockInfrastructureError
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, CompactRequest, ContinuityCapsule, ReplicationPullRequest, ReplicationPushRequest

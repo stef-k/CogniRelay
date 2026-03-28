@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
-from app.continuity.service import _estimated_tokens, _render_value, _trim_capsule, continuity_compare_service
+from app.continuity.service import continuity_compare_service
+from app.continuity.trimming import _estimated_tokens, _render_value, _trim_capsule
 from app.main import context_retrieve, continuity_read
 from app.models import ContinuityCompareRequest, ContinuityReadRequest, ContextRetrieveRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub

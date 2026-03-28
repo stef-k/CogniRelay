@@ -10,7 +10,8 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.config import Settings
-from app.continuity.service import _trim_capsule, continuity_list_service
+from app.continuity.service import continuity_list_service
+from app.continuity.trimming import _trim_capsule
 from app.main import context_retrieve
 from app.models import ContextRetrieveRequest, ContinuityListRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -187,7 +188,7 @@ class TestContinuityV3Phase4(unittest.TestCase):
                 continuity_verification_policy="prefer_healthy",
                 continuity_max_capsules=4,
             )
-            with patch("app.main._services", return_value=(settings, gm)), patch("app.continuity.service._trim_capsule", side_effect=lambda capsule, _max_tokens: (capsule, [])):
+            with patch("app.main._services", return_value=(settings, gm)), patch("app.continuity.context_state._trim_capsule", side_effect=lambda capsule, _max_tokens: (capsule, [])):
                 out = context_retrieve(req=req, auth=_AuthStub())
 
             state = out["bundle"]["continuity_state"]

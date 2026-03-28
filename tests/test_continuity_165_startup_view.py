@@ -10,10 +10,8 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.config import Settings
-from app.continuity.service import (
-    CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED,
-    _build_startup_summary,
-)
+from app.continuity.constants import CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED
+from app.continuity.trust import _build_startup_summary
 from app.main import continuity_read
 from app.models import ContinuityReadRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
