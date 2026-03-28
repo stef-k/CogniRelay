@@ -8,7 +8,7 @@ A fully-populated capsule with realistic content in every field is approximately
 
 ### Field count by object
 
-ContinuityCapsule (top-level): 15 fields
+ContinuityCapsule (top-level): 16 fields
 
 Nested objects when all optional fields are populated:
 
@@ -22,8 +22,9 @@ Nested objects when all optional fields are populated:
 - ContinuityFreshness: 3 fields
 - ContinuityVerificationState: 5 fields
 - ContinuityCapsuleHealth: 3 fields
+- StablePreference (×12): 3 fields each = 36 fields
 
-Total: **~58 distinct fields** across all nested objects.
+Total: **~94 distinct fields** across all nested objects.
 
 ### Maximum list items at full population
 
@@ -32,6 +33,7 @@ Total: **~58 distinct fields** across all nested objects.
 | ContinuityState lists (6 required) | 5 each = 30 strings | no per-item limit |
 | ContinuityState optional lists (5) | 3–5 each = 23 strings | no per-item limit |
 | `negative_decisions` | 4 × (160 + 240) = 1,600 chars | structured |
+| `stable_preferences` | 12 × (80 + 240) = 3,840 chars | structured |
 | `stance_summary` | 1 string | 240 chars |
 | `relationship_model` lists (2) | 5 each = 10 strings | no per-item limit |
 | `retrieval_hints` lists (3) | 8 each = 24 strings | no per-item limit |
@@ -66,9 +68,12 @@ The system is designed so that a fully-populated capsule with practical content 
 | `relationship_model` (`trust_level`, `preferred_style`, `sensitivity_notes`) | ~200 | up to 11 fields | Dropped early in trim order |
 | `attention_policy` (`early_load`, `presence_bias_overrides`) | ~175 | up to 13 strings | |
 | `source` + `canonical_sources` + `metadata` | ~280 | variable | |
+| `stable_preferences` (max 12 entries) | ~960 | up to 36 fields | Trimmed as whole unit under token pressure |
 | `verification_state` + `capsule_health` + `confidence` | ~185 | ~10 fields | |
 | Top-level metadata (`subject_kind`, `subject_id`, timestamps, etc.) | ~60 | ~6 fields | |
-| **Total (fully populated)** | **~2,400–2,800** | **~58 fields** | **~10 KB JSON** |
+| **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON (theoretical; see note below)** |
+
+> **Note on write-time size limit:** The server enforces a 12 KB serialized-UTF-8 cap on each capsule at write time. The ~14 KB figure above is the theoretical maximum when *every* optional field is populated at its maximum length simultaneously — a shape that exceeds the write limit and would be rejected. In practice a fully-featured capsule with realistic content fits within 10–11 KB. When populating both `stable_preferences` (up to ~4.6 KB at max lengths) and the full set of continuity fields, agents should expect to trade off less-critical optional content to stay within the 12 KB cap.
 
 ### Context window impact
 
@@ -86,7 +91,7 @@ The system is designed so that a fully-populated capsule with practical content 
 
 **Full capsule** — populate every field including `relationship_model`, `retrieval_hints`, `attention_policy`, `negative_decisions`, `session_trajectory`, `verification_state`, and `capsule_health`. This costs approximately **~2,400–2,800 tokens** and provides the richest possible orientation.
 
-**Under token pressure** — the system trims optional fields in deterministic order starting from the bottom of the `ContinuityState` table: `retrieval_hints` first, then `relationship_model`, `curiosity_queue`, `trailing_notes`, `negative_decisions`, `session_trajectory`, `long_horizon_commitments`, and `working_hypotheses`. The 6 required core lists and `stance_summary` are never trimmed.
+**Under token pressure** — the system trims optional fields in two phases. Phase 1 drops whole optional sections in deterministic order: `metadata`, `canonical_sources`, `freshness`, `attention_policy.presence_bias_overrides`, `relationship_model` sub-fields (`sensitivity_notes`, `preferred_style`), `retrieval_hints` sub-fields (`avoid`, `load_next`), `trailing_notes`, `curiosity_queue`, `negative_decisions`, `working_hypotheses`, then `stable_preferences` (dropped as a whole unit — all-or-nothing). Phase 2, if still over budget, progressively trims `retrieval_hints.must_include`, the remaining `relationship_model`, `long_horizon_commitments`, `stance_summary`, `drift_signals`, and finally the core lists. The 6 required core lists and `stance_summary` are trimmed only as a last resort. When `stable_preferences` is trimmed, `"stable_preferences"` appears in `trimmed_fields`.
 
 **Multi-capsule retrieval** — `POST /v1/context/retrieve` supports loading up to 4 capsules via `continuity_selectors` and `continuity_max_capsules`. At full population, 4 capsules would cost ~10,000–11,000 tokens. The `max_tokens_estimate` parameter (default 4,000) controls the total continuity token budget, and the system trims each capsule to fit.
 
@@ -102,6 +107,8 @@ Most list item strings in `ContinuityState` do not have a per-item character lim
 | `conflict_summary` (in `verification_state`) | 240 chars |
 | `subject_id` | 200 chars |
 | `source.producer` | 100 chars |
+| `stable_preferences[].tag` | 80 chars |
+| `stable_preferences[].content` | 240 chars |
 
 Agents should keep individual list item strings concise (roughly 80–120 chars) to stay within practical token budgets. Very long strings in many fields simultaneously would be legal but would consume disproportionate token budget for diminishing orientation value.
 
@@ -128,6 +135,17 @@ A continuity capsule is the core unit of orientation state. It is stored as a JS
 | `metadata` | object | no | default `{}` |
 | `verification_state` | ContinuityVerificationState | no | |
 | `capsule_health` | ContinuityCapsuleHealth | no | |
+| `stable_preferences` | list of StablePreference | no | max 12, default `[]`. Only valid on user/peer capsules (non-empty list on thread/task → HTTP 400). |
+
+### StablePreference
+
+A durable user/peer preference surfaced across sessions. Tags must be unique within a capsule's list.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `tag` | string | yes | 1–80 chars, unique within the list |
+| `content` | string | yes | 1–240 chars |
+| `set_at` | ISO datetime string | yes | UTC (Z suffix) |
 
 ### ContinuityState
 
@@ -334,18 +352,24 @@ When `view` is set to `"startup"`, the response includes one additional top-leve
       "completeness": { "orientation_adequate": true, "empty_orientation_fields": [], "trimmed": false, "trimmed_fields": [] },
       "integrity": { "source_state": "active", "health_status": "healthy", "health_reasons": [], "verification_status": "self_attested" },
       "scope_match": { "exact": true }
-    }
+    },
+    "stable_preferences": [
+      {"tag": "timezone", "content": "UTC+2 (Athens)", "set_at": "2026-03-20T10:00:00Z"},
+      {"tag": "no_emojis", "content": "Do not use emojis in responses", "set_at": "2026-03-15T14:30:00Z"}
+    ]
   }
 }
 ```
 
 `startup_summary.trust_signals` is the same trust_signals block as the top-level response key. It is `null` when `source_state` is `"missing"` or capsule is `null`.
 
+`startup_summary.stable_preferences` is the raw list of stable preferences from the capsule (tag + content + set_at). It is `[]` when the capsule has no preferences and `null` when `source_state` is `"missing"`. The list is capped at 12 entries (~4 KB worst case), comparable to the orientation tier.
+
 **`startup_summary` shape (missing capsule):**
 
-When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`, `updated_at` is `null`, `trust_signals` is `null`. The `recovery` block is always present and never null.
+When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`, `updated_at` is `null`, `trust_signals` is `null`, `stable_preferences` is `null`. The `recovery` block is always present and never null.
 
-**Key order contract:** Top-level keys are always `recovery`, `orientation`, `context`, `updated_at`, `trust_signals` in that order. Within each block, keys appear in the order shown above. Python 3.7+ dict insertion order is preserved through FastAPI/JSON serialization.
+**Key order contract:** Top-level keys are always `recovery`, `orientation`, `context`, `updated_at`, `trust_signals`, `stable_preferences` in that order. Within each block, keys appear in the order shown above. Python 3.7+ dict insertion order is preserved through FastAPI/JSON serialization.
 
 **Field defaults:**
 
@@ -398,7 +422,7 @@ Response includes `recovery_warnings` when the fallback snapshot refresh fails a
 | `include_archived` | boolean | no | default `false` |
 | `include_cold` | boolean | no | default `false` |
 
-Response includes `artifact_state` and `retention_class` for each entry. Archive entries include `archive_stale` classification based on `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`.
+Response includes `artifact_state` and `retention_class` for each entry. Archive entries include `archive_stale` classification based on `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`. Each summary entry includes `stable_preference_count` (integer, 0 when empty, `null` for cold stubs where the count cannot be determined without decompression).
 
 ### Archive — `POST /v1/continuity/archive`
 

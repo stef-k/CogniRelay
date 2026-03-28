@@ -679,6 +679,18 @@ class ContinuityState(BaseModel):
     retrieval_hints: Optional[ContinuityRetrievalHints] = None
 
 
+class StablePreference(BaseModel):
+    """A durable user/peer preference surfaced across sessions.
+
+    Stable preferences represent explicitly stated, cross-thread standing
+    instructions that the agent should honour regardless of thread context.
+    Tags must be unique within a capsule's ``stable_preferences`` list.
+    """
+    tag: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=240)
+    set_at: str
+
+
 class ContinuityCapsule(BaseModel):
     """Persisted continuity capsule for one subject."""
     schema_version: Literal["1.0"] = "1.0"
@@ -696,6 +708,7 @@ class ContinuityCapsule(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     verification_state: Optional[ContinuityVerificationState] = None
     capsule_health: Optional[ContinuityCapsuleHealth] = None
+    stable_preferences: List[StablePreference] = Field(default_factory=list, max_length=12)
 
 
 class SessionEndSnapshot(BaseModel):

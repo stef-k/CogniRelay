@@ -392,6 +392,21 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
             raise HTTPException(status_code=400, detail="Invalid metadata.interaction_boundary_kind")
     elif capsule.source.update_reason == "interaction_boundary":
         raise HTTPException(status_code=400, detail="metadata.interaction_boundary_kind is required when source.update_reason=interaction_boundary")
+    if capsule.stable_preferences:
+        if capsule.subject_kind not in ("user", "peer"):
+            raise HTTPException(
+                status_code=400,
+                detail="stable_preferences is only allowed for user and peer capsules",
+            )
+        seen_tags: set[str] = set()
+        for pref in capsule.stable_preferences:
+            _require_utc_timestamp(pref.set_at, "stable_preferences[].set_at")
+            if pref.tag in seen_tags:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Duplicate stable_preferences tag: {pref.tag}",
+                )
+            seen_tags.add(pref.tag)
     payload = capsule.model_dump(mode="json", exclude_none=True)
     canonical = canonical_json(payload)
     if len(canonical.encode("utf-8")) > 12 * 1024:
@@ -1365,6 +1380,7 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> tuple[dict[str, A
         "continuity.curiosity_queue",
         "continuity.negative_decisions",
         "continuity.working_hypotheses",
+        "stable_preferences",
     ):
         if _estimated_tokens(_render_value(payload)) <= max_tokens:
             break
@@ -1657,6 +1673,7 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
         orientation = None
         context = None
         updated_at = None
+        stable_preferences = None
     else:
         cont = capsule["continuity"]
         orientation = {
@@ -1672,6 +1689,7 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
             "active_concerns": list(cont.get("active_concerns", [])),
         }
         updated_at = capsule.get("updated_at")
+        stable_preferences = [dict(p) for p in capsule.get("stable_preferences", [])]
 
     return {
         "recovery": recovery,
@@ -1679,6 +1697,7 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
         "context": context,
         "updated_at": updated_at,
         "trust_signals": out.get("trust_signals"),
+        "stable_preferences": stable_preferences,
     }
 
 
@@ -2058,6 +2077,7 @@ def continuity_list_service(
                     "health_reasons": health_reasons,
                     "artifact_state": "active",
                     "retention_class": "active",
+                    "stable_preference_count": len(capsule.get("stable_preferences", [])),
                 }
             )
     if req.include_fallback:
@@ -2099,6 +2119,7 @@ def continuity_list_service(
                         "health_reasons": health_reasons,
                         "artifact_state": "fallback",
                         "retention_class": "fallback",
+                        "stable_preference_count": len(capsule.get("stable_preferences", [])),
                     }
                 )
     if req.include_archived:
@@ -2144,6 +2165,7 @@ def continuity_list_service(
                         "health_reasons": health_reasons,
                         "artifact_state": "archived",
                         "retention_class": retention_class,
+                        "stable_preference_count": len(capsule.get("stable_preferences", [])),
                     }
                 )
     if req.include_cold:
@@ -2190,6 +2212,7 @@ def continuity_list_service(
                         "cold_storage_path": frontmatter["cold_storage_path"],
                         "archived_at": frontmatter["archived_at"],
                         "cold_stored_at": frontmatter["cold_stored_at"],
+                        "stable_preference_count": None,
                     }
                 )
     artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}

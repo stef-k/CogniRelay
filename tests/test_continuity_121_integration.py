@@ -299,7 +299,7 @@ class TestStartupViewTrustSignals(unittest.TestCase):
             ss = out["startup_summary"]
             self.assertEqual(
                 list(ss.keys()),
-                ["recovery", "orientation", "context", "updated_at", "trust_signals"],
+                ["recovery", "orientation", "context", "updated_at", "trust_signals", "stable_preferences"],
             )
 
     def test_startup_missing_capsule_trust_signals_null(self) -> None:

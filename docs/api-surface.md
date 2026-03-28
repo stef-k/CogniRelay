@@ -201,3 +201,7 @@ Implementation notes that matter for operators and client authors:
 - host-local ops endpoints should rely on local transport boundaries; forwarded headers are proxy metadata, not a remote trust substitute
 
 For exact runtime expectations, use `GET /v1/discovery/tools` and `GET /v1/manifest`.
+
+## Changelog
+
+- **#124 — Stable user preferences**: Added `stable_preferences` (list of `StablePreference`) on `ContinuityCapsule`. Bounded to 12 entries; only valid on user/peer capsules. Included in read, startup summary, and context-retrieve paths. List summaries include `stable_preference_count`. Trimmed as a whole unit under token pressure. Fully backward-compatible (optional field with empty-list default, schema_version unchanged).
