@@ -285,6 +285,8 @@ Response:
 
 `trust_signals` is an objective, mechanical trust assessment of the returned capsule across four dimensions: recency, completeness, integrity, and scope_match. It is `null` when `capsule` is `null` (i.e. `source_state == "missing"`). No dimension produces a score — each exposes enumerated states and counts that consumers interpret. `completeness.trimmed` is always `false` on the read path (no token-budget trimming applies).
 
+On the context-retrieval path (`build_continuity_state`), trust_signals are budgeted as part of the delivered continuity token allocation. When the full trust_signals shape would leave insufficient room for capsule content, a **compact** form is emitted instead. The compact shape sets `"compact": true` and includes only the minimum subfields: `recency.phase`, `completeness.orientation_adequate`, `completeness.trimmed`, `integrity.source_state`, `integrity.health_status`, and `scope_match.exact`. If even the compact form cannot fit alongside minimum capsule content, trust_signals is `null` and the capsule is trimmed normally. When compact trust_signals are used, `recovery_warnings` includes `"trust_signals_compact"`.
+
 `source_state` is `"active"`, `"fallback"`, or `"missing"`. When `allow_fallback` is `false` (default) and the active capsule is missing, the response is an HTTP error. When `true`, the response degrades to fallback or missing state with appropriate `recovery_warnings`.
 
 #### Startup view (`view="startup"`)

@@ -146,6 +146,7 @@ CONTINUITY_PHASE_SEVERITY: dict[str, int] = {
     "expired": 4,
 }
 CONTINUITY_WARNING_TRUST_SIGNALS_FAILED = "trust_signals_build_failed"
+CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT = "trust_signals_compact"
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"
@@ -1408,9 +1409,14 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> tuple[dict[str, A
                 if not model:
                     continuity.pop("relationship_model", None)
         elif field == "long_horizon_commitments":
-            if field in continuity:
-                continuity.pop(field, None)
-                dropped.append(dotted_field)
+            current = continuity.get(field)
+            if isinstance(current, list):
+                before_len = len(current)
+                continuity[field] = _truncate_list(list(current), max(1, max_tokens // 4))
+                if len(continuity[field]) < before_len:
+                    dropped.append(dotted_field)
+                if not continuity[field]:
+                    continuity.pop(field, None)
         elif field == "stance_summary":
             before_val = str(continuity.get("stance_summary", ""))
             continuity["stance_summary"] = _truncate_string(before_val, max(1, max_tokens // 4))
@@ -1696,8 +1702,11 @@ def _build_trust_signals(
 ) -> dict[str, Any]:
     """Build per-capsule trust signals from objective, mechanical checks.
 
-    Pure function: deterministic, no I/O, no side effects.  Same capsule
-    and *now* always produce an identical result with identical key order.
+    Deterministic for valid capsules — no I/O, no side effects.  Same
+    capsule and *now* always produce an identical result with identical
+    key order.  May raise ``HTTPException`` on malformed capsule
+    timestamps (via ``_continuity_phase`` → ``_require_utc_timestamp``);
+    callers must wrap in try/except when graceful degradation is needed.
 
     Args:
         capsule: Raw capsule dict (pre-trim for ``build_continuity_state``).
@@ -1772,6 +1781,37 @@ def _build_trust_signals(
         "completeness": completeness,
         "integrity": integrity,
         "scope_match": scope_match,
+    }
+
+
+def _build_compact_trust_signals(
+    capsule: dict[str, Any],
+    now: datetime,
+    *,
+    source_state: str,
+    trimmed: bool = False,
+) -> dict[str, Any]:
+    """Build a reduced trust-signals shape for tight token budgets.
+
+    Contains the minimum subfields needed for trust assessment.  May raise
+    on malformed capsule timestamps (callers wrap in try/except).
+    """
+    phase, _ = _continuity_phase(capsule, now)
+    cont = capsule.get("continuity")
+    cont_dict = cont if isinstance(cont, dict) else {}
+    ol = cont_dict.get("open_loops")
+    tp = cont_dict.get("top_priorities")
+    ac = cont_dict.get("active_constraints")
+    ss = str(cont_dict.get("stance_summary", ""))
+    adequate = bool(ol and tp and ac and len(ss) >= _RESUME_QUALITY_STANCE_MIN_LEN)
+    health_status, _ = _capsule_health_summary(capsule)
+
+    return {
+        "compact": True,
+        "recency": {"phase": phase},
+        "completeness": {"orientation_adequate": adequate, "trimmed": trimmed},
+        "integrity": {"source_state": source_state, "health_status": health_status},
+        "scope_match": {"exact": source_state == "active"},
     }
 
 
@@ -3591,26 +3631,62 @@ def build_continuity_state(
         kind = selector["subject_kind"]
         subject_id = selector["subject_id"]
         resolution = selector["resolution"]
-        trimmed, trimmed_fields = _trim_capsule(row["capsule"], allocation)
+
+        # --- Build trust_signals BEFORE trimming to budget honestly ---
+        trust_signals_obj: dict[str, Any] | None = None
+        trust_tokens = 0
+        is_compact = False
+        try:
+            full_ts = _build_trust_signals(
+                row["capsule"],
+                now,
+                source_state=row["source_state"],
+                # trimmed/trimmed_fields filled in after trim pass below
+            )
+            full_ts_tokens = _estimated_tokens(_render_value(full_ts))
+            compact_ts = _build_compact_trust_signals(
+                row["capsule"],
+                now,
+                source_state=row["source_state"],
+            )
+            compact_ts_tokens = _estimated_tokens(_render_value(compact_ts))
+            # Choose full or compact based on whether full leaves room for capsule content
+            if full_ts_tokens < allocation:
+                trust_signals_obj = full_ts
+                trust_tokens = full_ts_tokens
+            elif compact_ts_tokens < allocation:
+                trust_signals_obj = compact_ts
+                trust_tokens = compact_ts_tokens
+                is_compact = True
+            # else: trust_signals_obj stays None — even compact doesn't fit
+        except Exception:
+            _logger.warning("per-capsule trust_signals failed; degrading to null", exc_info=True)
+            recovery_warnings.append(
+                _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED, kind, subject_id, multi_mode=multi_warning_mode)
+            )
+
+        capsule_allocation = allocation - trust_tokens
+        trimmed, trimmed_fields = _trim_capsule(row["capsule"], capsule_allocation)
         if trimmed is None:
             state["omitted_selectors"].append(_format_selector(kind, subject_id))
             warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUNCATED_MULTI, kind, subject_id, multi_mode=multi_warning_mode))
             continue
         trimmed["source_state"] = row["source_state"]
-        try:
-            trimmed["trust_signals"] = _build_trust_signals(
-                row["capsule"],
-                now,
-                source_state=row["source_state"],
-                trimmed=bool(trimmed_fields),
-                trimmed_fields=trimmed_fields,
-            )
-        except Exception:
-            _logger.warning("per-capsule trust_signals failed; degrading to null", exc_info=True)
+
+        # Attach trust_signals — update trimmed/trimmed_fields on full signals
+        if trust_signals_obj is not None:
+            if not is_compact and not trust_signals_obj.get("compact"):
+                trust_signals_obj["completeness"]["trimmed"] = bool(trimmed_fields)
+                trust_signals_obj["completeness"]["trimmed_fields"] = list(trimmed_fields) if trimmed_fields else []
+            elif is_compact:
+                trust_signals_obj["completeness"]["trimmed"] = bool(trimmed_fields)
+                recovery_warnings.append(
+                    _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode)
+                )
+            trimmed["trust_signals"] = trust_signals_obj
+        else:
             trimmed["trust_signals"] = None
-            recovery_warnings.append(
-                _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED, kind, subject_id, multi_mode=multi_warning_mode)
-            )
+
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
         if row["health_status"] == "degraded":

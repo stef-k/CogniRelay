@@ -188,7 +188,11 @@ class TestContinuityV2Phase2(unittest.TestCase):
             with patch("app.continuity.service._trim_capsule", side_effect=_record_trim):
                 state = build_continuity_state(repo_root=repo_root, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc))
 
-            self.assertEqual(allocations, [400, 400])
+            # Both capsules get equal allocation after subtracting trust_signals overhead
+            self.assertEqual(len(allocations), 2)
+            self.assertEqual(allocations[0], allocations[1], "even split expected")
+            self.assertLess(allocations[0], 400, "trust_signals overhead reduces capsule allocation")
+            self.assertGreater(allocations[0], 0, "capsule still gets positive allocation")
             self.assertTrue(state["present"])
 
     def test_required_mode_succeeds_when_one_selector_loads(self) -> None:

@@ -2,7 +2,8 @@
 
 Tests trust_signals presence, nullability, and structure through the
 actual endpoint paths: /v1/continuity/read, startup view, and
-build_continuity_state.
+build_continuity_state.  Also covers budget accounting, compact trust
+fallback, and all-fail aggregate degradation.
 """
 
 from __future__ import annotations
@@ -15,6 +16,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
+from app.continuity.service import (
+    CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT,
+    CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
+    _estimated_tokens,
+    _render_value,
+    build_continuity_state,
+)
 from app.main import continuity_read, context_retrieve
 from app.models import ContinuityReadRequest, ContextRetrieveRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
@@ -472,6 +480,144 @@ class TestBuildContinuityStateTrustSignals(unittest.TestCase):
             self.assertIn("recovery_warnings", state)
             self.assertIsInstance(state["warnings"], list)
             self.assertIsInstance(state["recovery_warnings"], list)
+
+
+# ---------------------------------------------------------------------------
+# Token budget accounting — trust_signals included in delivered total
+# ---------------------------------------------------------------------------
+
+
+class TestBudgetAccountingWithTrustSignals(unittest.TestCase):
+    """Trust signals tokens are counted in continuity_tokens_used."""
+
+    def test_tokens_used_includes_trust_signals(self) -> None:
+        """continuity_tokens_used should reflect the actual capsule + trust_signals."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write_capsule(repo, _capsule_payload())
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+                max_tokens_estimate=4000,
+            )
+            state = build_continuity_state(
+                repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+            )
+            self.assertTrue(state["present"])
+            cap = state["capsules"][0]
+            actual_tokens = _estimated_tokens(_render_value(cap))
+            reported = state["budget"]["continuity_tokens_used"]
+            self.assertEqual(reported, actual_tokens)
+
+    def test_tokens_used_within_budget(self) -> None:
+        """Reported tokens used should not exceed the reserved budget."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write_capsule(repo, _capsule_payload())
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+                max_tokens_estimate=4000,
+            )
+            state = build_continuity_state(
+                repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+            )
+            reserved = state["budget"]["continuity_tokens_reserved"]
+            used = state["budget"]["continuity_tokens_used"]
+            self.assertLessEqual(used, reserved)
+
+
+# ---------------------------------------------------------------------------
+# Compact trust signals under tight budgets
+# ---------------------------------------------------------------------------
+
+
+class TestCompactTrustSignalsOnRetrieval(unittest.TestCase):
+    """When budget is tight, compact trust_signals should be emitted."""
+
+    def test_compact_trust_on_tight_budget(self) -> None:
+        """Very tight budget should produce compact trust_signals."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write_capsule(repo, _capsule_payload())
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+                # Very small budget to force compact trust
+                max_tokens_estimate=500,
+            )
+            state = build_continuity_state(
+                repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+            )
+            if state["present"] and state["capsules"]:
+                cap = state["capsules"][0]
+                ts = cap.get("trust_signals")
+                if ts is not None and ts.get("compact"):
+                    # Compact shape has minimal keys
+                    self.assertTrue(ts["compact"])
+                    self.assertIn("phase", ts["recency"])
+                    self.assertIn("orientation_adequate", ts["completeness"])
+                    self.assertNotIn("trimmed_fields", ts.get("completeness", {}))
+                    # Warning should be present
+                    all_warnings = state.get("recovery_warnings", [])
+                    compact_warnings = [w for w in all_warnings if CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT in w]
+                    self.assertTrue(len(compact_warnings) > 0)
+
+    def test_normal_budget_uses_full_trust(self) -> None:
+        """Normal budget should produce full trust_signals without compact flag."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write_capsule(repo, _capsule_payload())
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+                max_tokens_estimate=4000,
+            )
+            state = build_continuity_state(
+                repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+            )
+            self.assertTrue(state["present"])
+            ts = state["capsules"][0]["trust_signals"]
+            self.assertIsNotNone(ts)
+            self.assertNotIn("compact", ts)
+            self.assertIn("trimmed_fields", ts["completeness"])
+
+
+# ---------------------------------------------------------------------------
+# All per-capsule trust_signals fail — aggregate degrades to null
+# ---------------------------------------------------------------------------
+
+
+class TestAllTrustSignalsFail(unittest.TestCase):
+    """When all per-capsule trust_signals raise, aggregate should be null."""
+
+    def test_all_fail_aggregate_null(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write_capsule(repo, _capsule_payload())
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "stef"}],
+            )
+
+            def _boom(*args, **kwargs):
+                raise RuntimeError("trust signals exploded")
+
+            with (
+                patch("app.continuity.service._build_trust_signals", side_effect=_boom),
+                patch("app.continuity.service._build_compact_trust_signals", side_effect=_boom),
+            ):
+                state = build_continuity_state(
+                    repo_root=repo, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc),
+                )
+            self.assertTrue(state["present"])
+            # Per-capsule trust_signals is null
+            self.assertIsNone(state["capsules"][0]["trust_signals"])
+            # Aggregate is null
+            self.assertIsNone(state["trust_signals"])
+            # Warning was emitted
+            failed_warnings = [w for w in state["recovery_warnings"] if CONTINUITY_WARNING_TRUST_SIGNALS_FAILED in w]
+            self.assertTrue(len(failed_warnings) > 0)
 
 
 if __name__ == "__main__":

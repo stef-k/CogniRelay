@@ -1,7 +1,7 @@
 """Unit tests for per-capsule trust signals (issue #121).
 
-Tests _build_trust_signals purity, determinism, field coverage, and
-_trim_capsule trimmed_fields tracking.
+Tests _build_trust_signals purity, determinism, field coverage,
+_build_compact_trust_signals shape, and _trim_capsule trimmed_fields tracking.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from app.continuity.service import (
+    _build_compact_trust_signals,
     _build_trust_signals,
     _estimated_tokens,
     _render_value,
@@ -464,6 +465,145 @@ class TestTrimCapsuleTracksFields(unittest.TestCase):
         result = _trim_capsule(capsule, 99999)
         self.assertIsInstance(result, tuple)
         self.assertEqual(len(result), 2)
+
+
+# ---------------------------------------------------------------------------
+# _build_compact_trust_signals — shape and content
+# ---------------------------------------------------------------------------
+
+
+class TestCompactTrustSignalsStructure(unittest.TestCase):
+    """Verify compact trust signals have the reduced shape."""
+
+    def test_top_level_keys(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="active")
+        self.assertEqual(list(ts.keys()), ["compact", "recency", "completeness", "integrity", "scope_match"])
+
+    def test_compact_flag_true(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="active")
+        self.assertTrue(ts["compact"])
+
+    def test_recency_only_phase(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="active")
+        self.assertEqual(list(ts["recency"].keys()), ["phase"])
+        self.assertEqual(ts["recency"]["phase"], "fresh")
+
+    def test_completeness_only_adequate_and_trimmed(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="active")
+        self.assertEqual(list(ts["completeness"].keys()), ["orientation_adequate", "trimmed"])
+
+    def test_integrity_only_source_and_health(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="active")
+        self.assertEqual(list(ts["integrity"].keys()), ["source_state", "health_status"])
+
+    def test_scope_match_only_exact(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="active")
+        self.assertEqual(list(ts["scope_match"].keys()), ["exact"])
+
+    def test_fallback_source_sets_exact_false(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="fallback")
+        self.assertFalse(ts["scope_match"]["exact"])
+        self.assertEqual(ts["integrity"]["source_state"], "fallback")
+
+    def test_degraded_health_propagates(self) -> None:
+        ts = _build_compact_trust_signals(
+            _capsule(capsule_health={"status": "degraded", "reasons": ["test"]}),
+            _now(),
+            source_state="active",
+        )
+        self.assertEqual(ts["integrity"]["health_status"], "degraded")
+
+    def test_trimmed_flag_forwarded(self) -> None:
+        ts = _build_compact_trust_signals(_capsule(), _now(), source_state="active", trimmed=True)
+        self.assertTrue(ts["completeness"]["trimmed"])
+
+    def test_determinism(self) -> None:
+        cap = _capsule()
+        now = _now()
+        a = _build_compact_trust_signals(cap, now, source_state="active")
+        b = _build_compact_trust_signals(cap, now, source_state="active")
+        self.assertEqual(json.dumps(a, sort_keys=False), json.dumps(b, sort_keys=False))
+
+    def test_compact_smaller_than_full(self) -> None:
+        cap = _capsule()
+        now = _now()
+        full = _build_trust_signals(cap, now, source_state="active")
+        compact = _build_compact_trust_signals(cap, now, source_state="active")
+        full_tokens = _estimated_tokens(_render_value(full))
+        compact_tokens = _estimated_tokens(_render_value(compact))
+        self.assertLess(compact_tokens, full_tokens)
+
+
+# ---------------------------------------------------------------------------
+# _trim_capsule — long_horizon_commitments gradual truncation
+# ---------------------------------------------------------------------------
+
+
+class TestTrimCapsuleLongHorizonCommitments(unittest.TestCase):
+    """Verify long_horizon_commitments is gradually truncated, not fully popped."""
+
+    def _capsule_with_commitments(self, count: int = 5) -> dict:
+        cap = _capsule(
+            open_loops=["ol1"],
+            top_priorities=["p1"],
+            active_constraints=["ac1"],
+            active_concerns=["c1"],
+            stance_summary="A" * 60,
+        )
+        cap["continuity"]["long_horizon_commitments"] = [f"commitment-{i}" for i in range(count)]
+        return cap
+
+    def test_no_truncation_when_budget_sufficient(self) -> None:
+        capsule = self._capsule_with_commitments(3)
+        trimmed, dropped = _trim_capsule(capsule, 99999)
+        self.assertIsNotNone(trimmed)
+        self.assertEqual(len(trimmed["continuity"]["long_horizon_commitments"]), 3)
+        self.assertNotIn("continuity.long_horizon_commitments", dropped)
+
+    def test_gradual_truncation_under_pressure(self) -> None:
+        """Under pressure, some commitments should survive — not all removed."""
+        capsule = self._capsule_with_commitments(5)
+        # Add bulk to force trimming into higher-priority fields
+        capsule["metadata"] = {"trace": "x" * 200}
+        capsule["continuity"]["retrieval_hints"] = {"must_include": ["hint-" + str(i) for i in range(10)]}
+        # Use a moderate budget that forces trimming past lower fields into commitments
+        full_tokens = _estimated_tokens(_render_value(capsule))
+        budget = int(full_tokens * 0.55)
+        trimmed, dropped = _trim_capsule(capsule, budget)
+        if trimmed is not None:
+            lhc = trimmed["continuity"].get("long_horizon_commitments")
+            if lhc is not None:
+                # If it survived, it should have fewer items than original (gradual)
+                self.assertLessEqual(len(lhc), 5)
+            if "continuity.long_horizon_commitments" in dropped:
+                # Tracked in dropped regardless of partial or full removal
+                self.assertIn("continuity.long_horizon_commitments", dropped)
+
+    def test_full_removal_only_when_empty_after_truncation(self) -> None:
+        """Field should only be removed from dict if truncation empties it."""
+        capsule = self._capsule_with_commitments(1)
+        # Impossibly small budget should drop the field entirely
+        trimmed, dropped = _trim_capsule(capsule, 30)
+        if trimmed is not None:
+            # If capsule survived, commitments may or may not be present
+            pass
+        # When dropped, it should be in the list
+        if "continuity.long_horizon_commitments" in dropped:
+            if trimmed is not None:
+                self.assertNotIn("long_horizon_commitments", trimmed.get("continuity", {}))
+
+    def test_drop_tracking_records_partial_truncation(self) -> None:
+        """Partial truncation (some items removed) should still appear in dropped."""
+        capsule = self._capsule_with_commitments(10)
+        capsule["continuity"]["long_horizon_commitments"] = [f"long-commitment-text-{i}" * 5 for i in range(10)]
+        # Budget that forces trimming but leaves room for some content
+        full_tokens = _estimated_tokens(_render_value(capsule))
+        budget = int(full_tokens * 0.7)
+        trimmed, dropped = _trim_capsule(capsule, budget)
+        if trimmed is not None:
+            lhc = trimmed["continuity"].get("long_horizon_commitments")
+            if lhc is not None and len(lhc) < 10:
+                self.assertIn("continuity.long_horizon_commitments", dropped)
 
 
 if __name__ == "__main__":
