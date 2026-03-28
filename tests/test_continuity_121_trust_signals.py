@@ -252,6 +252,17 @@ class TestTrustSignalsCompleteness(unittest.TestCase):
             ["active_concerns", "active_constraints", "drift_signals", "open_loops", "stance_summary", "top_priorities"],
         )
 
+    def test_adequate_but_non_required_fields_empty(self) -> None:
+        """orientation_adequate=True with non-empty empty_orientation_fields is valid."""
+        ts = _build_trust_signals(
+            _capsule(active_concerns=[], drift_signals=[]),
+            _now(),
+            source_state="active",
+        )
+        self.assertTrue(ts["completeness"]["orientation_adequate"])
+        self.assertIn("active_concerns", ts["completeness"]["empty_orientation_fields"])
+        self.assertIn("drift_signals", ts["completeness"]["empty_orientation_fields"])
+
     def test_trimmed_false_by_default(self) -> None:
         ts = _build_trust_signals(_capsule(), _now(), source_state="active")
         self.assertFalse(ts["completeness"]["trimmed"])

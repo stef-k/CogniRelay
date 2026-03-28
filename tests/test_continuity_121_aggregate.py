@@ -275,6 +275,19 @@ class TestAggregateScopeMatch(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestAggregateEdgeCases(unittest.TestCase):
+    """Verify edge case handling."""
+
+    def test_empty_signals_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            _build_aggregate_trust_signals(
+                [],
+                selectors_requested=0,
+                selectors_returned=0,
+                selectors_omitted=0,
+            )
+
+
 class TestAggregatePurity(unittest.TestCase):
     """Verify pure function guarantees."""
 

@@ -1786,7 +1786,12 @@ def _build_aggregate_trust_signals(
 
     Pure function: deterministic, no I/O, no side effects.  Same inputs
     always produce an identical result with identical key order.
+
+    Raises ``ValueError`` if *per_capsule_signals* is empty — callers
+    must guard against the empty case before invoking.
     """
+    if not per_capsule_signals:
+        raise ValueError("per_capsule_signals must be non-empty")
     # -- recency --
     phases = [s["recency"]["phase"] for s in per_capsule_signals]
     worst_phase = max(phases, key=lambda p: CONTINUITY_PHASE_SEVERITY.get(p, CONTINUITY_PHASE_SEVERITY["expired"]))
@@ -3603,6 +3608,9 @@ def build_continuity_state(
         except Exception:
             _logger.warning("per-capsule trust_signals failed; degrading to null", exc_info=True)
             trimmed["trust_signals"] = None
+            recovery_warnings.append(
+                _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED, kind, subject_id, multi_mode=multi_warning_mode)
+            )
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
         if row["health_status"] == "degraded":
