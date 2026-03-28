@@ -172,9 +172,9 @@ class TestContinuityV2Phase2(unittest.TestCase):
             self._write_capsule(repo_root, subject_kind="user", subject_id="b")
             allocations: list[int] = []
 
-            def _record_trim(capsule: dict, max_tokens: int) -> dict:
+            def _record_trim(capsule: dict, max_tokens: int) -> tuple[dict, list[str]]:
                 allocations.append(max_tokens)
-                return capsule
+                return capsule, []
 
             req = ContextRetrieveRequest(
                 task="resume",

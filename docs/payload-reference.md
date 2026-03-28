@@ -255,9 +255,35 @@ Response:
   "capsule": { },
   "archived": false,
   "source_state": "active",
-  "recovery_warnings": []
+  "recovery_warnings": [],
+  "trust_signals": {
+    "recency": {
+      "updated_age_seconds": 3600,
+      "verified_age_seconds": 7200,
+      "phase": "fresh",
+      "freshness_class": "durable",
+      "stale_threshold_seconds": 15552000
+    },
+    "completeness": {
+      "orientation_adequate": true,
+      "empty_orientation_fields": [],
+      "trimmed": false,
+      "trimmed_fields": []
+    },
+    "integrity": {
+      "source_state": "active",
+      "health_status": "healthy",
+      "health_reasons": [],
+      "verification_status": "self_attested"
+    },
+    "scope_match": {
+      "exact": true
+    }
+  }
 }
 ```
+
+`trust_signals` is an objective, mechanical trust assessment of the returned capsule across four dimensions: recency, completeness, integrity, and scope_match. It is `null` when `capsule` is `null` (i.e. `source_state == "missing"`). No dimension produces a score — each exposes enumerated states and counts that consumers interpret. `completeness.trimmed` is always `false` on the read path (no token-budget trimming applies).
 
 `source_state` is `"active"`, `"fallback"`, or `"missing"`. When `allow_fallback` is `false` (default) and the active capsule is missing, the response is an HTTP error. When `true`, the response degrades to fallback or missing state with appropriate `recovery_warnings`.
 
@@ -287,16 +313,19 @@ When `view` is set to `"startup"`, the response includes one additional top-leve
       "stance_summary": "...",
       "active_concerns": ["..."]
     },
-    "updated_at": "2026-03-24T18:06:26Z"
+    "updated_at": "2026-03-24T18:06:26Z",
+    "trust_signals": { "recency": {}, "completeness": {}, "integrity": {}, "scope_match": {} }
   }
 }
 ```
 
+`startup_summary.trust_signals` is the same trust_signals block as the top-level response key. It is `null` when `source_state` is `"missing"` or capsule is `null`.
+
 **`startup_summary` shape (missing capsule):**
 
-When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`, `updated_at` is `null`. The `recovery` block is always present and never null.
+When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`, `updated_at` is `null`, `trust_signals` is `null`. The `recovery` block is always present and never null.
 
-**Key order contract:** Top-level keys are always `recovery`, `orientation`, `context`, `updated_at` in that order. Within each block, keys appear in the order shown above. Python 3.7+ dict insertion order is preserved through FastAPI/JSON serialization.
+**Key order contract:** Top-level keys are always `recovery`, `orientation`, `context`, `updated_at`, `trust_signals` in that order. Within each block, keys appear in the order shown above. Python 3.7+ dict insertion order is preserved through FastAPI/JSON serialization.
 
 **Field defaults:**
 
@@ -407,7 +436,8 @@ Response:
     "notes": ["..."],
     "continuity_state": {
       "present": true,
-      "capsules": [{"source_state": "active", "...": "..."}],
+      "capsules": [{"source_state": "active", "trust_signals": {"recency": {}, "completeness": {}, "integrity": {}, "scope_match": {}}, "...": "..."}],
+      "trust_signals": {"recency": {"worst_phase": "fresh", "oldest_updated_age_seconds": 0, "oldest_verified_age_seconds": 0}, "completeness": {"all_adequate": true, "adequate_count": 1, "total_count": 1, "any_trimmed": false}, "integrity": {"worst_health": "healthy", "any_fallback": false, "any_degraded": false, "any_conflicted": false}, "scope_match": {"selectors_requested": 1, "selectors_returned": 1, "selectors_omitted": 0, "all_returned": true}},
       "warnings": [],
       "fallback_used": false,
       "recovery_warnings": []

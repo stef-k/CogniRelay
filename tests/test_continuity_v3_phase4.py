@@ -187,7 +187,7 @@ class TestContinuityV3Phase4(unittest.TestCase):
                 continuity_verification_policy="prefer_healthy",
                 continuity_max_capsules=4,
             )
-            with patch("app.main._services", return_value=(settings, gm)), patch("app.continuity.service._trim_capsule", side_effect=lambda capsule, _max_tokens: capsule):
+            with patch("app.main._services", return_value=(settings, gm)), patch("app.continuity.service._trim_capsule", side_effect=lambda capsule, _max_tokens: (capsule, [])):
                 out = context_retrieve(req=req, auth=_AuthStub())
 
             state = out["bundle"]["continuity_state"]
@@ -296,7 +296,7 @@ class TestContinuityV3Phase4(unittest.TestCase):
             ],
         )
 
-        trimmed = _trim_capsule(payload, 240)
+        trimmed, _ = _trim_capsule(payload, 240)
 
         self.assertIsNotNone(trimmed)
         assert trimmed is not None

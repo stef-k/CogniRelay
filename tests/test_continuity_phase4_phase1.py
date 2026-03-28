@@ -297,6 +297,7 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
                 repo_root=repo_root,
                 auth=_AuthStub(),
                 req=ContinuityReadRequest(subject_kind="user", subject_id="stef", allow_fallback=True),
+                now=datetime.now(timezone.utc),
                 audit=lambda *_args: None,
             )
 
@@ -315,6 +316,7 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
                 repo_root=repo_root,
                 auth=_AuthStub(),
                 req=ContinuityReadRequest(subject_kind="user", subject_id="stef", allow_fallback=True),
+                now=datetime.now(timezone.utc),
                 audit=lambda *_args: None,
             )
 
@@ -334,6 +336,7 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
                     repo_root=repo_root,
                     auth=_AuthStub(),
                     req=ContinuityReadRequest(subject_kind="user", subject_id="stef", allow_fallback=False),
+                    now=datetime.now(timezone.utc),
                     audit=lambda *_args: None,
                 )
 
@@ -353,6 +356,7 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
                     repo_root=repo_root,
                     auth=_AuthStub(),
                     req=ContinuityReadRequest(subject_kind="user", subject_id="stef", allow_fallback=True),
+                    now=datetime.now(timezone.utc),
                     audit=lambda *_args: None,
                 )
 
@@ -371,6 +375,7 @@ class TestContinuityPhase4Phase1(unittest.TestCase):
                     repo_root=repo_root,
                     auth=_RejectingReadAuthStub(),
                     req=ContinuityReadRequest(subject_kind="user", subject_id="stef", allow_fallback=True),
+                    now=datetime.now(timezone.utc),
                     audit=lambda *_args: None,
                 )
 
