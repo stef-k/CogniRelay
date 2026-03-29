@@ -5,6 +5,19 @@ All notable changes to CogniRelay are documented in this file.
 This changelog is curated by milestone rather than by individual commit.
 It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
+## [1.0.1] - 2026-03-29
+
+`v1.0.1` is a documentation-only patch release that clarifies a core property
+of the stabilized system.
+
+### Clarified
+
+- Documented explicitly that CogniRelay is agent-agnostic: it does not depend
+  on a specific model provider, agent runtime, or orchestration framework, as
+  long as an agent can call its API surfaces.
+- Added the clarification in the README and the system overview so the project
+  positioning and architecture docs stay aligned with the current system.
+
 ## [1.0.0] - 2026-03-29
 
 v1.0.0 marks the stabilization of the core CogniRelay system: a durable,
