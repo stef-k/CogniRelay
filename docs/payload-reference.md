@@ -277,8 +277,11 @@ When `update_reason` is `"interaction_boundary"`, the capsule must also include 
 | `session_end_snapshot` | SessionEndSnapshot | no | See below |
 | `lifecycle_transition` | `"suspend"` \| `"resume"` \| `"conclude"` \| `"supersede"` | no | When provided, atomically transitions the capsule's `thread_descriptor.lifecycle` as part of this upsert. |
 | `superseded_by` | string | no | max 200 chars. Required when `lifecycle_transition` is `"supersede"`. Sets `thread_descriptor.superseded_by`. |
+| `merge_mode` | `"replace"` \| `"preserve"` | no | Default `"replace"`. When `"preserve"`, fields absent from the incoming capsule JSON are preserved from the stored capsule rather than being overwritten. See [Preserve-by-default merge](#preserve-by-default-merge) below. |
 
 Response includes `recovery_warnings` (list of strings) when the fallback snapshot refresh fails after the active write has already committed.
+
+Response includes `normalizations_applied` (list of strings) describing write-path normalizations that fired (e.g. `"strip:continuity.open_loops"`, `"dedup:stable_preferences"`). Empty list when no normalizations fired.
 
 #### Session-end snapshot helper
 
@@ -308,6 +311,77 @@ Per-item string length constraints (e.g. each ≤ 160 chars for list fields, eac
 | `resume_quality` | `{"adequate": bool}` | `true` iff all P0 fields are non-empty and `stance_summary` ≥ 30 chars |
 
 When `session_end_snapshot` is omitted or null, behavior and response are identical to the baseline — no merge, no additional response keys.
+
+#### Preserve-by-default merge
+
+When `merge_mode` is `"preserve"`, the service inspects the raw JSON body to determine per-field intent:
+
+- **Required list fields** (`top_priorities`, `active_concerns`, `active_constraints`, `open_loops`, `drift_signals`): `[]` in JSON → preserve stored value; non-empty → override.
+- **Optional list fields** (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `trailing_notes`, `curiosity_queue`, `negative_decisions`, `rationale_entries`): absent → preserve; `[]` → override to empty; `null` → clear; non-empty → override.
+- **Optional object fields** (`relationship_model`, `retrieval_hints`): absent → preserve; `null` → clear; present → override.
+- **Capsule-level fields** (`attention_policy`, `freshness`, `canonical_sources`, `metadata`, `stable_preferences`): absent → preserve; `null` → clear to type-appropriate empty; present → override.
+- **`thread_descriptor`**: absent → preserve entire stored descriptor; `null` → clear; present → merge sub-fields (`keywords`, `scope_anchors`, `identity_anchors` are individually merge-eligible).
+
+Session-end snapshot fields are treated as explicitly provided and are not merged from stored. Lifecycle transitions run after the merge.
+
+### Patch — `POST /v1/continuity/patch`
+
+Applies partial list-field mutations to an existing capsule. All operations execute atomically within the subject lock — if any operation fails, none apply.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `subject_kind` | `"user"` \| `"peer"` \| `"thread"` \| `"task"` | yes | |
+| `subject_id` | string | yes | 1–200 chars |
+| `updated_at` | string (ISO UTC) | yes | Must be strictly newer than stored `updated_at` |
+| `operations` | list of PatchOperation | yes | 1–10 operations |
+| `commit_message` | string | no | max 240 chars |
+
+**PatchOperation:**
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `target` | string | yes | Dotted path to list field (e.g. `continuity.open_loops`, `stable_preferences`, `thread_descriptor.keywords`) |
+| `action` | `"append"` \| `"remove"` \| `"replace_at"` | yes | |
+| `value` | any | append/replace_at | String for string-list targets; full object for structured-list targets |
+| `match` | string | remove, structured replace_at | Exact string for string lists; key match for structured lists (`tag`, `decision`, `kind:value`) |
+| `index` | integer | string-list replace_at | 0-based index |
+
+Response includes `operations_applied` (count) and `normalizations_applied` (list).
+
+### Lifecycle — `POST /v1/continuity/lifecycle`
+
+Standalone lifecycle transition for thread/task capsules without a full upsert. Only mutates `lifecycle`, `superseded_by`, and `updated_at`.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `subject_kind` | `"thread"` \| `"task"` | yes | |
+| `subject_id` | string | yes | 1–200 chars |
+| `transition` | `"suspend"` \| `"resume"` \| `"conclude"` \| `"supersede"` | yes | |
+| `superseded_by` | string | supersede only | max 200 chars. Required when `transition` is `"supersede"` |
+| `updated_at` | string (ISO UTC) | yes | Must be strictly newer than stored `updated_at` |
+| `commit_message` | string | no | max 240 chars |
+
+Response includes `lifecycle` (new state) and `previous_lifecycle`.
+
+### Reduced-Authoring Patterns
+
+The three endpoints above — preserve-mode upsert, patch, and lifecycle — reduce agent authoring burden through deterministic mechanical assistance. Each avoids full-capsule rewrites for common operations:
+
+**Preserve-mode upsert** (`merge_mode="preserve"`): Send only the fields you want to change. Omitted fields are carried forward from the stored capsule. Required list fields sent as `[]` are treated as "not provided" and preserved. Example: update `stance_summary` and `top_priorities` without re-sending `open_loops`, `relationship_model`, `stable_preferences`, etc.
+
+**Patch** (`POST /v1/continuity/patch`): Append, remove, or replace individual items in list fields without rewriting the full list. Example: append one `rationale_entry` or remove a specific `open_loop` by exact match, with atomic all-or-nothing semantics.
+
+**Lifecycle** (`POST /v1/continuity/lifecycle`): Transition a thread or task capsule's lifecycle state (`suspend`, `resume`, `conclude`, `supersede`) without submitting a full capsule upsert. Only `lifecycle`, `superseded_by`, and `updated_at` change.
+
+#### Mechanical vs Agent-Authored Responsibilities
+
+These three endpoints provide *mechanical assistance* — deterministic structural operations that reduce the agent's authoring burden. CogniRelay does not generate, infer, or synthesize semantic content through any of these surfaces.
+
+**What the system handles mechanically:** field retention in preserve mode, atomic list-item mutations via patch, standalone lifecycle transitions, write-path normalization/deduplication (reported via `normalizations_applied`), and fallback snapshot refresh after successful writes.
+
+**What agents must still author explicitly:** all meaning-bearing content — `stance_summary`, `source`, `confidence`, priorities, constraints, concerns, loops, drift signals, rationale entries, stable preferences, negative decisions, hypotheses, commitments, trajectory, labels, keywords, scope anchors, and identity anchors. The system stores, merges, and retrieves this content but never originates it.
+
+For the full responsibility matrix, conceptual rationale, and worked examples, see [System Overview: Mechanical Assistance and Agent Authorship](system-overview.md#mechanical-assistance-and-agent-authorship).
 
 ### Read — `POST /v1/continuity/read`
 

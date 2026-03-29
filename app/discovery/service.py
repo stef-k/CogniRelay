@@ -29,7 +29,9 @@ from app.models import (
     ContinuityArchiveRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
+    ContinuityLifecycleRequest,
     ContinuityListRequest,
+    ContinuityPatchRequest,
     ContinuityRetentionPlanRequest,
     ContinuityRefreshPlanRequest,
     ContinuityReadRequest,
@@ -361,6 +363,24 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
             "idempotent": False,
             "input_schema": schema_for_model(ContinuityDeleteRequest),
+        },
+        {
+            "name": "continuity.patch",
+            "description": "Apply partial list-field patch operations to an existing continuity capsule.",
+            "method": "POST",
+            "path": "/v1/continuity/patch",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(ContinuityPatchRequest),
+        },
+        {
+            "name": "continuity.lifecycle",
+            "description": "Apply a standalone lifecycle transition to a thread or task capsule.",
+            "method": "POST",
+            "path": "/v1/continuity/lifecycle",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": schema_for_model(ContinuityLifecycleRequest),
         },
         {
             "name": "coordination.handoff_create",
@@ -1090,6 +1110,8 @@ def invoke_tool_by_name(
     continuity_list: Callable[[ContinuityListRequest, AuthContext | None], dict[str, Any]],
     continuity_archive: Callable[[ContinuityArchiveRequest, AuthContext | None], dict[str, Any]],
     continuity_delete: Callable[[ContinuityDeleteRequest, AuthContext | None], dict[str, Any]],
+    continuity_patch: Callable[[ContinuityPatchRequest, AuthContext | None], dict[str, Any]],
+    continuity_lifecycle: Callable[[ContinuityLifecycleRequest, AuthContext | None], dict[str, Any]],
     handoff_create: Callable[[CoordinationHandoffCreateRequest, AuthContext | None], dict[str, Any]],
     handoff_read: Callable[[str, AuthContext | None], dict[str, Any]],
     handoff_query: Callable[[CoordinationHandoffQueryRequest, AuthContext | None], dict[str, Any]],
@@ -1205,6 +1227,10 @@ def invoke_tool_by_name(
         return continuity_archive(ContinuityArchiveRequest(**args), auth)
     if name == "continuity.delete":
         return continuity_delete(ContinuityDeleteRequest(**args), auth)
+    if name == "continuity.patch":
+        return continuity_patch(ContinuityPatchRequest(**args), auth)
+    if name == "continuity.lifecycle":
+        return continuity_lifecycle(ContinuityLifecycleRequest(**args), auth)
     if name == "coordination.handoff_create":
         return handoff_create(CoordinationHandoffCreateRequest(**args), auth)
     if name == "coordination.handoff_read":
@@ -1547,6 +1573,15 @@ def capabilities_v1_payload() -> dict[str, Any]:
             "continuity.stable_preferences": {
                 "summary": "Stable user and peer preferences persisted on continuity capsules",
             },
+            "continuity.upsert.preserve_mode": {
+                "summary": "Preserve-by-default field merge on upsert with merge_mode='preserve'",
+            },
+            "continuity.patch": {
+                "summary": "Partial list-field patch operations on existing continuity capsules",
+            },
+            "continuity.lifecycle": {
+                "summary": "Standalone lifecycle transitions for thread and task capsules",
+            },
             "context.retrieve.continuity_state": {
                 "summary": "Multi-capsule continuity-oriented context bundles with fallback and degradation",
             },
@@ -1610,6 +1645,8 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "POST /v1/continuity/list": {"scope": "read:files"},
             "POST /v1/continuity/archive": {"scope": "write:projects"},
             "POST /v1/continuity/delete": {"scope": "write:projects"},
+            "POST /v1/continuity/patch": {"scope": "write:projects"},
+            "POST /v1/continuity/lifecycle": {"scope": "write:projects"},
             "POST /v1/coordination/handoff/create": {"scope": "write:projects"},
             "GET /v1/coordination/handoff/{handoff_id}": {"scope": "authenticated sender|recipient|admin"},
             "GET /v1/coordination/handoffs/query": {"scope": "read:files"},

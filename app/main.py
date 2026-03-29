@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -42,7 +43,9 @@ from .continuity import (
     continuity_cold_store_service,
     continuity_compare_service,
     continuity_delete_service,
+    continuity_lifecycle_service,
     continuity_list_service,
+    continuity_patch_service,
     continuity_read_service,
     continuity_retention_apply_service,
     continuity_retention_plan_service,
@@ -105,7 +108,9 @@ from .models import (
     ContinuityColdStoreRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
+    ContinuityLifecycleRequest,
     ContinuityListRequest,
+    ContinuityPatchRequest,
     ContinuityReadRequest,
     ContinuityRetentionApplyRequest,
     ContinuityRetentionPlanRequest,
@@ -259,6 +264,25 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(title="CogniRelay", version="0.3.0", lifespan=_lifespan)
 
 
+@app.middleware("http")
+async def _cache_raw_json_body(request: FastAPIRequest, call_next):  # type: ignore[no-untyped-def]
+    """Cache the raw JSON body on request.state for preserve-mode upsert.
+
+    Only activates for the continuity upsert endpoint when the body
+    contains ``"merge_mode": "preserve"``.  All other requests pass
+    through untouched.
+    """
+    if request.url.path.endswith("/v1/continuity/upsert") and request.method == "POST":
+        body_bytes = await request.body()
+        try:
+            raw = json.loads(body_bytes)
+            if isinstance(raw, dict) and raw.get("merge_mode") == "preserve":
+                request.state.raw_json_body = raw
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _log.warning("Failed to parse raw JSON body for preserve-mode upsert")  # let downstream validation handle malformed JSON
+    return await call_next(request)
+
+
 def _services() -> tuple:
     """Load settings and ensure the repository-backed git manager is ready."""
     settings = get_settings()
@@ -375,6 +399,8 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         continuity_list=lambda req, auth_ctx: continuity_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_archive=lambda req, auth_ctx: continuity_archive(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_delete=lambda req, auth_ctx: continuity_delete(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_patch=lambda req, auth_ctx: continuity_patch(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_lifecycle=lambda req, auth_ctx: continuity_lifecycle(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_create=lambda req, auth_ctx: coordination_handoff_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_read=lambda handoff_id, auth_ctx: coordination_handoff_read(handoff_id=handoff_id, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_query=lambda req, auth_ctx: coordination_handoffs_query(
@@ -805,11 +831,47 @@ def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -
     )
 
 
+def _extract_cached_raw_body(request: FastAPIRequest) -> dict | None:
+    """FastAPI dependency that extracts the cached raw JSON body for preserve-mode upsert."""
+    return getattr(request.state, "raw_json_body", None)
+
+
 @app.post("/v1/continuity/upsert")
-def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+def continuity_upsert(
+    req: ContinuityUpsertRequest,
+    auth: AuthContext = Depends(require_auth),
+    raw_body: dict | None = Depends(_extract_cached_raw_body),
+) -> dict:
     """Store or replace a continuity capsule."""
     settings, gm = _services()
     return continuity_upsert_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        raw_body=raw_body,
+        audit=_make_audit(settings, gm),
+    )
+
+
+@app.post("/v1/continuity/patch")
+def continuity_patch(req: ContinuityPatchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Apply partial list-field patch operations to an existing continuity capsule."""
+    settings, gm = _services()
+    return continuity_patch_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        audit=_make_audit(settings, gm),
+    )
+
+
+@app.post("/v1/continuity/lifecycle")
+def continuity_lifecycle(req: ContinuityLifecycleRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Apply a standalone lifecycle transition to a thread or task capsule."""
+    settings, gm = _services()
+    return continuity_lifecycle_service(
         repo_root=settings.repo_root,
         gm=gm,
         auth=auth,
