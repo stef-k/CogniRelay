@@ -26,10 +26,12 @@ from app.continuity.constants import (
     CONTINUITY_WARNING_FALLBACK_MISSING,
     CONTINUITY_WARNING_FALLBACK_USED,
     CONTINUITY_WARNING_INVALID,
+    CONTINUITY_WARNING_SALIENCE_OMITTED,
     CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED,
     CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT,
     CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
     CONTINUITY_WARNING_TRUNCATED_MULTI,
+    _SALIENCE_NULL_OVERHEAD_TOKENS,
     _TRUST_SIGNALS_NULL_OVERHEAD_TOKENS,
 )
 from app.continuity.freshness import (
@@ -53,6 +55,9 @@ from app.continuity.trimming import (
     _estimated_tokens,
     _render_value,
     _trim_capsule,
+)
+from app.continuity.salience import (
+    _salience_block,
 )
 from app.continuity.trust import (
     _build_aggregate_trust_signals,
@@ -223,10 +228,22 @@ def _trim_and_attach_trust(
     now: datetime,
     multi_warning_mode: bool,
     omitted_selectors: list[str],
-) -> tuple[list[dict[str, Any]], list[str], list[str], list[str]]:
-    """Allocate token budget, trim capsules, and attach per-capsule trust signals.
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[str], list[dict[str, Any]]]:
+    """Allocate token budget, trim capsules, and attach per-capsule trust and salience signals.
 
-    Returns ``(trimmed_capsules, trimmed_selection_order, warnings, recovery_warnings)``.
+    The *loaded* list must already be in salience-sorted order.  Each
+    capsule receives a ``salience`` block (§4a) with its 1-indexed rank
+    and sort-key explanation.  If the salience block cannot fit within
+    the per-capsule token allocation after trust signals, it is omitted
+    and a ``continuity_salience_omitted`` recovery warning is emitted.
+    Salience is a soft budget cost: when including the salience block
+    would cause a capsule to be omitted entirely, salience is dropped
+    and the capsule is retried without it.
+
+    Returns ``(trimmed_capsules, trimmed_selection_order, warnings,
+    recovery_warnings, survived_rows)``.  *survived_rows* contains the
+    original loaded-row dicts for capsules that made it into the output,
+    in the same order as *trimmed_capsules*.
     Appends omitted-selector labels to *omitted_selectors* in place.
     """
     count = len(loaded)
@@ -237,6 +254,10 @@ def _trim_and_attach_trust(
     trimmed_selection_order: list[str] = []
     warnings: list[str] = []
     recovery_warnings: list[str] = []
+    survived_rows: list[dict[str, Any]] = []
+
+    # Rank is 1-indexed and sequential over capsules that survive trimming.
+    emitted_rank = 0
 
     for idx, row in enumerate(loaded):
         allocation = base + (1 if idx < remainder else 0)
@@ -254,12 +275,39 @@ def _trim_and_attach_trust(
         if build_failed:
             recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED, kind, subject_id, multi_mode=multi_warning_mode))
 
-        capsule_allocation = allocation - trust_tokens
+        # --- Pre-compute salience block with placeholder rank for token estimation ---
+        try:
+            salience_obj: dict[str, Any] | None = _salience_block(row, now, rank=0)
+            salience_tokens = _estimated_tokens(_render_value(salience_obj))
+        except Exception:
+            _logger.warning("salience block build failed; degrading to null", exc_info=True)
+            salience_obj = None
+            salience_tokens = _SALIENCE_NULL_OVERHEAD_TOKENS
+            recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_SALIENCE_OMITTED, kind, subject_id, multi_mode=multi_warning_mode))
+
+        # --- Trim capsule: try with salience, fall back without ---
+        capsule_allocation = allocation - trust_tokens - salience_tokens
         trimmed, trimmed_fields = _trim_capsule(row["capsule"], capsule_allocation)
+
+        if trimmed is None and salience_obj is not None:
+            # Salience is a soft cost — retry without it to save the capsule.
+            capsule_allocation = allocation - trust_tokens - _SALIENCE_NULL_OVERHEAD_TOKENS
+            trimmed, trimmed_fields = _trim_capsule(row["capsule"], capsule_allocation)
+            if trimmed is not None:
+                salience_obj = None
+                salience_tokens = _SALIENCE_NULL_OVERHEAD_TOKENS
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_SALIENCE_OMITTED, kind, subject_id, multi_mode=multi_warning_mode))
+
         if trimmed is None:
             omitted_selectors.append(_format_selector(kind, subject_id))
             warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUNCATED_MULTI, kind, subject_id, multi_mode=multi_warning_mode))
             continue
+
+        # --- Capsule survived: assign sequential rank ---
+        emitted_rank += 1
+        if salience_obj is not None:
+            salience_obj["rank"] = emitted_rank
+
         trimmed["source_state"] = row["source_state"]
 
         # Attach trust_signals — update trimmed/trimmed_fields on full signals,
@@ -278,14 +326,28 @@ def _trim_and_attach_trust(
             recovery_warnings=recovery_warnings,
         )
 
+        # Attach salience block.  If the salience block was pre-computed
+        # but the overall capsule now exceeds its allocation, drop the
+        # salience block and emit a warning.
+        if salience_obj is not None:
+            total_tokens = _estimated_tokens(_render_value(trimmed)) + salience_tokens
+            if total_tokens > allocation:
+                trimmed["salience"] = None
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_SALIENCE_OMITTED, kind, subject_id, multi_mode=multi_warning_mode))
+            else:
+                trimmed["salience"] = salience_obj
+        else:
+            trimmed["salience"] = None
+
         trimmed_capsules.append(trimmed)
         trimmed_selection_order.append(f"{resolution}:{kind}:{subject_id}")
+        survived_rows.append(row)
         if row["health_status"] == "degraded":
             warnings.append(_qualify_warning(CONTINUITY_WARNING_DEGRADED, kind, subject_id, multi_mode=multi_warning_mode))
         elif row["health_status"] == "conflicted":
             warnings.append(_qualify_warning(CONTINUITY_WARNING_CONFLICTED, kind, subject_id, multi_mode=multi_warning_mode))
 
-    return trimmed_capsules, trimmed_selection_order, warnings, recovery_warnings
+    return trimmed_capsules, trimmed_selection_order, warnings, recovery_warnings, survived_rows
 
 
 def _build_per_capsule_trust(

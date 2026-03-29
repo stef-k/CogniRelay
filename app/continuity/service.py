@@ -109,6 +109,10 @@ from app.continuity.context_state import (
     _load_selectors_with_fallback,
     _trim_and_attach_trust,
 )
+from app.continuity.salience import (
+    _salience_metadata,
+    _salience_sort,
+)
 from app.continuity.revalidation import (
     _apply_verification_outcome,
     _resolve_revalidation_capsule,
@@ -450,7 +454,14 @@ def continuity_list_service(
     retention_archive_days: int = CONTINUITY_RETENTION_ARCHIVE_DAYS,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """List active, fallback, and archive continuity summaries under the repository namespace."""
+    """List active, fallback, and archive continuity summaries under the repository namespace.
+
+    When ``req.sort`` is ``"salience"``, active rows are ordered by the
+    deterministic salience sort key (§3b) and each active row receives a
+    ``salience_rank`` integer (1-indexed).  Non-active rows (fallback,
+    archive, cold) sort after all active rows in their existing
+    alphabetical order and receive ``salience_rank: null``.
+    """
     auth.require("read:files")
     summaries: list[dict[str, Any]] = _scan_active_summaries(repo_root, auth, req.subject_kind, now)
     if req.include_fallback:
@@ -463,8 +474,25 @@ def continuity_list_service(
     if has_thread_filters:
         summaries = [row for row in summaries if _matches_thread_filters(row, req)]
     filtered_count = len(summaries)
-    artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
-    summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
+
+    if req.sort == "salience":
+        # Partition into active vs non-active rows.
+        active_rows = [r for r in summaries if r.get("artifact_state") == "active"]
+        non_active_rows = [r for r in summaries if r.get("artifact_state") != "active"]
+        # Salience-sort active rows.
+        active_rows = _salience_sort(active_rows, now)
+        for rank_idx, row in enumerate(active_rows):
+            row["salience_rank"] = rank_idx + 1
+        # Non-active rows: existing alphabetical sort, null rank.
+        artifact_order = {"fallback": 0, "archived": 1, "cold": 2}
+        non_active_rows.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
+        for row in non_active_rows:
+            row["salience_rank"] = None
+        summaries = active_rows + non_active_rows
+    else:
+        artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
+        summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
+
     summaries = summaries[: req.limit]
     audit(
         auth,
@@ -1644,19 +1672,25 @@ def build_continuity_state(
 ) -> dict[str, Any]:
     """Load, trim, and package continuity state for context retrieval.
 
-    Each returned capsule includes a per-capsule ``trust_signals`` block
-    (full or compact depending on token budget) that mechanically derives
-    trust assessments from existing capsule state — recency from
-    timestamps, completeness from orientation fields and trimming,
-    integrity from health/verification metadata, and scope_match from
-    selector resolution.  An aggregate ``trust_signals`` block summarises
-    the worst-case across all per-capsule signals.
+    Capsules are returned in **salience order** — a deterministic
+    lexicographic sort over lifecycle, health, freshness, resume
+    adequacy, and verification strength, with recency and identity
+    tiebreakers guaranteeing total ordering.  Each capsule includes a
+    ``salience`` block exposing its rank and sort-key components, and
+    the top-level response carries ``salience_metadata`` with aggregate
+    best/worst-case signal summaries.
+
+    Each returned capsule also includes a per-capsule ``trust_signals``
+    block (full or compact depending on token budget) that mechanically
+    derives trust assessments from existing capsule state.  An aggregate
+    ``trust_signals`` block summarises the worst-case across all
+    per-capsule signals.
 
     The *now* parameter anchors all age computations so every signal in
     the response shares the same reference instant.
     """
     budget = _budget(req.max_tokens_estimate)
-    state = {
+    state: dict[str, Any] = {
         "present": False,
         "requested_selectors": [],
         "omitted_selectors": [],
@@ -1667,6 +1701,7 @@ def build_continuity_state(
         "fallback_used": False,
         "recovery_warnings": [],
         "trust_signals": None,
+        "salience_metadata": None,
     }
     if req.continuity_mode == "off":
         return state
@@ -1711,7 +1746,10 @@ def build_continuity_state(
         state["fallback_used"] = fallback_used
         return state
 
-    trimmed_capsules, trimmed_selection_order, trim_warnings, trim_recovery = _trim_and_attach_trust(
+    # --- Salience sort: reorder loaded capsules before trimming (§3a) ---
+    loaded = _salience_sort(loaded, now)
+
+    trimmed_capsules, trimmed_selection_order, trim_warnings, trim_recovery, survived_rows = _trim_and_attach_trust(
         loaded=loaded,
         reserve=budget["continuity_tokens_reserved"],
         now=now,
@@ -1744,5 +1782,6 @@ def build_continuity_state(
     state["recovery_warnings"] = recovery_warnings
     state["fallback_used"] = fallback_used
     state["trust_signals"] = aggregate_trust
+    state["salience_metadata"] = _salience_metadata(survived_rows, now)
     state["budget"]["continuity_tokens_used"] = sum(_estimated_tokens(_render_value(item)) for item in trimmed_capsules)
     return state

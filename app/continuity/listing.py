@@ -23,6 +23,7 @@ from app.continuity.freshness import (
     _continuity_phase,
     _verification_status,
 )
+from app.continuity.constants import RESUME_QUALITY_STANCE_MIN_LEN
 from app.continuity.persistence import (
     _load_archive_envelope,
     _load_capsule,
@@ -45,6 +46,16 @@ def _capsule_list_summary(
     freshness = capsule.get("freshness") if isinstance(capsule.get("freshness"), dict) else {}
     verification_status = _verification_status(capsule)
     health_status, health_reasons = _capsule_health_summary(capsule)
+    # Pre-compute resume adequacy from the full capsule so list-summary rows
+    # carry the value for salience sorting (mirrors salience._resume_adequate).
+    cont = capsule.get("continuity")
+    resume_adequate = bool(
+        isinstance(cont, dict)
+        and cont.get("open_loops")
+        and cont.get("top_priorities")
+        and cont.get("active_constraints")
+        and len(str(cont.get("stance_summary", ""))) >= RESUME_QUALITY_STANCE_MIN_LEN
+    )
     row: dict[str, Any] = {
         "subject_kind": capsule["subject_kind"],
         "subject_id": capsule["subject_id"],
@@ -62,6 +73,7 @@ def _capsule_list_summary(
         "stable_preference_count": len(capsule.get("stable_preferences", [])),
         "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
         "thread_descriptor": capsule.get("thread_descriptor"),
+        "resume_adequate": resume_adequate,
     }
     if extra:
         row.update(extra)
