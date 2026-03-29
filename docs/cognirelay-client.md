@@ -104,6 +104,8 @@ python tools/cognirelay_client.py upsert \
 
 The JSON file is the complete `POST /v1/continuity/upsert` request body (must include `subject_kind`, `subject_id`, `capsule`). The client sends it verbatim — no field injection or validation.
 
+The request body may include an optional `session_end_snapshot` to merge fresh startup-critical fields into the capsule before persistence — see [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm and field constraints. It may also include `lifecycle_transition` and `superseded_by` to atomically transition a thread capsule's lifecycle — see [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert).
+
 Use `--stdin` instead of `--input` to pipe JSON from another process. Exactly one of the two is required. Payloads over 256 KiB are rejected client-side.
 
 ## Hashing a Token
@@ -156,3 +158,7 @@ python tools/cognirelay_client.py upsert --input /tmp/capsule.json
 ```bash
 python tools/cognirelay_client.py token hash --value "$NEW_TOKEN"
 ```
+
+## Feature Discovery
+
+The CLI client covers continuity read and upsert operations. To discover what the current CogniRelay instance supports (including features like startup view, trust signals, and salience ranking), call `GET /v1/capabilities` directly — see [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.

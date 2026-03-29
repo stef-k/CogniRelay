@@ -25,6 +25,47 @@ For practical agent integration guidance, start with [Agent Onboarding](agent-on
 - `GET /.well-known/mcp.json`: MCP compatibility descriptor
 - `POST /v1/mcp`: JSON-RPC bridge for `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`
 
+### `GET /v1/capabilities` — versioned feature map
+
+Returns a deterministic, machine-readable feature map for the current build. No request body, no query parameters, no auth required. The response is byte-identical on every call to the same build.
+
+```json
+{
+  "version": "1",
+  "features": {
+    "continuity.read.startup_view": {
+      "summary": "Startup-oriented read view with mechanical orientation extraction"
+    },
+    "continuity.read.trust_signals": {
+      "summary": "Mechanical trust assessment: recency, completeness, integrity, scope match"
+    }
+  }
+}
+```
+
+**Semantics:** Presence of a key in `features` means the capability is available on this instance. Absence means it is unavailable. Keys are opaque stable identifiers — agents should treat them as exact-match strings, not parse the dots programmatically.
+
+**v1 feature registry (12 keys):**
+
+| Feature key | Summary |
+|---|---|
+| `continuity.read.startup_view` | Startup-oriented read view with mechanical orientation extraction |
+| `continuity.read.trust_signals` | Mechanical trust assessment: recency, completeness, integrity, scope match |
+| `continuity.upsert.session_end_snapshot` | Additive resume-here capture on upsert for session-end handoff |
+| `continuity.read.salience_ranking` | Deterministic multi-signal salience sorting on list and read paths |
+| `continuity.read.thread_identity` | Thread descriptors with scope anchors and lifecycle transitions |
+| `continuity.stable_preferences` | Stable user and peer preferences persisted on continuity capsules |
+| `context.retrieve.continuity_state` | Multi-capsule continuity-oriented context bundles with fallback and degradation |
+| `coordination.handoffs` | Local-first inter-agent handoff artifacts with consume tracking |
+| `coordination.shared_state` | Owner-authored shared coordination artifacts with version control |
+| `messaging.direct` | Tracked direct messages with ack, reject, defer, and delivery state |
+| `peers.registry` | Peer registration, trust-level transitions, and manifest exchange |
+| `discovery.tools` | Machine-readable tool catalog with MCP JSON-RPC bridge |
+
+**Versioning:** `version` is the schema version, not the app version. It increments only when the response shape changes incompatibly. Adding or removing feature keys does not change the version. Clients must tolerate unknown keys. Summaries are human-readable hints, not machine-parsed contracts.
+
+**Relationship to legacy `GET /capabilities`:** The two endpoints are independent. The legacy endpoint returns a flat string list and is unchanged.
+
 For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, see `docs/mcp.md`.
 
 ## Memory, file, and index operations
@@ -112,6 +153,9 @@ Notable behavior:
 - `POST /v1/continuity/read` and `POST /v1/context/retrieve` return those additive fields unchanged when present on the stored capsule and when retrieval trimming does not need to drop them
 - fallback snapshots, archive envelopes, and backup/restore validation preserve those additive fields as ordinary continuity-body content; `POST /v1/continuity/list` summaries intentionally do not expand to include them
 - `POST /v1/continuity/upsert` now enforces cross-field validation for `source.update_reason=interaction_boundary` and `metadata.interaction_boundary_kind`
+- `POST /v1/continuity/upsert` accepts optional `lifecycle_transition` (`suspend`/`resume`/`conclude`/`supersede`) and `superseded_by` to atomically transition a capsule's `thread_descriptor.lifecycle` as part of the write — see [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert) for field constraints
+- `POST /v1/continuity/list` accepts thread identity filters: `lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, and `anchor_value` — see [Payload Reference](payload-reference.md#list--post-v1continuitylist) for filter semantics
+- `POST /v1/continuity/list` accepts `sort="salience"` to apply deterministic multi-signal salience ranking; when applied, each capsule carries a `salience` block and the response includes aggregate `salience_metadata` — see [Payload Reference](payload-reference.md#salience-ranking) for the sort key and response structure
 - `POST /v1/continuity/read` and `POST /v1/context/retrieve` now include a `trust_signals` block alongside capsule data — an objective, mechanical trust assessment across four dimensions (recency, completeness, integrity, scope_match); `trust_signals` is `null` when the capsule is missing; the `startup_summary` view also includes `trust_signals` as a top-level key; `build_continuity_state` returns both per-capsule and aggregate `trust_signals`; age fields are `null` (not `0`) when timestamps are missing/malformed; `recency.phase` falls back to `"expired"` on malformed `verified_at`; aggregate trust handles compact per-capsule shapes; `recovery_warnings` includes `"trust_signals_aggregate_failed"` when aggregate computation fails
 
 ## Peers and messaging
@@ -205,4 +249,12 @@ For exact runtime expectations, use `GET /v1/discovery/tools` and `GET /v1/manif
 
 ## Changelog
 
-- **#124 — Stable user preferences**: Added `stable_preferences` (list of `StablePreference`) on `ContinuityCapsule`. Bounded to 12 entries; only valid on user/peer capsules. Included in read, startup summary, and context-retrieve paths. List summaries include `stable_preference_count`. Trimmed as a whole unit under token pressure. Fully backward-compatible (optional field with empty-list default, schema_version unchanged).
+- **#165 — Startup view**: Added `view="startup"` parameter on `POST /v1/continuity/read`. Returns a `startup_summary` block with recovery/orientation/context tiers alongside the unchanged full capsule. See [Payload Reference](payload-reference.md#startup-view-viewstartup).
+- **#167 — Session-end snapshot**: Added `session_end_snapshot` on `POST /v1/continuity/upsert`. A compact helper that merges startup-critical fields into the capsule before persistence. See [Payload Reference](payload-reference.md#session-end-snapshot-helper).
+- **#121 — Trust signals**: Added `trust_signals` block on `POST /v1/continuity/read` and `POST /v1/context/retrieve`. Four-dimension mechanical trust assessment (recency, completeness, integrity, scope match). See [Payload Reference](payload-reference.md#read--post-v1continuityread).
+- **#124 — Stable user preferences**: Added `stable_preferences` (list of `StablePreference`) on `ContinuityCapsule`. Bounded to 12 entries; only valid on user/peer capsules. Included in read, startup summary, and context-retrieve paths. List summaries include `stable_preference_count`. Trimmed as a whole unit under token pressure. See [Payload Reference](payload-reference.md#stablepreference).
+- **#122 — Rationale entries**: Added `rationale_entries` (list of `RationaleEntry`, max 6) on `ContinuityState`. Captures decision rationale, assumptions, and unresolved tensions with kind/status lifecycle and supersession semantics. See [Payload Reference](payload-reference.md#rationaleentry).
+- **#120 — Thread identity and scope boundaries**: Added `thread_descriptor` on `ContinuityCapsule` with `ThreadDescriptor` model (label, keywords, scope anchors, identity anchors, lifecycle, superseded_by). Added `lifecycle_transition` and `superseded_by` on upsert. Added list filters: `lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, `anchor_value`. See [Payload Reference](payload-reference.md#threaddescriptor).
+- **#123 — Salience ranking**: Added `sort="salience"` on `POST /v1/continuity/list` and deterministic salience sorting on context-retrieve paths. Six-signal sort key with per-capsule `salience` block and aggregate `salience_metadata`. See [Payload Reference](payload-reference.md#salience-ranking).
+- **#179 — `GET /v1/capabilities`**: Added versioned, machine-readable feature map endpoint. Returns 12 feature keys covering continuity enhancements, coordination, messaging, peers, and discovery. See [Discovery and contracts](#get-v1capabilities--versioned-feature-map) above.
+- **#163 — Python CLI client**: Added `tools/cognirelay_client.py`, a stdlib-only command-line client for continuity read, upsert, and token hashing. See [CLI Client](cognirelay-client.md).

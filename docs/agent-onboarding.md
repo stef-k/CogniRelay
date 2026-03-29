@@ -108,6 +108,49 @@ Both may describe the same thing from different perspectives (e.g., user says "b
 
 **Capture via session-end snapshot:** Include `rationale_entries` in the snapshot as a P1 field — `null` preserves existing entries, an explicit list overrides.
 
+## Interpreting Trust Signals
+
+When you read a continuity capsule (via `POST /v1/continuity/read` or `POST /v1/context/retrieve`), the response includes a `trust_signals` block — a mechanical assessment of the returned capsule across four dimensions. Use it to decide how much weight to place on the recovered orientation:
+
+- **Recency** — check `recency.phase`. `fresh` means timestamps are within the configured threshold. `stale_soft` or worse means the capsule has not been refreshed recently — consider re-verifying before acting on it. A `null` age means the timestamp was missing, not that the capsule is maximally fresh.
+- **Completeness** — check `completeness.orientation_adequate`. If `false`, one or more core orientation fields are empty. Check `empty_orientation_fields` to see which ones. If `trimmed` is `true`, token-budget constraints removed content — check `trimmed_fields`.
+- **Integrity** — check `integrity.health_status` and `integrity.source_state`. If `health_status` is `degraded` or `conflicted`, the capsule may need revalidation. If `source_state` is `fallback`, you are reading a recovery snapshot, not the current active capsule.
+- **Scope match** — check `scope_match.exact`. If `false`, the returned capsule did not match the requested selector exactly.
+
+Trust signals are deterministic and objective — every field is derived from existing capsule state. They do not tell you what to do; they tell you what the system knows about the capsule's state so you can decide. For the full field-level structure, see [Payload Reference](payload-reference.md#read--post-v1continuityread).
+
+## Thread Identity and Multi-Thread Patterns
+
+If you work across multiple threads, projects, or domains simultaneously, use `thread_descriptor` on your capsules to keep them scoped and discoverable.
+
+**Setting up a thread descriptor:** When creating a thread or task capsule, populate `thread_descriptor` with a `label`, relevant `keywords`, `scope_anchors` (e.g., repo name, project key), and optionally `identity_anchors` for typed key-value pins. Set `lifecycle` to `"active"`.
+
+**Filtering by thread:** Use the list filters to find capsules for a specific thread:
+- `lifecycle="active"` — only active threads
+- `scope_anchor="stef-k/CogniRelay"` — threads scoped to a specific repo
+- `keyword="auth"` — threads tagged with a keyword
+- `anchor_kind="issue"` + `anchor_value="42"` — threads pinned to a specific issue
+
+**Lifecycle transitions:** Use `lifecycle_transition` on upsert to atomically move a thread through `suspend` → `resume` → `conclude` or `supersede`. When superseding, set `superseded_by` to the successor's `subject_id`.
+
+For the full `ThreadDescriptor` model, see [Payload Reference](payload-reference.md#threaddescriptor).
+
+## Salience Ranking
+
+When listing capsules across multiple threads, use `sort="salience"` on `POST /v1/continuity/list` to surface the most decision-relevant capsules first. The sort considers lifecycle state, capsule health, freshness, resume adequacy, verification strength, and recency — all derived from existing capsule state at retrieval time.
+
+Each returned capsule includes a `salience` block with its `rank` and the individual `sort_key` signals, so you can inspect why one capsule ranked higher than another. The response also includes aggregate `salience_metadata` summarising the result set.
+
+Salience ranking is also applied automatically on the `POST /v1/context/retrieve` path when multiple capsules are loaded.
+
+For the full sort key and response structure, see [Payload Reference](payload-reference.md#salience-ranking).
+
+## Feature Discovery
+
+If you are integrating with a CogniRelay instance and want to confirm which capabilities are available before building integration logic, call `GET /v1/capabilities` as an early step in your cold-start sequence. It returns a versioned, machine-readable feature map with 12 feature keys covering continuity enhancements, coordination, messaging, peers, and discovery. Presence of a key means the capability is available; absence means it is not.
+
+This is useful when your agent supports multiple CogniRelay versions or wants to conditionally enable features like startup view, trust signals, or salience ranking based on what the instance actually supports. See [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.
+
 ## What CogniRelay Does Not Do
 
 - It does not persist everything — continuity is bounded and subject to write-time curation

@@ -42,6 +42,23 @@ The MCP tool catalog is broad. It covers the project's substantive feature set, 
 
 In other words, the usable application capabilities are available through MCP tools.
 
+### Continuity enhancements via MCP tools
+
+The post-#119 continuity enhancements are not separate MCP tools — they are parameters and response fields on existing tools. When calling continuity tools through MCP, pass the same parameters as the HTTP API:
+
+- **Startup view**: Pass `view: "startup"` in `continuity.read` to include the `startup_summary` extraction alongside the full capsule. See [Payload Reference](payload-reference.md#startup-view-viewstartup) for the response shape.
+- **Trust signals**: `continuity.read` and `context.retrieve` responses include `trust_signals` automatically — no extra parameter needed. See [Payload Reference](payload-reference.md#read--post-v1continuityread) for the four dimensions.
+- **Session-end snapshot**: Pass `session_end_snapshot` in `continuity.upsert` to merge startup-critical fields at session end. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm.
+- **Thread identity filters**: Pass `lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, and `anchor_value` in `continuity.list` to filter by thread scope. See [Payload Reference](payload-reference.md#threaddescriptor) for the model.
+- **Lifecycle transitions**: Pass `lifecycle_transition` and `superseded_by` in `continuity.upsert` to transition thread lifecycle. See [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert) for constraints.
+- **Salience ranking**: Pass `sort: "salience"` in `continuity.list` for deterministic multi-signal salience sorting. See [Payload Reference](payload-reference.md#salience-ranking) for the sort key.
+
+### Feature discovery: `system.capabilities_v1`
+
+`GET /v1/capabilities` is exposed as the MCP tool `system.capabilities_v1`. It returns a versioned, machine-readable feature map — see [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the response shape and feature registry.
+
+This complements `tools/list` (which returns the available MCP tools and their schemas) with semantic feature discovery (which tells you what continuity, coordination, and integration capabilities the instance supports). Both are useful: `tools/list` answers "what can I call?", `system.capabilities_v1` answers "what does this instance support?".
+
 ## What MCP Does Not Mirror One-To-One
 
 Not every HTTP endpoint appears as an MCP tool name. The main exclusions are transport and descriptor endpoints:

@@ -143,6 +143,29 @@ A continuity capsule is the core unit of orientation state. It is stored as a JS
 | `verification_state` | ContinuityVerificationState | no | |
 | `capsule_health` | ContinuityCapsuleHealth | no | |
 | `stable_preferences` | list of StablePreference | no | max 12, default `[]`. Only valid on user/peer capsules (non-empty list on thread/task → HTTP 400). |
+| `thread_descriptor` | ThreadDescriptor | no | Structured identity block for thread and task capsules. See below. |
+
+### ThreadDescriptor
+
+A structured identity block that gives thread and task capsules deterministic labels, keyword tags, scope anchors, and lifecycle state. Agents use thread descriptors to distinguish concurrent threads, filter by scope, and manage lifecycle transitions.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `label` | string | yes | 1–120 chars. Human-readable thread label. |
+| `keywords` | list of strings | no | max 6 items, default `[]`. Short tags for keyword-based discovery. |
+| `scope_anchors` | list of strings | no | max 4 items, default `[]`. Stable scope identifiers (e.g. repo name, project key). |
+| `identity_anchors` | list of IdentityAnchor | no | max 4 items, default `[]`. Typed key-value pins for deterministic thread discovery. |
+| `lifecycle` | `"active"` \| `"suspended"` \| `"concluded"` \| `"superseded"` | no | Current lifecycle state of the thread. |
+| `superseded_by` | string | no | max 200 chars. References the `subject_id` of the successor when `lifecycle` is `"superseded"`. |
+
+### IdentityAnchor
+
+A stable typed pin for deterministic thread discovery. Used inside `ThreadDescriptor.identity_anchors`.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `kind` | string | yes | 1–40 chars. Anchor type (e.g. `"repo"`, `"project"`, `"issue"`). |
+| `value` | string | yes | 1–200 chars. Anchor value (e.g. `"stef-k/CogniRelay"`, `"INGEST-42"`). |
 
 ### StablePreference
 
@@ -252,6 +275,8 @@ When `update_reason` is `"interaction_boundary"`, the capsule must also include 
 | `commit_message` | string | no | max 240 chars |
 | `idempotency_key` | string | no | max 200 chars |
 | `session_end_snapshot` | SessionEndSnapshot | no | See below |
+| `lifecycle_transition` | `"suspend"` \| `"resume"` \| `"conclude"` \| `"supersede"` | no | When provided, atomically transitions the capsule's `thread_descriptor.lifecycle` as part of this upsert. |
+| `superseded_by` | string | no | max 200 chars. Required when `lifecycle_transition` is `"supersede"`. Sets `thread_descriptor.superseded_by`. |
 
 Response includes `recovery_warnings` (list of strings) when the fallback snapshot refresh fails after the active write has already committed.
 
@@ -454,6 +479,13 @@ Response includes `recovery_warnings` when the fallback snapshot refresh fails a
 | `include_fallback` | boolean | no | default `false` |
 | `include_archived` | boolean | no | default `false` |
 | `include_cold` | boolean | no | default `false` |
+| `lifecycle` | `"active"` \| `"suspended"` \| `"concluded"` \| `"superseded"` | no | Filter by `thread_descriptor.lifecycle`. Only meaningful for capsules with a thread descriptor. |
+| `scope_anchor` | string | no | max 200 chars. Filter to capsules whose `thread_descriptor.scope_anchors` contains this value. |
+| `keyword` | string | no | max 40 chars. Filter to capsules whose `thread_descriptor.keywords` contains this value. |
+| `label_exact` | string | no | max 120 chars. Filter to capsules whose `thread_descriptor.label` matches exactly. |
+| `anchor_kind` | string | no | max 40 chars. Filter to capsules with an `identity_anchors` entry matching this kind. Combine with `anchor_value` for exact anchor matching. |
+| `anchor_value` | string | no | max 200 chars. Filter to capsules with an `identity_anchors` entry matching this value. Requires `anchor_kind`. |
+| `sort` | `"default"` \| `"salience"` | no | default `"default"`. When `"salience"`, results are sorted by the deterministic salience ranking described below. |
 
 Response includes `artifact_state` and `retention_class` for each entry. Archive entries include `archive_stale` classification based on `COGNIRELAY_CONTINUITY_RETENTION_ARCHIVE_DAYS`. Each summary entry includes `stable_preference_count` (integer, 0 when empty, `null` for cold stubs where the count cannot be determined without decompression) and `rationale_entry_count` (total count of all entries regardless of status — active, superseded, and retired are all counted; integer, 0 when empty or pre-feature, `null` for cold stubs).
 
@@ -524,6 +556,64 @@ Response:
 ```
 
 When derived search indexes are stale, `continuity_state.warnings` includes `"continuity_index_stale"`. When indexes are missing, retrieval falls back to a bounded raw scan and adds `"continuity_index_missing"`.
+
+## Salience Ranking
+
+When `sort="salience"` is set on `POST /v1/continuity/list`, or when capsules are returned through `POST /v1/context/retrieve`, the system applies a deterministic multi-signal sort that surfaces the most decision-relevant capsules first. Nothing is stored — salience is computed at retrieval time from in-memory capsule state.
+
+### Sort key
+
+Each capsule is ranked by a lexicographic key composed of six signals plus two deterministic tiebreakers, evaluated from highest to lowest priority:
+
+| Priority | Signal | Direction | Description |
+|----------|--------|-----------|-------------|
+| 1 | `lifecycle_rank` | lower = better | Derived from `thread_descriptor.lifecycle`: `active` (0), `suspended` (1), `concluded` (2), `superseded` (3). Capsules without a thread descriptor sort after all lifecycle-bearing capsules. |
+| 2 | `health_rank` | lower = better | Derived from `capsule_health.status`: `healthy` (0), `degraded` (1), `conflicted` (2). |
+| 3 | `freshness_rank` | lower = better | Derived from the capsule's freshness phase: `fresh` (0) through `expired` (4). |
+| 4 | `resume_adequate` | adequate first | `true` when the capsule has non-empty `open_loops`, `top_priorities`, `active_constraints`, and a `stance_summary` ≥ 30 chars. |
+| 5 | `verification_rank` | higher = better | Derived from `verification_state.kind`: stronger verification sorts first. |
+| 6 | `updated_age_seconds` | lower = better | Seconds since `updated_at`. More recent capsules sort first. `null` timestamps are treated as maximally stale. |
+| 7 | `subject_kind` | alphabetical | Deterministic tiebreaker. |
+| 8 | `subject_id` | alphabetical | Deterministic tiebreaker. |
+
+The sort is total — no two capsules produce the same key.
+
+### Per-capsule `salience` block
+
+When salience sorting is applied, each returned capsule includes a `salience` block:
+
+```json
+{
+  "salience": {
+    "rank": 0,
+    "sort_key": {
+      "lifecycle_rank": 0,
+      "health_rank": 0,
+      "freshness_rank": 0,
+      "resume_adequate": true,
+      "verification_rank": 3,
+      "updated_age_seconds": 120
+    }
+  }
+}
+```
+
+All values are in human-readable, natural-direction form — negation and inversion are internal to the sort, not exposed here. `rank` is 0-based (0 = most salient).
+
+### Aggregate `salience_metadata`
+
+When salience sorting is applied, the response includes a top-level `salience_metadata` block summarising the result set:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sort_applied` | boolean | Always `true` when salience sort was used. |
+| `capsule_count` | integer | Number of capsules in the result. |
+| `best_lifecycle_rank` | integer | Lowest (best) lifecycle rank across all capsules. |
+| `worst_health_rank` | integer | Highest (worst) health rank across all capsules. |
+| `worst_freshness_rank` | integer | Highest (worst) freshness rank across all capsules. |
+| `all_resume_adequate` | boolean | `true` when every capsule has adequate resume quality. |
+
+`salience_metadata` is `null` when the result set is empty.
 
 ## Coordination Payloads
 

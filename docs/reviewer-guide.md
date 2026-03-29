@@ -282,6 +282,22 @@ A post-implementation lifecycle-safety audit confirmed deterministic behavior un
 
 Full detail: [#106](https://github.com/stef-k/CogniRelay/issues/106) (stage controller).
 
+### Post-#119 Collaborator-Grade Continuity (Stages E–F)
+
+After the hardening stages, CogniRelay completed the #119 family — a collaborator-grade continuity wave that extends the orientation substrate with higher-level capabilities. These are additive features layered onto the existing capsule lifecycle and storage architecture:
+
+- **Thread identity and scope boundaries (#120)**: Capsules can carry a `thread_descriptor` with labels, keywords, scope anchors, identity anchors, and lifecycle state. List operations support filtering and lifecycle transitions. This prevents cross-thread bleed in multi-domain use.
+- **Trust signals (#121)**: Read and retrieve paths return a four-dimension mechanical trust assessment (recency, completeness, integrity, scope match). Agents use this to calibrate how much weight to place on recovered orientation. See the [Continuity model § Trust signals](system-overview.md#trust-signals) section for the design.
+- **Rationale entries (#122)**: `ContinuityState` supports structured decision rationale, assumptions, and unresolved tensions with kind/status lifecycle and supersession semantics. This preserves *why* alongside *what*.
+- **Salience ranking (#123)**: List and retrieve paths support deterministic multi-signal sorting that surfaces the most decision-relevant capsules first, using lifecycle, health, freshness, resume adequacy, verification, and recency signals.
+- **Stable preferences (#124)**: User/peer capsules can carry explicit standing instructions that persist across unrelated threads, distinct from the agent's inferred relationship model.
+- **Startup view (#165)**: Read path accepts `view="startup"` for a pre-structured mechanical extraction of startup-relevant orientation fields.
+- **Session-end snapshot (#167)**: Upsert path accepts a compact helper that merges startup-critical fields into the capsule, reducing caller burden at session end.
+- **`GET /v1/capabilities` (#179)**: A versioned, machine-readable feature map so agents can discover what the current instance supports without relying on static docs.
+- **Python CLI client (#163)**: A stdlib-only command-line tool for continuity read, upsert, and token hashing.
+
+Full detail for each feature is in [Payload Reference](payload-reference.md) (field-level schemas) and [API Surface](api-surface.md#changelog) (endpoint behavior and changelog).
+
 ### Known Limitations and Intentional Deferrals
 
 The following are known boundaries of the current system, not unresolved bugs:
@@ -320,6 +336,13 @@ The most important review questions are not "does it have many features?" They a
 **Operator boundary**
 - Is the operator/host-local boundary clear enough that an agent cannot accidentally perform authority actions?
 
+**Collaborator-grade continuity (#119 family)**
+- Are trust signals sufficient for an agent to decide whether to act on recovered continuity, or does the four-dimension model miss important signals?
+- Does thread identity scoping prevent cross-thread bleed in multi-domain scenarios, or can unrelated capsules still interfere?
+- Is salience ranking deterministic and auditable — can an agent inspect why one capsule ranked higher than another?
+- Do stable preferences persist correctly across unrelated threads without overfitting every thread to one domain?
+- Does `GET /v1/capabilities` accurately reflect the current instance, and is the feature-key granularity useful for integration gating?
+
 **Documentation fidelity**
 - Do the docs describe the implemented system faithfully, without implying a fuller memory architecture than exists?
 
@@ -335,6 +358,7 @@ The following materials form the complete review surface:
 - [`docs/payload-reference.md`](payload-reference.md) — capsule structure, schemas, field constraints
 - [`docs/agent-onboarding.md`](agent-onboarding.md) — practical agent integration guidance
 - [`docs/mcp.md`](mcp.md) — MCP integration and tool exposure
+- [`docs/cognirelay-client.md`](cognirelay-client.md) — stdlib-only CLI client for continuity operations
 - [`deploy/GO_LIVE_RUNBOOK.md`](../deploy/GO_LIVE_RUNBOOK.md) and [`deploy/PRODUCTION_SIGNOFF_CHECKLIST.md`](../deploy/PRODUCTION_SIGNOFF_CHECKLIST.md) — operator deployment and signoff
 
 **Hardening workflow**
