@@ -295,8 +295,10 @@ class TestReadSubcommand(unittest.TestCase):
 
         self.assertIn("=== Source State ===", output)
         self.assertIn("missing", output)
-        # Legacy fallback path: has capsule=None and no startup_summary
+        self.assertIn("- Capsule not found", output)
         self.assertIn("(no capsule available)", output)
+        # Capsule sections must not appear
+        self.assertNotIn("=== Top Priorities ===", output)
 
     @patch("tools.cognirelay_client.urllib.request.urlopen")
     def test_read_startup_missing_optional_fields(self, mock_urlopen):
@@ -1030,6 +1032,7 @@ class TestFormatStartupSummary(unittest.TestCase):
         """Null startup_summary + null capsule renders source state and placeholder."""
         data = {
             "source_state": "missing",
+            "recovery_warnings": ["Capsule not found"],
             "startup_summary": None,
             "capsule": None,
         }
@@ -1037,8 +1040,23 @@ class TestFormatStartupSummary(unittest.TestCase):
 
         self.assertIn("=== Source State ===", output)
         self.assertIn("missing", output)
+        self.assertIn("=== Recovery Warnings ===", output)
+        self.assertIn("- Capsule not found", output)
         self.assertIn("(no capsule available)", output)
         self.assertNotIn("=== Top Priorities ===", output)
+
+    def test_format_startup_summary_no_capsule_no_warnings(self):
+        """Null capsule with no warnings suppresses Recovery Warnings section."""
+        data = {
+            "source_state": "missing",
+            "startup_summary": None,
+            "capsule": None,
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Source State ===", output)
+        self.assertIn("(no capsule available)", output)
+        self.assertNotIn("=== Recovery Warnings ===", output)
 
     def test_format_startup_summary_trust_signals(self):
         """Trust signals digest renders 4 lines with correct field mapping."""
@@ -1381,7 +1399,7 @@ class TestCapabilitiesSubcommand(unittest.TestCase):
         request_obj = mock_urlopen.call_args[0][0]
         self.assertEqual(request_obj.method, "GET")
         self.assertIsNone(request_obj.data)
-        self.assertNotIn("Content-Type", request_obj.headers)
+        self.assertNotIn("Content-type", request_obj.headers)
 
         # Verify output
         parsed = json.loads(output)

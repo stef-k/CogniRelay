@@ -193,13 +193,19 @@ def format_startup_summary(data):
     if summary is None:
         if capsule is not None:
             return format_startup(data)
-        # Both null — minimal output
+        # Both null — minimal output, but still surface recovery warnings
         lines = [
             "=== Source State ===",
             data.get("source_state", "unknown"),
-            "",
-            "(no capsule available)",
         ]
+        warnings = data.get("recovery_warnings") or []
+        if warnings:
+            lines.append("")
+            lines.append("=== Recovery Warnings ===")
+            for w in warnings:
+                lines.append(f"- {w}")
+        lines.append("")
+        lines.append("(no capsule available)")
         return "\n".join(lines) + "\n"
 
     lines: list[str] = []
