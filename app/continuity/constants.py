@@ -120,9 +120,24 @@ CONTINUITY_PHASE_SEVERITY: dict[str, int] = {
 CONTINUITY_WARNING_TRUST_SIGNALS_FAILED = "trust_signals_build_failed"
 CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT = "trust_signals_compact"
 CONTINUITY_WARNING_TRUST_SIGNALS_AGGREGATE_FAILED = "trust_signals_aggregate_failed"
+CONTINUITY_WARNING_SALIENCE_OMITTED = "continuity_salience_omitted"
 # Token overhead for the "trust_signals": null key/value when embedded in a
 # capsule dict.  Precomputed: ceil(len("trust_signals: null") / 4) == 5.
 _TRUST_SIGNALS_NULL_OVERHEAD_TOKENS = 5
+# Token overhead for the "salience": null key/value when embedded in a
+# capsule dict.  Precomputed: ceil(len("salience: null") / 4) == 4.
+_SALIENCE_NULL_OVERHEAD_TOKENS = 4
+# Rank mappings for salience sort key components (§2b of spec #123).
+# Lower numeric rank = higher salience (sorts first).
+SALIENCE_LIFECYCLE_RANK: dict[str, int] = {
+    "active": 0,
+    "suspended": 1,
+    "concluded": 2,
+    "superseded": 3,
+}
+# Sentinel for capsules without a thread_descriptor — sorts after all
+# lifecycle-bearing capsules.
+SALIENCE_LIFECYCLE_NO_DESCRIPTOR = 99
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"

@@ -857,6 +857,7 @@ class ContinuityListRequest(BaseModel):
     label_exact: Optional[str] = Field(default=None, max_length=120)
     anchor_kind: Optional[str] = Field(default=None, max_length=40)
     anchor_value: Optional[str] = Field(default=None, max_length=200)
+    sort: Optional[Literal["default", "salience"]] = "default"
 
 
 class ContinuityRefreshPlanRequest(BaseModel):
