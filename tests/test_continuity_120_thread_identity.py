@@ -677,6 +677,16 @@ class TestListFiltering(unittest.TestCase):
             out = _do_list(root)
         self.assertFalse(out["unique_match"])
 
+    def test_unique_match_false_when_limit_truncates(self) -> None:
+        """unique_match must reflect total filtered count, not post-limit count."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._setup_capsules(root)
+            # keyword="deploy" matches thread-a and thread-b (2 capsules), limit=1
+            out = _do_list(root, keyword="deploy", limit=1)
+        self.assertEqual(out["count"], 1)
+        self.assertFalse(out["unique_match"])
+
     def test_summary_includes_thread_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

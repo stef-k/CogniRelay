@@ -453,6 +453,7 @@ def continuity_list_service(
     has_thread_filters = any(getattr(req, f) is not None for f in ("lifecycle", "scope_anchor", "keyword", "label_exact", "anchor_kind", "anchor_value"))
     if has_thread_filters:
         summaries = [row for row in summaries if _matches_thread_filters(row, req)]
+    filtered_count = len(summaries)
     artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
     summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
     summaries = summaries[: req.limit]
@@ -465,7 +466,7 @@ def continuity_list_service(
         },
     )
     result: dict[str, Any] = {"ok": True, "count": len(summaries), "capsules": summaries}
-    result["unique_match"] = len(summaries) == 1 if has_thread_filters else False
+    result["unique_match"] = filtered_count == 1 if has_thread_filters else False
     return result
 
 
