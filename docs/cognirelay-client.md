@@ -11,19 +11,21 @@ The client is a thin transport tool. It does not validate capsule contents, inje
 
 ## Subcommands
 
-The client exposes three subcommands:
+The client exposes five subcommands:
 
 | Subcommand | Purpose |
 |---|---|
 | `read` | Read a continuity capsule |
 | `upsert` | Write or update a continuity capsule |
+| `list` | List and discover continuity capsules |
+| `capabilities` | Show server capabilities (feature map) |
 | `token hash` | Compute the SHA-256 hex digest of a token (for config files) |
 
 Running with no subcommand prints usage to stderr and exits 2.
 
 ## Connection Arguments
 
-`read` and `upsert` share these arguments (not present on `token hash`):
+`read`, `upsert`, `list`, and `capabilities` share these arguments (not present on `token hash`):
 
 | Argument | Default | Notes |
 |---|---|---|
@@ -59,19 +61,28 @@ python tools/cognirelay_client.py read \
 
 ### Output formats
 
-- `--format json` (default): pretty-printed JSON response body
-- `--format startup`: compact section-based text showing source state, recovery warnings, top priorities, active constraints, open loops, negative decisions, and session trajectory. This is a client-side text renderer operating on the full capsule response body — it does not send `view="startup"` to the server and does not use the server-side `startup_summary` block. To get the server-side `startup_summary` extraction (with its fixed key-order contract), call `POST /v1/continuity/read` directly with `view="startup"`
+- `--format json` (default): pretty-printed JSON response body. Does not send `view` in the request — returns the full server response unchanged.
+- `--format startup`: sends `view="startup"` to the server and renders the `startup_summary` block as compact section-based text. If the server predates `view="startup"` (response lacks `startup_summary`), the client falls back to a legacy renderer that extracts fields from `capsule.continuity` directly.
 
 Use `--output <path>` to write to a file instead of stdout.
+
+### Startup format sections
+
+Sections are divided into **always-shown** (rendered with `(none)` when empty) and **conditional** (suppressed entirely when empty/null):
+
+**Always shown:** Source State, Top Priorities, Active Constraints, Open Loops.
+
+**Conditional:** Recovery Warnings (with health status), Trust Signals (4-line digest), Thread Identity (from `capsule.thread_descriptor`), Negative Decisions, Rationale Entries, Session Trajectory, Stable Preferences.
+
+**Not shown:** `updated_at`, `stance_summary`, `active_concerns` — available in `--format json`.
+
+The startup text format is a presentation convenience. Its exact layout is not a stable contract. Scripts that need stable field access must use `--format json`.
 
 ### Startup format example
 
 ```
 === Source State ===
 active
-
-=== Recovery Warnings ===
-(none)
 
 === Top Priorities ===
 - Complete authentication refactor
@@ -83,15 +94,31 @@ active
 === Open Loops ===
 (none)
 
+=== Trust Signals ===
+Recency: current (fresh)
+Completeness: orientation adequate
+Integrity: healthy, verified
+Scope: exact
+
+=== Thread Identity ===
+Auth refactor [active]
+Keywords: auth, security
+
 === Negative Decisions ===
 - No caching layer: adds complexity without current need
+
+=== Rationale Entries ===
+- [constraint] perf: Latency budget is 200ms
 
 === Session Trajectory ===
 - Reviewed PR #42
 - Started auth module extraction
+
+=== Stable Preferences ===
+- [communication] Prefer concise responses
 ```
 
-If there is no capsule, only Source State and Recovery Warnings are printed, followed by `(no capsule available)`.
+If there is no capsule and no `startup_summary`, only Source State (and Recovery Warnings if present) is printed, followed by `(no capsule available)`.
 
 ## Upserting a Capsule
 
@@ -107,6 +134,66 @@ The JSON file is the complete `POST /v1/continuity/upsert` request body (must in
 The request body may include an optional `session_end_snapshot` to merge fresh startup-critical fields into the capsule before persistence — see [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm and field constraints. It may also include `lifecycle_transition` and `superseded_by` to atomically transition a thread capsule's lifecycle — see [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert).
 
 Use `--stdin` instead of `--input` to pipe JSON from another process. Exactly one of the two is required. Payloads over 256 KiB are rejected client-side.
+
+### Session-End Snapshot
+
+Include `session_end_snapshot` in the upsert request body to merge fresh startup-critical fields into the capsule before persistence — the server applies the merge, the client sends it verbatim.
+
+```json
+{
+  "subject_kind": "user",
+  "subject_id": "agent-1",
+  "capsule": { "...": "..." },
+  "session_end_snapshot": {
+    "open_loops": ["finish auth refactor"],
+    "top_priorities": ["ship v2 API"],
+    "active_constraints": ["no breaking changes before release"],
+    "stance_summary": "Wrapping up auth work, blocked on review."
+  }
+}
+```
+
+The P0 fields (`open_loops`, `top_priorities`, `active_constraints`, `stance_summary`) are required when `session_end_snapshot` is present. P1 fields (`negative_decisions`, `session_trajectory`, `rationale_entries`) are optional — null means preserve the existing capsule value. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the full merge algorithm.
+
+## Listing Capsules
+
+```bash
+python tools/cognirelay_client.py list \
+  --base-url http://localhost:8080 \
+  --token-file /run/secrets/agent_token \
+  --subject-kind thread \
+  --sort salience \
+  --limit 10
+```
+
+Sends `POST /v1/continuity/list`. All flags map 1:1 to request body fields — omitted flags produce omitted fields (server defaults apply).
+
+| Flag | Maps to | Type |
+|---|---|---|
+| `--subject-kind` | `subject_kind` | Choice: user, peer, thread, task |
+| `--limit` | `limit` | int |
+| `--include-fallback` | `include_fallback` | flag |
+| `--include-archived` | `include_archived` | flag |
+| `--include-cold` | `include_cold` | flag |
+| `--lifecycle` | `lifecycle` | Choice: active, suspended, concluded, superseded |
+| `--scope-anchor` | `scope_anchor` | str |
+| `--keyword` | `keyword` | str |
+| `--label-exact` | `label_exact` | str |
+| `--anchor-kind` | `anchor_kind` | str |
+| `--anchor-value` | `anchor_value` | str |
+| `--sort` | `sort` | Choice: default, salience |
+
+Output is always pretty-printed JSON. No `--format` flag. No `--output` flag — pipe to a file if needed.
+
+## Capabilities
+
+```bash
+python tools/cognirelay_client.py capabilities \
+  --base-url http://localhost:8080 \
+  --token-file /run/secrets/agent_token
+```
+
+Sends `GET /v1/capabilities`. Prints the server's feature map as pretty-printed JSON. No additional arguments beyond connection args. Output is always JSON — no `--format` or `--output` flag.
 
 ## Hashing a Token
 
@@ -134,8 +221,8 @@ Use this to generate token hashes for `peer_tokens.json` and other config files.
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `COGNIRELAY_BASE_URL` | `read`, `upsert` | Default for `--base-url` |
-| `COGNIRELAY_TOKEN` | `read`, `upsert` | Implicit token fallback (lowest precedence) |
+| `COGNIRELAY_BASE_URL` | `read`, `upsert`, `list`, `capabilities` | Default for `--base-url` |
+| `COGNIRELAY_TOKEN` | `read`, `upsert`, `list`, `capabilities` | Implicit token fallback (lowest precedence) |
 
 ## Usage Patterns
 
@@ -161,4 +248,10 @@ python tools/cognirelay_client.py token hash --value "$NEW_TOKEN"
 
 ## Feature Discovery
 
-The CLI client covers continuity read and upsert operations. To discover what the current CogniRelay instance supports (including features like startup view, trust signals, and salience ranking), call `GET /v1/capabilities` directly — see [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.
+Use the `capabilities` subcommand to discover what the current CogniRelay instance supports (including features like startup view, trust signals, and salience ranking):
+
+```bash
+python tools/cognirelay_client.py capabilities --base-url http://localhost:8080 --token-file /run/secrets/agent_token
+```
+
+See [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.

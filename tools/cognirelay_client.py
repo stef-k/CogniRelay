@@ -82,20 +82,23 @@ def resolve_base_url(args):
 # HTTP helper
 # ---------------------------------------------------------------------------
 
-def do_request(base_url, path, token, body_bytes, timeout):
-    """Send a POST request and return the response body string.
+def do_request(base_url, path, token, body_bytes, timeout, *, method="POST"):
+    """Send an HTTP request and return the response body string.
+
+    When *method* is ``GET``, *body_bytes* is ignored and no
+    ``Content-Type`` header is sent.
 
     On HTTP error exits 1, on connection error exits 4.
     """
     url = f"{base_url}{path}"
+    headers = {"Authorization": f"Bearer {token}"}
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
         url,
-        data=body_bytes,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        method="POST",
+        data=body_bytes if method == "POST" else None,
+        headers=headers,
+        method=method,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -172,6 +175,163 @@ def format_startup(data):
 
 
 # ---------------------------------------------------------------------------
+# Startup-summary formatter (server-side startup_summary)
+# ---------------------------------------------------------------------------
+
+def format_startup_summary(data):
+    """Format a ``view=startup`` response as compact startup text.
+
+    Renders the server's ``startup_summary`` block.  Falls back to
+    :func:`format_startup` when ``startup_summary`` is absent (older
+    servers).  When both ``startup_summary`` and ``capsule`` are null,
+    shows only source state and a placeholder.
+    """
+    summary = data.get("startup_summary")
+    capsule = data.get("capsule")
+
+    # Fallback: no startup_summary in response — delegate to legacy renderer
+    if summary is None:
+        if capsule is not None:
+            return format_startup(data)
+        # Both null — minimal output, but still surface recovery warnings
+        lines = [
+            "=== Source State ===",
+            data.get("source_state", "unknown"),
+        ]
+        warnings = data.get("recovery_warnings") or []
+        if warnings:
+            lines.append("")
+            lines.append("=== Recovery Warnings ===")
+            for w in warnings:
+                lines.append(f"- {w}")
+        lines.append("")
+        lines.append("(no capsule available)")
+        return "\n".join(lines) + "\n"
+
+    lines: list[str] = []
+
+    # --- recovery (always shown) ---
+    recovery = summary.get("recovery") or {}
+    lines.append("=== Source State ===")
+    lines.append(recovery.get("source_state") or data.get("source_state", "unknown"))
+
+    # --- recovery warnings (conditional) ---
+    warnings = recovery.get("recovery_warnings") or []
+    health_reasons = recovery.get("capsule_health_reasons") or []
+    health_status = recovery.get("capsule_health_status")
+    if warnings or health_reasons:
+        lines.append("")
+        lines.append("=== Recovery Warnings ===")
+        if health_status:
+            lines.append(f"Health: {health_status}")
+        for w in warnings:
+            lines.append(f"- {w}")
+        for r in health_reasons:
+            lines.append(f"- {r}")
+
+    # --- orientation: always-shown sections ---
+    orientation = summary.get("orientation") or {}
+
+    for field, header in [
+        ("top_priorities", "Top Priorities"),
+        ("active_constraints", "Active Constraints"),
+        ("open_loops", "Open Loops"),
+    ]:
+        lines.append("")
+        lines.append(f"=== {header} ===")
+        items = orientation.get(field) or []
+        if not items:
+            lines.append("(none)")
+        else:
+            for item in items:
+                lines.append(f"- {item}")
+
+    # --- trust signals (conditional) ---
+    trust = summary.get("trust_signals")
+    if trust is not None:
+        recency = trust.get("recency") or {}
+        completeness = trust.get("completeness") or {}
+        integrity = trust.get("integrity") or {}
+        scope = trust.get("scope_match") or {}
+
+        phase = recency.get("phase", "unknown")
+        fc = recency.get("freshness_class", "unknown")
+        adequate = "adequate" if completeness.get("orientation_adequate") else "inadequate"
+        trimmed_note = ", trimmed" if completeness.get("trimmed") else ""
+        h_status = integrity.get("health_status", "unknown")
+        v_status = integrity.get("verification_status", "unknown")
+        scope_label = "exact" if scope.get("exact") else "fallback"
+
+        lines.append("")
+        lines.append("=== Trust Signals ===")
+        lines.append(f"Recency: {phase} ({fc})")
+        lines.append(f"Completeness: orientation {adequate}{trimmed_note}")
+        lines.append(f"Integrity: {h_status}, {v_status}")
+        lines.append(f"Scope: {scope_label}")
+
+    # --- thread identity (conditional, from capsule) ---
+    thread_desc = (capsule or {}).get("thread_descriptor")
+    if thread_desc is not None:
+        label = thread_desc.get("label", "")
+        lifecycle = thread_desc.get("lifecycle", "")
+        keywords = thread_desc.get("keywords") or []
+
+        lines.append("")
+        lines.append("=== Thread Identity ===")
+        lines.append(f"{label} [{lifecycle}]")
+        if keywords:
+            lines.append(f"Keywords: {', '.join(str(k) for k in keywords)}")
+
+    # --- negative decisions (conditional) ---
+    neg = orientation.get("negative_decisions") or []
+    if neg:
+        lines.append("")
+        lines.append("=== Negative Decisions ===")
+        for nd in neg:
+            decision = nd.get("decision", "") if isinstance(nd, dict) else str(nd)
+            rationale = nd.get("rationale", "") if isinstance(nd, dict) else ""
+            lines.append(f"- {decision}: {rationale}")
+
+    # --- rationale entries (conditional) ---
+    rationale_entries = orientation.get("rationale_entries") or []
+    if rationale_entries:
+        lines.append("")
+        lines.append("=== Rationale Entries ===")
+        for entry in rationale_entries:
+            if isinstance(entry, dict):
+                kind = entry.get("kind", "")
+                tag = entry.get("tag", "")
+                entry_summary = entry.get("summary", "")
+                lines.append(f"- [{kind}] {tag}: {entry_summary}")
+            else:
+                lines.append(f"- {entry}")
+
+    # --- session trajectory (conditional) ---
+    context = summary.get("context") or {}
+    trajectory = context.get("session_trajectory") or []
+    if trajectory:
+        lines.append("")
+        lines.append("=== Session Trajectory ===")
+        for item in trajectory:
+            lines.append(f"- {item}")
+
+    # --- stable preferences (conditional) ---
+    prefs = summary.get("stable_preferences") or []
+    if prefs:
+        lines.append("")
+        lines.append("=== Stable Preferences ===")
+        for pref in prefs:
+            if isinstance(pref, dict):
+                tag = pref.get("tag", "")
+                content = pref.get("content", "")
+                lines.append(f"- [{tag}] {content}")
+            else:
+                lines.append(f"- {pref}")
+
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
@@ -180,11 +340,15 @@ def cmd_read(args):
     base_url = resolve_base_url(args)
     token = resolve_token(args)
 
-    payload = json.dumps({
+    body = {
         "subject_kind": args.subject_kind,
         "subject_id": args.subject_id,
         "allow_fallback": True,
-    }).encode("utf-8")
+    }
+    if args.format == "startup":
+        body["view"] = "startup"
+
+    payload = json.dumps(body).encode("utf-8")
 
     resp_text = do_request(base_url, "/v1/continuity/read", token, payload, args.timeout)
 
@@ -198,7 +362,7 @@ def cmd_read(args):
     if args.format == "json":
         output = json.dumps(resp_data, indent=4) + "\n"
     else:
-        output = format_startup(resp_data)
+        output = format_startup_summary(resp_data)
 
     if args.output:
         try:
@@ -242,6 +406,68 @@ def cmd_upsert(args):
         sys.exit(2)
 
     resp_text = do_request(base_url, "/v1/continuity/upsert", token, raw, args.timeout)
+
+    try:
+        resp_data = json.loads(resp_text)
+    except (json.JSONDecodeError, ValueError):
+        print("Error: unexpected response format", file=sys.stderr)
+        sys.exit(5)
+
+    sys.stdout.write(json.dumps(resp_data, indent=4) + "\n")
+
+
+def cmd_capabilities(args):
+    """Handle the 'capabilities' subcommand."""
+    base_url = resolve_base_url(args)
+    token = resolve_token(args)
+
+    resp_text = do_request(
+        base_url, "/v1/capabilities", token, None, args.timeout, method="GET",
+    )
+
+    try:
+        resp_data = json.loads(resp_text)
+    except (json.JSONDecodeError, ValueError):
+        print("Error: unexpected response format", file=sys.stderr)
+        sys.exit(5)
+
+    sys.stdout.write(json.dumps(resp_data, indent=4) + "\n")
+
+
+def cmd_list(args):
+    """Handle the 'list' subcommand."""
+    base_url = resolve_base_url(args)
+    token = resolve_token(args)
+
+    # Build request body — only include explicitly-provided flags.
+    body = {}
+    if args.subject_kind is not None:
+        body["subject_kind"] = args.subject_kind
+    if args.limit is not None:
+        body["limit"] = args.limit
+    if args.include_fallback:
+        body["include_fallback"] = True
+    if args.include_archived:
+        body["include_archived"] = True
+    if args.include_cold:
+        body["include_cold"] = True
+    if args.lifecycle is not None:
+        body["lifecycle"] = args.lifecycle
+    if args.scope_anchor is not None:
+        body["scope_anchor"] = args.scope_anchor
+    if args.keyword is not None:
+        body["keyword"] = args.keyword
+    if args.label_exact is not None:
+        body["label_exact"] = args.label_exact
+    if args.anchor_kind is not None:
+        body["anchor_kind"] = args.anchor_kind
+    if args.anchor_value is not None:
+        body["anchor_value"] = args.anchor_value
+    if args.sort is not None:
+        body["sort"] = args.sort
+
+    payload = json.dumps(body).encode("utf-8")
+    resp_text = do_request(base_url, "/v1/continuity/list", token, payload, args.timeout)
 
     try:
         resp_data = json.loads(resp_text)
@@ -331,6 +557,33 @@ def build_parser():
     upsert_parser.add_argument("--input", default=None)
     upsert_parser.add_argument("--stdin", action="store_true", default=False)
 
+    # -- list --
+    list_parser = subparsers.add_parser("list", help="List continuity capsules")
+    add_connection_args(list_parser)
+    list_parser.add_argument("--subject-kind", dest="subject_kind", default=None,
+                             choices=["user", "peer", "thread", "task"])
+    list_parser.add_argument("--limit", type=int, default=None)
+    list_parser.add_argument("--include-fallback", dest="include_fallback",
+                             action="store_true", default=False)
+    list_parser.add_argument("--include-archived", dest="include_archived",
+                             action="store_true", default=False)
+    list_parser.add_argument("--include-cold", dest="include_cold",
+                             action="store_true", default=False)
+    list_parser.add_argument("--lifecycle", default=None,
+                             choices=["active", "suspended", "concluded", "superseded"])
+    list_parser.add_argument("--scope-anchor", dest="scope_anchor", default=None)
+    list_parser.add_argument("--keyword", default=None)
+    list_parser.add_argument("--label-exact", dest="label_exact", default=None)
+    list_parser.add_argument("--anchor-kind", dest="anchor_kind", default=None)
+    list_parser.add_argument("--anchor-value", dest="anchor_value", default=None)
+    list_parser.add_argument("--sort", default=None, choices=["default", "salience"])
+
+    # -- capabilities --
+    capabilities_parser = subparsers.add_parser(
+        "capabilities", help="Show server capabilities",
+    )
+    add_connection_args(capabilities_parser)
+
     # -- token (parent) -> hash (child) --
     token_parser = subparsers.add_parser("token", help="Token utilities")
     token_sub = token_parser.add_subparsers(dest="token_command")
@@ -356,6 +609,10 @@ def main():
         cmd_read(args)
     elif args.command == "upsert":
         cmd_upsert(args)
+    elif args.command == "list":
+        cmd_list(args)
+    elif args.command == "capabilities":
+        cmd_capabilities(args)
     elif args.command == "token":
         if not getattr(args, "token_command", None):
             token_parser.print_usage(sys.stderr)
