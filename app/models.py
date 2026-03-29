@@ -12,6 +12,7 @@ PeerId = Annotated[str, Field(min_length=1, max_length=200)]
 
 class WriteRequest(BaseModel):
     """Request payload for writing a full file into the repository."""
+
     path: str
     content: str
     commit_message: Optional[str] = None
@@ -19,6 +20,7 @@ class WriteRequest(BaseModel):
 
 class AppendRequest(BaseModel):
     """Request payload for appending one JSONL record to a file."""
+
     path: str
     record: Dict[str, Any]
     commit_message: Optional[str] = None
@@ -26,6 +28,7 @@ class AppendRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     """Search query parameters for the local index."""
+
     query: str
     limit: int = Field(default=10, ge=1, le=100)
     include_types: List[str] = Field(default_factory=list)
@@ -35,6 +38,7 @@ class SearchRequest(BaseModel):
 
 class ContextRetrieveRequest(BaseModel):
     """Context retrieval parameters for search-backed continuation bundles."""
+
     task: str
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     subject_id: Optional[str] = Field(default=None, max_length=200)
@@ -51,6 +55,7 @@ class ContextRetrieveRequest(BaseModel):
 
 class RecentRequest(BaseModel):
     """Parameters for listing recent repository files."""
+
     limit: int = Field(default=10, ge=1, le=100)
     include_types: List[str] = Field(default_factory=list)
     time_window_hours: Optional[int] = Field(default=None, ge=1, le=87600)
@@ -59,12 +64,14 @@ class RecentRequest(BaseModel):
 
 class SnapshotAsOfRequest(BaseModel):
     """Selector for creating a snapshot from the working tree or history."""
+
     mode: Literal["working_tree", "commit", "timestamp"] = "working_tree"
     value: Optional[str] = None
 
 
 class ContextSnapshotRequest(BaseModel):
     """Request payload for deterministic context snapshots."""
+
     task: str
     as_of: SnapshotAsOfRequest = Field(default_factory=SnapshotAsOfRequest)
     include_types: List[str] = Field(default_factory=list)
@@ -74,6 +81,7 @@ class ContextSnapshotRequest(BaseModel):
 
 class DeliveryPolicy(BaseModel):
     """Delivery behavior attached to outbound messages."""
+
     requires_ack: bool = False
     ack_timeout_seconds: int = Field(default=300, ge=1, le=86400)
     max_retries: int = Field(default=5, ge=0, le=100)
@@ -81,6 +89,7 @@ class DeliveryPolicy(BaseModel):
 
 class SignedEnvelope(BaseModel):
     """Message signing metadata carried with signed requests."""
+
     key_id: str
     nonce: str
     expires_at: Optional[str] = None
@@ -91,6 +100,7 @@ class SignedEnvelope(BaseModel):
 
 class MessageSendRequest(BaseModel):
     """Outbound direct message payload."""
+
     thread_id: str
     sender: str
     recipient: str
@@ -105,12 +115,14 @@ class MessageSendRequest(BaseModel):
 
 class CompactRequest(BaseModel):
     """Request payload for compaction plan generation."""
+
     source_path: Optional[str] = None
     note: Optional[str] = None
 
 
 class RelayForwardRequest(BaseModel):
     """Request payload for forwarding a message through a relay."""
+
     relay_id: str = "relay-local"
     target_recipient: str
     thread_id: str
@@ -125,6 +137,7 @@ class RelayForwardRequest(BaseModel):
 
 class MessageAckRequest(BaseModel):
     """Acknowledgement payload for previously delivered messages."""
+
     message_id: str
     status: Literal["accepted", "rejected", "deferred"]
     reason: Optional[str] = None
@@ -133,6 +146,7 @@ class MessageAckRequest(BaseModel):
 
 class PeerRegisterRequest(BaseModel):
     """Peer registry entry creation payload."""
+
     peer_id: str
     base_url: str
     public_key: Optional[str] = None
@@ -145,6 +159,7 @@ class PeerRegisterRequest(BaseModel):
 
 class PeerTrustTransitionRequest(BaseModel):
     """Peer trust-level transition payload."""
+
     trust_level: Literal["trusted", "restricted", "untrusted"]
     reason: str = Field(min_length=3, max_length=500)
     expected_public_key_fingerprint: Optional[str] = None
@@ -152,12 +167,14 @@ class PeerTrustTransitionRequest(BaseModel):
 
 class CoordinationHandoffSourceSelector(BaseModel):
     """Explicit continuity selector projected into a coordination handoff."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
 
 
 class CoordinationHandoffSourceSummary(BaseModel):
     """Source-capsule summary copied into a coordination handoff artifact."""
+
     path: str
     updated_at: str
     verified_at: str
@@ -167,12 +184,14 @@ class CoordinationHandoffSourceSummary(BaseModel):
 
 class CoordinationHandoffSharedContinuity(BaseModel):
     """The bounded 5A continuity subset allowed to cross the peer boundary."""
+
     active_constraints: List[str] = Field(default_factory=list, max_length=5)
     drift_signals: List[str] = Field(default_factory=list, max_length=5)
 
 
 class CoordinationHandoffArtifact(BaseModel):
     """Stored handoff artifact exchanged between one sender and one recipient."""
+
     schema_type: Literal["continuity_handoff"] = "continuity_handoff"
     schema_version: Literal["1.0"] = "1.0"
     handoff_id: str = Field(min_length=1, max_length=64)
@@ -194,6 +213,7 @@ class CoordinationHandoffArtifact(BaseModel):
 
 class CoordinationHandoffCreateRequest(BaseModel):
     """Create request for one inter-agent continuity handoff artifact."""
+
     recipient_peer: str = Field(min_length=1, max_length=200)
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
@@ -205,6 +225,7 @@ class CoordinationHandoffCreateRequest(BaseModel):
 
 class CoordinationHandoffQueryRequest(BaseModel):
     """Filter parameters for discovering visible handoff artifacts."""
+
     recipient_peer: Optional[str] = Field(default=None, max_length=200)
     sender_peer: Optional[str] = Field(default=None, max_length=200)
     status: Optional[Literal["pending", "accepted_advisory", "deferred", "rejected"]] = None
@@ -214,12 +235,14 @@ class CoordinationHandoffQueryRequest(BaseModel):
 
 class CoordinationHandoffConsumeRequest(BaseModel):
     """Recipient-only consume request for one handoff artifact."""
+
     status: Literal["accepted_advisory", "deferred", "rejected"]
     reason: Optional[str] = Field(default=None, max_length=240)
 
 
 class SharedCoordinationState(BaseModel):
     """The bounded 5B shared coordination payload visible across participants."""
+
     constraints: List[str] = Field(default_factory=list, max_length=8)
     drift_signals: List[str] = Field(default_factory=list, max_length=8)
     coordination_alerts: List[str] = Field(default_factory=list, max_length=8)
@@ -227,6 +250,7 @@ class SharedCoordinationState(BaseModel):
 
 class CoordinationSharedArtifact(BaseModel):
     """Stored shared coordination artifact owned by one peer and visible to participants."""
+
     schema_type: Literal["coordination_shared_state"] = "coordination_shared_state"
     schema_version: Literal["1.0"] = "1.0"
     shared_id: str = Field(min_length=1, max_length=64)
@@ -246,6 +270,7 @@ class CoordinationSharedArtifact(BaseModel):
 
 class CoordinationSharedCreateRequest(BaseModel):
     """Create request for one owner-authored shared coordination artifact."""
+
     participant_peers: List[PeerId] = Field(default_factory=list, min_length=1, max_length=8)
     task_id: Optional[str] = Field(default=None, max_length=200)
     thread_id: Optional[str] = Field(default=None, max_length=200)
@@ -259,6 +284,7 @@ class CoordinationSharedCreateRequest(BaseModel):
 
 class CoordinationSharedQueryRequest(BaseModel):
     """Filter parameters for discovering visible shared coordination artifacts."""
+
     owner_peer: Optional[str] = Field(default=None, max_length=200)
     participant_peer: Optional[str] = Field(default=None, max_length=200)
     task_id: Optional[str] = Field(default=None, max_length=200)
@@ -269,18 +295,14 @@ class CoordinationSharedQueryRequest(BaseModel):
     @model_validator(mode="after")
     def _require_one_filter(self) -> "CoordinationSharedQueryRequest":
         """Require at least one query filter for shared coordination discovery."""
-        if (
-            self.owner_peer is None
-            and self.participant_peer is None
-            and self.task_id is None
-            and self.thread_id is None
-        ):
+        if self.owner_peer is None and self.participant_peer is None and self.task_id is None and self.thread_id is None:
             raise ValueError("owner_peer, participant_peer, task_id, or thread_id is required")
         return self
 
 
 class CoordinationSharedUpdateRequest(BaseModel):
     """Owner-only replacement request for one shared coordination artifact."""
+
     model_config = ConfigDict(extra="forbid")
 
     expected_version: int = Field(ge=1)
@@ -294,6 +316,7 @@ class CoordinationSharedUpdateRequest(BaseModel):
 
 class CoordinationReconciliationClaim(BaseModel):
     """One bounded coordination claim carried inside a reconciliation record."""
+
     model_config = ConfigDict(extra="forbid")
 
     source_kind: Literal["handoff", "shared"]
@@ -311,6 +334,7 @@ class CoordinationReconciliationClaim(BaseModel):
 
 class CoordinationReconciliationArtifact(BaseModel):
     """Stored reconciliation record for one bounded inter-agent disagreement."""
+
     schema_type: Literal["coordination_reconciliation_record"] = "coordination_reconciliation_record"
     schema_version: Literal["1.0"] = "1.0"
     reconciliation_id: str = Field(min_length=1, max_length=64)
@@ -337,6 +361,7 @@ class CoordinationReconciliationArtifact(BaseModel):
 
 class CoordinationReconciliationOpenRequest(BaseModel):
     """Open request for one bounded reconciliation record."""
+
     model_config = ConfigDict(extra="forbid")
 
     task_id: Optional[str] = Field(default=None, max_length=200)
@@ -351,6 +376,7 @@ class CoordinationReconciliationOpenRequest(BaseModel):
 
 class CoordinationReconciliationQueryRequest(BaseModel):
     """Filter parameters for discovering visible reconciliation records."""
+
     model_config = ConfigDict(extra="forbid")
 
     owner_peer: Optional[str] = Field(default=None, max_length=200)
@@ -365,20 +391,14 @@ class CoordinationReconciliationQueryRequest(BaseModel):
     @model_validator(mode="after")
     def _require_one_filter(self) -> "CoordinationReconciliationQueryRequest":
         """Require at least one bounded query filter."""
-        if (
-            self.owner_peer is None
-            and self.claimant_peer is None
-            and self.status is None
-            and self.classification is None
-            and self.task_id is None
-            and self.thread_id is None
-        ):
+        if self.owner_peer is None and self.claimant_peer is None and self.status is None and self.classification is None and self.task_id is None and self.thread_id is None:
             raise ValueError("At least one reconciliation query filter is required")
         return self
 
 
 class CoordinationReconciliationResolveRequest(BaseModel):
     """Resolve request for one open reconciliation record under version checking."""
+
     model_config = ConfigDict(extra="forbid")
 
     expected_version: int = Field(ge=1)
@@ -389,6 +409,7 @@ class CoordinationReconciliationResolveRequest(BaseModel):
 
 class TaskCreateRequest(BaseModel):
     """Task creation payload for shared task records."""
+
     task_id: str
     title: str
     description: str = ""
@@ -403,6 +424,7 @@ class TaskCreateRequest(BaseModel):
 
 class TaskUpdateRequest(BaseModel):
     """Mutable fields for updating an existing task record."""
+
     status: Optional[Literal["open", "in_progress", "blocked", "done"]] = None
     title: Optional[str] = None
     description: Optional[str] = None
@@ -416,6 +438,7 @@ class TaskUpdateRequest(BaseModel):
 
 class PatchProposeRequest(BaseModel):
     """Patch proposal payload for docs or code workflows."""
+
     patch_id: Optional[str] = None
     target_path: str
     base_ref: str = "HEAD"
@@ -427,18 +450,21 @@ class PatchProposeRequest(BaseModel):
 
 class PatchApplyRequest(BaseModel):
     """Patch apply request referencing a previously proposed patch."""
+
     patch_id: str
     commit_message: Optional[str] = None
 
 
 class CodeCheckRunRequest(BaseModel):
     """Code check execution request."""
+
     ref: str = "HEAD"
     profile: Literal["lint", "test", "build"] = "test"
 
 
 class CodeMergeRequest(BaseModel):
     """Merge request gated by prior code check results."""
+
     source_ref: str
     target_ref: str = "HEAD"
     required_checks: List[Literal["lint", "test", "build"]] = Field(default_factory=lambda: ["test"])
@@ -446,6 +472,7 @@ class CodeMergeRequest(BaseModel):
 
 class SecurityKeysRotateRequest(BaseModel):
     """Security key rotation request."""
+
     key_id: Optional[str] = None
     secret: Optional[str] = None
     activate: bool = True
@@ -455,6 +482,7 @@ class SecurityKeysRotateRequest(BaseModel):
 
 class SecurityTokenIssueRequest(BaseModel):
     """Token issuance request for a peer."""
+
     peer_id: str
     scopes: List[str] = Field(default_factory=list)
     read_namespaces: List[str] = Field(default_factory=list)
@@ -467,6 +495,7 @@ class SecurityTokenIssueRequest(BaseModel):
 
 class SecurityTokenRevokeRequest(BaseModel):
     """Token revocation request by id, hash, or peer."""
+
     token_id: Optional[str] = None
     token_sha256: Optional[str] = None
     peer_id: Optional[str] = None
@@ -476,6 +505,7 @@ class SecurityTokenRevokeRequest(BaseModel):
 
 class SecurityTokenRotateRequest(BaseModel):
     """Token rotation request with optional metadata overrides."""
+
     token_id: Optional[str] = None
     token_sha256: Optional[str] = None
     new_token_id: Optional[str] = None
@@ -490,6 +520,7 @@ class SecurityTokenRotateRequest(BaseModel):
 
 class MessageVerifyRequest(BaseModel):
     """Signed payload verification request."""
+
     payload: Dict[str, Any]
     key_id: str
     nonce: str
@@ -501,6 +532,7 @@ class MessageVerifyRequest(BaseModel):
 
 class MessageReplayRequest(BaseModel):
     """Replay request for dead-letter or deferred messages."""
+
     message_id: str
     reason: Optional[str] = None
     force: bool = False
@@ -510,6 +542,7 @@ class MessageReplayRequest(BaseModel):
 
 class ReplicationFilePayload(BaseModel):
     """One file entry included in a replication pull payload."""
+
     path: str
     content: Optional[str] = None
     sha256: Optional[str] = None
@@ -520,6 +553,7 @@ class ReplicationFilePayload(BaseModel):
 
 class ReplicationPullRequest(BaseModel):
     """Inbound replication request carrying file state."""
+
     source_peer: str
     files: List[ReplicationFilePayload] = Field(default_factory=list)
     mode: Literal["upsert", "overwrite"] = "upsert"
@@ -530,13 +564,12 @@ class ReplicationPullRequest(BaseModel):
 
 class ReplicationPushRequest(BaseModel):
     """Outbound replication request describing a push operation."""
+
     peer_id: Optional[str] = None
     base_url: Optional[str] = None
     idempotency_key: Optional[str] = None
     target_path: str = "/v1/replication/pull"
-    include_prefixes: List[str] = Field(
-        default_factory=lambda: ["memory", "messages", "tasks", "patches", "runs", "projects", "essays", "journal", "snapshots"]
-    )
+    include_prefixes: List[str] = Field(default_factory=lambda: ["memory", "messages", "tasks", "patches", "runs", "projects", "essays", "journal", "snapshots"])
     max_files: int = Field(default=2000, ge=1, le=10000)
     dry_run: bool = False
     target_token: Optional[str] = None
@@ -546,12 +579,14 @@ class ReplicationPushRequest(BaseModel):
 
 class BackupCreateRequest(BaseModel):
     """Backup creation request."""
+
     include_prefixes: List[str] = Field(default_factory=lambda: ["memory", "messages", "tasks", "patches", "runs", "projects", "essays", "journal", "snapshots", "peers", "config", "logs"])
     note: Optional[str] = None
 
 
 class BackupRestoreTestRequest(BaseModel):
     """Restore-test request for an existing backup archive."""
+
     backup_path: str
     verify_index_rebuild: bool = True
     verify_continuity: bool = True
@@ -559,6 +594,7 @@ class BackupRestoreTestRequest(BaseModel):
 
 class OpsRunRequest(BaseModel):
     """Host-local operations runner payload."""
+
     job_id: Literal[
         "index.rebuild_incremental",
         "metrics.poll_and_alarm_eval",
@@ -587,6 +623,7 @@ class OpsRunRequest(BaseModel):
 
 class ContinuitySource(BaseModel):
     """Metadata about how a continuity capsule was produced."""
+
     producer: str = Field(min_length=1, max_length=100)
     update_reason: Literal["startup_refresh", "pre_compaction", "interaction_boundary", "manual", "migration"]
     inputs: List[str] = Field(default_factory=list, max_length=12)
@@ -594,6 +631,7 @@ class ContinuitySource(BaseModel):
 
 class ContinuityRelationshipModel(BaseModel):
     """Relationship-specific continuity hints for a subject."""
+
     trust_level: Optional[Literal["low", "guarded", "normal", "high"]] = None
     preferred_style: List[str] = Field(default_factory=list, max_length=5)
     sensitivity_notes: List[str] = Field(default_factory=list, max_length=5)
@@ -601,6 +639,7 @@ class ContinuityRelationshipModel(BaseModel):
 
 class ContinuityRetrievalHints(BaseModel):
     """Retrieval preferences embedded in a continuity capsule."""
+
     must_include: List[str] = Field(default_factory=list, max_length=8)
     avoid: List[str] = Field(default_factory=list, max_length=8)
     load_next: List[str] = Field(default_factory=list, max_length=8)
@@ -608,18 +647,21 @@ class ContinuityRetrievalHints(BaseModel):
 
 class ContinuityAttentionPolicy(BaseModel):
     """Attention allocation hints used during continuity loading."""
+
     early_load: List[str] = Field(default_factory=list, max_length=8)
     presence_bias_overrides: List[str] = Field(default_factory=list, max_length=5)
 
 
 class ContinuityConfidence(BaseModel):
     """Confidence values attached to continuity inferences."""
+
     continuity: float = Field(ge=0.0, le=1.0)
     relationship_model: float = Field(ge=0.0, le=1.0)
 
 
 class ContinuityVerificationState(BaseModel):
     """Verification status recorded for one continuity capsule."""
+
     status: Literal[
         "unverified",
         "self_attested",
@@ -637,6 +679,7 @@ class ContinuityVerificationState(BaseModel):
 
 class ContinuityFreshness(BaseModel):
     """Freshness metadata for continuity decay and expiration rules."""
+
     freshness_class: Optional[Literal["persistent", "durable", "situational", "ephemeral"]] = None
     expires_at: Optional[str] = None
     stale_after_seconds: Optional[int] = Field(default=None, ge=300, le=31536000)
@@ -644,6 +687,7 @@ class ContinuityFreshness(BaseModel):
 
 class ContinuityCapsuleHealth(BaseModel):
     """Operational health state recorded for one continuity capsule."""
+
     status: Literal["healthy", "degraded", "conflicted"]
     reasons: List[str] = Field(default_factory=list, max_length=5)
     last_checked_at: str
@@ -651,12 +695,14 @@ class ContinuityCapsuleHealth(BaseModel):
 
 class ContinuitySelector(BaseModel):
     """Explicit continuity subject selector used by multi-capsule retrieval."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
 
 
 class NegativeDecision(BaseModel):
     """A deliberate non-action plus rationale; bounds are enforced in the continuity service."""
+
     decision: str = Field(description="1-160 chars, validated at the continuity service layer.")
     rationale: str = Field(description="1-240 chars, validated at the continuity service layer.")
 
@@ -670,6 +716,7 @@ class RationaleEntry(BaseModel):
     enforced at the service layer (HTTP 400), consistent with
     ``NegativeDecision``.
     """
+
     tag: str = Field(min_length=1, max_length=80)
     kind: Literal["decision", "assumption", "tension"]
     status: Literal["active", "superseded", "retired"]
@@ -683,6 +730,7 @@ class RationaleEntry(BaseModel):
 
 class ContinuityState(BaseModel):
     """Operational orientation state preserved across resets and compaction."""
+
     top_priorities: List[str] = Field(max_length=5)
     active_concerns: List[str] = Field(max_length=5)
     active_constraints: List[str] = Field(max_length=5)
@@ -707,13 +755,33 @@ class StablePreference(BaseModel):
     instructions that the agent should honour regardless of thread context.
     Tags must be unique within a capsule's ``stable_preferences`` list.
     """
+
     tag: str = Field(min_length=1, max_length=80)
     content: str = Field(min_length=1, max_length=240)
     set_at: str
 
 
+class IdentityAnchor(BaseModel):
+    """A stable identity pin for deterministic thread discovery."""
+
+    kind: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=200)
+
+
+class ThreadDescriptor(BaseModel):
+    """Structured identity block for thread and task capsules."""
+
+    label: str = Field(min_length=1, max_length=120)
+    keywords: List[str] = Field(default_factory=list, max_length=6)
+    scope_anchors: List[str] = Field(default_factory=list, max_length=4)
+    identity_anchors: List[IdentityAnchor] = Field(default_factory=list, max_length=4)
+    lifecycle: Optional[Literal["active", "suspended", "concluded", "superseded"]] = None
+    superseded_by: Optional[str] = Field(default=None, max_length=200)
+
+
 class ContinuityCapsule(BaseModel):
     """Persisted continuity capsule for one subject."""
+
     schema_version: Literal["1.0"] = "1.0"
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
@@ -730,6 +798,7 @@ class ContinuityCapsule(BaseModel):
     verification_state: Optional[ContinuityVerificationState] = None
     capsule_health: Optional[ContinuityCapsuleHealth] = None
     stable_preferences: List[StablePreference] = Field(default_factory=list, max_length=12)
+    thread_descriptor: Optional[ThreadDescriptor] = None
 
 
 class SessionEndSnapshot(BaseModel):
@@ -739,6 +808,7 @@ class SessionEndSnapshot(BaseModel):
     at session end. P1 fields are optional: None means 'preserve whatever
     the base capsule already has'; an explicit list (even empty) overrides.
     """
+
     # P0 — required, always override capsule.continuity counterparts
     open_loops: List[str] = Field(max_length=5)
     top_priorities: List[str] = Field(max_length=5)
@@ -753,16 +823,20 @@ class SessionEndSnapshot(BaseModel):
 
 class ContinuityUpsertRequest(BaseModel):
     """Top-level request for storing or replacing a continuity capsule."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     capsule: ContinuityCapsule
     commit_message: Optional[str] = Field(default=None, max_length=240)
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
     session_end_snapshot: Optional[SessionEndSnapshot] = Field(default=None)
+    lifecycle_transition: Optional[Literal["suspend", "resume", "conclude", "supersede"]] = None
+    superseded_by: Optional[str] = Field(default=None, max_length=200)
 
 
 class ContinuityReadRequest(BaseModel):
     """Exact-selector request for reading one continuity capsule with optional fallback."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     allow_fallback: bool = False
@@ -771,15 +845,23 @@ class ContinuityReadRequest(BaseModel):
 
 class ContinuityListRequest(BaseModel):
     """Filter parameters for listing active, fallback, and archived continuity capsules."""
+
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     limit: int = Field(default=50, ge=1, le=200)
     include_fallback: bool = False
     include_archived: bool = False
     include_cold: bool = False
+    lifecycle: Optional[Literal["active", "suspended", "concluded", "superseded"]] = None
+    scope_anchor: Optional[str] = Field(default=None, max_length=200)
+    keyword: Optional[str] = Field(default=None, max_length=40)
+    label_exact: Optional[str] = Field(default=None, max_length=120)
+    anchor_kind: Optional[str] = Field(default=None, max_length=40)
+    anchor_value: Optional[str] = Field(default=None, max_length=200)
 
 
 class ContinuityRefreshPlanRequest(BaseModel):
     """Parameters for deterministic continuity refresh planning."""
+
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     limit: int = Field(default=25, ge=1, le=100)
     include_healthy: bool = False
@@ -787,12 +869,14 @@ class ContinuityRefreshPlanRequest(BaseModel):
 
 class ContinuityRetentionPlanRequest(BaseModel):
     """Parameters for deterministic continuity retention planning."""
+
     subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
     limit: int = Field(default=25, ge=1, le=100)
 
 
 class ContinuityArchiveRequest(BaseModel):
     """Exact-selector request for archiving one active continuity capsule."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=3, max_length=240)
@@ -800,21 +884,25 @@ class ContinuityArchiveRequest(BaseModel):
 
 class ContinuityColdStoreRequest(BaseModel):
     """Host-local request for cold-storing one archived continuity envelope."""
+
     source_archive_path: str = Field(min_length=1, max_length=400)
 
 
 class ArtifactHistoryColdStoreRequest(BaseModel):
     """Host-local request for cold-storing one artifact-history payload."""
+
     source_payload_path: str = Field(min_length=1, max_length=400)
 
 
 class ContinuityRetentionApplyRequest(BaseModel):
     """Host-local request for batch-applying continuity retention policy."""
+
     source_archive_paths: List[str] = Field(min_length=1, max_length=100)
 
 
 class ContinuityColdRehydrateRequest(BaseModel):
     """Host-local request for rehydrating one cold-stored continuity envelope."""
+
     source_archive_path: Optional[str] = Field(default=None, max_length=400)
     cold_stub_path: Optional[str] = Field(default=None, max_length=400)
 
@@ -828,6 +916,7 @@ class ContinuityColdRehydrateRequest(BaseModel):
 
 class ArtifactHistoryColdRehydrateRequest(BaseModel):
     """Host-local request for rehydrating one artifact-history cold payload."""
+
     source_payload_path: Optional[str] = Field(default=None, max_length=400)
     cold_stub_path: Optional[str] = Field(default=None, max_length=400)
 
@@ -841,11 +930,13 @@ class ArtifactHistoryColdRehydrateRequest(BaseModel):
 
 class RegistryHistoryColdStoreRequest(BaseModel):
     """Host-local request for cold-storing one registry-history shard."""
+
     source_payload_path: str = Field(min_length=1, max_length=400)
 
 
 class RegistryHistoryColdRehydrateRequest(BaseModel):
     """Host-local request for rehydrating one cold-stored registry-history shard."""
+
     source_payload_path: Optional[str] = Field(default=None, max_length=400)
     cold_stub_path: Optional[str] = Field(default=None, max_length=400)
 
@@ -859,12 +950,14 @@ class RegistryHistoryColdRehydrateRequest(BaseModel):
 
 class SegmentHistoryMaintenanceRequest(BaseModel):
     """Host-local request for rolling active sources into history segments."""
+
     family: Literal["journal", "api_audit", "ops_runs", "message_stream", "message_thread", "episodic"]
     batch_limit: Optional[int] = Field(default=None, gt=0)
 
 
 class SegmentHistoryColdStoreRequest(BaseModel):
     """Host-local request for cold-storing rolled segment-history payloads."""
+
     family: Literal["journal", "api_audit", "ops_runs", "message_stream", "message_thread", "episodic"]
     batch_limit: Optional[int] = Field(default=None, gt=0)
     segment_ids: Optional[List[str]] = Field(default=None, max_length=500)
@@ -872,12 +965,14 @@ class SegmentHistoryColdStoreRequest(BaseModel):
 
 class SegmentHistoryColdRehydrateRequest(BaseModel):
     """Host-local request for rehydrating one cold-stored segment-history payload."""
+
     family: Literal["journal", "api_audit", "ops_runs", "message_stream", "message_thread", "episodic"]
     segment_id: str = Field(min_length=1, max_length=200)
 
 
 class ContinuityDeleteRequest(BaseModel):
     """Exact-selector request for deleting continuity artifacts."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     delete_active: bool = False
@@ -895,6 +990,7 @@ class ContinuityDeleteRequest(BaseModel):
 
 class ContinuityVerificationSignal(BaseModel):
     """Structured verification signal used by continuity compare and revalidate workflows."""
+
     kind: Literal["self_review", "external_observation", "user_confirmation", "peer_confirmation", "system_check"]
     source_ref: str = Field(min_length=1, max_length=200)
     observed_at: str
@@ -903,6 +999,7 @@ class ContinuityVerificationSignal(BaseModel):
 
 class ContinuityCompareRequest(BaseModel):
     """Exact-selector request for comparing an active continuity capsule to a candidate."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     candidate_capsule: ContinuityCapsule
@@ -911,6 +1008,7 @@ class ContinuityCompareRequest(BaseModel):
 
 class ContinuityRevalidateRequest(BaseModel):
     """Exact-selector request for confirming or correcting one active continuity capsule."""
+
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     outcome: Literal["confirm", "correct", "degrade", "conflict"]

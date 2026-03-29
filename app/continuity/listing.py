@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.models import ContinuityListRequest
 from app.timestamps import parse_iso as _parse_iso
 
 from app.continuity.cold import _load_cold_stub
@@ -60,6 +61,7 @@ def _capsule_list_summary(
         "retention_class": retention_class,
         "stable_preference_count": len(capsule.get("stable_preferences", [])),
         "rationale_entry_count": len(capsule.get("continuity", {}).get("rationale_entries", [])),
+        "thread_descriptor": capsule.get("thread_descriptor"),
     }
     if extra:
         row.update(extra)
@@ -95,9 +97,7 @@ def _scan_active_summaries(
             if exc.status_code in {400, 404}:
                 continue
             raise
-        summaries.append(
-            _capsule_list_summary(capsule, rel=rel, now=now, artifact_state="active", retention_class="active")
-        )
+        summaries.append(_capsule_list_summary(capsule, rel=rel, now=now, artifact_state="active", retention_class="active"))
     return summaries
 
 
@@ -129,9 +129,7 @@ def _scan_fallback_summaries(
         capsule = envelope["capsule"]
         if subject_kind and capsule["subject_kind"] != subject_kind:
             continue
-        summaries.append(
-            _capsule_list_summary(capsule, rel=rel, now=now, artifact_state="fallback", retention_class="fallback")
-        )
+        summaries.append(_capsule_list_summary(capsule, rel=rel, now=now, artifact_state="fallback", retention_class="fallback"))
     return summaries
 
 
@@ -211,26 +209,61 @@ def _scan_cold_summaries(
             continue
         if subject_kind and frontmatter["subject_kind"] != subject_kind:
             continue
-        summaries.append({
-            "subject_kind": frontmatter["subject_kind"],
-            "subject_id": frontmatter["subject_id"],
-            "path": rel,
-            "source_archive_path": source_archive_path,
-            "updated_at": None,
-            "verified_at": None,
-            "verification_kind": frontmatter["verification_kind"] or None,
-            "freshness_class": frontmatter["freshness_class"] or None,
-            "phase": frontmatter["phase"],
-            "verification_status": frontmatter["verification_status"],
-            "health_status": frontmatter["health_status"],
-            "health_reasons": [],
-            "artifact_state": "cold",
-            "retention_class": "cold",
-            "cold_stub_path": rel,
-            "cold_storage_path": frontmatter["cold_storage_path"],
-            "archived_at": frontmatter["archived_at"],
-            "cold_stored_at": frontmatter["cold_stored_at"],
-            "stable_preference_count": None,
-            "rationale_entry_count": None,
-        })
+        summaries.append(
+            {
+                "subject_kind": frontmatter["subject_kind"],
+                "subject_id": frontmatter["subject_id"],
+                "path": rel,
+                "source_archive_path": source_archive_path,
+                "updated_at": None,
+                "verified_at": None,
+                "verification_kind": frontmatter["verification_kind"] or None,
+                "freshness_class": frontmatter["freshness_class"] or None,
+                "phase": frontmatter["phase"],
+                "verification_status": frontmatter["verification_status"],
+                "health_status": frontmatter["health_status"],
+                "health_reasons": [],
+                "artifact_state": "cold",
+                "retention_class": "cold",
+                "cold_stub_path": rel,
+                "cold_storage_path": frontmatter["cold_storage_path"],
+                "archived_at": frontmatter["archived_at"],
+                "cold_stored_at": frontmatter["cold_stored_at"],
+                "stable_preference_count": None,
+                "rationale_entry_count": None,
+                "thread_descriptor": None,
+            }
+        )
     return summaries
+
+
+def _matches_thread_filters(row: dict[str, Any], req: ContinuityListRequest) -> bool:
+    """Check if a summary row matches all thread descriptor filters (conjunctive)."""
+    td = row.get("thread_descriptor")
+    if td is None:
+        return False
+    if req.lifecycle is not None and td.get("lifecycle") != req.lifecycle:
+        return False
+    if req.scope_anchor is not None:
+        normalized_scope = req.scope_anchor.lower().strip()
+        if normalized_scope not in (td.get("scope_anchors") or []):
+            return False
+    if req.keyword is not None:
+        normalized_keyword = req.keyword.lower().strip()
+        if normalized_keyword not in [kw.lower().strip() for kw in (td.get("keywords") or [])]:
+            return False
+    if req.label_exact is not None and td.get("label") != req.label_exact:
+        return False
+    if req.anchor_kind is not None or req.anchor_value is not None:
+        normalized_anchor_kind = req.anchor_kind.lower().strip() if req.anchor_kind is not None else None
+        anchors = td.get("identity_anchors") or []
+        matched = False
+        for anchor in anchors:
+            kind_ok = normalized_anchor_kind is None or anchor.get("kind") == normalized_anchor_kind
+            value_ok = req.anchor_value is None or anchor.get("value") == req.anchor_value
+            if kind_ok and value_ok:
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
