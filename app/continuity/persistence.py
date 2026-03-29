@@ -304,6 +304,16 @@ def _restore_failed_cold_store(*, archive_path: Path, archive_bytes: bytes, cold
     return errors
 
 
+def _reject_stale_timestamp(incoming_updated_at: str, stored_updated_at: str) -> None:
+    """Reject if the incoming timestamp is not strictly newer than the stored one."""
+    incoming_dt = _require_utc_timestamp(incoming_updated_at, "updated_at")
+    stored_dt = _require_utc_timestamp(stored_updated_at, "updated_at")
+    if incoming_dt < stored_dt:
+        raise HTTPException(status_code=409, detail="Incoming continuity capsule is older than the current stored capsule")
+    if incoming_dt == stored_dt:
+        raise HTTPException(status_code=409, detail="Incoming continuity capsule conflicts with the current stored capsule timestamp")
+
+
 def _reject_stale_or_conflicting_write(path: Path, req: ContinuityUpsertRequest) -> None:
     """Reject older or equal-timestamp conflicting writes against the stored capsule."""
     if not path.exists() or not path.is_file():
@@ -312,9 +322,4 @@ def _reject_stale_or_conflicting_write(path: Path, req: ContinuityUpsertRequest)
         current = ContinuityCapsule.model_validate(json.loads(path.read_text(encoding="utf-8")))
     except (ValidationError, json.JSONDecodeError):
         return
-    incoming_updated = _require_utc_timestamp(req.capsule.updated_at, "updated_at")
-    current_updated = _require_utc_timestamp(current.updated_at, "updated_at")
-    if incoming_updated < current_updated:
-        raise HTTPException(status_code=409, detail="Incoming continuity capsule is older than the current stored capsule")
-    if incoming_updated == current_updated:
-        raise HTTPException(status_code=409, detail="Incoming continuity capsule conflicts with the current stored capsule timestamp")
+    _reject_stale_timestamp(req.capsule.updated_at, current.updated_at)

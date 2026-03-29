@@ -43,7 +43,9 @@ from .continuity import (
     continuity_cold_store_service,
     continuity_compare_service,
     continuity_delete_service,
+    continuity_lifecycle_service,
     continuity_list_service,
+    continuity_patch_service,
     continuity_read_service,
     continuity_retention_apply_service,
     continuity_retention_plan_service,
@@ -106,7 +108,9 @@ from .models import (
     ContinuityColdStoreRequest,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
+    ContinuityLifecycleRequest,
     ContinuityListRequest,
+    ContinuityPatchRequest,
     ContinuityReadRequest,
     ContinuityRetentionApplyRequest,
     ContinuityRetentionPlanRequest,
@@ -844,6 +848,32 @@ def continuity_upsert(
         auth=auth,
         req=req,
         raw_body=raw_body,
+        audit=_make_audit(settings, gm),
+    )
+
+
+@app.post("/v1/continuity/patch")
+def continuity_patch(req: ContinuityPatchRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Apply partial list-field patch operations to an existing continuity capsule."""
+    settings, gm = _services()
+    return continuity_patch_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
+        audit=_make_audit(settings, gm),
+    )
+
+
+@app.post("/v1/continuity/lifecycle")
+def continuity_lifecycle(req: ContinuityLifecycleRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Apply a standalone lifecycle transition to a thread or task capsule."""
+    settings, gm = _services()
+    return continuity_lifecycle_service(
+        repo_root=settings.repo_root,
+        gm=gm,
+        auth=auth,
+        req=req,
         audit=_make_audit(settings, gm),
     )
 

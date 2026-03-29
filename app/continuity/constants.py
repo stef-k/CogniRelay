@@ -290,5 +290,25 @@ PATCH_STRUCTURED_MATCH_KEYS: dict[str, str] = {
     "thread_descriptor.identity_anchors": "kind:value",
 }
 
+# Max-length bounds per patch target (mirrors Pydantic model constraints).
+PATCH_TARGET_MAX_LENGTH: dict[str, int] = {
+    "continuity.top_priorities": 5,
+    "continuity.active_concerns": 5,
+    "continuity.active_constraints": 5,
+    "continuity.open_loops": 5,
+    "continuity.drift_signals": 5,
+    "continuity.working_hypotheses": 5,
+    "continuity.long_horizon_commitments": 5,
+    "continuity.session_trajectory": 5,
+    "continuity.trailing_notes": 3,
+    "continuity.curiosity_queue": 5,
+    "continuity.negative_decisions": 4,
+    "continuity.rationale_entries": 6,
+    "stable_preferences": 12,
+    "thread_descriptor.keywords": 6,
+    "thread_descriptor.scope_anchors": 4,
+    "thread_descriptor.identity_anchors": 4,
+}
+
 # Capsule size limit in bytes (12 KB).
 CAPSULE_SIZE_LIMIT_BYTES = 12 * 1024

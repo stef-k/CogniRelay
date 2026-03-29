@@ -26,14 +26,21 @@ from app.models import (
     ContinuityCapsule,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
+    ContinuityLifecycleRequest,
     ContinuityListRequest,
+    ContinuityPatchRequest,
     ContinuityReadRequest,
     ContinuityRetentionApplyRequest,
     ContinuityRetentionPlanRequest,
     ContinuityRefreshPlanRequest,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
+    IdentityAnchor,
+    NegativeDecision,
+    PatchOperation,
+    RationaleEntry,
     SessionEndSnapshot,
+    StablePreference,
     ContextRetrieveRequest,
 )
 from app.storage import canonical_json, safe_path, write_bytes_file, write_text_file
@@ -60,6 +67,11 @@ from app.continuity.constants import (
     PRESERVE_OPTIONAL_LIST_CONTINUITY_FIELDS,
     PRESERVE_OPTIONAL_OBJECT_CONTINUITY_FIELDS,
     PRESERVE_REQUIRED_LIST_CONTINUITY_FIELDS,
+    PATCH_STRING_LIST_TARGETS,
+    PATCH_STRUCTURED_LIST_TARGETS,
+    PATCH_STRUCTURED_MATCH_KEYS,
+    PATCH_TARGET_MAX_LENGTH,
+    PATCH_THREAD_DESCRIPTOR_TARGETS,
     PRESERVE_THREAD_DESCRIPTOR_LIST_FIELDS,
     THREAD_LIFECYCLE_TRANSITIONS,
     THREAD_LIFECYCLE_TRANSITION_TARGETS,
@@ -99,6 +111,7 @@ from app.continuity.persistence import (
     _persist_active_capsule,
     _persist_fallback_snapshot,
     _reject_stale_or_conflicting_write,
+    _reject_stale_timestamp,
     _restore_failed_archive,
     _restore_failed_cold_store,
     _restore_failed_refresh_state,
@@ -488,6 +501,406 @@ def continuity_upsert_service(
     if capsule.thread_descriptor is not None and capsule.thread_descriptor.lifecycle is not None:
         result["lifecycle"] = capsule.thread_descriptor.lifecycle
     return result
+
+
+def _resolve_patch_target_list(capsule: ContinuityCapsule, target: str) -> list[Any]:
+    """Return the mutable list on the capsule for a given patch target path."""
+    if target.startswith("continuity."):
+        field = target.split(".", 1)[1]
+        return getattr(capsule.continuity, field)
+    if target.startswith("thread_descriptor."):
+        field = target.split(".", 1)[1]
+        if capsule.thread_descriptor is None:
+            raise HTTPException(status_code=400, detail=f"capsule has no thread_descriptor for target '{target}'")
+        return getattr(capsule.thread_descriptor, field)
+    return getattr(capsule, target)
+
+
+def _set_patch_target_list(capsule: ContinuityCapsule, target: str, value: list[Any]) -> None:
+    """Replace the list on the capsule for a given patch target path."""
+    if target.startswith("continuity."):
+        field = target.split(".", 1)[1]
+        setattr(capsule.continuity, field, value)
+    elif target.startswith("thread_descriptor."):
+        field = target.split(".", 1)[1]
+        setattr(capsule.thread_descriptor, field, value)
+    else:
+        setattr(capsule, target, value)
+
+
+def _validate_patch_operation(op: PatchOperation) -> None:
+    """Validate per-operation parameter constraints; raises HTTP 400 on violation."""
+    target = op.target
+    is_string = target in PATCH_STRING_LIST_TARGETS or target in PATCH_THREAD_DESCRIPTOR_TARGETS
+    is_structured = target in PATCH_STRUCTURED_LIST_TARGETS
+
+    if op.action == "append":
+        if op.match is not None or op.index is not None:
+            raise HTTPException(status_code=400, detail=f"invalid operation: append must not specify match or index on {target}")
+        if op.value is None:
+            raise HTTPException(status_code=400, detail=f"invalid operation: append requires value on {target}")
+    elif op.action == "remove":
+        if op.value is not None:
+            raise HTTPException(status_code=400, detail=f"invalid operation: remove must not specify value on {target}")
+        if is_string:
+            if op.match is None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: remove requires match on string-list target {target}")
+            if op.index is not None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: remove must not specify index on {target}")
+        elif is_structured:
+            if op.match is None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: remove requires match on structured-list target {target}")
+            if op.index is not None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: remove must not specify index on {target}")
+    elif op.action == "replace_at":
+        if op.value is None:
+            raise HTTPException(status_code=400, detail=f"invalid operation: replace_at requires value on {target}")
+        if is_string:
+            if op.index is None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: replace_at requires index on string-list target {target}")
+            if op.match is not None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: replace_at must not specify match on string-list target {target}")
+        elif is_structured:
+            if op.match is None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: replace_at requires match on structured-list target {target}")
+            if op.index is not None:
+                raise HTTPException(status_code=400, detail=f"invalid operation: replace_at must not specify index on structured-list target {target}")
+
+
+def _find_structured_item_index(items: list[Any], target: str, match_value: str) -> int:
+    """Find the index of a structured-list item by its match key; returns -1 if not found."""
+    match_key = PATCH_STRUCTURED_MATCH_KEYS.get(target)
+    if match_key == "kind:value":
+        # identity_anchors: match by "kind:value"
+        for i, item in enumerate(items):
+            kind = item.kind if hasattr(item, "kind") else item.get("kind", "")
+            value = item.value if hasattr(item, "value") else item.get("value", "")
+            if f"{kind}:{value}" == match_value:
+                return i
+    elif match_key:
+        for i, item in enumerate(items):
+            item_val = getattr(item, match_key, None) if hasattr(item, match_key) else item.get(match_key)
+            if item_val == match_value:
+                return i
+    return -1
+
+
+def _coerce_structured_value(target: str, value: Any) -> Any:
+    """Coerce a raw dict value into the appropriate Pydantic model for a structured target."""
+    if target == "continuity.negative_decisions":
+        return NegativeDecision.model_validate(value) if isinstance(value, dict) else value
+    if target == "continuity.rationale_entries":
+        return RationaleEntry.model_validate(value) if isinstance(value, dict) else value
+    if target == "stable_preferences":
+        return StablePreference.model_validate(value) if isinstance(value, dict) else value
+    if target == "thread_descriptor.identity_anchors":
+        return IdentityAnchor.model_validate(value) if isinstance(value, dict) else value
+    return value
+
+
+def _apply_patch_operations(
+    capsule: ContinuityCapsule,
+    operations: list[PatchOperation],
+) -> int:
+    """Apply all patch operations in order; raises on first failure.
+
+    Returns the number of operations successfully applied. If any
+    operation fails, the capsule is in a partially mutated state — the
+    caller must ensure atomicity by working on a snapshot.
+    """
+    for i, op in enumerate(operations):
+        target_list = _resolve_patch_target_list(capsule, op.target)
+        max_len = PATCH_TARGET_MAX_LENGTH.get(op.target)
+
+        if op.action == "append":
+            if max_len is not None and len(target_list) >= max_len:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"append would exceed max length ({max_len}) for {op.target}",
+                )
+            coerced = _coerce_structured_value(op.target, op.value)
+            target_list.append(coerced)
+
+        elif op.action == "remove":
+            if op.target in PATCH_STRING_LIST_TARGETS or op.target in PATCH_THREAD_DESCRIPTOR_TARGETS:
+                # String-list: match by exact string
+                try:
+                    idx = target_list.index(op.match)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"no matching item for remove on {op.target}",
+                    )
+                target_list.pop(idx)
+            else:
+                # Structured-list: match by key
+                idx = _find_structured_item_index(target_list, op.target, op.match)  # type: ignore[arg-type]
+                if idx < 0:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"no matching item for remove on {op.target}",
+                    )
+                target_list.pop(idx)
+
+        elif op.action == "replace_at":
+            if op.target in PATCH_STRING_LIST_TARGETS or op.target in PATCH_THREAD_DESCRIPTOR_TARGETS:
+                # String-list: by index
+                if op.index is None or op.index < 0 or op.index >= len(target_list):
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"index {op.index} out of bounds for {op.target} (length {len(target_list)})",
+                    )
+                target_list[op.index] = op.value
+            else:
+                # Structured-list: by key
+                idx = _find_structured_item_index(target_list, op.target, op.match)  # type: ignore[arg-type]
+                if idx < 0:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"no matching item for replace_at on {op.target}",
+                    )
+                coerced = _coerce_structured_value(op.target, op.value)
+                target_list[idx] = coerced
+
+    return len(operations)
+
+
+def continuity_patch_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityPatchRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Apply partial list-field patch operations to an existing continuity capsule."""
+    auth.require("write:projects")
+    rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    auth.require_write_path(rel)
+    path = safe_path(repo_root, rel)
+
+    # Pre-validate all operation parameter constraints before acquiring the lock.
+    for op in req.operations:
+        _validate_patch_operation(op)
+
+    with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="continuity capsule not found")
+
+        old_bytes = path.read_bytes()
+        try:
+            capsule = ContinuityCapsule.model_validate(json.loads(old_bytes))
+        except (json.JSONDecodeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"stored capsule is invalid: {exc}") from exc
+
+        # Stale-write guard
+        _reject_stale_timestamp(req.updated_at, capsule.updated_at)
+
+        # Snapshot for atomicity: if any operation fails, we discard the snapshot.
+        capsule_snapshot = ContinuityCapsule.model_validate(json.loads(old_bytes))
+        try:
+            ops_applied = _apply_patch_operations(capsule_snapshot, req.operations)
+        except HTTPException:
+            raise  # atomic rejection — no mutations applied
+
+        # Update timestamp
+        capsule_snapshot.updated_at = req.updated_at
+
+        # Post-patch normalization
+        normalizations_applied = _normalize_capsule_fields(capsule_snapshot)
+
+        # Full validation on mutated capsule
+        _validate_capsule(repo_root, capsule_snapshot)
+
+        # Serialize and persist
+        canonical = canonical_json(capsule_snapshot.model_dump(mode="json", exclude_none=True))
+        new_bytes = canonical.encode("utf-8")
+        if len(new_bytes) > CAPSULE_SIZE_LIMIT_BYTES:
+            raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+
+        capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
+        changed = old_bytes != new_bytes
+        committed = False
+        fallback_warning: str | None = None
+        fallback_warning_detail: str | None = None
+
+        if changed:
+            _persist_active_capsule(
+                repo_root=repo_root,
+                gm=gm,
+                path=path,
+                canonical=canonical,
+                commit_message=req.commit_message or f"continuity: patch {req.subject_kind} {req.subject_id}",
+            )
+            committed = True
+            fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
+                repo_root=repo_root,
+                gm=gm,
+                subject_kind=req.subject_kind,
+                subject_id=req.subject_id,
+                capsule=capsule_snapshot.model_dump(mode="json", exclude_none=True),
+            )
+            if fallback_status == "failed":
+                fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
+        else:
+            fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
+
+    audit_detail: dict[str, Any] = {
+        "subject_kind": req.subject_kind,
+        "subject_id": req.subject_id,
+        "path": rel,
+        "operations_applied": ops_applied,
+        "capsule_sha256": capsule_sha256,
+        "committed": committed,
+    }
+    audit(auth, "continuity_patch", audit_detail)
+
+    _warnings: list[dict[str, Any]] = []
+    if fallback_warning:
+        _warnings.append(
+            make_warning(
+                fallback_warning,
+                fallback_warning_detail or "Fallback snapshot write failed",
+                path=rel,
+            )
+        )
+
+    return {
+        "ok": True,
+        "path": rel,
+        "updated": changed,
+        "durable": True,
+        "latest_commit": gm.latest_commit(),
+        "capsule_sha256": capsule_sha256,
+        "operations_applied": ops_applied,
+        "normalizations_applied": normalizations_applied,
+        "warnings": _warnings,
+        "recovery_warnings": [fallback_warning] if fallback_warning else [],
+    }
+
+
+def continuity_lifecycle_service(
+    *,
+    repo_root: Path,
+    gm: GitManager,
+    auth: AuthContext,
+    req: ContinuityLifecycleRequest,
+    audit: Callable[[AuthContext, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Apply a standalone lifecycle transition to a thread or task capsule."""
+    auth.require("write:projects")
+    rel = continuity_rel_path(req.subject_kind, req.subject_id)
+    auth.require_write_path(rel)
+    path = safe_path(repo_root, rel)
+
+    # Validate superseded_by consistency
+    if req.transition == "supersede" and req.superseded_by is None:
+        raise HTTPException(status_code=400, detail="superseded_by is required when transition is 'supersede'")
+    if req.transition != "supersede" and req.superseded_by is not None:
+        raise HTTPException(status_code=400, detail="superseded_by is only allowed when transition is 'supersede'")
+
+    with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="continuity capsule not found")
+
+        old_bytes = path.read_bytes()
+        try:
+            capsule = ContinuityCapsule.model_validate(json.loads(old_bytes))
+        except (json.JSONDecodeError, Exception) as exc:
+            raise HTTPException(status_code=400, detail=f"stored capsule is invalid: {exc}") from exc
+
+        # Stale-write guard
+        _reject_stale_timestamp(req.updated_at, capsule.updated_at)
+
+        # Require thread_descriptor
+        if capsule.thread_descriptor is None:
+            raise HTTPException(status_code=400, detail="no thread_descriptor to transition")
+
+        # Run lifecycle state machine (same logic as upsert)
+        stored_lifecycle = capsule.thread_descriptor.lifecycle or "active"
+        allowed = THREAD_LIFECYCLE_TRANSITIONS.get(stored_lifecycle)
+        if allowed is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"lifecycle transition not allowed from terminal state '{stored_lifecycle}'",
+            )
+        if req.transition not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"lifecycle transition '{req.transition}' not allowed from '{stored_lifecycle}'",
+            )
+
+        previous_lifecycle = stored_lifecycle
+        capsule.thread_descriptor.lifecycle = THREAD_LIFECYCLE_TRANSITION_TARGETS[req.transition]
+        capsule.thread_descriptor.superseded_by = req.superseded_by if req.transition == "supersede" else None
+        capsule.updated_at = req.updated_at
+
+        # Serialize and persist
+        canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
+        new_bytes = canonical.encode("utf-8")
+        if len(new_bytes) > CAPSULE_SIZE_LIMIT_BYTES:
+            raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+
+        capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
+        changed = old_bytes != new_bytes
+        committed = False
+        fallback_warning: str | None = None
+        fallback_warning_detail: str | None = None
+
+        if changed:
+            _persist_active_capsule(
+                repo_root=repo_root,
+                gm=gm,
+                path=path,
+                canonical=canonical,
+                commit_message=req.commit_message or f"continuity: lifecycle {req.transition} {req.subject_kind} {req.subject_id}",
+            )
+            committed = True
+            fallback_rel, fallback_status, fallback_warning_detail = _persist_fallback_snapshot(
+                repo_root=repo_root,
+                gm=gm,
+                subject_kind=req.subject_kind,
+                subject_id=req.subject_id,
+                capsule=capsule.model_dump(mode="json", exclude_none=True),
+            )
+            if fallback_status == "failed":
+                fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
+        else:
+            fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
+
+    audit_detail: dict[str, Any] = {
+        "subject_kind": req.subject_kind,
+        "subject_id": req.subject_id,
+        "path": rel,
+        "transition": req.transition,
+        "lifecycle": capsule.thread_descriptor.lifecycle,
+        "previous_lifecycle": previous_lifecycle,
+        "capsule_sha256": capsule_sha256,
+        "committed": committed,
+    }
+    audit(auth, "continuity_lifecycle", audit_detail)
+
+    _warnings: list[dict[str, Any]] = []
+    if fallback_warning:
+        _warnings.append(
+            make_warning(
+                fallback_warning,
+                fallback_warning_detail or "Fallback snapshot write failed",
+                path=rel,
+            )
+        )
+
+    return {
+        "ok": True,
+        "path": rel,
+        "lifecycle": capsule.thread_descriptor.lifecycle,
+        "previous_lifecycle": previous_lifecycle,
+        "durable": True,
+        "latest_commit": gm.latest_commit(),
+        "capsule_sha256": capsule_sha256,
+        "warnings": _warnings,
+        "recovery_warnings": [fallback_warning] if fallback_warning else [],
+    }
 
 
 def continuity_read_service(
