@@ -84,6 +84,15 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
+            "name": "system.capabilities_v1",
+            "description": "Return versioned, machine-readable v1 feature map.",
+            "method": "GET",
+            "path": "/v1/capabilities",
+            "scopes": [],
+            "idempotent": True,
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
             "name": "system.manifest",
             "description": "Return endpoint map and auth expectations.",
             "method": "GET",
@@ -1052,6 +1061,7 @@ def invoke_tool_by_name(
     *,
     health: Callable[[], dict[str, Any]],
     capabilities: Callable[[], dict[str, Any]],
+    capabilities_v1: Callable[[], dict[str, Any]],
     manifest: Callable[[], dict[str, Any]],
     contracts: Callable[[], dict[str, Any]],
     governance_policy: Callable[[], dict[str, Any]],
@@ -1135,6 +1145,8 @@ def invoke_tool_by_name(
         return health()
     if name == "system.capabilities":
         return capabilities()
+    if name == "system.capabilities_v1":
+        return capabilities_v1()
     if name == "system.manifest":
         return manifest()
     if name == "system.contracts":
@@ -1507,6 +1519,56 @@ def capabilities_payload() -> dict[str, Any]:
     }
 
 
+def capabilities_v1_payload() -> dict[str, Any]:
+    """Return the versioned, machine-readable v1 feature map.
+
+    Pure function — no I/O, no config, no runtime inference.  The registry
+    is a hardcoded dict literal so the response is fully deterministic and
+    identical on every call to the same build.
+    """
+    return {
+        "version": "1",
+        "features": {
+            "continuity.read.startup_view": {
+                "summary": "Startup-oriented read view with mechanical orientation extraction",
+            },
+            "continuity.read.trust_signals": {
+                "summary": "Mechanical trust assessment: recency, completeness, integrity, scope match",
+            },
+            "continuity.upsert.session_end_snapshot": {
+                "summary": "Additive resume-here capture on upsert for session-end handoff",
+            },
+            "continuity.read.salience_ranking": {
+                "summary": "Deterministic multi-signal salience sorting on list and read paths",
+            },
+            "continuity.read.thread_identity": {
+                "summary": "Thread descriptors with scope anchors and lifecycle transitions",
+            },
+            "continuity.stable_preferences": {
+                "summary": "Stable user and peer preferences persisted on continuity capsules",
+            },
+            "context.retrieve.continuity_state": {
+                "summary": "Multi-capsule continuity-oriented context bundles with fallback and degradation",
+            },
+            "coordination.handoffs": {
+                "summary": "Local-first inter-agent handoff artifacts with consume tracking",
+            },
+            "coordination.shared_state": {
+                "summary": "Owner-authored shared coordination artifacts with version control",
+            },
+            "messaging.direct": {
+                "summary": "Tracked direct messages with ack, reject, defer, and delivery state",
+            },
+            "peers.registry": {
+                "summary": "Peer registration, trust-level transitions, and manifest exchange",
+            },
+            "discovery.tools": {
+                "summary": "Machine-readable tool catalog with MCP JSON-RPC bridge",
+            },
+        },
+    }
+
+
 def manifest_payload(*, app_version: str) -> dict[str, Any]:
     """Build the machine-first endpoint manifest for autonomous clients."""
     return {
@@ -1516,6 +1578,7 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
         "endpoints": {
             "GET /health": {"scope": None},
             "GET /capabilities": {"scope": None},
+            "GET /v1/capabilities": {"scope": None},
             "GET /v1/manifest": {"scope": None},
             "GET /v1/contracts": {"scope": None},
             "GET /v1/governance/policy": {"scope": None},

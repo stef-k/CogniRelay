@@ -2,6 +2,7 @@
 
 from .service import (
     capabilities_payload,
+    capabilities_v1_payload,
     contracts_payload,
     discovery_payload,
     discovery_tools_payload,
@@ -20,6 +21,7 @@ from .service import (
 
 __all__ = [
     "capabilities_payload",
+    "capabilities_v1_payload",
     "contracts_payload",
     "discovery_payload",
     "discovery_tools_payload",

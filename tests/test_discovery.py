@@ -57,6 +57,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("messages.replay", by_name)
         self.assertIn("replication.pull", by_name)
         self.assertIn("replication.push", by_name)
+        self.assertIn("system.capabilities_v1", by_name)
         self.assertIn("system.contracts", by_name)
         self.assertIn("system.governance_policy", by_name)
         self.assertIn("peers.trust_transition", by_name)
@@ -100,6 +101,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         """Manifest should link back to the discovery endpoints."""
         m = manifest()
         endpoints = m["endpoints"]
+        self.assertIn("GET /v1/capabilities", endpoints)
         self.assertIn("GET /v1/discovery", endpoints)
         self.assertIn("GET /v1/discovery/tools", endpoints)
         self.assertIn("GET /v1/discovery/workflows", endpoints)
