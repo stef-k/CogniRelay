@@ -497,6 +497,76 @@ class TestReadSubcommand(unittest.TestCase):
         self.assertNotIn("view", body)
 
     @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_read_startup_with_startup_summary(self, mock_urlopen):
+        """cmd_read end-to-end with a startup_summary-bearing response."""
+        response = {
+            "source_state": "active",
+            "capsule": {
+                "thread_descriptor": {
+                    "label": "Auth refactor",
+                    "lifecycle": "active",
+                    "keywords": ["auth"],
+                },
+            },
+            "startup_summary": {
+                "recovery": {"source_state": "active"},
+                "orientation": {
+                    "top_priorities": ["Ship v2 API"],
+                    "active_constraints": ["No breaking changes"],
+                    "open_loops": [],
+                },
+                "context": {"session_trajectory": ["Reviewed PR #42"]},
+                "trust_signals": {
+                    "recency": {"phase": "current", "freshness_class": "fresh"},
+                    "completeness": {"orientation_adequate": True, "trimmed": False},
+                    "integrity": {"health_status": "healthy", "verification_status": "verified"},
+                    "scope_match": {"exact": True},
+                },
+                "stable_preferences": [
+                    {"tag": "tone", "content": "Be direct"},
+                ],
+            },
+        }
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(response).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="read",
+            subject_kind="user",
+            subject_id="agent-1",
+            format="startup",
+            output=None,
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            client.cmd_read(args)
+            output = mock_out.getvalue()
+
+        # Verify request included view=startup
+        request_obj = mock_urlopen.call_args[0][0]
+        body = json.loads(request_obj.data.decode())
+        self.assertEqual(body["view"], "startup")
+
+        # Verify startup_summary sections rendered (not legacy fallback)
+        self.assertIn("- Ship v2 API", output)
+        self.assertIn("=== Trust Signals ===", output)
+        self.assertIn("Recency: current (fresh)", output)
+        self.assertIn("=== Thread Identity ===", output)
+        self.assertIn("Auth refactor [active]", output)
+        self.assertIn("=== Session Trajectory ===", output)
+        self.assertIn("=== Stable Preferences ===", output)
+        self.assertIn("- [tone] Be direct", output)
+
+        # Open Loops is always-shown with (none) when empty
+        idx = output.index("=== Open Loops ===")
+        after = output[idx:].split("\n")
+        self.assertEqual(after[1], "(none)")
+
+        # Legacy-only sections must not appear
+        self.assertNotIn("=== Recovery Warnings ===", output)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
     def test_read_allow_fallback_always_true(self, mock_urlopen):
         mock_urlopen.return_value = _mock_urlopen(
             body=json.dumps(SAMPLE_READ_RESPONSE).encode()

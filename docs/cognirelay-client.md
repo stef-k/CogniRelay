@@ -118,7 +118,7 @@ Keywords: auth, security
 - [communication] Prefer concise responses
 ```
 
-If there is no capsule and no `startup_summary`, only Source State is printed followed by `(no capsule available)`.
+If there is no capsule and no `startup_summary`, only Source State (and Recovery Warnings if present) is printed, followed by `(no capsule available)`.
 
 ## Upserting a Capsule
 
