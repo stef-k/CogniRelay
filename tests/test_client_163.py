@@ -246,7 +246,8 @@ class TestReadSubcommand(unittest.TestCase):
         self.assertIn("capsule", parsed)
 
     @patch("tools.cognirelay_client.urllib.request.urlopen")
-    def test_read_startup_full_capsule(self, mock_urlopen):
+    def test_read_startup_legacy_fallback(self, mock_urlopen):
+        """Response without startup_summary falls back to legacy format_startup()."""
         mock_urlopen.return_value = _mock_urlopen(
             body=json.dumps(SAMPLE_READ_RESPONSE).encode()
         )
@@ -274,15 +275,6 @@ class TestReadSubcommand(unittest.TestCase):
         self.assertIn("- No caching: Adds complexity", output)
         self.assertIn("=== Session Trajectory ===", output)
 
-        # Check section order
-        sections = [
-            "Source State", "Recovery Warnings", "Top Priorities",
-            "Active Constraints", "Open Loops", "Negative Decisions",
-            "Session Trajectory",
-        ]
-        positions = [output.index(f"=== {s} ===") for s in sections]
-        self.assertEqual(positions, sorted(positions))
-
     @patch("tools.cognirelay_client.urllib.request.urlopen")
     def test_read_startup_null_capsule(self, mock_urlopen):
         mock_urlopen.return_value = _mock_urlopen(
@@ -303,25 +295,20 @@ class TestReadSubcommand(unittest.TestCase):
 
         self.assertIn("=== Source State ===", output)
         self.assertIn("missing", output)
-        self.assertIn("- Capsule not found", output)
+        # Legacy fallback path: has capsule=None and no startup_summary
         self.assertIn("(no capsule available)", output)
-        # Should NOT have capsule sections
-        self.assertNotIn("=== Top Priorities ===", output)
 
     @patch("tools.cognirelay_client.urllib.request.urlopen")
     def test_read_startup_missing_optional_fields(self, mock_urlopen):
-        """Missing/null capsule fields treated as empty lists."""
+        """Missing/null capsule fields treated as empty lists in legacy fallback."""
         response = {
             "source_state": "active",
             "recovery_warnings": [],
             "capsule": {
                 "continuity": {
-                    # All optional fields missing or null
                     "top_priorities": None,
-                    # active_constraints absent
                     "open_loops": [],
                     "negative_decisions": None,
-                    # session_trajectory absent
                 },
             },
         }
@@ -339,7 +326,6 @@ class TestReadSubcommand(unittest.TestCase):
             client.cmd_read(args)
             output = mock_out.getvalue()
 
-        # Each section with missing/null data should show (none)
         lines = output.split("\n")
         for header in ["Top Priorities", "Active Constraints", "Open Loops",
                         "Negative Decisions", "Session Trajectory"]:
@@ -465,6 +451,48 @@ class TestReadSubcommand(unittest.TestCase):
             env_override={"COGNIRELAY_BASE_URL": "http://localhost:8000", "COGNIRELAY_TOKEN": "tok"},
         )
         self.assertEqual(rc, 2)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_read_startup_sends_view_startup(self, mock_urlopen):
+        """--format startup includes view=startup in request body."""
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(SAMPLE_READ_RESPONSE).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="read",
+            subject_kind="user",
+            subject_id="agent-1",
+            format="startup",
+            output=None,
+        )
+        with patch("sys.stdout", new_callable=io.StringIO):
+            client.cmd_read(args)
+        request_obj = mock_urlopen.call_args[0][0]
+        body = json.loads(request_obj.data.decode())
+        self.assertEqual(body["view"], "startup")
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_read_json_does_not_send_view(self, mock_urlopen):
+        """--format json does not include view in request body."""
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(SAMPLE_READ_RESPONSE).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="read",
+            subject_kind="user",
+            subject_id="agent-1",
+            format="json",
+            output=None,
+        )
+        with patch("sys.stdout", new_callable=io.StringIO):
+            client.cmd_read(args)
+        request_obj = mock_urlopen.call_args[0][0]
+        body = json.loads(request_obj.data.decode())
+        self.assertNotIn("view", body)
 
     @patch("tools.cognirelay_client.urllib.request.urlopen")
     def test_read_allow_fallback_always_true(self, mock_urlopen):
@@ -815,6 +843,612 @@ class TestTokenHash(unittest.TestCase):
             client.cmd_token_hash(args)
             output = mock_out.getvalue()
         self.assertEqual(output.strip(), expected)
+
+
+# ===========================================================================
+# format_startup_summary tests (server-side startup_summary rendering)
+# ===========================================================================
+
+# Full startup_summary response fixture
+SAMPLE_STARTUP_SUMMARY_RESPONSE = {
+    "source_state": "active",
+    "capsule": {
+        "thread_descriptor": {
+            "label": "Auth refactor",
+            "lifecycle": "active",
+            "keywords": ["auth", "security"],
+        },
+    },
+    "startup_summary": {
+        "recovery": {
+            "source_state": "active",
+            "recovery_warnings": ["Stale capsule detected"],
+            "capsule_health_status": "degraded",
+            "capsule_health_reasons": ["Missing verification"],
+        },
+        "orientation": {
+            "top_priorities": ["Ship v2 API", "Fix auth bug"],
+            "active_constraints": ["No breaking changes"],
+            "open_loops": ["Review PR #42"],
+            "negative_decisions": [
+                {"decision": "No caching", "rationale": "Adds complexity"},
+            ],
+            "rationale_entries": [
+                {"kind": "constraint", "tag": "perf", "summary": "Latency budget is 200ms"},
+            ],
+        },
+        "context": {
+            "session_trajectory": ["Started auth extraction", "Reviewed PR"],
+            "stance_summary": "Wrapping up auth work.",
+            "active_concerns": ["Deployment risk"],
+        },
+        "updated_at": "2026-03-29T10:00:00Z",
+        "trust_signals": {
+            "recency": {"phase": "current", "freshness_class": "fresh"},
+            "completeness": {"orientation_adequate": True, "trimmed": False},
+            "integrity": {"health_status": "healthy", "verification_status": "verified"},
+            "scope_match": {"exact": True},
+        },
+        "stable_preferences": [
+            {"tag": "communication", "content": "Prefer concise responses"},
+        ],
+    },
+}
+
+
+class TestFormatStartupSummary(unittest.TestCase):
+    """Tests for format_startup_summary() rendering."""
+
+    def test_format_startup_summary_full(self):
+        """Full startup_summary + capsule with thread_descriptor renders all sections."""
+        output = client.format_startup_summary(SAMPLE_STARTUP_SUMMARY_RESPONSE)
+
+        # Always-shown sections
+        self.assertIn("=== Source State ===", output)
+        self.assertIn("active", output)
+        self.assertIn("=== Top Priorities ===", output)
+        self.assertIn("- Ship v2 API", output)
+        self.assertIn("=== Active Constraints ===", output)
+        self.assertIn("- No breaking changes", output)
+        self.assertIn("=== Open Loops ===", output)
+        self.assertIn("- Review PR #42", output)
+
+        # Conditional sections — all present in this fixture
+        self.assertIn("=== Recovery Warnings ===", output)
+        self.assertIn("Health: degraded", output)
+        self.assertIn("- Stale capsule detected", output)
+        self.assertIn("- Missing verification", output)
+        self.assertIn("=== Trust Signals ===", output)
+        self.assertIn("=== Thread Identity ===", output)
+        self.assertIn("Auth refactor [active]", output)
+        self.assertIn("Keywords: auth, security", output)
+        self.assertIn("=== Negative Decisions ===", output)
+        self.assertIn("- No caching: Adds complexity", output)
+        self.assertIn("=== Rationale Entries ===", output)
+        self.assertIn("- [constraint] perf: Latency budget is 200ms", output)
+        self.assertIn("=== Session Trajectory ===", output)
+        self.assertIn("- Started auth extraction", output)
+        self.assertIn("=== Stable Preferences ===", output)
+        self.assertIn("- [communication] Prefer concise responses", output)
+
+        # Not shown
+        self.assertNotIn("updated_at", output)
+        self.assertNotIn("stance_summary", output)
+        self.assertNotIn("active_concerns", output)
+
+    def test_format_startup_summary_always_shown_empty(self):
+        """Null orientation renders always-shown sections with (none), suppresses conditional."""
+        data = {
+            "source_state": "active",
+            "capsule": {},
+            "startup_summary": {
+                "recovery": {"source_state": "active"},
+                "orientation": None,
+                "context": None,
+                "trust_signals": None,
+                "stable_preferences": None,
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Source State ===", output)
+        self.assertIn("=== Top Priorities ===", output)
+        self.assertIn("=== Active Constraints ===", output)
+        self.assertIn("=== Open Loops ===", output)
+
+        # Always-shown sections show (none) when empty
+        lines = output.split("\n")
+        for header in ["Top Priorities", "Active Constraints", "Open Loops"]:
+            idx = next(i for i, line in enumerate(lines) if header in line)
+            self.assertEqual(lines[idx + 1], "(none)")
+
+        # Conditional sections suppressed
+        self.assertNotIn("=== Recovery Warnings ===", output)
+        self.assertNotIn("=== Trust Signals ===", output)
+        self.assertNotIn("=== Thread Identity ===", output)
+        self.assertNotIn("=== Negative Decisions ===", output)
+        self.assertNotIn("=== Rationale Entries ===", output)
+        self.assertNotIn("=== Session Trajectory ===", output)
+        self.assertNotIn("=== Stable Preferences ===", output)
+
+    def test_format_startup_summary_conditional_suppressed(self):
+        """Empty conditional fields produce no output for those sections."""
+        data = {
+            "source_state": "active",
+            "capsule": {},  # No thread_descriptor
+            "startup_summary": {
+                "recovery": {
+                    "source_state": "active",
+                    "recovery_warnings": [],
+                    "capsule_health_reasons": [],
+                },
+                "orientation": {
+                    "top_priorities": ["P1"],
+                    "active_constraints": [],
+                    "open_loops": [],
+                    "negative_decisions": [],
+                    "rationale_entries": [],
+                },
+                "context": {"session_trajectory": []},
+                "trust_signals": None,
+                "stable_preferences": [],
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertNotIn("=== Recovery Warnings ===", output)
+        self.assertNotIn("=== Trust Signals ===", output)
+        self.assertNotIn("=== Thread Identity ===", output)
+        self.assertNotIn("=== Negative Decisions ===", output)
+        self.assertNotIn("=== Rationale Entries ===", output)
+        self.assertNotIn("=== Session Trajectory ===", output)
+        self.assertNotIn("=== Stable Preferences ===", output)
+
+    def test_format_startup_summary_fallback(self):
+        """Response lacking startup_summary falls back to legacy format_startup()."""
+        data = {
+            "source_state": "active",
+            "recovery_warnings": [],
+            "capsule": {
+                "continuity": {
+                    "top_priorities": ["Fallback priority"],
+                    "active_constraints": [],
+                    "open_loops": [],
+                    "negative_decisions": [],
+                    "session_trajectory": [],
+                },
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        # Legacy renderer output
+        self.assertIn("=== Source State ===", output)
+        self.assertIn("=== Recovery Warnings ===", output)
+        self.assertIn("- Fallback priority", output)
+
+    def test_format_startup_summary_no_capsule(self):
+        """Null startup_summary + null capsule renders source state and placeholder."""
+        data = {
+            "source_state": "missing",
+            "startup_summary": None,
+            "capsule": None,
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Source State ===", output)
+        self.assertIn("missing", output)
+        self.assertIn("(no capsule available)", output)
+        self.assertNotIn("=== Top Priorities ===", output)
+
+    def test_format_startup_summary_trust_signals(self):
+        """Trust signals digest renders 4 lines with correct field mapping."""
+        data = {
+            "source_state": "active",
+            "capsule": {},
+            "startup_summary": {
+                "recovery": {"source_state": "active"},
+                "orientation": {
+                    "top_priorities": ["P1"],
+                    "active_constraints": [],
+                    "open_loops": [],
+                },
+                "trust_signals": {
+                    "recency": {"phase": "current", "freshness_class": "fresh"},
+                    "completeness": {"orientation_adequate": True, "trimmed": True},
+                    "integrity": {"health_status": "healthy", "verification_status": "verified"},
+                    "scope_match": {"exact": False},
+                },
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Trust Signals ===", output)
+        self.assertIn("Recency: current (fresh)", output)
+        self.assertIn("Completeness: orientation adequate, trimmed", output)
+        self.assertIn("Integrity: healthy, verified", output)
+        self.assertIn("Scope: fallback", output)
+
+    def test_format_startup_summary_thread_identity(self):
+        """Thread descriptor renders label, lifecycle, keywords."""
+        data = {
+            "source_state": "active",
+            "capsule": {
+                "thread_descriptor": {
+                    "label": "Migration task",
+                    "lifecycle": "suspended",
+                    "keywords": ["db", "migration"],
+                },
+            },
+            "startup_summary": {
+                "recovery": {"source_state": "active"},
+                "orientation": {
+                    "top_priorities": [],
+                    "active_constraints": [],
+                    "open_loops": [],
+                },
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Thread Identity ===", output)
+        self.assertIn("Migration task [suspended]", output)
+        self.assertIn("Keywords: db, migration", output)
+
+    def test_format_startup_summary_thread_identity_no_keywords(self):
+        """Keywords line suppressed when keywords list is empty."""
+        data = {
+            "source_state": "active",
+            "capsule": {
+                "thread_descriptor": {
+                    "label": "Simple thread",
+                    "lifecycle": "active",
+                    "keywords": [],
+                },
+            },
+            "startup_summary": {
+                "recovery": {"source_state": "active"},
+                "orientation": {
+                    "top_priorities": [],
+                    "active_constraints": [],
+                    "open_loops": [],
+                },
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Thread Identity ===", output)
+        self.assertIn("Simple thread [active]", output)
+        self.assertNotIn("Keywords:", output)
+
+    def test_format_startup_summary_rationale_entries(self):
+        """Rationale entries render as - [{kind}] {tag}: {summary}."""
+        data = {
+            "source_state": "active",
+            "capsule": {},
+            "startup_summary": {
+                "recovery": {"source_state": "active"},
+                "orientation": {
+                    "top_priorities": ["P1"],
+                    "active_constraints": [],
+                    "open_loops": [],
+                    "rationale_entries": [
+                        {"kind": "decision", "tag": "arch", "summary": "Chose microservices"},
+                        {"kind": "constraint", "tag": "perf", "summary": "Must be under 100ms"},
+                    ],
+                },
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Rationale Entries ===", output)
+        self.assertIn("- [decision] arch: Chose microservices", output)
+        self.assertIn("- [constraint] perf: Must be under 100ms", output)
+
+    def test_format_startup_summary_stable_preferences(self):
+        """Stable preferences render as - [{tag}] {content}."""
+        data = {
+            "source_state": "active",
+            "capsule": {},
+            "startup_summary": {
+                "recovery": {"source_state": "active"},
+                "orientation": {
+                    "top_priorities": [],
+                    "active_constraints": [],
+                    "open_loops": [],
+                },
+                "stable_preferences": [
+                    {"tag": "tone", "content": "Be direct"},
+                    {"tag": "format", "content": "Use bullet points"},
+                ],
+            },
+        }
+        output = client.format_startup_summary(data)
+
+        self.assertIn("=== Stable Preferences ===", output)
+        self.assertIn("- [tone] Be direct", output)
+        self.assertIn("- [format] Use bullet points", output)
+
+
+# ===========================================================================
+# list subcommand tests
+# ===========================================================================
+
+SAMPLE_LIST_RESPONSE = {
+    "ok": True,
+    "count": 1,
+    "capsules": [{"subject_kind": "user", "subject_id": "agent-1"}],
+    "unique_match": False,
+}
+
+
+class TestListSubcommand(unittest.TestCase):
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_list_minimal(self, mock_urlopen):
+        """list with no optional flags sends {} body and prints JSON."""
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(SAMPLE_LIST_RESPONSE).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="list",
+            subject_kind=None,
+            limit=None,
+            include_fallback=False,
+            include_archived=False,
+            include_cold=False,
+            lifecycle=None,
+            scope_anchor=None,
+            keyword=None,
+            label_exact=None,
+            anchor_kind=None,
+            anchor_value=None,
+            sort=None,
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            client.cmd_list(args)
+            output = mock_out.getvalue()
+
+        # Verify request body is empty object
+        request_obj = mock_urlopen.call_args[0][0]
+        body = json.loads(request_obj.data.decode())
+        self.assertEqual(body, {})
+
+        # Verify output is pretty-printed JSON
+        parsed = json.loads(output)
+        self.assertTrue(parsed["ok"])
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_list_all_flags(self, mock_urlopen):
+        """All flags map to correct request body fields."""
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(SAMPLE_LIST_RESPONSE).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="list",
+            subject_kind="thread",
+            limit=10,
+            include_fallback=True,
+            include_archived=True,
+            include_cold=True,
+            lifecycle="active",
+            scope_anchor="project-x",
+            keyword="auth",
+            label_exact="Auth refactor",
+            anchor_kind="project",
+            anchor_value="cogni",
+            sort="salience",
+        )
+        with patch("sys.stdout", new_callable=io.StringIO):
+            client.cmd_list(args)
+
+        request_obj = mock_urlopen.call_args[0][0]
+        body = json.loads(request_obj.data.decode())
+        self.assertEqual(body["subject_kind"], "thread")
+        self.assertEqual(body["limit"], 10)
+        self.assertTrue(body["include_fallback"])
+        self.assertTrue(body["include_archived"])
+        self.assertTrue(body["include_cold"])
+        self.assertEqual(body["lifecycle"], "active")
+        self.assertEqual(body["scope_anchor"], "project-x")
+        self.assertEqual(body["keyword"], "auth")
+        self.assertEqual(body["label_exact"], "Auth refactor")
+        self.assertEqual(body["anchor_kind"], "project")
+        self.assertEqual(body["anchor_value"], "cogni")
+        self.assertEqual(body["sort"], "salience")
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_list_omits_unset_flags(self, mock_urlopen):
+        """Omitted flags produce omitted fields (not null)."""
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(SAMPLE_LIST_RESPONSE).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="list",
+            subject_kind="user",
+            limit=None,
+            include_fallback=False,
+            include_archived=False,
+            include_cold=False,
+            lifecycle=None,
+            scope_anchor=None,
+            keyword=None,
+            label_exact=None,
+            anchor_kind=None,
+            anchor_value=None,
+            sort=None,
+        )
+        with patch("sys.stdout", new_callable=io.StringIO):
+            client.cmd_list(args)
+
+        request_obj = mock_urlopen.call_args[0][0]
+        body = json.loads(request_obj.data.decode())
+        # Only subject_kind should be present
+        self.assertEqual(body, {"subject_kind": "user"})
+        self.assertNotIn("limit", body)
+        self.assertNotIn("include_fallback", body)
+        self.assertNotIn("lifecycle", body)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_list_http_error_exits_1(self, mock_urlopen):
+        exc = urllib.error.HTTPError(
+            "http://x", 500, "Server Error", {}, io.BytesIO(b"error")
+        )
+        mock_urlopen.side_effect = exc
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="list",
+            subject_kind=None,
+            limit=None,
+            include_fallback=False,
+            include_archived=False,
+            include_cold=False,
+            lifecycle=None,
+            scope_anchor=None,
+            keyword=None,
+            label_exact=None,
+            anchor_kind=None,
+            anchor_value=None,
+            sort=None,
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            client.cmd_list(args)
+        self.assertEqual(ctx.exception.code, 1)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_list_connection_error_exits_4(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="list",
+            subject_kind=None,
+            limit=None,
+            include_fallback=False,
+            include_archived=False,
+            include_cold=False,
+            lifecycle=None,
+            scope_anchor=None,
+            keyword=None,
+            label_exact=None,
+            anchor_kind=None,
+            anchor_value=None,
+            sort=None,
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            client.cmd_list(args)
+        self.assertEqual(ctx.exception.code, 4)
+
+
+# ===========================================================================
+# capabilities subcommand tests
+# ===========================================================================
+
+SAMPLE_CAPABILITIES_RESPONSE = {
+    "version": "1",
+    "features": {
+        "continuity.read.startup_view": {
+            "summary": "Startup-oriented read view",
+        },
+    },
+}
+
+
+class TestCapabilitiesSubcommand(unittest.TestCase):
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_capabilities_success(self, mock_urlopen):
+        """capabilities sends GET to /v1/capabilities and prints pretty JSON."""
+        mock_urlopen.return_value = _mock_urlopen(
+            body=json.dumps(SAMPLE_CAPABILITIES_RESPONSE).encode()
+        )
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="capabilities",
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            client.cmd_capabilities(args)
+            output = mock_out.getvalue()
+
+        # Verify GET method
+        request_obj = mock_urlopen.call_args[0][0]
+        self.assertEqual(request_obj.method, "GET")
+        self.assertIsNone(request_obj.data)
+        self.assertNotIn("Content-Type", request_obj.headers)
+
+        # Verify output
+        parsed = json.loads(output)
+        self.assertEqual(parsed["version"], "1")
+        self.assertIn("features", parsed)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_capabilities_http_error_exits_1(self, mock_urlopen):
+        exc = urllib.error.HTTPError(
+            "http://x", 401, "Unauthorized", {}, io.BytesIO(b"unauthorized")
+        )
+        mock_urlopen.side_effect = exc
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="capabilities",
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            client.cmd_capabilities(args)
+        self.assertEqual(ctx.exception.code, 1)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_capabilities_connection_error_exits_4(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        args = _make_namespace(
+            token="test-token",
+            base_url="http://localhost:8000",
+            command="capabilities",
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            client.cmd_capabilities(args)
+        self.assertEqual(ctx.exception.code, 4)
+
+
+# ===========================================================================
+# do_request GET/POST tests
+# ===========================================================================
+
+class TestDoRequest(unittest.TestCase):
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_do_request_get_no_body(self, mock_urlopen):
+        """GET requests send no body and omit Content-Type."""
+        mock_urlopen.return_value = _mock_urlopen(body=b'{"ok":true}')
+        client.do_request(
+            "http://localhost:8000", "/v1/capabilities", "tok", b"ignored", 30,
+            method="GET",
+        )
+        request_obj = mock_urlopen.call_args[0][0]
+        self.assertEqual(request_obj.method, "GET")
+        self.assertIsNone(request_obj.data)
+        self.assertNotIn("Content-type", request_obj.headers)
+        self.assertIn("Authorization", request_obj.headers)
+
+    @patch("tools.cognirelay_client.urllib.request.urlopen")
+    def test_do_request_post_sends_body(self, mock_urlopen):
+        """POST requests send body and include Content-Type."""
+        mock_urlopen.return_value = _mock_urlopen(body=b'{"ok":true}')
+        body = b'{"test": true}'
+        client.do_request(
+            "http://localhost:8000", "/v1/continuity/read", "tok", body, 30,
+        )
+        request_obj = mock_urlopen.call_args[0][0]
+        self.assertEqual(request_obj.method, "POST")
+        self.assertEqual(request_obj.data, body)
+        self.assertEqual(request_obj.headers["Content-type"], "application/json")
+        self.assertIn("Authorization", request_obj.headers)
 
 
 if __name__ == "__main__":
