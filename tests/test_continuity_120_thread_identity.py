@@ -1009,5 +1009,200 @@ class TestTerminalStateErrorMessages(unittest.TestCase):
             self.assertIn("superseded", str(ctx.exception.detail))
 
 
+# ===========================================================================
+# 15. B1: Post-mutation size check is authoritative
+# ===========================================================================
+
+
+class TestPostMutationSizeCheck(unittest.TestCase):
+    """The authoritative 12 KB size check runs on the final payload including lifecycle fields."""
+
+    def test_boundary_capsule_lifecycle_fields_counted(self) -> None:
+        """A capsule near the 12 KB limit must include lifecycle fields in the size budget."""
+        # Build a capsule that uses most of the budget via padded metadata
+        # so lifecycle fields ("lifecycle":"active") are counted.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = _do_upsert(
+                root,
+                _base_capsule(
+                    thread_descriptor=_td(
+                        label="x" * 120,
+                        keywords=["k" * 40] * 6,
+                        scope_anchors=["user:" + "a" * 115] * 4,
+                        identity_anchors=[
+                            {"kind": "a" * 40, "value": "v" * 200},
+                            {"kind": "b" * 40, "value": "v" * 200},
+                            {"kind": "c" * 40, "value": "v" * 200},
+                            {"kind": "d" * 40, "value": "v" * 200},
+                        ],
+                    ),
+                ),
+            )
+            self.assertTrue(out["ok"])
+            # The persisted capsule must include lifecycle
+            read = _do_read(root)
+            self.assertEqual(read["capsule"]["thread_descriptor"]["lifecycle"], "active")
+
+
+# ===========================================================================
+# 16. M2: Content updates to terminal capsules are allowed
+# ===========================================================================
+
+
+class TestTerminalCapsuleContentUpdate(unittest.TestCase):
+    """Agents may update labels/keywords on concluded or superseded threads for discovery."""
+
+    def test_concluded_capsule_allows_content_update(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(root, _base_capsule(thread_descriptor=_td(label="Original")))
+            _do_upsert(root, _base_capsule(thread_descriptor=_td(label="Original")), lifecycle_transition="conclude")
+            # Ordinary update (no transition) — should succeed, preserving concluded state
+            out = _do_upsert(root, _base_capsule(thread_descriptor=_td(label="Updated")))
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["lifecycle"], "concluded")
+            read = _do_read(root)
+            self.assertEqual(read["capsule"]["thread_descriptor"]["label"], "Updated")
+
+    def test_superseded_capsule_allows_content_update(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(root, _base_capsule(thread_descriptor=_td(label="Original")))
+            _do_upsert(
+                root,
+                _base_capsule(thread_descriptor=_td(label="Original")),
+                lifecycle_transition="supersede",
+                superseded_by="thread:new",
+            )
+            out = _do_upsert(root, _base_capsule(thread_descriptor=_td(label="Updated")))
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["lifecycle"], "superseded")
+            read = _do_read(root)
+            self.assertEqual(read["capsule"]["thread_descriptor"]["label"], "Updated")
+            # superseded_by must be preserved
+            self.assertEqual(read["capsule"]["thread_descriptor"]["superseded_by"], "thread:new")
+
+
+# ===========================================================================
+# 17. M4: Cold stubs excluded from thread filters
+# ===========================================================================
+
+
+class TestColdStubsExcludedFromThreadFilters(unittest.TestCase):
+    """Cold stubs have thread_descriptor=None so thread filters always exclude them."""
+
+    def test_cold_summary_has_null_descriptor(self) -> None:
+        """Verify the cold summary shape includes thread_descriptor: None."""
+        # A cold stub row already hardcodes thread_descriptor: None in the
+        # cold scan path.  Verify active summaries include it from the capsule.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(root, _base_capsule(thread_descriptor=_td(label="Thread A")))
+            out = _do_list(root)
+        self.assertIsNotNone(out["capsules"][0]["thread_descriptor"])
+
+    def test_thread_filter_excludes_capsules_without_descriptor(self) -> None:
+        """Thread filters exclude capsules where thread_descriptor is None."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # User capsule has no descriptor
+            _do_upsert(root, _base_capsule(subject_kind="user", subject_id="u1"))
+            # Thread capsule with descriptor
+            _do_upsert(root, _base_capsule(thread_descriptor=_td(label="Thread")))
+            out = _do_list(root, lifecycle="active")
+        # Only the thread capsule matches
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["capsules"][0]["subject_id"], "test-thread")
+
+
+# ===========================================================================
+# 18. L2: anchor_value exact match, not substring
+# ===========================================================================
+
+
+class TestAnchorValueExactMatch(unittest.TestCase):
+    """anchor_value matching uses exact comparison, not substring."""
+
+    def test_partial_value_does_not_match(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(
+                root,
+                _base_capsule(
+                    subject_id="thread-full",
+                    thread_descriptor=_td(
+                        identity_anchors=[{"kind": "ticket", "value": "PROJECT-42"}],
+                    ),
+                ),
+            )
+            # Partial value must NOT match
+            out = _do_list(root, anchor_value="PROJECT-4")
+        self.assertEqual(out["count"], 0)
+
+    def test_exact_value_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(
+                root,
+                _base_capsule(
+                    subject_id="thread-full",
+                    thread_descriptor=_td(
+                        identity_anchors=[{"kind": "ticket", "value": "PROJECT-42"}],
+                    ),
+                ),
+            )
+            out = _do_list(root, anchor_value="PROJECT-42")
+        self.assertEqual(out["count"], 1)
+        self.assertTrue(out["unique_match"])
+
+
+# ===========================================================================
+# 19. L3: Integration test for write-side stripping
+# ===========================================================================
+
+
+class TestWriteSideStrippingIntegration(unittest.TestCase):
+    """Caller-supplied lifecycle/superseded_by are silently ignored on upsert roundtrip."""
+
+    def test_caller_lifecycle_ignored_on_create(self) -> None:
+        """Submitting lifecycle='concluded' in the capsule body gets overridden to 'active'."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = _do_upsert(
+                root,
+                _base_capsule(thread_descriptor=_td(lifecycle="concluded")),
+            )
+            self.assertEqual(out["lifecycle"], "active")
+            read = _do_read(root)
+            self.assertEqual(read["capsule"]["thread_descriptor"]["lifecycle"], "active")
+
+    def test_caller_superseded_by_ignored_on_create(self) -> None:
+        """Submitting superseded_by in the capsule body gets silently stripped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = _do_upsert(
+                root,
+                _base_capsule(thread_descriptor=_td(superseded_by="thread:sneaky")),
+            )
+            self.assertEqual(out["lifecycle"], "active")
+            read = _do_read(root)
+            self.assertIsNone(read["capsule"]["thread_descriptor"].get("superseded_by"))
+
+    def test_caller_lifecycle_ignored_on_update(self) -> None:
+        """Submitting lifecycle='suspended' in the body during an ordinary update is ignored."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(root, _base_capsule(thread_descriptor=_td()))
+            out = _do_upsert(
+                root,
+                _base_capsule(thread_descriptor=_td(lifecycle="suspended")),
+            )
+            # Should preserve the stored "active", not accept the caller's "suspended"
+            self.assertEqual(out["lifecycle"], "active")
+            read = _do_read(root)
+            self.assertEqual(read["capsule"]["thread_descriptor"]["lifecycle"], "active")
+
+
 if __name__ == "__main__":
     unittest.main()

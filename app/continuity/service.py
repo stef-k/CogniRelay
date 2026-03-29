@@ -197,6 +197,11 @@ def continuity_upsert_service(
     auth.require_write_path(rel)
     _validate_lifecycle_transition_request(req)
     _strip_service_managed_descriptor_fields(capsule)
+    # Phase 1: validate field bounds and structure on the caller-supplied
+    # payload (lifecycle/superseded_by stripped to None).  This catches
+    # malformed capsules early, before acquiring the subject lock.
+    # The size check inside _validate_capsule runs on this pre-mutation
+    # payload; the authoritative post-mutation size check is below (Phase 2).
     _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
     with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
@@ -235,6 +240,10 @@ def continuity_upsert_service(
             raise HTTPException(status_code=400, detail="no thread_descriptor to transition; create one first")
         canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
         new_bytes = canonical.encode("utf-8")
+        # Phase 2 (authoritative): size check on the final payload including
+        # service-managed lifecycle/superseded_by fields set by the state
+        # machine above.  This is the binding check — Phase 1 is an early
+        # reject on the smaller pre-mutation payload.
         if len(new_bytes) > 12 * 1024:
             raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
         if old_bytes != new_bytes:
