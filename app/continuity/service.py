@@ -38,6 +38,7 @@ from app.models import (
 )
 from app.storage import canonical_json, safe_path, write_bytes_file, write_text_file
 from app.continuity.constants import (
+    CAPSULE_SIZE_LIMIT_BYTES,
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
     CONTINUITY_DIR_REL,
@@ -53,6 +54,13 @@ from app.continuity.constants import (
     CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
     CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED,
     CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
+    PRESERVE_CAPSULE_DICT_FIELDS,
+    PRESERVE_CAPSULE_LIST_FIELDS,
+    PRESERVE_CAPSULE_OBJECT_FIELDS,
+    PRESERVE_OPTIONAL_LIST_CONTINUITY_FIELDS,
+    PRESERVE_OPTIONAL_OBJECT_CONTINUITY_FIELDS,
+    PRESERVE_REQUIRED_LIST_CONTINUITY_FIELDS,
+    PRESERVE_THREAD_DESCRIPTOR_LIST_FIELDS,
     THREAD_LIFECYCLE_TRANSITIONS,
     THREAD_LIFECYCLE_TRANSITION_TARGETS,
 )
@@ -153,6 +161,140 @@ from app.continuity.trust import (
 _logger = logging.getLogger(__name__)
 
 
+def _default_empty(field_name: str, field_type: str) -> Any:
+    """Return the type-appropriate empty value for a merge-eligible field.
+
+    *field_type* is one of ``"list"``, ``"object"``, ``"dict"``.
+    """
+    if field_type == "list":
+        return []
+    if field_type == "dict":
+        return {}
+    return None  # object
+
+
+def _apply_preserve_merge(
+    capsule: ContinuityCapsule,
+    stored: dict[str, Any],
+    raw_body: dict[str, Any],
+    snapshot_touched_fields: frozenset[str],
+) -> None:
+    """Apply preserve-by-default field-level merge in place.
+
+    For each merge-eligible field, the raw JSON body is inspected to determine
+    the caller's intent (absent → preserve, null → clear, present → override).
+    Fields touched by session_end_snapshot are treated as explicitly provided.
+    """
+    raw_capsule = raw_body.get("capsule", {})
+    raw_continuity = raw_capsule.get("continuity", {})
+    stored_continuity = stored.get("continuity", {})
+
+    # --- ContinuityState required list fields ---
+    # [] in raw JSON → preserve stored value; non-empty → override.
+    for field_name in PRESERVE_REQUIRED_LIST_CONTINUITY_FIELDS:
+        if field_name in snapshot_touched_fields:
+            continue  # snapshot already set this
+        raw_val = raw_continuity.get(field_name)
+        if isinstance(raw_val, list) and len(raw_val) == 0:
+            # "Not provided" placeholder — preserve stored value
+            stored_val = stored_continuity.get(field_name)
+            if stored_val is not None:
+                setattr(capsule.continuity, field_name, stored_val)
+        # else: non-empty list → already in capsule from Pydantic parse
+
+    # --- ContinuityState optional list fields ---
+    for field_name in PRESERVE_OPTIONAL_LIST_CONTINUITY_FIELDS:
+        if field_name in snapshot_touched_fields:
+            continue
+        if field_name not in raw_continuity:
+            # Absent → preserve stored value
+            stored_val = stored_continuity.get(field_name)
+            if stored_val is not None:
+                setattr(capsule.continuity, field_name, stored_val)
+        elif raw_continuity[field_name] is None:
+            # Explicitly null → clear to empty list
+            setattr(capsule.continuity, field_name, [])
+        # else: value present (including []) → override, already in capsule
+
+    # --- ContinuityState optional object fields ---
+    for field_name in PRESERVE_OPTIONAL_OBJECT_CONTINUITY_FIELDS:
+        if field_name not in raw_continuity:
+            stored_val = stored_continuity.get(field_name)
+            if stored_val is not None:
+                setattr(capsule.continuity, field_name, stored_val)
+        elif raw_continuity[field_name] is None:
+            setattr(capsule.continuity, field_name, None)
+        # else: present → override
+
+    # --- Capsule-level list fields ---
+    for field_name in PRESERVE_CAPSULE_LIST_FIELDS:
+        if field_name not in raw_capsule:
+            stored_val = stored.get(field_name)
+            if stored_val is not None:
+                setattr(capsule, field_name, stored_val)
+        elif raw_capsule[field_name] is None:
+            setattr(capsule, field_name, [])
+        # else: override
+
+    # --- Capsule-level object fields (except thread_descriptor) ---
+    for field_name in PRESERVE_CAPSULE_OBJECT_FIELDS - {"thread_descriptor"}:
+        if field_name not in raw_capsule:
+            stored_val = stored.get(field_name)
+            if stored_val is not None:
+                setattr(capsule, field_name, stored_val)
+        elif raw_capsule[field_name] is None:
+            setattr(capsule, field_name, None)
+        # else: override
+
+    # --- Capsule-level dict fields (metadata) ---
+    for field_name in PRESERVE_CAPSULE_DICT_FIELDS:
+        if field_name not in raw_capsule:
+            stored_val = stored.get(field_name)
+            if stored_val is not None:
+                setattr(capsule, field_name, stored_val)
+        elif raw_capsule[field_name] is None:
+            setattr(capsule, field_name, {})
+        # else: override
+
+    # --- thread_descriptor sub-field merge ---
+    if "thread_descriptor" not in raw_capsule:
+        # Absent → preserve entire stored descriptor
+        stored_td = stored.get("thread_descriptor")
+        if stored_td is not None:
+            setattr(capsule, "thread_descriptor", stored_td)
+    elif raw_capsule["thread_descriptor"] is None:
+        # Explicitly null → clear
+        capsule.thread_descriptor = None
+    elif capsule.thread_descriptor is not None:
+        # Present with value → merge sub-fields individually
+        raw_td = raw_capsule["thread_descriptor"]
+        stored_td = stored.get("thread_descriptor") or {}
+        for td_field in PRESERVE_THREAD_DESCRIPTOR_LIST_FIELDS:
+            if td_field not in raw_td:
+                stored_sub = stored_td.get(td_field)
+                if stored_sub is not None:
+                    setattr(capsule.thread_descriptor, td_field, stored_sub)
+            elif raw_td[td_field] is None:
+                setattr(capsule.thread_descriptor, td_field, [])
+            # else: override
+
+
+def _session_end_snapshot_touched_fields(snapshot: SessionEndSnapshot | None) -> frozenset[str]:
+    """Return the set of ContinuityState field names touched by a session-end snapshot."""
+    if snapshot is None:
+        return frozenset()
+    # P0 fields are always touched
+    touched: set[str] = {"open_loops", "top_priorities", "active_constraints", "stance_summary"}
+    # P1 fields are touched only when not None
+    if snapshot.negative_decisions is not None:
+        touched.add("negative_decisions")
+    if snapshot.session_trajectory is not None:
+        touched.add("session_trajectory")
+    if snapshot.rationale_entries is not None:
+        touched.add("rationale_entries")
+    return frozenset(touched)
+
+
 def _apply_session_end_snapshot(capsule: ContinuityCapsule, snapshot: SessionEndSnapshot) -> None:
     """Merge session-end snapshot fields into capsule.continuity in place.
 
@@ -181,6 +323,7 @@ def continuity_upsert_service(
     gm: GitManager,
     auth: AuthContext,
     req: ContinuityUpsertRequest,
+    raw_body: dict[str, Any] | None = None,
     audit: Callable[[AuthContext, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
     """Validate and persist one continuity capsule with commit-on-change behavior."""
@@ -210,6 +353,14 @@ def continuity_upsert_service(
     path = safe_path(repo_root, rel)
     with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
         old_bytes = path.read_bytes() if path.exists() else None
+        # --- preserve-by-default merge (runs inside lock, before lifecycle) ---
+        if req.merge_mode == "preserve" and raw_body is not None and old_bytes is not None:
+            stored = json.loads(old_bytes)
+            snapshot_touched = _session_end_snapshot_touched_fields(req.session_end_snapshot)
+            _apply_preserve_merge(capsule, stored, raw_body, snapshot_touched)
+            # Re-validate after merge since preserved stored values may
+            # interact with incoming values in ways that need bounds checking.
+            _validate_capsule(repo_root, capsule)
         # --- lifecycle state machine (mutates capsule before serialization) ---
         if capsule.thread_descriptor is not None:
             old_parsed = json.loads(old_bytes) if old_bytes else None
@@ -248,7 +399,7 @@ def continuity_upsert_service(
         # service-managed lifecycle/superseded_by fields set by the state
         # machine above.  This is the binding check — Phase 1 is an early
         # reject on the smaller pre-mutation payload.
-        if len(new_bytes) > 12 * 1024:
+        if len(new_bytes) > CAPSULE_SIZE_LIMIT_BYTES:
             raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
         if old_bytes != new_bytes:
             stripped_req = ContinuityUpsertRequest(

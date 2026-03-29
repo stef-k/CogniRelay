@@ -806,14 +806,22 @@ def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -
 
 
 @app.post("/v1/continuity/upsert")
-def continuity_upsert(req: ContinuityUpsertRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+async def continuity_upsert(
+    req: ContinuityUpsertRequest,
+    request: FastAPIRequest,
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
     """Store or replace a continuity capsule."""
     settings, gm = _services()
+    raw_body = None
+    if req.merge_mode == "preserve":
+        raw_body = await request.json()
     return continuity_upsert_service(
         repo_root=settings.repo_root,
         gm=gm,
         auth=auth,
         req=req,
+        raw_body=raw_body,
         audit=_make_audit(settings, gm),
     )
 

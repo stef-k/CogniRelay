@@ -182,3 +182,113 @@ CONTINUITY_COLD_STUB_FRONTMATTER_ORDER = [
     "phase",
     "update_reason",
 ]
+
+# ---------------------------------------------------------------------------
+# Preserve-by-default merge (#176 Move A)
+# ---------------------------------------------------------------------------
+# ContinuityState fields eligible for preserve-by-default merge.
+# Required list fields (no Pydantic default): [] in raw JSON → preserve stored.
+PRESERVE_REQUIRED_LIST_CONTINUITY_FIELDS: frozenset[str] = frozenset({
+    "top_priorities",
+    "active_concerns",
+    "active_constraints",
+    "open_loops",
+    "drift_signals",
+})
+# Optional list fields (have default_factory=list): absent → preserve; [] → override to empty.
+PRESERVE_OPTIONAL_LIST_CONTINUITY_FIELDS: frozenset[str] = frozenset({
+    "working_hypotheses",
+    "long_horizon_commitments",
+    "session_trajectory",
+    "trailing_notes",
+    "curiosity_queue",
+    "negative_decisions",
+    "rationale_entries",
+})
+# Optional object fields: absent → preserve; null → clear to None.
+PRESERVE_OPTIONAL_OBJECT_CONTINUITY_FIELDS: frozenset[str] = frozenset({
+    "relationship_model",
+    "retrieval_hints",
+})
+# All ContinuityState merge-eligible fields (union of the three sets above).
+PRESERVE_ELIGIBLE_CONTINUITY_FIELDS: frozenset[str] = (
+    PRESERVE_REQUIRED_LIST_CONTINUITY_FIELDS
+    | PRESERVE_OPTIONAL_LIST_CONTINUITY_FIELDS
+    | PRESERVE_OPTIONAL_OBJECT_CONTINUITY_FIELDS
+)
+# Capsule-level merge-eligible fields.
+PRESERVE_ELIGIBLE_CAPSULE_FIELDS: frozenset[str] = frozenset({
+    "attention_policy",
+    "freshness",
+    "canonical_sources",
+    "metadata",
+    "stable_preferences",
+    "thread_descriptor",
+})
+# Capsule-level optional list fields.
+PRESERVE_CAPSULE_LIST_FIELDS: frozenset[str] = frozenset({
+    "canonical_sources",
+    "stable_preferences",
+})
+# Capsule-level optional object fields.
+PRESERVE_CAPSULE_OBJECT_FIELDS: frozenset[str] = frozenset({
+    "attention_policy",
+    "freshness",
+    "thread_descriptor",
+})
+# Capsule-level dict fields.
+PRESERVE_CAPSULE_DICT_FIELDS: frozenset[str] = frozenset({
+    "metadata",
+})
+# ThreadDescriptor sub-fields eligible for preserve merge.
+PRESERVE_THREAD_DESCRIPTOR_LIST_FIELDS: frozenset[str] = frozenset({
+    "keywords",
+    "scope_anchors",
+    "identity_anchors",
+})
+
+# ---------------------------------------------------------------------------
+# Patch operation constants (#176 Move B)
+# ---------------------------------------------------------------------------
+# Maximum number of operations in a single patch request.
+PATCH_MAX_OPERATIONS = 10
+
+# All valid patch targets.
+PATCH_STRING_LIST_TARGETS: frozenset[str] = frozenset({
+    "continuity.open_loops",
+    "continuity.top_priorities",
+    "continuity.active_constraints",
+    "continuity.active_concerns",
+    "continuity.drift_signals",
+    "continuity.working_hypotheses",
+    "continuity.long_horizon_commitments",
+    "continuity.session_trajectory",
+    "continuity.trailing_notes",
+    "continuity.curiosity_queue",
+})
+PATCH_STRUCTURED_LIST_TARGETS: frozenset[str] = frozenset({
+    "continuity.negative_decisions",
+    "continuity.rationale_entries",
+    "stable_preferences",
+})
+PATCH_THREAD_DESCRIPTOR_TARGETS: frozenset[str] = frozenset({
+    "thread_descriptor.keywords",
+    "thread_descriptor.scope_anchors",
+    "thread_descriptor.identity_anchors",
+})
+PATCH_ALL_TARGETS: frozenset[str] = (
+    PATCH_STRING_LIST_TARGETS
+    | PATCH_STRUCTURED_LIST_TARGETS
+    | PATCH_THREAD_DESCRIPTOR_TARGETS
+)
+
+# Structured-list match key field mapping for patch remove/replace_at.
+PATCH_STRUCTURED_MATCH_KEYS: dict[str, str] = {
+    "continuity.rationale_entries": "tag",
+    "continuity.negative_decisions": "decision",
+    "stable_preferences": "tag",
+    "thread_descriptor.identity_anchors": "kind:value",
+}
+
+# Capsule size limit in bytes (12 KB).
+CAPSULE_SIZE_LIMIT_BYTES = 12 * 1024

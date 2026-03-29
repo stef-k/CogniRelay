@@ -832,6 +832,59 @@ class ContinuityUpsertRequest(BaseModel):
     session_end_snapshot: Optional[SessionEndSnapshot] = Field(default=None)
     lifecycle_transition: Optional[Literal["suspend", "resume", "conclude", "supersede"]] = None
     superseded_by: Optional[str] = Field(default=None, max_length=200)
+    merge_mode: Literal["replace", "preserve"] = "replace"
+
+
+class PatchOperation(BaseModel):
+    """One append/remove/replace_at operation targeting a capsule list field."""
+
+    target: Literal[
+        # ContinuityState string lists
+        "continuity.open_loops",
+        "continuity.top_priorities",
+        "continuity.active_constraints",
+        "continuity.active_concerns",
+        "continuity.drift_signals",
+        "continuity.working_hypotheses",
+        "continuity.long_horizon_commitments",
+        "continuity.session_trajectory",
+        "continuity.trailing_notes",
+        "continuity.curiosity_queue",
+        # ContinuityState structured lists
+        "continuity.negative_decisions",
+        "continuity.rationale_entries",
+        # Capsule-level structured lists
+        "stable_preferences",
+        # ThreadDescriptor lists
+        "thread_descriptor.keywords",
+        "thread_descriptor.scope_anchors",
+        "thread_descriptor.identity_anchors",
+    ]
+    action: Literal["append", "remove", "replace_at"]
+    value: Any = None
+    match: Optional[str] = None
+    index: Optional[int] = None
+
+
+class ContinuityPatchRequest(BaseModel):
+    """Request for partial list-field mutations on an existing continuity capsule."""
+
+    subject_kind: Literal["user", "peer", "thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    updated_at: str
+    operations: List[PatchOperation] = Field(min_length=1, max_length=10)
+    commit_message: Optional[str] = Field(default=None, max_length=240)
+
+
+class ContinuityLifecycleRequest(BaseModel):
+    """Standalone lifecycle transition for a thread or task capsule."""
+
+    subject_kind: Literal["thread", "task"]
+    subject_id: str = Field(min_length=1, max_length=200)
+    transition: Literal["suspend", "resume", "conclude", "supersede"]
+    superseded_by: Optional[str] = Field(default=None, max_length=200)
+    updated_at: str
+    commit_message: Optional[str] = Field(default=None, max_length=240)
 
 
 class ContinuityReadRequest(BaseModel):
