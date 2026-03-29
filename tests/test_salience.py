@@ -756,12 +756,15 @@ class TestBuildContinuityStateSalience(unittest.TestCase):
         state = self._build([_capsule()], max_tokens=256)
         capsules = state["capsules"]
         if capsules:
+            # Capsule survived (salience dropped as soft cost) — verify null salience and warning.
             for c in capsules:
-                if c.get("salience") is None:
-                    self.assertIn(
-                        CONTINUITY_WARNING_SALIENCE_OMITTED,
-                        " ".join(state.get("recovery_warnings", [])),
-                    )
+                self.assertIsNone(c.get("salience"))
+            self.assertTrue(
+                any(CONTINUITY_WARNING_SALIENCE_OMITTED in w for w in state.get("recovery_warnings", [])),
+            )
+        else:
+            # Budget too tight even without salience — capsule fully omitted.
+            self.assertGreater(len(state["omitted_selectors"]), 0)
 
 
 # ---------------------------------------------------------------------------

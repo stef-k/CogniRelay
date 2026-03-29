@@ -85,7 +85,13 @@ def _resume_adequate(capsule: dict[str, Any]) -> bool:
 
     Mirrors the logic in ``trust._compute_resume_quality`` but operates
     on the raw dict so we avoid constructing a full pydantic model.
+    Accepts a pre-computed ``resume_adequate`` key (set by list-summary
+    rows in ``listing._capsule_list_summary``) to avoid requiring the
+    nested ``continuity`` dict.
     """
+    pre = capsule.get("resume_adequate")
+    if isinstance(pre, bool):
+        return pre
     cont = capsule.get("continuity")
     if not isinstance(cont, dict):
         return False

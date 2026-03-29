@@ -1749,7 +1749,7 @@ def build_continuity_state(
     # --- Salience sort: reorder loaded capsules before trimming (§3a) ---
     loaded = _salience_sort(loaded, now)
 
-    trimmed_capsules, trimmed_selection_order, trim_warnings, trim_recovery = _trim_and_attach_trust(
+    trimmed_capsules, trimmed_selection_order, trim_warnings, trim_recovery, survived_rows = _trim_and_attach_trust(
         loaded=loaded,
         reserve=budget["continuity_tokens_reserved"],
         now=now,
@@ -1782,6 +1782,6 @@ def build_continuity_state(
     state["recovery_warnings"] = recovery_warnings
     state["fallback_used"] = fallback_used
     state["trust_signals"] = aggregate_trust
-    state["salience_metadata"] = _salience_metadata(loaded, now)
+    state["salience_metadata"] = _salience_metadata(survived_rows, now)
     state["budget"]["continuity_tokens_used"] = sum(_estimated_tokens(_render_value(item)) for item in trimmed_capsules)
     return state

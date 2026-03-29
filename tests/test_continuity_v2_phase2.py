@@ -81,7 +81,7 @@ class TestContinuityV2Phase2(unittest.TestCase):
         (continuity_dir / f"{subject_kind}-{normalized}.json").write_text(json.dumps(capsule), encoding="utf-8")
 
     def test_multi_capsule_retrieval_returns_deterministic_order(self) -> None:
-        """Primary and secondary selectors should load in deterministic explicit order."""
+        """Primary and secondary selectors should load in deterministic salience order."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = self._settings(repo_root)
@@ -104,19 +104,24 @@ class TestContinuityV2Phase2(unittest.TestCase):
 
             state = out["bundle"]["continuity_state"]
             self.assertTrue(state["present"])
+            # requested_selectors preserves request order.
             self.assertEqual(
                 state["requested_selectors"],
                 ["thread:guestbook-1", "user:curious", "task:guestbook-maintenance"],
             )
+            # selection_order and capsules reflect salience sort.
+            # All capsules lack thread_descriptor (lifecycle_rank=99) and have
+            # identical signals, so the tiebreaker is alphabetical by
+            # (subject_kind, subject_id).
             self.assertEqual(
                 state["selection_order"],
                 [
+                    "explicit:task:guestbook-maintenance",
                     "explicit:thread:guestbook-1",
                     "explicit:user:curious",
-                    "explicit:task:guestbook-maintenance",
                 ],
             )
-            self.assertEqual([item["subject_id"] for item in state["capsules"]], ["guestbook-1", "curious", "guestbook-maintenance"])
+            self.assertEqual([item["subject_id"] for item in state["capsules"]], ["guestbook-maintenance", "guestbook-1", "curious"])
 
     def test_deduplication_uses_normalized_selector_identity(self) -> None:
         """Selectors that normalize to the same key should collapse to one load."""
