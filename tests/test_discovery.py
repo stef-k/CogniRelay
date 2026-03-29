@@ -100,6 +100,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         """Manifest should link back to the discovery endpoints."""
         m = manifest()
         endpoints = m["endpoints"]
+        self.assertIn("GET /v1/capabilities", endpoints)
         self.assertIn("GET /v1/discovery", endpoints)
         self.assertIn("GET /v1/discovery/tools", endpoints)
         self.assertIn("GET /v1/discovery/workflows", endpoints)

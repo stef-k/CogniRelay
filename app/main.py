@@ -68,6 +68,7 @@ from .config import get_settings
 from .coordination.locking import purge_stale_lockfiles
 from .discovery import (
     capabilities_payload,
+    capabilities_v1_payload,
     contracts_payload,
     discovery_payload,
     discovery_tools_payload,
@@ -523,6 +524,12 @@ def health() -> dict:
 def capabilities() -> dict:
     """Return the service feature flag payload."""
     return capabilities_payload()
+
+
+@app.get("/v1/capabilities")
+def capabilities_v1() -> dict:
+    """Return the versioned, machine-readable v1 feature map."""
+    return capabilities_v1_payload()
 
 
 @app.get("/v1/manifest")

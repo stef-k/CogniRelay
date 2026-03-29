@@ -14,6 +14,7 @@ For practical agent integration guidance, start with [Agent Onboarding](agent-on
 
 - `GET /health`: liveness and git-state check
 - `GET /capabilities`: high-level feature flags
+- `GET /v1/capabilities`: versioned, machine-readable feature map with per-capability metadata
 - `GET /v1/manifest`: machine-readable endpoint contract
 - `GET /v1/contracts`: compatibility and contract metadata
 - `GET /v1/governance/policy`: governance and authority policy metadata
