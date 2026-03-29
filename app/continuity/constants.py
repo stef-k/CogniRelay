@@ -138,6 +138,9 @@ SALIENCE_LIFECYCLE_RANK: dict[str, int] = {
 # Sentinel for capsules without a thread_descriptor — sorts after all
 # lifecycle-bearing capsules.
 SALIENCE_LIFECYCLE_NO_DESCRIPTOR = 99
+# Minimum length of stance_summary for resume quality to be considered adequate.
+# Single source of truth — used by trust, salience, and listing modules.
+RESUME_QUALITY_STANCE_MIN_LEN = 30
 CONTINUITY_REFRESH_STATE_REL = f"{CONTINUITY_DIR_REL}/refresh_state.json"
 CONTINUITY_RETENTION_ARCHIVE_DAYS = 90
 CONTINUITY_RETENTION_STATE_REL = f"{CONTINUITY_DIR_REL}/retention_state.json"

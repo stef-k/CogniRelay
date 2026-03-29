@@ -8,6 +8,7 @@ from typing import Any
 from app.continuity.constants import (
     CONTINUITY_HEALTH_ORDER,
     CONTINUITY_PHASE_SEVERITY,
+    RESUME_QUALITY_STANCE_MIN_LEN,
 )
 from app.continuity.freshness import (
     _capsule_health_summary,
@@ -28,8 +29,6 @@ _ORIENTATION_FIELDS = (
     "drift_signals",
 )
 
-# Spec (#167): adequate requires stance_summary >= 30 chars.
-_RESUME_QUALITY_STANCE_MIN_LEN = 30
 
 
 def _compute_resume_quality(capsule: ContinuityCapsule) -> dict[str, Any]:
@@ -37,10 +36,10 @@ def _compute_resume_quality(capsule: ContinuityCapsule) -> dict[str, Any]:
 
     adequate is True iff open_loops, top_priorities, and active_constraints
     are each non-empty and stance_summary is at least
-    _RESUME_QUALITY_STANCE_MIN_LEN characters long.
+    RESUME_QUALITY_STANCE_MIN_LEN characters long.
     """
     cont = capsule.continuity
-    adequate = bool(cont.open_loops and cont.top_priorities and cont.active_constraints and len(cont.stance_summary) >= _RESUME_QUALITY_STANCE_MIN_LEN)
+    adequate = bool(cont.open_loops and cont.top_priorities and cont.active_constraints and len(cont.stance_summary) >= RESUME_QUALITY_STANCE_MIN_LEN)
     return {"adequate": adequate}
 
 
@@ -170,13 +169,13 @@ def _build_trust_signals(
     tp = cont_dict.get("top_priorities")
     ac = cont_dict.get("active_constraints")
     ss = str(cont_dict.get("stance_summary", ""))
-    adequate = bool(ol and tp and ac and len(ss) >= _RESUME_QUALITY_STANCE_MIN_LEN)
+    adequate = bool(ol and tp and ac and len(ss) >= RESUME_QUALITY_STANCE_MIN_LEN)
 
     empty_fields: list[str] = []
     for fname in _ORIENTATION_FIELDS:
         val = cont_dict.get(fname)
         if fname == "stance_summary":
-            if not isinstance(val, str) or len(val) < _RESUME_QUALITY_STANCE_MIN_LEN:
+            if not isinstance(val, str) or len(val) < RESUME_QUALITY_STANCE_MIN_LEN:
                 empty_fields.append(fname)
         elif not val:
             empty_fields.append(fname)
@@ -235,7 +234,7 @@ def _build_compact_trust_signals(
     tp = cont_dict.get("top_priorities")
     ac = cont_dict.get("active_constraints")
     ss = str(cont_dict.get("stance_summary", ""))
-    adequate = bool(ol and tp and ac and len(ss) >= _RESUME_QUALITY_STANCE_MIN_LEN)
+    adequate = bool(ol and tp and ac and len(ss) >= RESUME_QUALITY_STANCE_MIN_LEN)
     health_status, _ = _capsule_health_summary(capsule)
 
     return {

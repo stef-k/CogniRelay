@@ -23,6 +23,7 @@ from app.continuity.freshness import (
     _continuity_phase,
     _verification_status,
 )
+from app.continuity.constants import RESUME_QUALITY_STANCE_MIN_LEN
 from app.continuity.persistence import (
     _load_archive_envelope,
     _load_capsule,
@@ -53,7 +54,7 @@ def _capsule_list_summary(
         and cont.get("open_loops")
         and cont.get("top_priorities")
         and cont.get("active_constraints")
-        and len(str(cont.get("stance_summary", ""))) >= 30
+        and len(str(cont.get("stance_summary", ""))) >= RESUME_QUALITY_STANCE_MIN_LEN
     )
     row: dict[str, Any] = {
         "subject_kind": capsule["subject_kind"],

@@ -18,6 +18,7 @@ from app.continuity.constants import (
     CONTINUITY_HEALTH_ORDER,
     CONTINUITY_PHASE_SEVERITY,
     CONTINUITY_SIGNAL_RANK,
+    RESUME_QUALITY_STANCE_MIN_LEN,
     SALIENCE_LIFECYCLE_NO_DESCRIPTOR,
     SALIENCE_LIFECYCLE_RANK,
 )
@@ -28,10 +29,6 @@ from app.continuity.freshness import (
 from app.timestamps import parse_iso as _parse_iso
 
 
-# ---------------------------------------------------------------------------
-# Resume-adequacy threshold (mirrors trust._RESUME_QUALITY_STANCE_MIN_LEN)
-# ---------------------------------------------------------------------------
-_RESUME_QUALITY_STANCE_MIN_LEN = 30
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +96,7 @@ def _resume_adequate(capsule: dict[str, Any]) -> bool:
         cont.get("open_loops")
         and cont.get("top_priorities")
         and cont.get("active_constraints")
-        and len(str(cont.get("stance_summary", ""))) >= _RESUME_QUALITY_STANCE_MIN_LEN
+        and len(str(cont.get("stance_summary", ""))) >= RESUME_QUALITY_STANCE_MIN_LEN
     )
 
 
