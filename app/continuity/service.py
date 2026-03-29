@@ -175,18 +175,6 @@ from app.continuity.trust import (
 _logger = logging.getLogger(__name__)
 
 
-def _default_empty(field_name: str, field_type: str) -> Any:
-    """Return the type-appropriate empty value for a merge-eligible field.
-
-    *field_type* is one of ``"list"``, ``"object"``, ``"dict"``.
-    """
-    if field_type == "list":
-        return []
-    if field_type == "dict":
-        return {}
-    return None  # object
-
-
 def _apply_preserve_merge(
     capsule: ContinuityCapsule,
     stored: dict[str, Any],
@@ -521,18 +509,6 @@ def _resolve_patch_target_list(capsule: ContinuityCapsule, target: str) -> list[
     return getattr(capsule, target)
 
 
-def _set_patch_target_list(capsule: ContinuityCapsule, target: str, value: list[Any]) -> None:
-    """Replace the list on the capsule for a given patch target path."""
-    if target.startswith("continuity."):
-        field = target.split(".", 1)[1]
-        setattr(capsule.continuity, field, value)
-    elif target.startswith("thread_descriptor."):
-        field = target.split(".", 1)[1]
-        setattr(capsule.thread_descriptor, field, value)
-    else:
-        setattr(capsule, target, value)
-
-
 def _validate_patch_operation(op: PatchOperation) -> None:
     """Validate per-operation parameter constraints; raises HTTP 400 on violation."""
     target = op.target
@@ -757,8 +733,6 @@ def continuity_patch_service(
             )
             if fallback_status == "failed":
                 fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
-        else:
-            fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
 
     audit_detail: dict[str, Any] = {
         "subject_kind": req.subject_kind,
@@ -880,8 +854,6 @@ def continuity_lifecycle_service(
             )
             if fallback_status == "failed":
                 fallback_warning = CONTINUITY_WARNING_FALLBACK_WRITE_FAILED
-        else:
-            fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
 
     audit_detail: dict[str, Any] = {
         "subject_kind": req.subject_kind,

@@ -277,8 +277,11 @@ When `update_reason` is `"interaction_boundary"`, the capsule must also include 
 | `session_end_snapshot` | SessionEndSnapshot | no | See below |
 | `lifecycle_transition` | `"suspend"` \| `"resume"` \| `"conclude"` \| `"supersede"` | no | When provided, atomically transitions the capsule's `thread_descriptor.lifecycle` as part of this upsert. |
 | `superseded_by` | string | no | max 200 chars. Required when `lifecycle_transition` is `"supersede"`. Sets `thread_descriptor.superseded_by`. |
+| `merge_mode` | `"replace"` \| `"preserve"` | no | Default `"replace"`. When `"preserve"`, fields absent from the incoming capsule JSON are preserved from the stored capsule rather than being overwritten. See [Preserve-by-default merge](#preserve-by-default-merge) below. |
 
 Response includes `recovery_warnings` (list of strings) when the fallback snapshot refresh fails after the active write has already committed.
+
+Response includes `normalizations_applied` (list of strings) describing write-path normalizations that fired (e.g. `"strip:continuity.open_loops"`, `"dedup:stable_preferences"`). Empty list when no normalizations fired.
 
 #### Session-end snapshot helper
 
@@ -308,6 +311,57 @@ Per-item string length constraints (e.g. each ≤ 160 chars for list fields, eac
 | `resume_quality` | `{"adequate": bool}` | `true` iff all P0 fields are non-empty and `stance_summary` ≥ 30 chars |
 
 When `session_end_snapshot` is omitted or null, behavior and response are identical to the baseline — no merge, no additional response keys.
+
+#### Preserve-by-default merge
+
+When `merge_mode` is `"preserve"`, the service inspects the raw JSON body to determine per-field intent:
+
+- **Required list fields** (`top_priorities`, `active_concerns`, `active_constraints`, `open_loops`, `drift_signals`): `[]` in JSON → preserve stored value; non-empty → override.
+- **Optional list fields** (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `trailing_notes`, `curiosity_queue`, `negative_decisions`, `rationale_entries`): absent → preserve; `[]` → override to empty; `null` → clear; non-empty → override.
+- **Optional object fields** (`relationship_model`, `retrieval_hints`): absent → preserve; `null` → clear; present → override.
+- **Capsule-level fields** (`attention_policy`, `freshness`, `canonical_sources`, `metadata`, `stable_preferences`): absent → preserve; `null` → clear to type-appropriate empty; present → override.
+- **`thread_descriptor`**: absent → preserve entire stored descriptor; `null` → clear; present → merge sub-fields (`keywords`, `scope_anchors`, `identity_anchors` are individually merge-eligible).
+
+Session-end snapshot fields are treated as explicitly provided and are not merged from stored. Lifecycle transitions run after the merge.
+
+### Patch — `POST /v1/continuity/patch`
+
+Applies partial list-field mutations to an existing capsule. All operations execute atomically within the subject lock — if any operation fails, none apply.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `subject_kind` | `"user"` \| `"peer"` \| `"thread"` \| `"task"` | yes | |
+| `subject_id` | string | yes | 1–200 chars |
+| `updated_at` | string (ISO UTC) | yes | Must be strictly newer than stored `updated_at` |
+| `operations` | list of PatchOperation | yes | 1–10 operations |
+| `commit_message` | string | no | max 240 chars |
+
+**PatchOperation:**
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `target` | string | yes | Dotted path to list field (e.g. `continuity.open_loops`, `stable_preferences`, `thread_descriptor.keywords`) |
+| `action` | `"append"` \| `"remove"` \| `"replace_at"` | yes | |
+| `value` | any | append/replace_at | String for string-list targets; full object for structured-list targets |
+| `match` | string | remove, structured replace_at | Exact string for string lists; key match for structured lists (`tag`, `decision`, `kind:value`) |
+| `index` | integer | string-list replace_at | 0-based index |
+
+Response includes `operations_applied` (count) and `normalizations_applied` (list).
+
+### Lifecycle — `POST /v1/continuity/lifecycle`
+
+Standalone lifecycle transition for thread/task capsules without a full upsert. Only mutates `lifecycle`, `superseded_by`, and `updated_at`.
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `subject_kind` | `"thread"` \| `"task"` | yes | |
+| `subject_id` | string | yes | 1–200 chars |
+| `transition` | `"suspend"` \| `"resume"` \| `"conclude"` \| `"supersede"` | yes | |
+| `superseded_by` | string | supersede only | max 200 chars. Required when `transition` is `"supersede"` |
+| `updated_at` | string (ISO UTC) | yes | Must be strictly newer than stored `updated_at` |
+| `commit_message` | string | no | max 240 chars |
+
+Response includes `lifecycle` (new state) and `previous_lifecycle`.
 
 ### Read — `POST /v1/continuity/read`
 

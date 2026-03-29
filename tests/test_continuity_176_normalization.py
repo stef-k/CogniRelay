@@ -8,7 +8,6 @@ normalizations_applied response field from continuity_upsert_service.
 
 from __future__ import annotations
 
-import copy
 import json
 import tempfile
 import unittest
@@ -495,7 +494,6 @@ def _do_upsert(repo_root: Path, capsule_dict: dict[str, Any]) -> dict[str, Any]:
     (repo_root / "memory" / "continuity").mkdir(parents=True, exist_ok=True)
     (repo_root / "memory" / "continuity" / "fallback").mkdir(parents=True, exist_ok=True)
     gm = SimpleGitManagerStub(repo_root)
-    s = _settings(repo_root)
     req = ContinuityUpsertRequest(
         subject_kind=capsule_dict["subject_kind"],
         subject_id=capsule_dict["subject_id"],
