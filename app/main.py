@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -257,6 +258,25 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="CogniRelay", version="0.3.0", lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _cache_raw_json_body(request: FastAPIRequest, call_next):  # type: ignore[no-untyped-def]
+    """Cache the raw JSON body on request.state for preserve-mode upsert.
+
+    Only activates for the continuity upsert endpoint when the body
+    contains ``"merge_mode": "preserve"``.  All other requests pass
+    through untouched.
+    """
+    if request.url.path == "/v1/continuity/upsert" and request.method == "POST":
+        body_bytes = await request.body()
+        try:
+            raw = json.loads(body_bytes)
+            if isinstance(raw, dict) and raw.get("merge_mode") == "preserve":
+                request.state.raw_json_body = raw
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass  # let downstream validation handle malformed JSON
+    return await call_next(request)
 
 
 def _services() -> tuple:
@@ -805,17 +825,19 @@ def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -
     )
 
 
+def _extract_cached_raw_body(request: FastAPIRequest) -> dict | None:
+    """FastAPI dependency that extracts the cached raw JSON body for preserve-mode upsert."""
+    return getattr(request.state, "raw_json_body", None)
+
+
 @app.post("/v1/continuity/upsert")
-async def continuity_upsert(
+def continuity_upsert(
     req: ContinuityUpsertRequest,
-    request: FastAPIRequest,
     auth: AuthContext = Depends(require_auth),
+    raw_body: dict | None = Depends(_extract_cached_raw_body),
 ) -> dict:
     """Store or replace a continuity capsule."""
     settings, gm = _services()
-    raw_body = None
-    if req.merge_mode == "preserve":
-        raw_body = await request.json()
     return continuity_upsert_service(
         repo_root=settings.repo_root,
         gm=gm,
