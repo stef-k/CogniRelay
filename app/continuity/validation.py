@@ -146,15 +146,20 @@ def _validate_lifecycle_transition_request(req: ContinuityUpsertRequest) -> None
     """Validate lifecycle_transition + superseded_by consistency on the request."""
     if req.lifecycle_transition is None and req.superseded_by is None:
         return
+    if req.superseded_by is not None and req.lifecycle_transition != "supersede":
+        raise HTTPException(status_code=400, detail="superseded_by is only allowed when lifecycle_transition is 'supersede'")
     if req.subject_kind not in ("thread", "task"):
+        if req.lifecycle_transition is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="lifecycle_transition is only allowed for thread and task capsules",
+            )
         raise HTTPException(
             status_code=400,
-            detail="lifecycle_transition is only allowed for thread and task capsules",
+            detail="superseded_by is only allowed for thread and task capsules",
         )
     if req.lifecycle_transition == "supersede" and req.superseded_by is None:
         raise HTTPException(status_code=400, detail="superseded_by is required when lifecycle_transition is 'supersede'")
-    if req.lifecycle_transition != "supersede" and req.superseded_by is not None:
-        raise HTTPException(status_code=400, detail="superseded_by is only allowed when lifecycle_transition is 'supersede'")
 
 
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:

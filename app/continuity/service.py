@@ -219,10 +219,15 @@ def continuity_upsert_service(
                     capsule.thread_descriptor.superseded_by = stored_superseded_by
                 else:
                     allowed = THREAD_LIFECYCLE_TRANSITIONS.get(stored_lifecycle)
-                    if allowed is None or req.lifecycle_transition not in allowed:
+                    if allowed is None:
                         raise HTTPException(
                             status_code=400,
-                            detail=f"lifecycle transition not allowed from '{stored_lifecycle}' via '{req.lifecycle_transition}'",
+                            detail=f"lifecycle transition not allowed from terminal state '{stored_lifecycle}'",
+                        )
+                    if req.lifecycle_transition not in allowed:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"lifecycle transition '{req.lifecycle_transition}' not allowed from '{stored_lifecycle}'",
                         )
                     capsule.thread_descriptor.lifecycle = THREAD_LIFECYCLE_TRANSITION_TARGETS[req.lifecycle_transition]
                     capsule.thread_descriptor.superseded_by = req.superseded_by if req.lifecycle_transition == "supersede" else None
@@ -230,6 +235,8 @@ def continuity_upsert_service(
             raise HTTPException(status_code=400, detail="no thread_descriptor to transition; create one first")
         canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
         new_bytes = canonical.encode("utf-8")
+        if len(new_bytes) > 12 * 1024:
+            raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
         if old_bytes != new_bytes:
             stripped_req = ContinuityUpsertRequest(
                 subject_kind=req.subject_kind,

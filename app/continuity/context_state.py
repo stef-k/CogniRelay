@@ -67,6 +67,7 @@ _logger = logging.getLogger(__name__)
 # 1) Multi-selector loading with fallback cascade
 # ---------------------------------------------------------------------------
 
+
 def _load_selectors_with_fallback(
     *,
     repo_root: Path,
@@ -96,10 +97,7 @@ def _load_selectors_with_fallback(
         except HTTPException as auth_exc:
             if auth_exc.status_code == 403:
                 selector_label = _format_selector(kind, subject_id)
-                recovery_warnings.append(
-                    _qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
-                    + " (owner only)"
-                )
+                recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_ACTIVE_MISSING, kind, subject_id, multi_mode=multi_warning_mode) + " (owner only)")
                 omitted_selectors.append(selector_label)
                 continue
             raise
@@ -127,10 +125,7 @@ def _load_selectors_with_fallback(
                 auth.require_read_path(fallback_rel)
             except HTTPException as fallback_auth_exc:
                 if fallback_auth_exc.status_code == 403:
-                    recovery_warnings.append(
-                        _qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode)
-                        + " (owner only)"
-                    )
+                    recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_MISSING, kind, subject_id, multi_mode=multi_warning_mode) + " (owner only)")
                     omitted_selectors.append(selector_label)
                     continue
                 raise
@@ -151,6 +146,19 @@ def _load_selectors_with_fallback(
                         continue
                     raise exc
                 raise
+        # --- thread descriptor superseded warning ---
+        td = capsule.get("thread_descriptor") if isinstance(capsule, dict) else None
+        if td and td.get("lifecycle") == "superseded":
+            sid = capsule.get("subject_id", "unknown") if isinstance(capsule, dict) else "unknown"
+            sby = td.get("superseded_by", "unknown")
+            recovery_warnings.append(
+                _qualify_warning(
+                    f"continuity_capsule_superseded:thread:{sid}\u2192{sby}",
+                    kind,
+                    subject_id,
+                    multi_mode=multi_warning_mode,
+                )
+            )
         phase, phase_warnings = _continuity_phase(capsule, now)
         warnings.extend(_qualify_warning(warning, kind, subject_id, multi_mode=multi_warning_mode) for warning in phase_warnings)
         if phase in {"expired", "expired_by_age"}:
@@ -174,6 +182,7 @@ def _load_selectors_with_fallback(
 # ---------------------------------------------------------------------------
 # 2) Verification-policy filtering
 # ---------------------------------------------------------------------------
+
 
 def _filter_by_verification_policy(
     loaded: list[dict[str, Any]],
@@ -206,6 +215,7 @@ def _filter_by_verification_policy(
 # 3) Per-capsule trust-budget allocation and trim
 # ---------------------------------------------------------------------------
 
+
 def _trim_and_attach_trust(
     *,
     loaded: list[dict[str, Any]],
@@ -237,12 +247,12 @@ def _trim_and_attach_trust(
 
         # --- Build trust_signals BEFORE trimming to budget honestly ---
         trust_signals_obj, trust_tokens, is_compact, compact_ts, build_failed = _build_per_capsule_trust(
-            row=row, now=now, allocation=allocation,
+            row=row,
+            now=now,
+            allocation=allocation,
         )
         if build_failed:
-            recovery_warnings.append(
-                _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED, kind, subject_id, multi_mode=multi_warning_mode)
-            )
+            recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED, kind, subject_id, multi_mode=multi_warning_mode))
 
         capsule_allocation = allocation - trust_tokens
         trimmed, trimmed_fields = _trim_capsule(row["capsule"], capsule_allocation)
@@ -346,14 +356,10 @@ def _attach_trust_to_trimmed(
                 capsule_tokens = _estimated_tokens(_render_value(trimmed))
                 if capsule_tokens + updated_ts_tokens > allocation and capsule_tokens + fallback_compact_tokens <= allocation:
                     trust_signals_obj = compact_ts
-                    recovery_warnings.append(
-                        _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode)
-                    )
+                    recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode))
         elif is_compact:
             trust_signals_obj["completeness"]["trimmed"] = bool(trimmed_fields)
-            recovery_warnings.append(
-                _qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode)
-            )
+            recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_TRUST_SIGNALS_COMPACT, kind, subject_id, multi_mode=multi_warning_mode))
         trimmed["trust_signals"] = trust_signals_obj
     else:
         trimmed["trust_signals"] = None
@@ -362,6 +368,7 @@ def _attach_trust_to_trimmed(
 # ---------------------------------------------------------------------------
 # 4) Aggregate trust-signal assembly
 # ---------------------------------------------------------------------------
+
 
 def _assemble_aggregate_trust(
     trimmed_capsules: list[dict[str, Any]],
@@ -375,9 +382,7 @@ def _assemble_aggregate_trust(
     Returns ``(aggregate_trust, recovery_warnings)``.
     """
     recovery_warnings: list[str] = []
-    per_capsule_signals = [
-        c["trust_signals"] for c in trimmed_capsules if c.get("trust_signals") is not None
-    ]
+    per_capsule_signals = [c["trust_signals"] for c in trimmed_capsules if c.get("trust_signals") is not None]
     if not per_capsule_signals:
         return None, recovery_warnings
     try:

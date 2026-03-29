@@ -231,6 +231,7 @@ def _scan_cold_summaries(
                 "cold_stored_at": frontmatter["cold_stored_at"],
                 "stable_preference_count": None,
                 "rationale_entry_count": None,
+                "thread_descriptor": None,
             }
         )
     return summaries
@@ -243,8 +244,10 @@ def _matches_thread_filters(row: dict[str, Any], req: ContinuityListRequest) -> 
         return False
     if req.lifecycle is not None and td.get("lifecycle") != req.lifecycle:
         return False
-    if req.scope_anchor is not None and req.scope_anchor not in (td.get("scope_anchors") or []):
-        return False
+    if req.scope_anchor is not None:
+        normalized_scope = req.scope_anchor.lower().strip()
+        if normalized_scope not in (td.get("scope_anchors") or []):
+            return False
     if req.keyword is not None:
         normalized_keyword = req.keyword.lower().strip()
         if normalized_keyword not in [kw.lower().strip() for kw in (td.get("keywords") or [])]:
@@ -252,10 +255,11 @@ def _matches_thread_filters(row: dict[str, Any], req: ContinuityListRequest) -> 
     if req.label_exact is not None and td.get("label") != req.label_exact:
         return False
     if req.anchor_kind is not None or req.anchor_value is not None:
+        normalized_anchor_kind = req.anchor_kind.lower().strip() if req.anchor_kind is not None else None
         anchors = td.get("identity_anchors") or []
         matched = False
         for anchor in anchors:
-            kind_ok = req.anchor_kind is None or anchor.get("kind") == req.anchor_kind
+            kind_ok = normalized_anchor_kind is None or anchor.get("kind") == normalized_anchor_kind
             value_ok = req.anchor_value is None or anchor.get("value") == req.anchor_value
             if kind_ok and value_ok:
                 matched = True

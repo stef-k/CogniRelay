@@ -823,5 +823,181 @@ class TestArchiveRoundtrip(unittest.TestCase):
             self.assertEqual(out["capsule"]["thread_descriptor"]["lifecycle"], "active")
 
 
+# ===========================================================================
+# 12. Lifecycle transition on user/peer capsules (M2)
+# ===========================================================================
+
+
+class TestLifecycleTransitionOnUserPeer(unittest.TestCase):
+    """lifecycle_transition on user/peer capsules must be rejected."""
+
+    def test_lifecycle_transition_on_user_capsule(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(HTTPException) as ctx:
+                _do_upsert(
+                    Path(td),
+                    _base_capsule(subject_kind="user", subject_id="test-user"),
+                    lifecycle_transition="suspend",
+                )
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("only allowed for thread and task", str(ctx.exception.detail))
+
+    def test_lifecycle_transition_on_peer_capsule(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(HTTPException) as ctx:
+                _do_upsert(
+                    Path(td),
+                    _base_capsule(subject_kind="peer", subject_id="test-peer"),
+                    lifecycle_transition="conclude",
+                )
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("only allowed for thread and task", str(ctx.exception.detail))
+
+    def test_superseded_by_only_on_user_capsule(self) -> None:
+        """superseded_by without lifecycle_transition reports the correct error."""
+        with self.assertRaises(HTTPException) as ctx:
+            req = ContinuityUpsertRequest(
+                subject_kind="user",
+                subject_id="u",
+                capsule=ContinuityCapsule(**_base_capsule(subject_kind="user", subject_id="u")),
+                superseded_by="thread:other",
+            )
+            _validate_lifecycle_transition_request(req)
+        self.assertIn("superseded_by is only allowed", str(ctx.exception.detail))
+
+
+# ===========================================================================
+# 13. anchor_kind-only and anchor_value-only filtering (M3/M4)
+# ===========================================================================
+
+
+class TestAnchorFilterModes(unittest.TestCase):
+    """Separate anchor_kind-only and anchor_value-only filter behavior."""
+
+    def _setup_anchor_capsules(self, root: Path) -> None:
+        _do_upsert(
+            root,
+            _base_capsule(
+                subject_id="thread-issue",
+                thread_descriptor=_td(
+                    label="Issue Thread",
+                    identity_anchors=[{"kind": "issue", "value": "PROJECT-42"}],
+                ),
+            ),
+        )
+        _do_upsert(
+            root,
+            _base_capsule(
+                subject_id="thread-ticket",
+                thread_descriptor=_td(
+                    label="Ticket Thread",
+                    identity_anchors=[{"kind": "ticket", "value": "PROJECT-42"}],
+                ),
+            ),
+        )
+        _do_upsert(
+            root,
+            _base_capsule(
+                subject_id="thread-repo",
+                thread_descriptor=_td(
+                    label="Repo Thread",
+                    identity_anchors=[{"kind": "repo", "value": "main-repo"}],
+                ),
+            ),
+        )
+
+    def test_anchor_kind_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._setup_anchor_capsules(root)
+            out = _do_list(root, anchor_kind="issue")
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["capsules"][0]["subject_id"], "thread-issue")
+
+    def test_anchor_kind_only_case_insensitive(self) -> None:
+        """anchor_kind filter is normalized (B2 fix)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._setup_anchor_capsules(root)
+            out = _do_list(root, anchor_kind="ISSUE")
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["capsules"][0]["subject_id"], "thread-issue")
+
+    def test_anchor_value_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._setup_anchor_capsules(root)
+            out = _do_list(root, anchor_value="PROJECT-42")
+        self.assertEqual(out["count"], 2)
+        self.assertFalse(out["unique_match"])
+
+    def test_anchor_value_only_ambiguity(self) -> None:
+        """anchor_value-only matches anchors under different kinds (M4)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._setup_anchor_capsules(root)
+            out = _do_list(root, anchor_value="PROJECT-42")
+        ids = {c["subject_id"] for c in out["capsules"]}
+        self.assertEqual(ids, {"thread-issue", "thread-ticket"})
+        self.assertFalse(out["unique_match"])
+
+    def test_compound_anchor_resolves_uniquely(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._setup_anchor_capsules(root)
+            out = _do_list(root, anchor_kind="issue", anchor_value="PROJECT-42")
+        self.assertEqual(out["count"], 1)
+        self.assertTrue(out["unique_match"])
+        self.assertEqual(out["capsules"][0]["subject_id"], "thread-issue")
+
+    def test_scope_anchor_filter_case_insensitive(self) -> None:
+        """scope_anchor filter is normalized (B3 fix)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(
+                root,
+                _base_capsule(
+                    subject_id="thread-scoped",
+                    thread_descriptor=_td(scope_anchors=["user:alice"]),
+                ),
+            )
+            out = _do_list(root, scope_anchor="User:Alice")
+        self.assertEqual(out["count"], 1)
+
+
+# ===========================================================================
+# 14. Terminal state error messages (M1)
+# ===========================================================================
+
+
+class TestTerminalStateErrorMessages(unittest.TestCase):
+    """Terminal state rejection includes 'terminal state' in error message."""
+
+    def test_concluded_error_says_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(root, _base_capsule(thread_descriptor=_td()))
+            _do_upsert(root, _base_capsule(thread_descriptor=_td()), lifecycle_transition="conclude")
+            with self.assertRaises(HTTPException) as ctx:
+                _do_upsert(root, _base_capsule(thread_descriptor=_td()), lifecycle_transition="resume")
+            self.assertIn("terminal state", str(ctx.exception.detail))
+            self.assertIn("concluded", str(ctx.exception.detail))
+
+    def test_superseded_error_says_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _do_upsert(root, _base_capsule(thread_descriptor=_td()))
+            _do_upsert(
+                root,
+                _base_capsule(thread_descriptor=_td()),
+                lifecycle_transition="supersede",
+                superseded_by="thread:new",
+            )
+            with self.assertRaises(HTTPException) as ctx:
+                _do_upsert(root, _base_capsule(thread_descriptor=_td()), lifecycle_transition="resume")
+            self.assertIn("terminal state", str(ctx.exception.detail))
+            self.assertIn("superseded", str(ctx.exception.detail))
+
+
 if __name__ == "__main__":
     unittest.main()
