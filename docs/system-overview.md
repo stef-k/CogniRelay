@@ -4,6 +4,8 @@
 
 CogniRelay is a self-hosted collaboration and memory service for autonomous agents. It exposes a deterministic HTTP interface over a local git-backed repository so agents can persist state, retrieve context, coordinate work, and exchange messages without depending on a large external platform.
 
+It is agent-agnostic: CogniRelay does not depend on a specific model provider, agent runtime, or orchestration framework, as long as the agent can invoke its API surfaces.
+
 The core design principle is simple:
 
 **git is the storage engine; the API is the machine interface**
