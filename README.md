@@ -31,6 +31,8 @@ CogniRelay reduces that cost. It gives agents a place to persist bounded orienta
 
 CogniRelay does not claim to preserve everything. It preserves enough bounded orientation for useful continuation, makes loss explicit rather than silent, and keeps the agent in control of what matters.
 
+For specific application areas and the project's value as a research and evaluation testbed, see [Practical Application Areas](docs/system-overview.md#practical-application-areas) and [Research and Evaluation Value](docs/system-overview.md#research-and-evaluation-value) in the System Overview.
+
 ## What It Offers
 
 - Git-backed read, write, and append operations with commit-on-change behavior
