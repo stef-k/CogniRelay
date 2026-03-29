@@ -76,6 +76,7 @@ from app.continuity.paths import (
 )
 from app.continuity.validation import (
     _final_capsule_payload,
+    _normalize_capsule_fields,
     _normalize_compare_payload,
     _strip_service_managed_descriptor_fields,
     _strip_verification_fields_for_upsert,
@@ -361,6 +362,8 @@ def continuity_upsert_service(
             # Re-validate after merge since preserved stored values may
             # interact with incoming values in ways that need bounds checking.
             _validate_capsule(repo_root, capsule)
+        # --- write-path normalization (strip, dedup) ---
+        normalizations_applied = _normalize_capsule_fields(capsule)
         # --- lifecycle state machine (mutates capsule before serialization) ---
         if capsule.thread_descriptor is not None:
             old_parsed = json.loads(old_bytes) if old_bytes else None
@@ -474,6 +477,7 @@ def continuity_upsert_service(
         "durable": True,
         "latest_commit": gm.latest_commit(),
         "capsule_sha256": capsule_sha256,
+        "normalizations_applied": normalizations_applied,
         "warnings": _warnings,
         "recovery_warnings": [fallback_warning] if fallback_warning else [],
         "fallback_warning_detail": fallback_warning_detail,

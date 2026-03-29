@@ -324,3 +324,156 @@ def _normalize_compare_payload(repo_root: Path, capsule: ContinuityCapsule) -> d
     _validate_capsule(repo_root, capsule)
     _validate_verification_state_and_health(capsule)
     return capsule.model_dump(mode="json", exclude_none=True)
+
+
+# ---------------------------------------------------------------------------
+# Write-path normalization expansion (#176 Move D)
+# ---------------------------------------------------------------------------
+
+# ContinuityState string-list field names eligible for strip/dedup normalization.
+_NORMALIZABLE_STRING_LIST_FIELDS: tuple[str, ...] = (
+    "top_priorities",
+    "active_concerns",
+    "active_constraints",
+    "open_loops",
+    "drift_signals",
+    "working_hypotheses",
+    "long_horizon_commitments",
+    "session_trajectory",
+    "trailing_notes",
+    "curiosity_queue",
+)
+
+
+def _dedup_first_wins(items: list[str]) -> tuple[list[str], bool]:
+    """Deduplicate a string list preserving the first occurrence of each value."""
+    seen: set[str] = set()
+    result: list[str] = []
+    changed = False
+    for item in items:
+        if item in seen:
+            changed = True
+            continue
+        seen.add(item)
+        result.append(item)
+    return result, changed
+
+
+def _normalize_capsule_fields(capsule: ContinuityCapsule) -> list[str]:
+    """Apply write-path normalizations to capsule fields in place.
+
+    Returns a list of normalization action strings (e.g.
+    ``"strip:continuity.open_loops"``) describing what changed.  Empty list
+    when no normalizations fired.  Idempotent on already-clean data.
+    """
+    applied: list[str] = []
+    cont = capsule.continuity
+
+    # --- ContinuityState string-list fields: strip, drop empty, dedup first-wins ---
+    for field_name in _NORMALIZABLE_STRING_LIST_FIELDS:
+        items: list[str] = getattr(cont, field_name)
+        target = f"continuity.{field_name}"
+
+        # Strip whitespace
+        stripped = [s.strip() for s in items]
+        if stripped != items:
+            applied.append(f"strip:{target}")
+            items = stripped
+            setattr(cont, field_name, items)
+
+        # Drop empty strings
+        filtered = [s for s in items if s]
+        if len(filtered) != len(items):
+            applied.append(f"drop_empty:{target}")
+            items = filtered
+            setattr(cont, field_name, items)
+
+        # Deduplicate (first-wins)
+        deduped, did_dedup = _dedup_first_wins(items)
+        if did_dedup:
+            applied.append(f"dedup:{target}")
+            setattr(cont, field_name, deduped)
+
+    # --- canonical_sources: strip, drop empty, dedup first-wins ---
+    if capsule.canonical_sources:
+        cs = capsule.canonical_sources
+        stripped_cs = [s.strip() for s in cs]
+        if stripped_cs != cs:
+            applied.append("strip:canonical_sources")
+            cs = stripped_cs
+            capsule.canonical_sources = cs
+        filtered_cs = [s for s in cs if s]
+        if len(filtered_cs) != len(cs):
+            applied.append("drop_empty:canonical_sources")
+            cs = filtered_cs
+            capsule.canonical_sources = cs
+        deduped_cs, did_dedup_cs = _dedup_first_wins(cs)
+        if did_dedup_cs:
+            applied.append("dedup:canonical_sources")
+            capsule.canonical_sources = deduped_cs
+
+    # --- stable_preferences: strip tag/content, dedup by tag (last-wins) ---
+    if capsule.stable_preferences:
+        sp = capsule.stable_preferences
+        sp_stripped = False
+        for pref in sp:
+            new_tag = pref.tag.strip()
+            new_content = pref.content.strip()
+            if new_tag != pref.tag or new_content != pref.content:
+                pref.tag = new_tag
+                pref.content = new_content
+                sp_stripped = True
+        if sp_stripped:
+            applied.append("strip:stable_preferences")
+        # Dedup by tag, last-wins
+        seen_tags: dict[str, int] = {}
+        for i, pref in enumerate(sp):
+            seen_tags[pref.tag] = i
+        if len(seen_tags) < len(sp):
+            kept_indices = sorted(seen_tags.values())
+            capsule.stable_preferences = [sp[i] for i in kept_indices]
+            applied.append("dedup:stable_preferences")
+
+    # --- rationale_entries: strip tag, dedup by tag (last-wins) ---
+    if cont.rationale_entries:
+        re_list = cont.rationale_entries
+        re_stripped = False
+        for entry in re_list:
+            new_tag = entry.tag.strip()
+            if new_tag != entry.tag:
+                entry.tag = new_tag
+                re_stripped = True
+        if re_stripped:
+            applied.append("strip:rationale_entries.tag")
+        # Dedup by tag, last-wins
+        seen_re: dict[str, int] = {}
+        for i, entry in enumerate(re_list):
+            seen_re[entry.tag] = i
+        if len(seen_re) < len(re_list):
+            kept = sorted(seen_re.values())
+            cont.rationale_entries = [re_list[i] for i in kept]
+            applied.append("dedup:rationale_entries")
+
+    # --- negative_decisions: strip decision/rationale, dedup by decision (last-wins) ---
+    if cont.negative_decisions:
+        nd_list = cont.negative_decisions
+        nd_stripped = False
+        for nd in nd_list:
+            new_d = nd.decision.strip()
+            new_r = nd.rationale.strip()
+            if new_d != nd.decision or new_r != nd.rationale:
+                nd.decision = new_d
+                nd.rationale = new_r
+                nd_stripped = True
+        if nd_stripped:
+            applied.append("strip:negative_decisions")
+        # Dedup by decision text, last-wins
+        seen_nd: dict[str, int] = {}
+        for i, nd in enumerate(nd_list):
+            seen_nd[nd.decision] = i
+        if len(seen_nd) < len(nd_list):
+            kept_nd = sorted(seen_nd.values())
+            cont.negative_decisions = [nd_list[i] for i in kept_nd]
+            applied.append("dedup:negative_decisions")
+
+    return applied
