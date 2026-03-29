@@ -21,18 +21,22 @@ from app.git_manager import GitManager
 from app.git_safety import try_commit_paths, try_unstage_paths
 from app.models import (
     ContinuityArchiveRequest,
+    ContinuityAttentionPolicy,
     ContinuityColdRehydrateRequest,
     ContinuityColdStoreRequest,
     ContinuityCapsule,
     ContinuityCompareRequest,
     ContinuityDeleteRequest,
+    ContinuityFreshness,
     ContinuityLifecycleRequest,
     ContinuityListRequest,
     ContinuityPatchRequest,
     ContinuityReadRequest,
+    ContinuityRelationshipModel,
     ContinuityRetentionApplyRequest,
     ContinuityRetentionPlanRequest,
     ContinuityRefreshPlanRequest,
+    ContinuityRetrievalHints,
     ContinuityRevalidateRequest,
     ContinuityUpsertRequest,
     IdentityAnchor,
@@ -41,6 +45,7 @@ from app.models import (
     RationaleEntry,
     SessionEndSnapshot,
     StablePreference,
+    ThreadDescriptor,
     ContextRetrieveRequest,
 )
 from app.storage import canonical_json, safe_path, write_bytes_file, write_text_file
@@ -176,6 +181,29 @@ from app.continuity.trust import (
 _logger = logging.getLogger(__name__)
 
 
+def _coerce_preserve_value(field_name: str, value: Any) -> Any:
+    """Coerce a stored JSON value into the appropriate Pydantic model for preserve merge."""
+    if field_name == "negative_decisions" and isinstance(value, list):
+        return [NegativeDecision.model_validate(v) if isinstance(v, dict) else v for v in value]
+    if field_name == "rationale_entries" and isinstance(value, list):
+        return [RationaleEntry.model_validate(v) if isinstance(v, dict) else v for v in value]
+    if field_name == "relationship_model" and isinstance(value, dict):
+        return ContinuityRelationshipModel.model_validate(value)
+    if field_name == "retrieval_hints" and isinstance(value, dict):
+        return ContinuityRetrievalHints.model_validate(value)
+    if field_name == "stable_preferences" and isinstance(value, list):
+        return [StablePreference.model_validate(v) if isinstance(v, dict) else v for v in value]
+    if field_name == "attention_policy" and isinstance(value, dict):
+        return ContinuityAttentionPolicy.model_validate(value)
+    if field_name == "freshness" and isinstance(value, dict):
+        return ContinuityFreshness.model_validate(value)
+    if field_name == "thread_descriptor" and isinstance(value, dict):
+        return ThreadDescriptor.model_validate(value)
+    if field_name == "identity_anchors" and isinstance(value, list):
+        return [IdentityAnchor.model_validate(v) if isinstance(v, dict) else v for v in value]
+    return value
+
+
 def _apply_preserve_merge(
     capsule: ContinuityCapsule,
     stored: dict[str, Any],
@@ -213,7 +241,7 @@ def _apply_preserve_merge(
             # Absent → preserve stored value
             stored_val = stored_continuity.get(field_name)
             if stored_val is not None:
-                setattr(capsule.continuity, field_name, stored_val)
+                setattr(capsule.continuity, field_name, _coerce_preserve_value(field_name, stored_val))
         elif raw_continuity[field_name] is None:
             # Explicitly null → clear to empty list
             setattr(capsule.continuity, field_name, [])
@@ -224,7 +252,7 @@ def _apply_preserve_merge(
         if field_name not in raw_continuity:
             stored_val = stored_continuity.get(field_name)
             if stored_val is not None:
-                setattr(capsule.continuity, field_name, stored_val)
+                setattr(capsule.continuity, field_name, _coerce_preserve_value(field_name, stored_val))
         elif raw_continuity[field_name] is None:
             setattr(capsule.continuity, field_name, None)
         # else: present → override
@@ -238,7 +266,7 @@ def _apply_preserve_merge(
         if field_name not in raw_capsule:
             stored_val = stored.get(field_name)
             if stored_val is not None:
-                setattr(capsule, field_name, stored_val)
+                setattr(capsule, field_name, _coerce_preserve_value(field_name, stored_val))
         elif raw_capsule[field_name] is None:
             setattr(capsule, field_name, [])
         # else: override
@@ -248,7 +276,7 @@ def _apply_preserve_merge(
         if field_name not in raw_capsule:
             stored_val = stored.get(field_name)
             if stored_val is not None:
-                setattr(capsule, field_name, stored_val)
+                setattr(capsule, field_name, _coerce_preserve_value(field_name, stored_val))
         elif raw_capsule[field_name] is None:
             setattr(capsule, field_name, None)
         # else: override
@@ -272,7 +300,7 @@ def _apply_preserve_merge(
         # Absent → preserve entire stored descriptor
         stored_td = stored.get("thread_descriptor")
         if stored_td is not None:
-            setattr(capsule, "thread_descriptor", stored_td)
+            setattr(capsule, "thread_descriptor", _coerce_preserve_value("thread_descriptor", stored_td))
     elif raw_capsule["thread_descriptor"] is None:
         # Explicitly null → clear
         capsule.thread_descriptor = None
@@ -284,7 +312,7 @@ def _apply_preserve_merge(
             if td_field not in raw_td:
                 stored_sub = stored_td.get(td_field)
                 if stored_sub is not None:
-                    setattr(capsule.thread_descriptor, td_field, stored_sub)
+                    setattr(capsule.thread_descriptor, td_field, _coerce_preserve_value(td_field, stored_sub))
             elif raw_td[td_field] is None:
                 setattr(capsule.thread_descriptor, td_field, [])
             # else: override
@@ -364,7 +392,24 @@ def continuity_upsert_service(
     path = safe_path(repo_root, rel)
     with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
         old_bytes = path.read_bytes() if path.exists() else None
-        # --- preserve-by-default merge (runs inside lock, before lifecycle) ---
+        # --- early stale-write guard (before merge/normalize/validate work) ---
+        # Only reject strictly older timestamps here.  Equal-timestamp
+        # conflict detection stays in the late check (line ~460) which only
+        # runs when content has actually changed, preserving the existing
+        # idempotent no-op behavior for same-timestamp same-content writes.
+        if old_bytes is not None:
+            try:
+                stored_ts = json.loads(old_bytes).get("updated_at", "")
+                incoming_dt = _parse_iso(req.capsule.updated_at)
+                stored_dt = _parse_iso(stored_ts)
+                if incoming_dt is not None and stored_dt is not None and incoming_dt < stored_dt:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Incoming continuity capsule is older than the current stored capsule",
+                    )
+            except (json.JSONDecodeError, KeyError):
+                pass  # malformed stored capsule — let downstream handle it
+        # --- preserve-by-default merge (runs inside lock, after stale check) ---
         if req.merge_mode == "preserve" and raw_body is not None and old_bytes is not None:
             stored = json.loads(old_bytes)
             snapshot_touched = _session_end_snapshot_touched_fields(req.session_end_snapshot)

@@ -399,6 +399,8 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         continuity_list=lambda req, auth_ctx: continuity_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_archive=lambda req, auth_ctx: continuity_archive(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_delete=lambda req, auth_ctx: continuity_delete(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_patch=lambda req, auth_ctx: continuity_patch(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        continuity_lifecycle=lambda req, auth_ctx: continuity_lifecycle(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_create=lambda req, auth_ctx: coordination_handoff_create(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_read=lambda handoff_id, auth_ctx: coordination_handoff_read(handoff_id=handoff_id, auth=auth_ctx),  # type: ignore[arg-type]
         handoff_query=lambda req, auth_ctx: coordination_handoffs_query(

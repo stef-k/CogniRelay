@@ -363,6 +363,16 @@ Standalone lifecycle transition for thread/task capsules without a full upsert. 
 
 Response includes `lifecycle` (new state) and `previous_lifecycle`.
 
+### Reduced-Authoring Patterns
+
+The three endpoints above — preserve-mode upsert, patch, and lifecycle — reduce agent authoring burden through deterministic mechanical assistance. Each avoids full-capsule rewrites for common operations:
+
+**Preserve-mode upsert** (`merge_mode="preserve"`): Send only the fields you want to change. Omitted fields are carried forward from the stored capsule. Required list fields sent as `[]` are treated as "not provided" and preserved. Example: update `stance_summary` and `top_priorities` without re-sending `open_loops`, `relationship_model`, `stable_preferences`, etc.
+
+**Patch** (`POST /v1/continuity/patch`): Append, remove, or replace individual items in list fields without rewriting the full list. Example: append one `rationale_entry` or remove a specific `open_loop` by exact match, with atomic all-or-nothing semantics.
+
+**Lifecycle** (`POST /v1/continuity/lifecycle`): Transition a thread or task capsule's lifecycle state (`suspend`, `resume`, `conclude`, `supersede`) without submitting a full capsule upsert. Only `lifecycle`, `superseded_by`, and `updated_at` change.
+
 ### Read — `POST /v1/continuity/read`
 
 | Field | Type | Required | Constraints |
