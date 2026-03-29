@@ -53,6 +53,8 @@ from app.continuity.constants import (
     CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
     CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED,
     CONTINUITY_WARNING_TRUST_SIGNALS_FAILED,
+    THREAD_LIFECYCLE_TRANSITIONS,
+    THREAD_LIFECYCLE_TRANSITION_TARGETS,
 )
 from app.continuity.paths import (
     _archive_rel_path_from_envelope,
@@ -67,9 +69,11 @@ from app.continuity.paths import (
 from app.continuity.validation import (
     _final_capsule_payload,
     _normalize_compare_payload,
+    _strip_service_managed_descriptor_fields,
     _strip_verification_fields_for_upsert,
     _validate_capsule,
     _validate_candidate_selector_match,
+    _validate_lifecycle_transition_request,
     _validate_verification_signals,
 )
 from app.continuity.compare import (
@@ -110,6 +114,7 @@ from app.continuity.revalidation import (
     _resolve_revalidation_capsule,
 )
 from app.continuity.listing import (
+    _matches_thread_filters,
     _scan_active_summaries,
     _scan_archive_summaries,
     _scan_cold_summaries,
@@ -190,12 +195,43 @@ def continuity_upsert_service(
         snapshot_applied = True
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_write_path(rel)
+    _validate_lifecycle_transition_request(req)
+    _strip_service_managed_descriptor_fields(capsule)
     _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
     with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
+        old_bytes = path.read_bytes() if path.exists() else None
+        # --- lifecycle state machine (mutates capsule before serialization) ---
+        if capsule.thread_descriptor is not None:
+            old_parsed = json.loads(old_bytes) if old_bytes else None
+            old_td = old_parsed.get("thread_descriptor") if old_parsed else None
+            if old_td is None:
+                # First creation or first descriptor addition
+                if req.lifecycle_transition is not None:
+                    raise HTTPException(status_code=400, detail="no thread_descriptor to transition; create one first")
+                capsule.thread_descriptor.lifecycle = "active"
+                capsule.thread_descriptor.superseded_by = None
+            else:
+                stored_lifecycle = old_td.get("lifecycle", "active")
+                stored_superseded_by = old_td.get("superseded_by")
+                if req.lifecycle_transition is None:
+                    capsule.thread_descriptor.lifecycle = stored_lifecycle
+                    capsule.thread_descriptor.superseded_by = stored_superseded_by
+                else:
+                    allowed = THREAD_LIFECYCLE_TRANSITIONS.get(stored_lifecycle)
+                    if allowed is None or req.lifecycle_transition not in allowed:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"lifecycle transition not allowed from '{stored_lifecycle}' via '{req.lifecycle_transition}'",
+                        )
+                    capsule.thread_descriptor.lifecycle = THREAD_LIFECYCLE_TRANSITION_TARGETS[req.lifecycle_transition]
+                    capsule.thread_descriptor.superseded_by = (
+                        req.superseded_by if req.lifecycle_transition == "supersede" else None
+                    )
+        elif req.lifecycle_transition is not None:
+            raise HTTPException(status_code=400, detail="no thread_descriptor to transition; create one first")
         canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
         new_bytes = canonical.encode("utf-8")
-        old_bytes = path.read_bytes() if path.exists() else None
         if old_bytes != new_bytes:
             stripped_req = ContinuityUpsertRequest(
                 subject_kind=req.subject_kind,
@@ -247,6 +283,10 @@ def continuity_upsert_service(
     if snapshot_applied:
         audit_detail["session_end_snapshot_applied"] = True
         audit_detail["resume_quality_adequate"] = _compute_resume_quality(capsule)["adequate"]
+    if req.lifecycle_transition is not None:
+        audit_detail["lifecycle_transition"] = req.lifecycle_transition
+    if capsule.thread_descriptor is not None and capsule.thread_descriptor.lifecycle is not None:
+        audit_detail["lifecycle"] = capsule.thread_descriptor.lifecycle
     audit(auth, "continuity_upsert", audit_detail)
     _warnings: list[dict[str, Any]] = []
     if fallback_warning:
@@ -270,6 +310,8 @@ def continuity_upsert_service(
     if snapshot_applied:
         result["session_end_snapshot_applied"] = True
         result["resume_quality"] = _compute_resume_quality(capsule)
+    if capsule.thread_descriptor is not None and capsule.thread_descriptor.lifecycle is not None:
+        result["lifecycle"] = capsule.thread_descriptor.lifecycle
     return result
 
 
@@ -353,6 +395,16 @@ def continuity_read_service(
             out["recovery_warnings"].append(CONTINUITY_WARNING_TRUST_SIGNALS_FAILED)
     else:
         out["trust_signals"] = None
+    # --- thread descriptor warnings ---
+    capsule_dict = out.get("capsule")
+    if capsule_dict is not None:
+        td = capsule_dict.get("thread_descriptor")
+        if td and td.get("lifecycle") == "superseded":
+            sid = capsule_dict.get("subject_id", "unknown")
+            sby = td.get("superseded_by", "unknown")
+            recovery_warnings.append(
+                f"continuity_capsule_superseded:thread:{sid}\u2192{sby}"
+            )
     audit(
         auth,
         "continuity_read",
@@ -393,6 +445,12 @@ def continuity_list_service(
         summaries.extend(_scan_archive_summaries(repo_root, auth, req.subject_kind, now, retention_archive_days))
     if req.include_cold:
         summaries.extend(_scan_cold_summaries(repo_root, auth, req.subject_kind))
+    has_thread_filters = any(
+        getattr(req, f) is not None
+        for f in ("lifecycle", "scope_anchor", "keyword", "label_exact", "anchor_kind", "anchor_value")
+    )
+    if has_thread_filters:
+        summaries = [row for row in summaries if _matches_thread_filters(row, req)]
     artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
     summaries.sort(key=lambda row: (str(row["subject_kind"]), str(row["subject_id"]), artifact_order.get(str(row.get("artifact_state")), 99), str(row["path"])))
     summaries = summaries[: req.limit]
@@ -404,7 +462,9 @@ def continuity_list_service(
             "count": len(summaries),
         },
     )
-    return {"ok": True, "count": len(summaries), "capsules": summaries}
+    result: dict[str, Any] = {"ok": True, "count": len(summaries), "capsules": summaries}
+    result["unique_match"] = len(summaries) == 1 if has_thread_filters else False
+    return result
 
 
 def continuity_delete_service(

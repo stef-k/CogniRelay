@@ -712,6 +712,22 @@ class StablePreference(BaseModel):
     set_at: str
 
 
+class IdentityAnchor(BaseModel):
+    """A stable identity pin for deterministic thread discovery."""
+    kind: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=200)
+
+
+class ThreadDescriptor(BaseModel):
+    """Structured identity block for thread and task capsules."""
+    label: str = Field(min_length=1, max_length=120)
+    keywords: List[str] = Field(default_factory=list, max_length=6)
+    scope_anchors: List[str] = Field(default_factory=list, max_length=4)
+    identity_anchors: List[IdentityAnchor] = Field(default_factory=list, max_length=4)
+    lifecycle: Optional[Literal["active", "suspended", "concluded", "superseded"]] = None
+    superseded_by: Optional[str] = Field(default=None, max_length=200)
+
+
 class ContinuityCapsule(BaseModel):
     """Persisted continuity capsule for one subject."""
     schema_version: Literal["1.0"] = "1.0"
@@ -730,6 +746,7 @@ class ContinuityCapsule(BaseModel):
     verification_state: Optional[ContinuityVerificationState] = None
     capsule_health: Optional[ContinuityCapsuleHealth] = None
     stable_preferences: List[StablePreference] = Field(default_factory=list, max_length=12)
+    thread_descriptor: Optional[ThreadDescriptor] = None
 
 
 class SessionEndSnapshot(BaseModel):
@@ -759,6 +776,8 @@ class ContinuityUpsertRequest(BaseModel):
     commit_message: Optional[str] = Field(default=None, max_length=240)
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
     session_end_snapshot: Optional[SessionEndSnapshot] = Field(default=None)
+    lifecycle_transition: Optional[Literal["suspend", "resume", "conclude", "supersede"]] = None
+    superseded_by: Optional[str] = Field(default=None, max_length=200)
 
 
 class ContinuityReadRequest(BaseModel):
@@ -776,6 +795,12 @@ class ContinuityListRequest(BaseModel):
     include_fallback: bool = False
     include_archived: bool = False
     include_cold: bool = False
+    lifecycle: Optional[Literal["active", "suspended", "concluded", "superseded"]] = None
+    scope_anchor: Optional[str] = Field(default=None, max_length=200)
+    keyword: Optional[str] = Field(default=None, max_length=40)
+    label_exact: Optional[str] = Field(default=None, max_length=120)
+    anchor_kind: Optional[str] = Field(default=None, max_length=40)
+    anchor_value: Optional[str] = Field(default=None, max_length=200)
 
 
 class ContinuityRefreshPlanRequest(BaseModel):

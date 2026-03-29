@@ -7,6 +7,18 @@ from pathlib import Path
 
 CONTINUITY_DIR_REL = "memory/continuity"
 CONTINUITY_SUBJECT_RE = re.compile(r"^(task|thread):(.+)$")
+THREAD_DESCRIPTOR_SCOPE_ANCHOR_RE = re.compile(r"^(user|peer|thread|task):[a-z0-9._-]{1,120}$")
+THREAD_DESCRIPTOR_ANCHOR_KIND_RE = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+THREAD_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
+    "active": {"suspend", "conclude", "supersede"},
+    "suspended": {"resume", "conclude", "supersede"},
+}
+THREAD_LIFECYCLE_TRANSITION_TARGETS: dict[str, str] = {
+    "suspend": "suspended",
+    "resume": "active",
+    "conclude": "concluded",
+    "supersede": "superseded",
+}
 CONTINUITY_PATH_RE = re.compile(r"^[A-Za-z0-9._/\-]+$")
 CONTINUITY_DEFAULT_STALE: dict[str, int | None] = {
     "persistent": None,
@@ -61,6 +73,7 @@ CONTINUITY_COMPARE_TOP_LEVEL_ORDER = [
     "freshness",
     "canonical_sources",
     "metadata",
+    "thread_descriptor",
 ]
 CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
     "source": ["producer", "update_reason", "inputs"],
@@ -86,6 +99,7 @@ CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
     ],
     "relationship_model": ["trust_level", "preferred_style", "sensitivity_notes"],
     "retrieval_hints": ["must_include", "avoid", "load_next"],
+    "thread_descriptor": ["label", "keywords", "scope_anchors", "identity_anchors", "lifecycle", "superseded_by"],
 }
 CONTINUITY_COMPARE_IGNORED_FIELDS = {"verified_at", "verification_kind", "verification_state", "capsule_health"}
 CONTINUITY_SIGNAL_STATUS = {

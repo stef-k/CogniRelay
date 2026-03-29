@@ -12,10 +12,13 @@ from pydantic import ValidationError
 from app.continuity.constants import (
     CONTINUITY_INTERACTION_BOUNDARY_KINDS,
     CONTINUITY_PATH_RE,
+    THREAD_DESCRIPTOR_ANCHOR_KIND_RE,
+    THREAD_DESCRIPTOR_SCOPE_ANCHOR_RE,
 )
 from app.continuity.paths import _normalize_subject_id
 from app.models import (
     ContinuityCapsule,
+    ContinuityUpsertRequest,
     ContinuityVerificationSignal,
 )
 from app.storage import StorageError, canonical_json, safe_path
@@ -89,6 +92,69 @@ def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
                 raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].depends_on")
             if len(dep) > 120:
                 raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].depends_on")
+
+
+def _strip_service_managed_descriptor_fields(capsule: ContinuityCapsule) -> None:
+    """Silently discard caller-supplied lifecycle and superseded_by on thread_descriptor."""
+    if capsule.thread_descriptor is not None:
+        capsule.thread_descriptor.lifecycle = None
+        capsule.thread_descriptor.superseded_by = None
+
+
+def _validate_thread_descriptor(capsule: ContinuityCapsule) -> None:
+    """Validate thread_descriptor constraints when present."""
+    td = capsule.thread_descriptor
+    if td is None:
+        return
+    if capsule.subject_kind not in ("thread", "task"):
+        raise HTTPException(
+            status_code=400,
+            detail="thread_descriptor is only allowed for thread and task capsules",
+        )
+    # Normalize keywords: lowercase, strip, filter empty, deduplicate preserving order
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for kw in td.keywords:
+        kw = kw.lower().strip()
+        if not kw:
+            continue
+        if kw not in seen:
+            normalized.append(kw)
+            seen.add(kw)
+    td.keywords = normalized
+    for kw in td.keywords:
+        if len(kw) < 1 or len(kw) > 40:
+            raise HTTPException(status_code=400, detail="Keyword must be 1-40 characters")
+    for anchor in td.scope_anchors:
+        if not THREAD_DESCRIPTOR_SCOPE_ANCHOR_RE.match(anchor):
+            raise HTTPException(status_code=400, detail=f"Invalid scope_anchor format: {anchor}")
+    seen_anchors: set[tuple[str, str]] = set()
+    for ia in td.identity_anchors:
+        ia.kind = ia.kind.lower().strip()
+        ia.value = ia.value.strip()
+        if not THREAD_DESCRIPTOR_ANCHOR_KIND_RE.match(ia.kind):
+            raise HTTPException(status_code=400, detail=f"Invalid identity_anchor kind: {ia.kind}")
+        if len(ia.value) < 1 or len(ia.value) > 200:
+            raise HTTPException(status_code=400, detail="identity_anchor value must be 1-200 characters")
+        key = (ia.kind, ia.value)
+        if key in seen_anchors:
+            raise HTTPException(status_code=400, detail=f"Duplicate identity_anchor: ({ia.kind}, {ia.value})")
+        seen_anchors.add(key)
+
+
+def _validate_lifecycle_transition_request(req: ContinuityUpsertRequest) -> None:
+    """Validate lifecycle_transition + superseded_by consistency on the request."""
+    if req.lifecycle_transition is None and req.superseded_by is None:
+        return
+    if req.subject_kind not in ("thread", "task"):
+        raise HTTPException(
+            status_code=400,
+            detail="lifecycle_transition is only allowed for thread and task capsules",
+        )
+    if req.lifecycle_transition == "supersede" and req.superseded_by is None:
+        raise HTTPException(status_code=400, detail="superseded_by is required when lifecycle_transition is 'supersede'")
+    if req.lifecycle_transition != "supersede" and req.superseded_by is not None:
+        raise HTTPException(status_code=400, detail="superseded_by is only allowed when lifecycle_transition is 'supersede'")
 
 
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
@@ -191,6 +257,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
                         status_code=400,
                         detail=f"rationale_entries[].supersedes references tag '{entry.supersedes}' which does not exist with status 'superseded'",
                     )
+    _validate_thread_descriptor(capsule)
     payload = capsule.model_dump(mode="json", exclude_none=True)
     canonical = canonical_json(payload)
     if len(canonical.encode("utf-8")) > 12 * 1024:

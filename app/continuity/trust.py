@@ -70,6 +70,12 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
         capsule_health_status = None
         capsule_health_reasons: list[str] = []
 
+    if capsule is not None:
+        if capsule.get("subject_kind") in ("thread", "task") and not capsule.get("thread_descriptor"):
+            recovery_warnings.append(
+                f"continuity_thread_descriptor_missing:thread:{capsule.get('subject_id', 'unknown')}"
+            )
+
     recovery = {
         "source_state": source_state,
         "recovery_warnings": recovery_warnings,
