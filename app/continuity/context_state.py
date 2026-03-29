@@ -58,7 +58,6 @@ from app.continuity.trimming import (
 )
 from app.continuity.salience import (
     _salience_block,
-    _salience_sort,
 )
 from app.continuity.trust import (
     _build_aggregate_trust_signals,
