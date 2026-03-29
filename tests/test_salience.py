@@ -750,21 +750,28 @@ class TestBuildContinuityStateSalience(unittest.TestCase):
         ]
         self.assertEqual(ranks, list(range(1, len(ranks) + 1)))
 
-    def test_tight_budget_omits_salience_gracefully(self) -> None:
-        """Acceptance criterion #9: very low budget → salience omitted with warning."""
-        # Use the minimum allowed token budget (256) to trigger omission.
+    def test_budget_too_tight_omits_capsule_entirely(self) -> None:
+        """At 256 tokens the capsule cannot fit even without salience and is fully omitted."""
         state = self._build([_capsule()], max_tokens=256)
+        self.assertEqual(state["capsules"], [])
+        self.assertGreater(len(state["omitted_selectors"]), 0)
+
+    def test_soft_budget_drops_salience_but_keeps_capsule(self) -> None:
+        """Acceptance criterion #9: salience is a soft cost — capsule survives without it."""
+        state = self._build([_capsule()], max_tokens=1175)
         capsules = state["capsules"]
-        if capsules:
-            # Capsule survived (salience dropped as soft cost) — verify null salience and warning.
-            for c in capsules:
-                self.assertIsNone(c.get("salience"))
-            self.assertTrue(
-                any(CONTINUITY_WARNING_SALIENCE_OMITTED in w for w in state.get("recovery_warnings", [])),
-            )
-        else:
-            # Budget too tight even without salience — capsule fully omitted.
-            self.assertGreater(len(state["omitted_selectors"]), 0)
+        self.assertEqual(len(capsules), 1, "capsule must survive at this budget")
+        self.assertIsNone(capsules[0].get("salience"))
+        self.assertTrue(
+            any(CONTINUITY_WARNING_SALIENCE_OMITTED in w for w in state.get("recovery_warnings", [])),
+        )
+
+    def test_sufficient_budget_includes_salience(self) -> None:
+        """When budget is ample, salience block is present on the capsule."""
+        state = self._build([_capsule()], max_tokens=4000)
+        capsules = state["capsules"]
+        self.assertEqual(len(capsules), 1)
+        self.assertIsNotNone(capsules[0].get("salience"))
 
 
 # ---------------------------------------------------------------------------
