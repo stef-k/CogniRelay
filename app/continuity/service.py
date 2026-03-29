@@ -372,6 +372,11 @@ def continuity_upsert_service(
             stored = json.loads(old_bytes)
             snapshot_touched = _session_end_snapshot_touched_fields(req.session_end_snapshot)
             _apply_preserve_merge(capsule, stored, raw_body, snapshot_touched)
+            # Re-construct capsule through the model so that any raw dicts
+            # restored from the stored JSON become proper Pydantic instances.
+            capsule = ContinuityCapsule.model_validate(
+                capsule.model_dump(mode="json")
+            )
             # Re-validate after merge since preserved stored values may
             # interact with incoming values in ways that need bounds checking.
             _validate_capsule(repo_root, capsule)
@@ -531,8 +536,10 @@ def _set_patch_target_list(capsule: ContinuityCapsule, target: str, value: list[
 def _validate_patch_operation(op: PatchOperation) -> None:
     """Validate per-operation parameter constraints; raises HTTP 400 on violation."""
     target = op.target
-    is_string = target in PATCH_STRING_LIST_TARGETS or target in PATCH_THREAD_DESCRIPTOR_TARGETS
-    is_structured = target in PATCH_STRUCTURED_LIST_TARGETS
+    # identity_anchors uses structured matching (kind:value) despite being
+    # under thread_descriptor; keywords and scope_anchors are plain strings.
+    is_structured = target in PATCH_STRUCTURED_LIST_TARGETS or target == "thread_descriptor.identity_anchors"
+    is_string = (target in PATCH_STRING_LIST_TARGETS or target in PATCH_THREAD_DESCRIPTOR_TARGETS) and not is_structured
 
     if op.action == "append":
         if op.match is not None or op.index is not None:
@@ -622,7 +629,11 @@ def _apply_patch_operations(
             target_list.append(coerced)
 
         elif op.action == "remove":
-            if op.target in PATCH_STRING_LIST_TARGETS or op.target in PATCH_THREAD_DESCRIPTOR_TARGETS:
+            is_structured_target = (
+                op.target in PATCH_STRUCTURED_LIST_TARGETS
+                or op.target == "thread_descriptor.identity_anchors"
+            )
+            if not is_structured_target:
                 # String-list: match by exact string
                 try:
                     idx = target_list.index(op.match)
@@ -643,7 +654,11 @@ def _apply_patch_operations(
                 target_list.pop(idx)
 
         elif op.action == "replace_at":
-            if op.target in PATCH_STRING_LIST_TARGETS or op.target in PATCH_THREAD_DESCRIPTOR_TARGETS:
+            is_structured_target = (
+                op.target in PATCH_STRUCTURED_LIST_TARGETS
+                or op.target == "thread_descriptor.identity_anchors"
+            )
+            if not is_structured_target:
                 # String-list: by index
                 if op.index is None or op.index < 0 or op.index >= len(target_list):
                     raise HTTPException(
