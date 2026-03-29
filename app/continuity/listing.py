@@ -97,9 +97,7 @@ def _scan_active_summaries(
             if exc.status_code in {400, 404}:
                 continue
             raise
-        summaries.append(
-            _capsule_list_summary(capsule, rel=rel, now=now, artifact_state="active", retention_class="active")
-        )
+        summaries.append(_capsule_list_summary(capsule, rel=rel, now=now, artifact_state="active", retention_class="active"))
     return summaries
 
 
@@ -131,9 +129,7 @@ def _scan_fallback_summaries(
         capsule = envelope["capsule"]
         if subject_kind and capsule["subject_kind"] != subject_kind:
             continue
-        summaries.append(
-            _capsule_list_summary(capsule, rel=rel, now=now, artifact_state="fallback", retention_class="fallback")
-        )
+        summaries.append(_capsule_list_summary(capsule, rel=rel, now=now, artifact_state="fallback", retention_class="fallback"))
     return summaries
 
 
@@ -213,28 +209,30 @@ def _scan_cold_summaries(
             continue
         if subject_kind and frontmatter["subject_kind"] != subject_kind:
             continue
-        summaries.append({
-            "subject_kind": frontmatter["subject_kind"],
-            "subject_id": frontmatter["subject_id"],
-            "path": rel,
-            "source_archive_path": source_archive_path,
-            "updated_at": None,
-            "verified_at": None,
-            "verification_kind": frontmatter["verification_kind"] or None,
-            "freshness_class": frontmatter["freshness_class"] or None,
-            "phase": frontmatter["phase"],
-            "verification_status": frontmatter["verification_status"],
-            "health_status": frontmatter["health_status"],
-            "health_reasons": [],
-            "artifact_state": "cold",
-            "retention_class": "cold",
-            "cold_stub_path": rel,
-            "cold_storage_path": frontmatter["cold_storage_path"],
-            "archived_at": frontmatter["archived_at"],
-            "cold_stored_at": frontmatter["cold_stored_at"],
-            "stable_preference_count": None,
-            "rationale_entry_count": None,
-        })
+        summaries.append(
+            {
+                "subject_kind": frontmatter["subject_kind"],
+                "subject_id": frontmatter["subject_id"],
+                "path": rel,
+                "source_archive_path": source_archive_path,
+                "updated_at": None,
+                "verified_at": None,
+                "verification_kind": frontmatter["verification_kind"] or None,
+                "freshness_class": frontmatter["freshness_class"] or None,
+                "phase": frontmatter["phase"],
+                "verification_status": frontmatter["verification_status"],
+                "health_status": frontmatter["health_status"],
+                "health_reasons": [],
+                "artifact_state": "cold",
+                "retention_class": "cold",
+                "cold_stub_path": rel,
+                "cold_storage_path": frontmatter["cold_storage_path"],
+                "archived_at": frontmatter["archived_at"],
+                "cold_stored_at": frontmatter["cold_stored_at"],
+                "stable_preference_count": None,
+                "rationale_entry_count": None,
+            }
+        )
     return summaries
 
 

@@ -225,9 +225,7 @@ def continuity_upsert_service(
                             detail=f"lifecycle transition not allowed from '{stored_lifecycle}' via '{req.lifecycle_transition}'",
                         )
                     capsule.thread_descriptor.lifecycle = THREAD_LIFECYCLE_TRANSITION_TARGETS[req.lifecycle_transition]
-                    capsule.thread_descriptor.superseded_by = (
-                        req.superseded_by if req.lifecycle_transition == "supersede" else None
-                    )
+                    capsule.thread_descriptor.superseded_by = req.superseded_by if req.lifecycle_transition == "supersede" else None
         elif req.lifecycle_transition is not None:
             raise HTTPException(status_code=400, detail="no thread_descriptor to transition; create one first")
         canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
@@ -290,11 +288,13 @@ def continuity_upsert_service(
     audit(auth, "continuity_upsert", audit_detail)
     _warnings: list[dict[str, Any]] = []
     if fallback_warning:
-        _warnings.append(make_warning(
-            fallback_warning,
-            fallback_warning_detail or "Fallback snapshot write failed",
-            path=rel,
-        ))
+        _warnings.append(
+            make_warning(
+                fallback_warning,
+                fallback_warning_detail or "Fallback snapshot write failed",
+                path=rel,
+            )
+        )
     result: dict[str, Any] = {
         "ok": True,
         "path": rel,
@@ -402,9 +402,7 @@ def continuity_read_service(
         if td and td.get("lifecycle") == "superseded":
             sid = capsule_dict.get("subject_id", "unknown")
             sby = td.get("superseded_by", "unknown")
-            recovery_warnings.append(
-                f"continuity_capsule_superseded:thread:{sid}\u2192{sby}"
-            )
+            recovery_warnings.append(f"continuity_capsule_superseded:thread:{sid}\u2192{sby}")
     audit(
         auth,
         "continuity_read",
@@ -445,10 +443,7 @@ def continuity_list_service(
         summaries.extend(_scan_archive_summaries(repo_root, auth, req.subject_kind, now, retention_archive_days))
     if req.include_cold:
         summaries.extend(_scan_cold_summaries(repo_root, auth, req.subject_kind))
-    has_thread_filters = any(
-        getattr(req, f) is not None
-        for f in ("lifecycle", "scope_anchor", "keyword", "label_exact", "anchor_kind", "anchor_value")
-    )
+    has_thread_filters = any(getattr(req, f) is not None for f in ("lifecycle", "scope_anchor", "keyword", "label_exact", "anchor_kind", "anchor_value"))
     if has_thread_filters:
         summaries = [row for row in summaries if _matches_thread_filters(row, req)]
     artifact_order = {"active": 0, "fallback": 1, "archived": 2, "cold": 3}
@@ -513,7 +508,7 @@ def continuity_delete_service(
                 stem = path.stem
                 if path.is_dir() or path.suffix.lower() != ".json" or not stem.startswith(archive_prefix):
                     continue
-                archive_suffix = stem[len(archive_prefix):]
+                archive_suffix = stem[len(archive_prefix) :]
                 if re.fullmatch(r"\d{8}T\d{6}Z", archive_suffix) is None:
                     continue
                 rel = str(path.relative_to(repo_root))
@@ -651,8 +646,7 @@ def continuity_refresh_plan_service(
                     "verification_status": verification_status,
                     "last_revalidated_at": (
                         str(capsule.get("verification_state", {}).get("last_revalidated_at"))
-                        if isinstance(capsule.get("verification_state"), dict)
-                        and capsule.get("verification_state", {}).get("last_revalidated_at")
+                        if isinstance(capsule.get("verification_state"), dict) and capsule.get("verification_state", {}).get("last_revalidated_at")
                         else None
                     ),
                     "updated_at": capsule["updated_at"],
@@ -710,8 +704,7 @@ def continuity_refresh_plan_service(
                     "verification_status": verification_status,
                     "last_revalidated_at": (
                         str(capsule.get("verification_state", {}).get("last_revalidated_at"))
-                        if isinstance(capsule.get("verification_state"), dict)
-                        and capsule.get("verification_state", {}).get("last_revalidated_at")
+                        if isinstance(capsule.get("verification_state"), dict) and capsule.get("verification_state", {}).get("last_revalidated_at")
                         else None
                     ),
                     "updated_at": capsule["updated_at"],
@@ -1062,9 +1055,7 @@ def continuity_revalidate_service(
     auth.require_write_path(rel)
     active_path = safe_path(repo_root, rel)
     with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
-        active = ContinuityCapsule.model_validate(
-            _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
-        )
+        active = ContinuityCapsule.model_validate(_load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id)))
         now = datetime.now(timezone.utc).replace(microsecond=0)
         now_iso = format_iso(now)
         strongest_signal = _strongest_signal_kind(req.signals)
@@ -1119,11 +1110,13 @@ def continuity_revalidate_service(
     )
     _rev_warnings: list[dict[str, Any]] = []
     if fallback_status == "failed":
-        _rev_warnings.append(make_warning(
-            CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
-            fallback_warning_detail or "Fallback snapshot write failed",
-            path=rel,
-        ))
+        _rev_warnings.append(
+            make_warning(
+                CONTINUITY_WARNING_FALLBACK_WRITE_FAILED,
+                fallback_warning_detail or "Fallback snapshot write failed",
+                path=rel,
+            )
+        )
     return {
         "ok": True,
         "path": rel,
@@ -1288,14 +1281,13 @@ def continuity_cold_store_service(
                 ):
                     # Re-verify under lock (TOCTOU prevention)
                     if not archive_path.exists() and cold_payload_file.exists() and cold_stub_file.exists():
-                        _recovery_committed = bool(try_commit_paths(
-                            paths=[cold_payload_file, cold_stub_file, archive_path],
-                            gm=gm,
-                            commit_message=(
-                                f"continuity: cold-store recovery "
-                                f"{_cold_fm['subject_kind']} {_cold_fm['subject_id']}"
-                            ),
-                        ))
+                        _recovery_committed = bool(
+                            try_commit_paths(
+                                paths=[cold_payload_file, cold_stub_file, archive_path],
+                                gm=gm,
+                                commit_message=(f"continuity: cold-store recovery {_cold_fm['subject_kind']} {_cold_fm['subject_id']}"),
+                            )
+                        )
                         audit(
                             auth,
                             "continuity_cold_store",
@@ -1309,16 +1301,14 @@ def continuity_cold_store_service(
                         _cs_recovery_warnings: list[dict[str, Any]] = [
                             make_warning(
                                 "continuity_cold_store_crash_recovery",
-                                "Completed cold-store via crash recovery: "
-                                "archive was already deleted, cold files committed",
+                                "Completed cold-store via crash recovery: archive was already deleted, cold files committed",
                             ),
                         ]
                         if not _recovery_committed:
                             _cs_recovery_warnings.append(
                                 make_warning(
                                     "continuity_cold_store_recovery_not_durable",
-                                    "Crash recovery completed on disk but git commit "
-                                    "failed; state is not yet durable",
+                                    "Crash recovery completed on disk but git commit failed; state is not yet durable",
                                 ),
                             )
                         return {
@@ -1336,8 +1326,7 @@ def continuity_cold_store_service(
                         }
         except Exception:
             _logger.warning(
-                "Continuity cold-store crash recovery: cold stub validation "
-                "failed; falling through to normal flow",
+                "Continuity cold-store crash recovery: cold stub validation failed; falling through to normal flow",
                 exc_info=True,
             )
 
@@ -1491,14 +1480,13 @@ def continuity_cold_rehydrate_service(
                         if _archive_rel_path_from_envelope(_check_envelope) == source_archive_path:
                             cold_payload_file.unlink(missing_ok=True)
                             cold_stub_file.unlink(missing_ok=True)
-                            _rh_recovery_committed = bool(try_commit_paths(
-                                paths=[archive_path, cold_payload_file, cold_stub_file],
-                                gm=gm,
-                                commit_message=(
-                                    f"continuity: cold-rehydrate recovery "
-                                    f"{frontmatter['subject_kind']} {frontmatter['subject_id']}"
-                                ),
-                            ))
+                            _rh_recovery_committed = bool(
+                                try_commit_paths(
+                                    paths=[archive_path, cold_payload_file, cold_stub_file],
+                                    gm=gm,
+                                    commit_message=(f"continuity: cold-rehydrate recovery {frontmatter['subject_kind']} {frontmatter['subject_id']}"),
+                                )
+                            )
                             audit(
                                 auth,
                                 "continuity_cold_rehydrate",
@@ -1512,16 +1500,14 @@ def continuity_cold_rehydrate_service(
                             _rh_warnings: list[dict[str, Any]] = [
                                 make_warning(
                                     "continuity_cold_rehydrate_crash_recovery",
-                                    "Completed rehydrate via crash recovery: "
-                                    "archive already restored, removed orphaned cold files",
+                                    "Completed rehydrate via crash recovery: archive already restored, removed orphaned cold files",
                                 ),
                             ]
                             if not _rh_recovery_committed:
                                 _rh_warnings.append(
                                     make_warning(
                                         "continuity_cold_rehydrate_recovery_not_durable",
-                                        "Crash recovery completed on disk but git commit "
-                                        "failed; state is not yet durable",
+                                        "Crash recovery completed on disk but git commit failed; state is not yet durable",
                                     ),
                                 )
                             return {
@@ -1540,8 +1526,7 @@ def continuity_cold_rehydrate_service(
                             }
                     except Exception:
                         _logger.warning(
-                            "Continuity cold-rehydrate crash recovery: "
-                            "archive validation failed; falling through to 409",
+                            "Continuity cold-rehydrate crash recovery: archive validation failed; falling through to 409",
                             exc_info=True,
                         )
                 raise HTTPException(status_code=409, detail="Continuity archive envelope already exists")
@@ -1556,9 +1541,7 @@ def continuity_cold_rehydrate_service(
             if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
                 raise ValueError("wrong schema_version")
             capsule = ContinuityCapsule.model_validate(payload.get("capsule")).model_dump(mode="json", exclude_none=True)
-            expected_archive_path = _archive_rel_path_from_envelope(
-                {**payload, "capsule": capsule}
-            )
+            expected_archive_path = _archive_rel_path_from_envelope({**payload, "capsule": capsule})
             if expected_archive_path != source_archive_path:
                 raise HTTPException(status_code=400, detail="Continuity cold payload identity does not match requested source archive")
             if str(payload.get("active_path") or "") != continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])):
@@ -1698,7 +1681,9 @@ def build_continuity_state(
         return state
 
     loaded = _filter_by_verification_policy(
-        loaded, req.continuity_verification_policy, state["omitted_selectors"],
+        loaded,
+        req.continuity_verification_policy,
+        state["omitted_selectors"],
     )
 
     if not loaded:

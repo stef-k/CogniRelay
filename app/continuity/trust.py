@@ -40,12 +40,7 @@ def _compute_resume_quality(capsule: ContinuityCapsule) -> dict[str, Any]:
     _RESUME_QUALITY_STANCE_MIN_LEN characters long.
     """
     cont = capsule.continuity
-    adequate = bool(
-        cont.open_loops
-        and cont.top_priorities
-        and cont.active_constraints
-        and len(cont.stance_summary) >= _RESUME_QUALITY_STANCE_MIN_LEN
-    )
+    adequate = bool(cont.open_loops and cont.top_priorities and cont.active_constraints and len(cont.stance_summary) >= _RESUME_QUALITY_STANCE_MIN_LEN)
     return {"adequate": adequate}
 
 
@@ -72,9 +67,7 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
 
     if capsule is not None:
         if capsule.get("subject_kind") in ("thread", "task") and not capsule.get("thread_descriptor"):
-            recovery_warnings.append(
-                f"continuity_thread_descriptor_missing:thread:{capsule.get('subject_id', 'unknown')}"
-            )
+            recovery_warnings.append(f"continuity_thread_descriptor_missing:thread:{capsule.get('subject_id', 'unknown')}")
 
     recovery = {
         "source_state": source_state,
@@ -99,8 +92,7 @@ def _build_startup_summary(out: dict[str, Any]) -> dict[str, Any]:
             "negative_decisions": [dict(d) for d in cont.get("negative_decisions", [])],
             # Deep copy: RationaleEntry has nested lists (alternatives_considered, depends_on).
             "rationale_entries": [
-                {**r, "alternatives_considered": list(r.get("alternatives_considered", [])),
-                 "depends_on": list(r.get("depends_on", []))}
+                {**r, "alternatives_considered": list(r.get("alternatives_considered", [])), "depends_on": list(r.get("depends_on", []))}
                 for r in cont.get("rationale_entries", [])
                 if r.get("status") == "active"
             ],
