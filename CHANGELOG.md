@@ -9,10 +9,11 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 v1.0.0 marks the stabilization of the core CogniRelay system: a durable,
 file-backed continuity and memory relay for autonomous agents operating 24/7.
-The release represents the culmination of the phased continuity roadmap (#6)
--- from initial orientation preservation through engine hardening, inter-agent
-coordination, collaborator-grade feature completion, and deterministic
-burden-reduction -- into a stable, production-ready core.
+The release represents the culmination of the phased continuity
+[roadmap](https://github.com/stef-k/CogniRelay/issues/6) -- from initial
+orientation preservation through engine hardening, inter-agent coordination,
+collaborator-grade feature completion, and deterministic burden-reduction --
+into a stable, production-ready core.
 
 ### Continuity Foundation and Durable Capsule Model
 
@@ -28,7 +29,7 @@ burden-reduction -- into a stable, production-ready core.
 - Introduced retention policies with configurable lifecycle for capsules,
   coordination artifacts, registry state, and segment history.
 
-### Inter-Agent Coordination (#36 - #38)
+### Inter-Agent Coordination ([#36](https://github.com/stef-k/CogniRelay/issues/36) - [#38](https://github.com/stef-k/CogniRelay/issues/38))
 
 - Implemented inter-agent handoff continuity for session transfer between
   agents.
@@ -39,7 +40,7 @@ burden-reduction -- into a stable, production-ready core.
 - Added per-artifact file locking with timeout to serialize concurrent
   coordination mutations.
 
-### Production Hardening (#42 - #102 family)
+### Production Hardening ([#42](https://github.com/stef-k/CogniRelay/issues/42) - [#102](https://github.com/stef-k/CogniRelay/issues/102) family)
 
 - Serialized continuity mutations per subject and repository-wide git
   operations to eliminate concurrency races.
@@ -52,14 +53,14 @@ burden-reduction -- into a stable, production-ready core.
 - Introduced per-artifact file locking with a 30-second acquisition timeout
   and startup lockfile purge.
 
-### Staged Module Extraction (#12 family)
+### Staged Module Extraction ([#12](https://github.com/stef-k/CogniRelay/issues/12) family)
 
 - Extracted discovery, context, ops, peers, tasks, security, messaging,
   replication, and runtime helpers from `app/main.py` across 10 refactor
   stages.
 - Realigned all test patch boundaries to target extracted modules.
 
-### Security and Auth Model Refinements (#141 - #160)
+### Security and Auth Model Refinements ([#141](https://github.com/stef-k/CogniRelay/issues/141) - [#160](https://github.com/stef-k/CogniRelay/issues/160))
 
 - Added sub-directory namespace granularity to the auth model.
 - Introduced the `replication:sync` scope to reduce peer blast radius.
@@ -68,7 +69,7 @@ burden-reduction -- into a stable, production-ready core.
 - Documented the single-operator trust model, token-scoped isolation, and
   deployment topology.
 
-### Startup and Handoff Improvements (#164 - #167)
+### Startup and Handoff Improvements ([#164](https://github.com/stef-k/CogniRelay/issues/164) - [#167](https://github.com/stef-k/CogniRelay/issues/167))
 
 - Added a startup-oriented continuity read view providing agents with an
   immediate orientation payload on cold start.
@@ -76,7 +77,7 @@ burden-reduction -- into a stable, production-ready core.
   clean handoff between agent sessions.
 - Added a stdlib-only CLI client for continuity operations.
 
-### Collaborator-Grade Continuity Completion (#119 family)
+### Collaborator-Grade Continuity Completion ([#119](https://github.com/stef-k/CogniRelay/issues/119) family)
 
 - Added trust and freshness signaling on all continuity retrieval paths,
   giving agents machine-readable confidence indicators.
@@ -89,14 +90,14 @@ burden-reduction -- into a stable, production-ready core.
 - Added salience ranking (first slice) for continuity entries to surface
   the most relevant data on retrieval.
 
-### Continuity Service Extraction (#174)
+### Continuity Service Extraction ([#174](https://github.com/stef-k/CogniRelay/issues/174))
 
 - Decomposed the monolithic continuity `service.py` into 16 focused modules
   (constants, paths, freshness, trimming, compare, validation, retrieval,
   cold, persistence, trust, refresh, retention, listing, revalidation,
   context_state) across two extraction passes.
 
-### Post-#119 Consolidation (#179 - #186)
+### Post-[#119](https://github.com/stef-k/CogniRelay/issues/119) Consolidation ([#179](https://github.com/stef-k/CogniRelay/issues/179) - [#186](https://github.com/stef-k/CogniRelay/issues/186))
 
 - Added `GET /v1/capabilities` as a versioned, machine-readable feature map
   for client alignment.
@@ -106,7 +107,7 @@ burden-reduction -- into a stable, production-ready core.
 - Added practical application areas and research/testbed framing to project
   documentation.
 
-### Deterministic Burden-Reduction (#176)
+### Deterministic Burden-Reduction ([#176](https://github.com/stef-k/CogniRelay/issues/176))
 
 - Implemented preserve-by-default upsert semantics with raw-body middleware
   so agents can write capsules without reconstructing unchanged fields.
