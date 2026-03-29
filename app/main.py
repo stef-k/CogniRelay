@@ -346,6 +346,7 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         auth,
         health=health,
         capabilities=capabilities,
+        capabilities_v1=capabilities_v1,
         manifest=manifest,
         contracts=contracts,
         governance_policy=governance_policy,

@@ -57,6 +57,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("messages.replay", by_name)
         self.assertIn("replication.pull", by_name)
         self.assertIn("replication.push", by_name)
+        self.assertIn("system.capabilities_v1", by_name)
         self.assertIn("system.contracts", by_name)
         self.assertIn("system.governance_policy", by_name)
         self.assertIn("peers.trust_transition", by_name)

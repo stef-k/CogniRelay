@@ -84,6 +84,15 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
+            "name": "system.capabilities_v1",
+            "description": "Return versioned, machine-readable v1 feature map.",
+            "method": "GET",
+            "path": "/v1/capabilities",
+            "scopes": [],
+            "idempotent": True,
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
             "name": "system.manifest",
             "description": "Return endpoint map and auth expectations.",
             "method": "GET",
@@ -1052,6 +1061,7 @@ def invoke_tool_by_name(
     *,
     health: Callable[[], dict[str, Any]],
     capabilities: Callable[[], dict[str, Any]],
+    capabilities_v1: Callable[[], dict[str, Any]],
     manifest: Callable[[], dict[str, Any]],
     contracts: Callable[[], dict[str, Any]],
     governance_policy: Callable[[], dict[str, Any]],
@@ -1135,6 +1145,8 @@ def invoke_tool_by_name(
         return health()
     if name == "system.capabilities":
         return capabilities()
+    if name == "system.capabilities_v1":
+        return capabilities_v1()
     if name == "system.manifest":
         return manifest()
     if name == "system.contracts":
