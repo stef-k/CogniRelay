@@ -129,6 +129,26 @@ An aggregate `trust_signals` block at the `continuity_state` level summarises th
 
 Trust signals tell the consumer what the system mechanically knows about the capsule's state. They do not tell the consumer what to do about it — that decision belongs to the agent.
 
+For the full field-level structure including compact forms, aggregate shapes, and nullability rules, see [Payload Reference](payload-reference.md#read--post-v1continuityread).
+
+#### Post-#119 continuity enhancements
+
+The collaborator-grade continuity wave (#119 family) added several capabilities layered onto the existing continuity substrate. Each extends the system's orientation-preservation model without changing the base capsule lifecycle or storage architecture.
+
+**Thread identity and scope boundaries (#120).** Capsules can now carry a `thread_descriptor` with a label, keywords, scope anchors, identity anchors, and a lifecycle state (`active`/`suspended`/`concluded`/`superseded`). This gives agents deterministic thread-level scoping so unrelated threads do not bleed into each other. List operations support filtering by lifecycle, scope anchor, keyword, label, and identity anchor. Lifecycle transitions are atomic with upsert. See [Payload Reference](payload-reference.md#threaddescriptor) for the model.
+
+**Salience ranking (#123).** List and context-retrieve paths now support deterministic multi-signal salience sorting that surfaces the most decision-relevant capsules first. The sort key combines lifecycle rank, health rank, freshness phase, resume adequacy, verification strength, and recency — all derived from existing capsule state at retrieval time, with no stored ranking metadata. See [Payload Reference](payload-reference.md#salience-ranking) for the sort key and response structure.
+
+**Stable preferences (#124).** User and peer capsules can carry up to 12 stable preferences — explicit, user-stated standing instructions that persist across unrelated threads (e.g., "always use metric units", "UTC+2 timezone"). Distinct from the agent's inferred `relationship_model`. See [Payload Reference](payload-reference.md#stablepreference) for the model.
+
+**Rationale entries (#122).** `ContinuityState` now supports up to 6 structured rationale entries capturing decision reasoning, assumptions, and unresolved tensions with a kind/status lifecycle and supersession semantics. This preserves *why* alongside *what*. See [Payload Reference](payload-reference.md#rationaleentry) for the model.
+
+**Startup view (#165).** `POST /v1/continuity/read` accepts `view="startup"` to return a pre-structured `startup_summary` with recovery, orientation, and context tiers alongside the unchanged full capsule. This is a mechanical extraction — no additional I/O. See [Payload Reference](payload-reference.md#startup-view-viewstartup) for the response shape.
+
+**Session-end snapshot (#167).** `POST /v1/continuity/upsert` accepts a `session_end_snapshot` that merges fresh startup-critical fields into the base capsule before persistence, reducing caller burden at session end. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm.
+
+**`GET /v1/capabilities` (#179).** A versioned, machine-readable feature map that allows agents to discover what the current instance supports before building integration logic. Returns 12 feature keys covering the continuity enhancements above plus coordination, messaging, peers, and discovery surfaces. See [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.
+
 ### Coordination model
 
 CogniRelay provides three bounded coordination primitives. All are additive records that do not mutate local continuity capsules or automatically synchronize state between agents.
@@ -182,17 +202,18 @@ For a practical onboarding walkthrough covering both cold-start and incremental 
 
 For an agent cold start, the full recommended sequence is:
 
-1. `GET /v1/discovery`
-2. `GET /v1/manifest`
-3. `GET /v1/contracts`
-4. `GET /v1/governance/policy`
-5. `GET /health`
-6. `POST /v1/index/rebuild-incremental` when writes occurred since the last cycle
-7. `POST /v1/context/retrieve` for the active task
-8. `GET /v1/tasks/query` for shared planning state
-9. `GET /v1/messages/pending` for tracked delivery state
-10. `GET /v1/metrics` for backlog, check, and replication health
-11. `POST /v1/context/snapshot` when reproducible continuation context is needed
+1. `GET /v1/capabilities` (optional — confirm which features the instance supports before building integration logic; see [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map))
+2. `GET /v1/discovery`
+3. `GET /v1/manifest`
+4. `GET /v1/contracts`
+5. `GET /v1/governance/policy`
+6. `GET /health`
+7. `POST /v1/index/rebuild-incremental` when writes occurred since the last cycle
+8. `POST /v1/context/retrieve` for the active task
+9. `GET /v1/tasks/query` for shared planning state
+10. `GET /v1/messages/pending` for tracked delivery state
+11. `GET /v1/metrics` for backlog, check, and replication health
+12. `POST /v1/context/snapshot` when reproducible continuation context is needed
 
 If the runtime prefers MCP-style JSON-RPC, use `GET /.well-known/mcp.json` and then `POST /v1/mcp` for `initialize`, `notifications/initialized`, and `tools/list`.
 
@@ -226,7 +247,7 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule
 - Use `POST /v1/continuity/revalidate` when you need to confirm, correct, degrade, or conflict-mark one active capsule through the audited write path
 - Expect `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` to return additive `recovery_warnings` when the fallback snapshot refresh fails after the active write has already committed
-- Use `POST /v1/continuity/list` when you need active, fallback, archived, or cold continuity summaries with deterministic artifact-state and retention-class labeling
+- Use `POST /v1/continuity/list` when you need active, fallback, archived, or cold continuity summaries with deterministic artifact-state and retention-class labeling; use the thread identity filters (`lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, `anchor_value`) to scope results to a specific thread or scope; use `sort="salience"` for deterministic multi-signal salience ranking — see [Payload Reference](payload-reference.md#salience-ranking) for the sort key and response structure
 - Use `POST /v1/continuity/delete` when you need an explicit hard-delete path for active, fallback, or archive continuity artifacts
 - Use `POST /v1/continuity/archive` when you need to remove an active capsule from retrieval while preserving its final archived envelope
 - Use `GET /v1/coordination/handoff/{handoff_id}` and `GET /v1/coordination/handoffs/query` when you need to read or discover existing handoff artifacts without assuming the sender's message or task reference already arrived

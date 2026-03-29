@@ -34,6 +34,10 @@ CogniRelay does not claim to preserve everything. It preserves enough bounded or
 - Git-backed read, write, and append operations with commit-on-change behavior
 - Derived indexing and local search with JSON indexes and SQLite FTS5
 - Context retrieval, continuity capsules, and deterministic snapshots for continuation-safe agent loops
+- [Trust signals](docs/payload-reference.md#read--post-v1continuityread) on continuity reads, [startup view](docs/payload-reference.md#startup-view-viewstartup) for mechanical orientation extraction, and [session-end snapshot](docs/payload-reference.md#session-end-snapshot-helper) for lightweight session-end capture
+- [Thread identity](docs/payload-reference.md#threaddescriptor) with scope anchors and lifecycle transitions, and [salience ranking](docs/payload-reference.md#salience-ranking) for deterministic retrieval ordering
+- [Stable preferences](docs/payload-reference.md#stablepreference) for cross-thread standing instructions, and [rationale entries](docs/payload-reference.md#rationaleentry) for structured decision continuity
+- [Versioned feature discovery](docs/api-surface.md#get-v1capabilities--versioned-feature-map) via `GET /v1/capabilities`
 - Peer registry, federation metadata, direct messaging, and relay transport
 - Shared task records, patch proposal/apply flows, and code check/merge workflows
 - Token lifecycle management, signed message verification, replication, backup, and host-local ops automation
@@ -92,6 +96,8 @@ git init
 For non-local exposure, prefer file-based peer tokens in `data_repo/config/peer_tokens.json` instead of the plaintext development token in `.env`.
 
 Each CogniRelay instance serves a single owner-agent. If you operate multiple agents that each need their own continuity, run a separate instance per agent.
+
+For shell-based agent hooks, the [CLI client](docs/cognirelay-client.md) (`tools/cognirelay_client.py`) can read and upsert continuity capsules without a third-party HTTP library.
 
 ## Runtime Shape
 
