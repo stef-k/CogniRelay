@@ -484,11 +484,11 @@ class TestLifecycleErrorCases(unittest.TestCase):
 
     def test_stale_write_guard_rejects_old_timestamp(self) -> None:
         """Test 13: stale-write guard (updated_at must be > stored)."""
-        _, seed_ts = _seed_thread_capsule(self.root, self.gm, self.auth)
-        # Use a timestamp older than the seed
-        old_ts = (
-            datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
-        ).isoformat().replace("+00:00", "Z")
+        _seed_thread_capsule(self.root, self.gm, self.auth)
+        stored = _read_stored_capsule(self.root)
+        # Derive old_ts from the actual stored timestamp to avoid wall-clock fragility.
+        stored_dt = datetime.fromisoformat(stored["updated_at"].replace("Z", "+00:00"))
+        old_ts = (stored_dt - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
         req = _lifecycle_request(transition="suspend", updated_at=old_ts)
         with self.assertRaises(HTTPException) as ctx:
             continuity_lifecycle_service(

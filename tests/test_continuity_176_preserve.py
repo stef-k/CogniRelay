@@ -968,5 +968,56 @@ class TestPreservePostMergeValidation(unittest.TestCase):
             self.assertEqual(out2["capsule_sha256"], sha1)
 
 
+class TestPreserveStanceSummaryAlwaysIncoming(unittest.TestCase):
+    """M3: stance_summary is never preserved — always taken from incoming capsule."""
+
+    def test_stance_summary_always_from_incoming(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _seed_capsule(repo)
+            cap = _incoming_capsule()
+            raw = _build_raw_body(cap)
+            _do_upsert(repo, cap, merge_mode="preserve", raw_body=raw)
+            written = _read_stored(repo)
+            # Incoming stance_summary must override stored, not preserve.
+            self.assertEqual(
+                written["continuity"]["stance_summary"],
+                "New stance summary for the incoming capsule test",
+            )
+            self.assertNotEqual(
+                written["continuity"]["stance_summary"],
+                "Stored stance summary for testing purposes here",
+            )
+
+
+class TestPreserveFieldNormalizationReporting(unittest.TestCase):
+    """M4: preserved fields that need normalization report accurately."""
+
+    def test_preserved_field_with_whitespace_reports_normalization(self) -> None:
+        """Stored value with trailing space is restored then normalized."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            # Seed a capsule with whitespace-padded open_loops
+            stored = _base_capsule()
+            stored["continuity"]["open_loops"] = ["stored-loop ", " stored-loop"]
+            _seed_capsule(repo, stored)
+            # Incoming sends [] for required list → preserve stored
+            cap = _incoming_capsule()
+            raw = _build_raw_body(cap)
+            out = _do_upsert(repo, cap, merge_mode="preserve", raw_body=raw)
+            # Normalization should have stripped and deduped
+            norms = out.get("normalizations_applied", [])
+            self.assertTrue(
+                any("strip:continuity.open_loops" in n for n in norms),
+                f"Expected strip normalization in {norms}",
+            )
+            self.assertTrue(
+                any("dedup:continuity.open_loops" in n for n in norms),
+                f"Expected dedup normalization in {norms}",
+            )
+            written = _read_stored(repo)
+            self.assertEqual(written["continuity"]["open_loops"], ["stored-loop"])
+
+
 if __name__ == "__main__":
     unittest.main()

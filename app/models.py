@@ -776,7 +776,7 @@ class ThreadDescriptor(BaseModel):
     scope_anchors: List[str] = Field(default_factory=list, max_length=4)
     identity_anchors: List[IdentityAnchor] = Field(default_factory=list, max_length=4)
     lifecycle: Optional[Literal["active", "suspended", "concluded", "superseded"]] = None
-    superseded_by: Optional[str] = Field(default=None, max_length=200)
+    superseded_by: Optional[str] = Field(default=None, min_length=1, max_length=200)
 
 
 class ContinuityCapsule(BaseModel):
@@ -831,7 +831,7 @@ class ContinuityUpsertRequest(BaseModel):
     idempotency_key: Optional[str] = Field(default=None, max_length=200)
     session_end_snapshot: Optional[SessionEndSnapshot] = Field(default=None)
     lifecycle_transition: Optional[Literal["suspend", "resume", "conclude", "supersede"]] = None
-    superseded_by: Optional[str] = Field(default=None, max_length=200)
+    superseded_by: Optional[str] = Field(default=None, min_length=1, max_length=200)
     merge_mode: Literal["replace", "preserve"] = "replace"
 
 
@@ -882,7 +882,7 @@ class ContinuityLifecycleRequest(BaseModel):
     subject_kind: Literal["thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     transition: Literal["suspend", "resume", "conclude", "supersede"]
-    superseded_by: Optional[str] = Field(default=None, max_length=200)
+    superseded_by: Optional[str] = Field(default=None, min_length=1, max_length=200)
     updated_at: str
     commit_message: Optional[str] = Field(default=None, max_length=240)
 

@@ -272,14 +272,14 @@ async def _cache_raw_json_body(request: FastAPIRequest, call_next):  # type: ign
     contains ``"merge_mode": "preserve"``.  All other requests pass
     through untouched.
     """
-    if request.url.path == "/v1/continuity/upsert" and request.method == "POST":
+    if request.url.path.endswith("/v1/continuity/upsert") and request.method == "POST":
         body_bytes = await request.body()
         try:
             raw = json.loads(body_bytes)
             if isinstance(raw, dict) and raw.get("merge_mode") == "preserve":
                 request.state.raw_json_body = raw
         except (json.JSONDecodeError, UnicodeDecodeError):
-            pass  # let downstream validation handle malformed JSON
+            _log.warning("Failed to parse raw JSON body for preserve-mode upsert")  # let downstream validation handle malformed JSON
     return await call_next(request)
 
 

@@ -1110,5 +1110,34 @@ class TestPatchUpdatedAtWritten(unittest.TestCase):
             self.assertEqual(capsule["updated_at"], patch_ts)
 
 
+class TestPatchNoOp(unittest.TestCase):
+    """M5: append then remove same item yields no content change beyond updated_at."""
+
+    def test_append_then_remove_preserves_content(self) -> None:
+        """Appending and removing the same item leaves list content unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _setup_dirs(root)
+            gm = _GitManagerStub(root)
+            auth = _AuthStub()
+            _seed_capsule(root, gm, auth)
+
+            before = _read_persisted_capsule(root)
+            result = _patch(root, gm, auth, [
+                {"target": "continuity.open_loops", "action": "append", "value": "noop-item"},
+                {"target": "continuity.open_loops", "action": "remove", "match": "noop-item"},
+            ])
+            self.assertTrue(result["ok"])
+            after = _read_persisted_capsule(root)
+            # List content should be unchanged despite append+remove.
+            self.assertEqual(
+                before["continuity"]["open_loops"],
+                after["continuity"]["open_loops"],
+            )
+            # updated_at will differ (patch always advances it), so
+            # updated=True and a commit are expected — the no-op is only
+            # at the list-content level, not at the capsule level.
+
+
 if __name__ == "__main__":
     unittest.main()

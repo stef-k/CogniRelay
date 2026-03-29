@@ -90,6 +90,7 @@ from app.continuity.validation import (
     _final_capsule_payload,
     _normalize_capsule_fields,
     _normalize_compare_payload,
+    _require_utc_timestamp,
     _strip_service_managed_descriptor_fields,
     _strip_verification_fields_for_upsert,
     _validate_capsule,
@@ -229,6 +230,10 @@ def _apply_preserve_merge(
         # else: present → override
 
     # --- Capsule-level list fields ---
+    # NOTE: canonical_sources and stable_preferences are non-Optional in
+    # ContinuityCapsule, so Pydantic rejects null before the service layer.
+    # The null-clear branch below is unreachable via HTTP but retained for
+    # direct-call safety and spec completeness.
     for field_name in PRESERVE_CAPSULE_LIST_FIELDS:
         if field_name not in raw_capsule:
             stored_val = stored.get(field_name)
@@ -249,6 +254,10 @@ def _apply_preserve_merge(
         # else: override
 
     # --- Capsule-level dict fields (metadata) ---
+    # NOTE: metadata is non-Optional (Dict[str, Any]) in ContinuityCapsule,
+    # so Pydantic rejects null before the service layer.  The null-clear
+    # branch below is unreachable via HTTP but retained for direct-call
+    # safety and spec completeness.
     for field_name in PRESERVE_CAPSULE_DICT_FIELDS:
         if field_name not in raw_capsule:
             stored_val = stored.get(field_name)
@@ -346,11 +355,11 @@ def continuity_upsert_service(
     auth.require_write_path(rel)
     _validate_lifecycle_transition_request(req)
     _strip_service_managed_descriptor_fields(capsule)
-    # Phase 1: validate field bounds and structure on the caller-supplied
-    # payload (lifecycle/superseded_by stripped to None).  This catches
-    # malformed capsules early, before acquiring the subject lock.
-    # The size check inside _validate_capsule runs on this pre-mutation
-    # payload; the authoritative post-mutation size check is below (Phase 2).
+    # Phase 1: early-reject malformed capsules before acquiring the subject
+    # lock.  This uses _validate_capsule without prior normalization, so
+    # duplicate tags etc. will be caught here for clearly invalid input.
+    # The authoritative normalize → validate pass runs inside the lock
+    # (Phase 2) where normalizations_applied is captured for the response.
     _validate_capsule(repo_root, capsule)
     path = safe_path(repo_root, rel)
     with _continuity_subject_lock(repo_root=repo_root, subject_kind=req.subject_kind, subject_id=req.subject_id):
@@ -360,16 +369,24 @@ def continuity_upsert_service(
             stored = json.loads(old_bytes)
             snapshot_touched = _session_end_snapshot_touched_fields(req.session_end_snapshot)
             _apply_preserve_merge(capsule, stored, raw_body, snapshot_touched)
-            # Re-construct capsule through the model so that any raw dicts
-            # restored from the stored JSON become proper Pydantic instances.
+            # LOAD-BEARING: Re-construct capsule through the model so that
+            # any raw dicts/lists restored from stored JSON by
+            # _apply_preserve_merge become proper Pydantic instances.
+            # Without this round-trip, attribute access on preserved
+            # sub-models (e.g. capsule.thread_descriptor.lifecycle) would
+            # fail or return raw dicts instead of model instances.
             capsule = ContinuityCapsule.model_validate(
                 capsule.model_dump(mode="json")
             )
-            # Re-validate after merge since preserved stored values may
-            # interact with incoming values in ways that need bounds checking.
-            _validate_capsule(repo_root, capsule)
-        # --- write-path normalization (strip, dedup) ---
+        # --- write-path normalization → validation (authoritative) ---
+        # Normalization runs before validation so that dedup (e.g.
+        # last-wins on stable_preferences/rationale_entries) fires before
+        # duplicate-tag checks in _validate_capsule.  This matches the
+        # patch path ordering (normalize → validate).  The response
+        # carries normalizations_applied from this single authoritative
+        # pass.
         normalizations_applied = _normalize_capsule_fields(capsule)
+        _validate_capsule(repo_root, capsule)
         # --- lifecycle state machine (mutates capsule before serialization) ---
         if capsule.thread_descriptor is not None:
             old_parsed = json.loads(old_bytes) if old_bytes else None
@@ -522,6 +539,8 @@ def _validate_patch_operation(op: PatchOperation) -> None:
             raise HTTPException(status_code=400, detail=f"invalid operation: append must not specify match or index on {target}")
         if op.value is None:
             raise HTTPException(status_code=400, detail=f"invalid operation: append requires value on {target}")
+        if is_string and not isinstance(op.value, str):
+            raise HTTPException(status_code=400, detail=f"invalid operation: value must be a string for string-list target {target}")
     elif op.action == "remove":
         if op.value is not None:
             raise HTTPException(status_code=400, detail=f"invalid operation: remove must not specify value on {target}")
@@ -538,6 +557,8 @@ def _validate_patch_operation(op: PatchOperation) -> None:
     elif op.action == "replace_at":
         if op.value is None:
             raise HTTPException(status_code=400, detail=f"invalid operation: replace_at requires value on {target}")
+        if is_string and not isinstance(op.value, str):
+            raise HTTPException(status_code=400, detail=f"invalid operation: value must be a string for string-list target {target}")
         if is_string:
             if op.index is None:
                 raise HTTPException(status_code=400, detail=f"invalid operation: replace_at requires index on string-list target {target}")
@@ -778,6 +799,8 @@ def continuity_lifecycle_service(
 ) -> dict[str, Any]:
     """Apply a standalone lifecycle transition to a thread or task capsule."""
     auth.require("write:projects")
+    # Explicit timestamp format pre-guard (matches upsert/patch pattern).
+    _require_utc_timestamp(req.updated_at, "updated_at")
     rel = continuity_rel_path(req.subject_kind, req.subject_id)
     auth.require_write_path(rel)
     path = safe_path(repo_root, rel)
