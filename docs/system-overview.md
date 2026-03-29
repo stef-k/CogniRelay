@@ -258,6 +258,97 @@ The collaborator-grade continuity wave (#119 family) added several capabilities 
 
 **`GET /v1/capabilities` (#179).** A versioned, machine-readable feature map that allows agents to discover what the current instance supports before building integration logic. Returns 12 feature keys covering the continuity enhancements above plus coordination, messaging, peers, and discovery surfaces. See [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.
 
+#### Mechanical Assistance and Agent Authorship
+
+CogniRelay provides bounded mechanical assistance for continuity maintenance, but does not generate, infer, or synthesize semantic content. The division is strict: CogniRelay handles structural operations deterministically; agents remain solely responsible for meaning-bearing content.
+
+##### What CogniRelay Handles Mechanically
+
+| Capability | Surface | What the system does |
+|---|---|---|
+| Preserve-by-default field retention | `POST /v1/continuity/upsert` with `merge_mode="preserve"` | Carries forward omitted fields from the stored capsule so agents can update a subset without re-sending the full capsule. |
+| Bounded partial list updates | `POST /v1/continuity/patch` | Appends, removes, or replaces individual items in list fields atomically without rewriting the full list. |
+| Standalone lifecycle transitions | `POST /v1/continuity/lifecycle` | Transitions `thread_descriptor.lifecycle` without a full capsule upsert. |
+| Write-path normalization | All continuity write endpoints | Deduplicates, trims, and normalizes fields deterministically; reports what fired via `normalizations_applied`. |
+| Fallback snapshot refresh | All continuity write paths (upsert, patch, lifecycle, revalidate) | Refreshes the last-known-good fallback snapshot after each successful active write. |
+| Trust signal computation | Read and retrieve paths | Derives recency, completeness, integrity, and scope-match signals mechanically from stored capsule state. |
+| Deterministic trimming | Read and retrieve paths under token budget | Trims lower-priority fields in a fixed order to fit the token budget; reports what was trimmed. |
+
+##### What Agents Must Author Explicitly
+
+All semantic content — the meaning-bearing orientation that makes a capsule useful — is authored by the agent. CogniRelay stores, merges, and retrieves it but never generates it.
+
+| Content | Why it requires agent authorship |
+|---|---|
+| `stance_summary` | Captures the agent's current analytical or operational position in its own terms. |
+| `source` (agent identity, update reason) | Only the agent knows who it is and why it is writing. |
+| `confidence` | Only the agent can assess its own certainty. |
+| `top_priorities`, `active_concerns`, `active_constraints` | Semantic judgments about what matters and what limits apply. |
+| `open_loops`, `drift_signals` | The agent identifies what is unresolved and what has shifted. |
+| `rationale_entries` | Structured decision reasoning — why the agent chose what it chose. |
+| `stable_preferences` | Explicit standing instructions the agent or user provides. |
+| `negative_decisions` | What the agent deliberately chose not to do. |
+| `working_hypotheses`, `long_horizon_commitments` | Speculative or durable analytical content. |
+| `session_trajectory`, `trailing_notes`, `curiosity_queue` | Session-specific direction, low-commitment observations, and open questions. |
+| `relationship_model` | The agent's inferred model of the user or peer relationship. |
+| Thread/task labels, keywords, scope anchors, identity anchors | Semantic identity of the thread or task. |
+
+Capsule-level structural fields — `attention_policy`, `freshness`, `canonical_sources`, `metadata`, `stable_preferences`, and `thread_descriptor` — are also agent-authored and preserve-eligible (omitted in preserve mode, they are carried forward from the stored capsule). Other capsule-level fields (`verification_kind`, `verification_state`, `capsule_health`) are not preserve-eligible and must be provided explicitly when needed. The continuity-state-level `retrieval_hints` is similarly agent-authored. CogniRelay stores all of these but never generates or infers their values.
+
+The system never infers, summarizes, or generates any of these fields. When an agent omits a field in preserve mode, CogniRelay carries forward the previously stored value — it does not fill in a new one.
+
+##### Examples
+
+**Preserve-mode upsert** — update stance and priorities, carry forward everything else:
+
+```json
+{
+  "subject_kind": "thread", "subject_id": "refactor-auth",
+  "merge_mode": "preserve",
+  "capsule": {
+    "subject_kind": "thread", "subject_id": "refactor-auth",
+    "updated_at": "2026-03-29T10:00:00Z",
+    "verified_at": "2026-03-29T10:00:00Z",
+    "source": {"producer": "coder-1", "update_reason": "manual"},
+    "confidence": {"continuity": 0.9, "relationship_model": 0.8},
+    "continuity": {
+      "stance_summary": "Auth module extracted; integration tests next.",
+      "top_priorities": ["Write integration tests for new auth service"],
+      "active_concerns": [],
+      "active_constraints": [],
+      "open_loops": [],
+      "drift_signals": []
+    }
+  }
+}
+```
+
+Required list fields sent as `[]` signal "preserve the stored value" in preserve mode. Optional fields omitted entirely are also preserved. Capsule-level fields (`stable_preferences`, `attention_policy`, `freshness`, etc.) that are absent from the request are carried forward from the stored capsule. See [Preserve-by-default merge](payload-reference.md#preserve-by-default-merge) for the full field-intent rules.
+
+**Patch** — append one open loop without rewriting the list:
+
+```json
+{
+  "subject_kind": "thread", "subject_id": "refactor-auth",
+  "updated_at": "2026-03-29T10:05:00Z",
+  "operations": [
+    {"target": "continuity.open_loops", "action": "append", "value": "Verify token rotation under new auth flow"}
+  ]
+}
+```
+
+**Lifecycle transition** — conclude a thread without a full upsert:
+
+```json
+{
+  "subject_kind": "thread", "subject_id": "refactor-auth",
+  "transition": "conclude",
+  "updated_at": "2026-03-29T11:00:00Z"
+}
+```
+
+For field-level schemas and constraints, see [Payload Reference](payload-reference.md#reduced-authoring-patterns).
+
 ### Coordination model
 
 CogniRelay provides three bounded coordination primitives. All are additive records that do not mutate local continuity capsules or automatically synchronize state between agents.

@@ -41,6 +41,7 @@ For specific application areas and the project's value as a research and evaluat
 - [Trust signals](docs/payload-reference.md#read--post-v1continuityread) on continuity reads, [startup view](docs/payload-reference.md#startup-view-viewstartup) for mechanical orientation extraction, and [session-end snapshot](docs/payload-reference.md#session-end-snapshot-helper) for lightweight session-end capture
 - [Thread identity](docs/payload-reference.md#threaddescriptor) with scope anchors and lifecycle transitions, and [salience ranking](docs/payload-reference.md#salience-ranking) for deterministic retrieval ordering
 - [Stable preferences](docs/payload-reference.md#stablepreference) for cross-thread standing instructions, and [rationale entries](docs/payload-reference.md#rationaleentry) for structured decision continuity
+- [Mechanical continuity assistance](docs/system-overview.md#mechanical-assistance-and-agent-authorship) — preserve-mode merge, partial patch, and lifecycle transitions that reduce authoring burden while agents remain solely responsible for semantic content
 - [Versioned feature discovery](docs/api-surface.md#get-v1capabilities--versioned-feature-map) via `GET /v1/capabilities`
 - Peer registry, federation metadata, direct messaging, and relay transport
 - Shared task records, patch proposal/apply flows, and code check/merge workflows

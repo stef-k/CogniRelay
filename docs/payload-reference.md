@@ -373,6 +373,16 @@ The three endpoints above — preserve-mode upsert, patch, and lifecycle — red
 
 **Lifecycle** (`POST /v1/continuity/lifecycle`): Transition a thread or task capsule's lifecycle state (`suspend`, `resume`, `conclude`, `supersede`) without submitting a full capsule upsert. Only `lifecycle`, `superseded_by`, and `updated_at` change.
 
+#### Mechanical vs Agent-Authored Responsibilities
+
+These three endpoints provide *mechanical assistance* — deterministic structural operations that reduce the agent's authoring burden. CogniRelay does not generate, infer, or synthesize semantic content through any of these surfaces.
+
+**What the system handles mechanically:** field retention in preserve mode, atomic list-item mutations via patch, standalone lifecycle transitions, write-path normalization/deduplication (reported via `normalizations_applied`), and fallback snapshot refresh after successful writes.
+
+**What agents must still author explicitly:** all meaning-bearing content — `stance_summary`, `source`, `confidence`, priorities, constraints, concerns, loops, drift signals, rationale entries, stable preferences, negative decisions, hypotheses, commitments, trajectory, labels, keywords, scope anchors, and identity anchors. The system stores, merges, and retrieves this content but never originates it.
+
+For the full responsibility matrix, conceptual rationale, and worked examples, see [System Overview: Mechanical Assistance and Agent Authorship](system-overview.md#mechanical-assistance-and-agent-authorship).
+
 ### Read — `POST /v1/continuity/read`
 
 | Field | Type | Required | Constraints |
