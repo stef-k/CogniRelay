@@ -46,12 +46,12 @@ In other words, the usable application capabilities are available through MCP to
 
 The post-#119 continuity enhancements are not separate MCP tools — they are parameters and response fields on existing tools. When calling continuity tools through MCP, pass the same parameters as the HTTP API:
 
-- **Startup view**: Pass `view: "startup"` in `continuity.read` to include the `startup_summary` extraction alongside the full capsule.
-- **Trust signals**: `continuity.read` and `context.retrieve` responses include `trust_signals` automatically — no extra parameter needed.
-- **Session-end snapshot**: Pass `session_end_snapshot` in `continuity.upsert` to merge startup-critical fields at session end.
-- **Thread identity filters**: Pass `lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, and `anchor_value` in `continuity.list` to filter by thread scope.
-- **Lifecycle transitions**: Pass `lifecycle_transition` and `superseded_by` in `continuity.upsert` to transition thread lifecycle.
-- **Salience ranking**: Pass `sort: "salience"` in `continuity.list` for deterministic multi-signal salience sorting.
+- **Startup view**: Pass `view: "startup"` in `continuity.read` to include the `startup_summary` extraction alongside the full capsule. See [Payload Reference](payload-reference.md#startup-view-viewstartup) for the response shape.
+- **Trust signals**: `continuity.read` and `context.retrieve` responses include `trust_signals` automatically — no extra parameter needed. See [Payload Reference](payload-reference.md#read--post-v1continuityread) for the four dimensions.
+- **Session-end snapshot**: Pass `session_end_snapshot` in `continuity.upsert` to merge startup-critical fields at session end. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm.
+- **Thread identity filters**: Pass `lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, and `anchor_value` in `continuity.list` to filter by thread scope. See [Payload Reference](payload-reference.md#threaddescriptor) for the model.
+- **Lifecycle transitions**: Pass `lifecycle_transition` and `superseded_by` in `continuity.upsert` to transition thread lifecycle. See [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert) for constraints.
+- **Salience ranking**: Pass `sort: "salience"` in `continuity.list` for deterministic multi-signal salience sorting. See [Payload Reference](payload-reference.md#salience-ranking) for the sort key.
 
 ### Feature discovery: `system.capabilities_v1`
 
