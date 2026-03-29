@@ -10,6 +10,115 @@ The core design principle is simple:
 
 This system should be read as a bounded continuity and orientation substrate. It aims to preserve enough state for useful continuation and recovery, while making degradation, fallback, and authority boundaries explicit rather than pretending persistence is lossless.
 
+## Practical Application Areas
+
+CogniRelay is most useful in environments where agent work spans multiple sessions, interruptions are routine, and continuity must be recoverable and bounded rather than assumed.
+
+### Software engineering
+
+- **Coding and review agents** that maintain orientation across multi-file refactors, session resets, and context-window compaction — preserving what was already reviewed, what constraints apply, and what decisions were deliberately deferred.
+- **Incident response assistants** that retain investigation state, active hypotheses, and escalation context across responder handoffs and shift boundaries.
+- **Long-running maintenance workflows** where an agent tracks dependency upgrades, migration progress, or technical-debt campaigns over days or weeks with explicit continuity between sessions.
+
+### Research and analysis
+
+- **Literature review and synthesis agents** that accumulate source assessments, open questions, and analytical threads across reading sessions without re-discovering prior evaluations.
+- **Multi-day investigation and reporting assistants** that preserve analytical stance, evidence inventory, and unresolved tensions across interruptions.
+- **Policy or technical analysis agents** where the cost of re-establishing context after each session reset undermines analytical coherence.
+
+### Operations and internal tooling
+
+- **DevOps/SRE assistants** that carry forward runbook state, remediation history, and environment constraints across incident timelines and on-call rotations.
+- **Support escalation agents** that maintain case context, prior diagnostic steps, and resolution attempts across tier boundaries and shift changes.
+- **Project coordination and recurring workflow helpers** that track standing constraints, recurring task state, and coordination context across planning cycles.
+
+### Multi-agent collaboration
+
+- **Delegated collaborator agents** that receive bounded coordination context through handoff artifacts without gaining access to each other's private continuity substrate.
+- **Handoff and coordination infrastructure** where structured artifacts (handoffs, shared coordination state, reconciliation records) replace implicit shared-state assumptions.
+- **Distributed agent communities** where each agent runs its own CogniRelay instance and collaboration happens through explicit, auditable coordination surfaces.
+
+### Customer-facing and service workflows
+
+- **Support agents with continuity across tickets or cases** where a returning user should not have to re-explain history and the agent should not silently lose prior context.
+- **Account or onboarding assistants** that maintain relationship context, preference state, and follow-up obligations across sessions.
+
+### Education, tutoring, and advisory contexts
+
+- **Tutoring systems with continuity** where the agent preserves learner progress, prior explanations, identified gaps, and pedagogical stance across sessions.
+- **Coaching and advisory agents** that retain standing preferences, prior advice, and ongoing commitments rather than starting from scratch each interaction.
+
+In all these areas the common thread is that interruptions — session resets, context-window compaction, handoffs between agents or humans — are structural, not exceptional. CogniRelay makes the cost of those interruptions explicit and recoverable rather than silent and cumulative.
+
+### What the current system provides for these use cases
+
+The application areas above are grounded in capabilities the system currently implements:
+
+- **Startup-oriented continuity views** (`view="startup"`) that extract recovery, orientation, and context tiers mechanically from the stored capsule, reducing cold-start reorientation cost.
+- **Trust and freshness signaling** — deterministic `trust_signals` on every continuity read, covering recency, completeness, integrity, and scope match so the consuming agent can calibrate confidence in recovered state.
+- **Session-end snapshot support** — additive `session_end_snapshot` merges on upsert that reduce the burden of persisting startup-critical fields at session close.
+- **Thread identity and scope boundaries** — `thread_descriptor` with lifecycle states, scope anchors, and identity anchors so unrelated threads do not bleed orientation into each other.
+- **Salience ranking** — deterministic multi-signal sorting on list and retrieval paths that surfaces the most decision-relevant capsules first.
+- **Stable preferences** — explicit standing instructions that persist across threads (e.g., timezone, units, communication style).
+- **Rationale entries** — structured decision reasoning with kind/status lifecycle and supersession semantics, preserving *why* alongside *what*.
+- **Versioned capability discovery** — `GET /v1/capabilities` lets agents discover what the current instance supports before building integration logic.
+- **Bounded coordination primitives** — handoffs, shared coordination artifacts, and reconciliation records for inter-agent collaboration without shared-state mutation.
+- **Lightweight client and MCP support** — a stdlib-only CLI client and MCP bootstrap flow for integration without heavy dependencies.
+
+## Research and Evaluation Value
+
+CogniRelay is also a useful artifact for studying questions about agent continuity, recovery, and long-horizon collaboration. It is not a formal academic project, but it implements enough of a concrete continuity substrate that researchers and evaluators can use it as a testbed for empirical work.
+
+### Agent continuity and session-boundary recovery
+
+The system's explicit capsule lifecycle (active → fallback → archive → cold storage), deterministic trust signals, and structured degradation paths provide concrete surfaces for measuring:
+
+- **Reorientation cost**: how much work an agent must redo after a session reset, and how that cost changes with different capsule completeness levels, freshness phases, or fallback states.
+- **Session-boundary recovery quality**: whether startup views, trust signals, and fallback mechanisms actually reduce the gap between a fresh-context agent and one with preserved orientation.
+- **Degradation behavior**: how agents perform when continuity artifacts are stale, partially trimmed, or missing — the system makes these states explicit rather than hiding them.
+
+### Human-AI interaction and trust
+
+The trust-signaling surface (recency, completeness, integrity, scope match) and the distinction between explicit orientation and implicit inference create testable questions:
+
+- How do users experience interacting with agents that have recoverable continuity versus agents that silently re-derive context?
+- Does explicit trust signaling change user confidence in persistent agents?
+- How does the recoverability and intelligibility of an agent's externalized memory affect user trust and willingness to delegate longer tasks?
+
+### Evaluation and benchmarking
+
+The deterministic nature of CogniRelay's retrieval, ranking, and trust-signaling paths makes them amenable to controlled evaluation:
+
+- **Continuity quality measurement**: comparing agent task performance with and without continuity infrastructure, across different capsule completeness levels.
+- **Startup recovery benchmarking**: measuring how quickly and accurately agents reorient using startup views versus raw capsule data versus no preserved state.
+- **Handoff quality**: evaluating whether bounded coordination artifacts (handoffs, shared state, reconciliation records) improve multi-agent task outcomes compared to implicit context passing.
+- **Memory architecture comparison**: CogniRelay's explicit, structured, write-time-curated capsules versus append-only logs, vector stores, or inferred-summary approaches.
+
+### Interpretability and memory structure
+
+CogniRelay externalizes agent orientation into inspectable, structured artifacts rather than leaving it implicit in model weights or conversation history:
+
+- **Explicit versus inferred memory**: the system's structured capsule fields (active constraints, drift signals, open loops, negative decisions, rationale entries) make the agent's preserved orientation auditable. This creates a surface for studying whether explicit memory structures produce more predictable or steerable agent behavior than inferred persistence.
+- **Trust signaling and uncertainty presentation**: the deterministic trust-signals model provides a controlled surface for studying how mechanical confidence metadata affects agent decision-making.
+
+### Distributed and multi-agent continuity
+
+The owner-per-instance deployment model, delegated token scoping, and bounded coordination primitives provide infrastructure for studying:
+
+- **Handoff protocols**: how bounded orientation projection (only `active_constraints` and `drift_signals` cross the handoff boundary) compares to full-state transfer or no-transfer baselines.
+- **Coordination memory**: whether explicit shared coordination artifacts with version checking and reconciliation records improve multi-agent coherence.
+- **Bounded shared memory architectures**: the separation between private continuity and delegated coordination surfaces as a model for studying access-controlled multi-agent memory.
+
+### Digital identity and continuity
+
+CogniRelay's model — where an agent's orientation is externalized into durable, bounded, inspectable artifacts that survive context-window resets — touches questions about:
+
+- **Continuity across discontinuities**: what it means for an agent to "continue" when its context is reconstructed from stored artifacts rather than maintained in an unbroken stream.
+- **Persistence versus reconstruction**: the practical difference between an agent that remembers and one that re-derives from stored state, and whether users or collaborating agents can distinguish the two.
+- **Externalized memory and agent identity**: whether structured, inspectable continuity artifacts constitute a meaningful form of agent self-continuity or are better understood as orientation scaffolding.
+
+These are open questions. CogniRelay does not claim to answer them, but it provides a concrete, operational system against which they can be empirically investigated.
+
 ## Default Deployment Topology
 
 The default deployment is one owner-agent per CogniRelay instance.
