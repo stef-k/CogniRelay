@@ -34,6 +34,7 @@ CogniRelay reduces that cost. It gives agents a place to persist bounded orienta
 CogniRelay does not claim to preserve everything. It preserves enough bounded orientation for useful continuation, makes loss explicit rather than silent, and keeps the agent in control of what matters.
 
 For specific application areas and the project's value as a research and evaluation testbed, see [Practical Application Areas](docs/system-overview.md#practical-application-areas) and [Research and Evaluation Value](docs/system-overview.md#research-and-evaluation-value) in the System Overview.
+For external experiments, third-party usage notes, and public case studies, see [External References and Case Studies](docs/external-references.md).
 
 ## What It Offers
 
@@ -76,6 +77,7 @@ For the full cold-start endpoint sequence, see [System Overview: Agent Usage](do
 - [Agent Onboarding](docs/agent-onboarding.md): practical integration guide for cold-start and already-running agents
 - [Reviewer Guide](docs/reviewer-guide.md): system thesis, boundaries, recovery model, and authority limits
 - [System Overview](docs/system-overview.md): implemented product shape and agent usage guidance
+- [External References and Case Studies](docs/external-references.md): external experiments, usage notes, and scoped collaboration/evaluation references
 - [API Surface](docs/api-surface.md): currently implemented HTTP behavior grouped by domain
 - [Payload Reference](docs/payload-reference.md): capsule structure, request/response schemas, and field constraints
 - [MCP Guide](docs/mcp.md): MCP bootstrap flow and tool mapping
