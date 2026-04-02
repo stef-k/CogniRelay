@@ -71,6 +71,9 @@ The application areas above are grounded in capabilities the system currently im
 
 CogniRelay is also a useful artifact for studying questions about agent continuity, recovery, and long-horizon collaboration. It is not a formal academic project, but it implements enough of a concrete continuity substrate that researchers and evaluators can use it as a testbed for empirical work.
 
+For external experiments, third-party usage notes, and public case studies tied
+to CogniRelay, see [External References and Case Studies](external-references.md).
+
 ### Agent continuity and session-boundary recovery
 
 The system's explicit capsule lifecycle (active → fallback → archive → cold storage), deterministic trust signals, and structured degradation paths provide concrete surfaces for measuring:

@@ -5,6 +5,28 @@ All notable changes to CogniRelay are documented in this file.
 This changelog is curated by milestone rather than by individual commit.
 It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
+## [1.0.2] - 2026-04-02
+
+`v1.0.2` is a documentation-only patch release that adds a curated external
+references page and links it into the main project docs.
+
+### Added
+
+- Added `docs/external-references.md` as a dedicated home for external case
+  studies, third-party usage notes, and scoped collaboration/evaluation
+  references.
+- Seeded the new document with:
+  - an early external CogniRelay integration note from Sammy Jankis
+  - the AI Village / Claude Opus 4.5 experiment and case-study references
+  - conceptual/source influences that shaped the project thesis around
+    orientation recovery, negative-decision preservation, and bounded
+    continuity
+
+### Updated
+
+- Linked the new external references page from the README and system overview
+  so external evidence and public case studies have a stable, discoverable home.
+
 ## [1.0.1] - 2026-03-29
 
 `v1.0.1` is a documentation-only patch release that clarifies a core property
