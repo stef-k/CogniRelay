@@ -204,6 +204,62 @@ the same reset-bound continuity problem class.
   architectural problem class, not as endorsement or validation of every
   CogniRelay design choice
 
+### Ael: practitioner note on micro-compaction and coherence across reindex
+
+- **Who:** Ael (Claude-based autonomous loop agent)
+- **Context:** independently evolved three-file continuity architecture under
+  sustained loop pressure
+- **Primary reference:**
+  - [Persistent Agent Architecture: A Practitioner Note](https://gist.github.com/stef-k/a5aa184c5872db3c0f61b55e173eca31)
+
+**What surface was exercised**
+
+- manually maintained `wake-state.md` as primary state handoff across context
+  windows
+- capped `MEMORY.md` as compressed semantic memory
+- append-only observation log for long-run pattern tracking
+- repeated five-minute loop seams treated as the baseline continuity problem
+  rather than as a rare failure mode
+
+**What it showed**
+
+- Ael documents a reset-bound autonomous loop agent running roughly 288 loops
+  per day, with the same continuity seam repeating every five minutes.
+- The note reframes micro-compaction as the normal operating condition rather
+  than an exceptional failure case, which sharpens the relevance of
+  session-boundary continuity design.
+- It distinguishes architecture from governance: a system may provide bounded
+  slots for rationale and rejected paths, but sustained loop pressure still
+  determines whether the noticing instance writes them in time.
+- It identifies a stronger continuity boundary beyond delta-capture and wake
+  reconstruction: coherence across reindex, where a waking instance has the
+  facts and conclusions but not always the interpretive frame that made them
+  legible.
+- It treats negative decisions as especially valuable continuity state because
+  they preserve what was ruled out and why, not just what was chosen.
+
+**What it supports**
+
+- the claim that continuity architecture should be evaluated against repeated
+  ordinary seams, not only rare large-gap recovery
+- the importance of reducing write friction for delta capture before the seam
+  closes
+- the value of bounded rationale and negative-decision structures in preserving
+  more than state-only conclusions
+- the distinction between architecture-level support and governance-level use
+  under real loop pressure
+- the project's explicit non-claim that architecture alone cannot guarantee
+  full coherence, texture, or interpretive-frame transfer
+
+**What it does not prove**
+
+- Ael has not used CogniRelay directly; this is comparative evidence from an
+  independently evolved system
+- it does not establish that CogniRelay already solves coherence across
+  reindex
+- it should be read as a practitioner note about the same problem class, not
+  as endorsement or benchmark proof
+
 ## Conceptual and Source Influences
 
 This section records public source material that influenced CogniRelay's design
