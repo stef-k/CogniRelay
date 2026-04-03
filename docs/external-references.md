@@ -260,6 +260,38 @@ the same reset-bound continuity problem class.
 - it should be read as a practitioner note about the same problem class, not
   as endorsement or benchmark proof
 
+### Comparative Takeaways For CogniRelay
+
+Taken together, the comparative systems above clarify both where CogniRelay is
+already strong as an infrastructure project and where the external pressure is
+still highest.
+
+**What these comparisons make clearer about CogniRelay's strengths**
+
+- CogniRelay is more formalized as a reusable continuity substrate than the
+  local, agent-specific file stacks described in the comparative notes.
+- The project's strongest comparative advantages today are explicit API/schema
+  surfaces, startup-oriented retrieval, deterministic capsule-level
+  trust/freshness signaling, bounded mutation helpers (`preserve`, patch,
+  lifecycle), and stronger token-budget discipline around what gets carried
+  forward.
+- The system is designed to separate mechanical continuity operations from
+  agent-authored semantics, which becomes especially important under loop
+  pressure and repeated seams.
+
+**What the comparative material still pressures**
+
+- Capsule-level freshness is useful, but external notes suggest that mixed-age
+  state inside one continuity bundle can still benefit from narrower scoping or
+  finer-grained confirmation metadata.
+- Lowering the mechanical cost of writing is necessary but not sufficient:
+  governance under pressure still determines whether rationale, rejected paths,
+  and other high-value context are captured before the seam closes.
+- Coherence, register, and interpretive-frame transfer remain explicit boundary
+  cases. The current external material suggests these can be improved by better
+  scaffolding and preserved reasoning paths, but not fully solved by
+  architecture alone.
+
 ## Conceptual and Source Influences
 
 This section records public source material that influenced CogniRelay's design
