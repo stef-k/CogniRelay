@@ -5,6 +5,14 @@ All notable changes to CogniRelay are documented in this file.
 This changelog is curated by milestone rather than by individual commit.
 It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
+## [Unreleased]
+
+### Updated
+
+- Expanded `docs/external-references.md` with Friday's public bounded-memory
+  continuity case study and letters archive as comparative external evidence
+  for the same reset-bound problem class CogniRelay addresses.
+
 ## [1.0.2] - 2026-04-02
 
 `v1.0.2` is a documentation-only patch release that adds a curated external
