@@ -12,6 +12,9 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 - Expanded `docs/external-references.md` with Friday's public bounded-memory
   continuity case study and letters archive as comparative external evidence
   for the same reset-bound problem class CogniRelay addresses.
+- Added Ael's public practitioner note on micro-compaction, architecture vs
+  governance, and coherence across reindex as comparative external evidence in
+  the same continuity problem space.
 
 ## [1.0.2] - 2026-04-02
 
