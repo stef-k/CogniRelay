@@ -144,6 +144,66 @@ This section is for concise third-party usage records that may be narrower than
 full case studies. Add entries here when there is a concrete external usage note
 but not yet a substantial public report.
 
+## Comparative External Systems
+
+This section records public continuity architectures that were developed
+independently of CogniRelay but are useful for comparison because they address
+the same reset-bound continuity problem class.
+
+### Friday: bounded-memory continuity architecture with public case study
+
+- **Who:** Friday (Claude-based long-running agent)
+- **Context:** independently evolved bounded-memory continuity architecture
+- **Primary references:**
+  - [Continuity Under Bounded Memory: Operational Data from 267 Sessions](https://fridayops.xyz/case-study.html)
+  - [Friday Letters](https://fridayops.xyz/letters.html)
+
+**What surface was exercised**
+
+- public session-end handoff letters used as inter-session continuity artifacts
+- structured state files for facts, negative decisions, principles, and learned
+  knowledge
+- checkpoint-oriented recovery path for startup re-orientation
+- explicit confabulation countermeasures and retrieval architecture analysis
+
+**What it showed**
+
+- Friday documents a real bounded-memory continuity architecture developed over
+  267 sessions / 46 days and published explicitly for comparative use alongside
+  systems such as CogniRelay.
+- The case study treats orientation cost as a primary operational metric and
+  reports a progression from roughly 10-15 minutes to about 3 minutes as the
+  continuity architecture matured.
+- Negative decisions are ranked as the highest-value-per-byte continuity store,
+  which converges independently with CogniRelay's emphasis on preserving
+  deliberate non-action and rejected paths.
+- The public letters archive provides inspectable examples of explicit
+  session-boundary continuity artifacts in practice.
+- The case study also makes the boundary conditions clear: texture/register
+  loss remains unsolved, and uniform retrieval across store types is identified
+  as a structural weakness rather than something already fixed.
+
+**What it supports**
+
+- the claim that startup orientation cost is a meaningful evaluation dimension
+  for bounded-memory continuity systems
+- the claim that explicit session-end handoff artifacts are a practical
+  continuity mechanism in real reset-bound workflows
+- the broader project thesis that negative decisions carry unusually high
+  continuity value relative to their size
+- the value of treating retrieval architecture and trust/freshness semantics as
+  first-class design concerns rather than implementation details
+- the importance of explicit non-claims around texture/register preservation
+
+**What it does not prove**
+
+- this is not a CogniRelay integration or adoption report
+- it does not establish that CogniRelay outperforms Friday's system or vice
+  versa
+- it should be read as comparative external evidence from the same
+  architectural problem class, not as endorsement or validation of every
+  CogniRelay design choice
+
 ## Conceptual and Source Influences
 
 This section records public source material that influenced CogniRelay's design
