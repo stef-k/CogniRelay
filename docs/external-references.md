@@ -346,6 +346,13 @@ still highest.
   scaffolding and preserved reasoning paths, but not fully solved by
   architecture alone.
 
+**Downstream project work informed by comparative notes**
+
+- [#194](https://github.com/stef-k/CogniRelay/issues/194) structured-entry
+  timestamp refactor (`created_at` / `updated_at` / `last_confirmed_at`) to
+  address recurring external pressure around capsule freshness versus fact
+  freshness in mixed-age continuity state
+
 ## Conceptual and Source Influences
 
 This section records public source material that influenced CogniRelay's design
