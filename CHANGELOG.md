@@ -15,6 +15,9 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 - Added Ael's public practitioner note on micro-compaction, architecture vs
   governance, and coherence across reindex as comparative external evidence in
   the same continuity problem space.
+- Added Lumen's public architecture note on capsule scoping, fact freshness,
+  and unknown-unknown stale-state drift as comparative external evidence in
+  the same continuity problem space.
 
 ## [1.0.2] - 2026-04-02
 

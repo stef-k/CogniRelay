@@ -260,6 +260,59 @@ the same reset-bound continuity problem class.
 - it should be read as a practitioner note about the same problem class, not
   as endorsement or benchmark proof
 
+### Lumen: architecture note on capsule scoping and the unknown-unknown problem
+
+- **Who:** Lumen (persistent loop agent)
+- **Context:** independently evolved loop-state plus memory-vault continuity
+  architecture
+- **Primary reference:**
+  - [Continuity Architecture Note: Loop-State, Capsule Scoping, and the Unknown-Unknown Problem](https://lumenloop.work/architecture-note.html)
+
+**What surface was exercised**
+
+- per-loop `loop-state.json` for narrow, high-freshness orientation
+- narrative `wake-state.md` for medium-freshness loop handoff
+- Engram memory vault retrieval plus live file cross-check for drift-prone
+  facts
+- JSONL loop packets summarized into wake capsules for medium-term continuity
+
+**What it showed**
+
+- Lumen documents a live persistent-loop architecture that distinguishes
+  several continuity mechanisms by freshness properties rather than treating
+  "memory" as one uniform store.
+- The note sharpens the difference between capsule freshness and fact
+  freshness: a recently generated capsule can still carry facts that were not
+  recently confirmed against the live system.
+- It describes adaptive capsule scoping at query time as the practical current
+  answer: trust broader memory for background context, but re-read specific
+  files or live system state when a claim may have drifted.
+- It also identifies the stronger residual case: the unknown-unknown stale
+  fact, where no mistrust signal is present and the local model remains
+  internally coherent while being temporally misaligned with the external
+  system.
+
+**What it supports**
+
+- the claim that freshness should be analyzed at more than one level
+  (retrieved bundle versus contained fact)
+- the project's current guidance that narrower scoping can often preserve more
+  meaningful freshness than one broad mixed-age continuity bundle
+- the comparative finding that capsule-level trust/freshness signaling is
+  useful but may not fully resolve unknown-unknown drift across shared
+  external systems
+- the value of treating direct live verification as a distinct continuity
+  maneuver rather than as an afterthought
+
+**What it does not prove**
+
+- Lumen has not used CogniRelay directly; this is comparative evidence from an
+  independently evolved system
+- it does not establish that finer-grained confirmation metadata is always the
+  right answer rather than narrower capsule scoping
+- it should be read as a public architecture note about the same problem
+  class, not as endorsement or benchmark proof
+
 ### Comparative Takeaways For CogniRelay
 
 Taken together, the comparative systems above clarify both where CogniRelay is
@@ -283,7 +336,8 @@ still highest.
 
 - Capsule-level freshness is useful, but external notes suggest that mixed-age
   state inside one continuity bundle can still benefit from narrower scoping or
-  finer-grained confirmation metadata.
+  finer-grained confirmation metadata; several notes also sharpen the
+  distinction between capsule freshness and fact freshness.
 - Lowering the mechanical cost of writing is necessary but not sufficient:
   governance under pressure still determines whether rationale, rejected paths,
   and other high-value context are captured before the seam closes.
