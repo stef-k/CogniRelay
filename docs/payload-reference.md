@@ -123,6 +123,8 @@ Agents should keep individual list item strings concise (roughly 80–120 chars)
 
 A continuity capsule is the core unit of orientation state. It is stored as a JSON file under `memory/continuity/`.
 
+Persisted legacy compatibility is intentionally bounded. On-disk capsules from older releases can be upgraded automatically when they still have the stabilized capsule shape and only need timestamp repair or structured-entry field upgrade. Pre-stabilization payloads that are missing required top-level fields such as `updated_at`, `verified_at`, `source`, or `confidence`, or that omit required core `continuity` fields such as `active_concerns`, `active_constraints`, `open_loops`, `stance_summary`, or `drift_signals`, are not auto-migrated by the runtime loader and are treated as invalid legacy state.
+
 ### ContinuityCapsule
 
 | Field | Type | Required | Notes |
@@ -175,7 +177,9 @@ A durable user/peer preference surfaced across sessions. Tags must be unique wit
 |-------|------|----------|-------------|
 | `tag` | string | yes | 1–80 chars, unique within the list |
 | `content` | string | yes | 1–240 chars |
-| `set_at` | ISO datetime string | yes | UTC (Z suffix) |
+| `created_at` | ISO datetime string | no | System-managed on persist. UTC (Z suffix). |
+| `updated_at` | ISO datetime string | no | System-managed on persist. UTC (Z suffix). |
+| `last_confirmed_at` | ISO datetime string | no | Agent-managed. Accepted only when explicitly provided. UTC (Z suffix). |
 
 ### ContinuityState
 
@@ -215,7 +219,9 @@ One bounded, agent-authored decision rationale or unresolved tension. Tags must 
 | `alternatives_considered` | list of strings | no | max 3 items, each 1–160 chars |
 | `depends_on` | list of strings | no | max 3 items, each 1–120 chars |
 | `supersedes` | string | no | max 80 chars. Must reference a tag in the same list with `status: "superseded"` |
-| `set_at` | ISO datetime string | yes | UTC (Z suffix) |
+| `created_at` | ISO datetime string | no | System-managed on persist. UTC (Z suffix). |
+| `updated_at` | ISO datetime string | no | System-managed on persist. UTC (Z suffix). |
+| `last_confirmed_at` | ISO datetime string | no | Agent-managed. Accepted only when explicitly provided. UTC (Z suffix). |
 
 **Supersession:** to supersede an entry, set the old entry's `status` to `"superseded"` and add a new entry with `supersedes` pointing to the old tag. The old entry remains in the list for auditability; full history is preserved in git commits.
 
@@ -227,6 +233,9 @@ One bounded, agent-authored decision rationale or unresolved tension. Tags must 
 |-------|------|----------|-------------|
 | `decision` | string | yes | 1–160 chars |
 | `rationale` | string | yes | 1–240 chars |
+| `created_at` | ISO datetime string | no | System-managed on persist. UTC (Z suffix). |
+| `updated_at` | ISO datetime string | no | System-managed on persist. UTC (Z suffix). |
+| `last_confirmed_at` | ISO datetime string | no | Agent-managed. Accepted only when explicitly provided. UTC (Z suffix). |
 
 ### ContinuitySource
 
@@ -467,8 +476,8 @@ When `view` is set to `"startup"`, the response includes one additional top-leve
       "top_priorities": ["..."],
       "active_constraints": ["..."],
       "open_loops": ["..."],
-      "negative_decisions": [{"decision": "...", "rationale": "..."}],
-      "rationale_entries": [{"tag": "...", "kind": "decision", "status": "active", "summary": "...", "reasoning": "...", "set_at": "..."}]
+      "negative_decisions": [{"decision": "...", "rationale": "...", "created_at": "...", "updated_at": "..."}],
+      "rationale_entries": [{"tag": "...", "kind": "decision", "status": "active", "summary": "...", "reasoning": "...", "created_at": "...", "updated_at": "...", "last_confirmed_at": "..."}]
     },
     "context": {
       "session_trajectory": ["..."],
@@ -483,8 +492,8 @@ When `view` is set to `"startup"`, the response includes one additional top-leve
       "scope_match": { "exact": true }
     },
     "stable_preferences": [
-      {"tag": "timezone", "content": "UTC+2 (Athens)", "set_at": "2026-03-20T10:00:00Z"},
-      {"tag": "no_emojis", "content": "Do not use emojis in responses", "set_at": "2026-03-15T14:30:00Z"}
+      {"tag": "timezone", "content": "UTC+2 (Athens)", "created_at": "2026-03-20T10:00:00Z", "updated_at": "2026-03-20T10:00:00Z", "last_confirmed_at": "2026-03-20T10:00:00Z"},
+      {"tag": "no_emojis", "content": "Do not use emojis in responses", "created_at": "2026-03-15T14:30:00Z", "updated_at": "2026-03-15T14:30:00Z", "last_confirmed_at": "2026-03-15T14:30:00Z"}
     ]
   }
 }
@@ -492,7 +501,7 @@ When `view` is set to `"startup"`, the response includes one additional top-leve
 
 `startup_summary.trust_signals` is the same trust_signals block as the top-level response key. It is `null` when `source_state` is `"missing"` or capsule is `null`.
 
-`startup_summary.stable_preferences` is the raw list of stable preferences from the capsule (tag + content + set_at). It is `[]` when the capsule has no preferences and `null` when `source_state` is `"missing"`. The list is capped at 12 entries (~4 KB worst case), comparable to the orientation tier.
+`startup_summary.stable_preferences` is the raw list of stable preferences from the capsule, including the structured-entry timestamps (`created_at`, `updated_at`, and optional `last_confirmed_at`). It is `[]` when the capsule has no preferences and `null` when `source_state` is `"missing"`. The list is capped at 12 entries (~4 KB worst case), comparable to the orientation tier.
 
 **`startup_summary` shape (missing capsule):**
 
@@ -512,7 +521,7 @@ When `source_state` is `"missing"`: `orientation` is `null`, `context` is `null`
 | Legacy capsule missing `rationale_entries` | `orientation.rationale_entries` | `[]` |
 | Legacy capsule missing `session_trajectory` | `context.session_trajectory` | `[]` |
 
-**`negative_decisions` pass-through:** Each element in `orientation.negative_decisions` is the same `{"decision": str, "rationale": str}` object stored in the capsule — no transformation, flattening, or summarization.
+**`negative_decisions` pass-through:** Each element in `orientation.negative_decisions` is the same structured object stored in the capsule. In this slice that means `decision`, `rationale`, and any structured-entry timestamps present on the capsule item (`created_at`, `updated_at`, optional `last_confirmed_at`) pass through unchanged. No transformation, flattening, or summarization is applied.
 
 **`rationale_entries` filtering:** The startup summary `orientation.rationale_entries` contains only entries with `status: "active"`. Superseded and retired entries are filtered out at summary-build time but remain available in the full capsule read.
 

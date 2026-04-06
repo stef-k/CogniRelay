@@ -22,7 +22,7 @@ from app.continuity.paths import (
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-from app.continuity.validation import _require_utc_timestamp
+from app.continuity.validation import _require_utc_timestamp, _upgrade_legacy_structured_entry_timestamps
 from app.git_locking import repository_mutation_lock
 from app.git_manager import GitManager
 from app.git_safety import try_unstage_paths
@@ -152,7 +152,9 @@ def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]
     if not isinstance(nested, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
     try:
-        payload["capsule"] = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
+        payload["capsule"] = ContinuityCapsule.model_validate(
+            _upgrade_legacy_structured_entry_timestamps(nested)
+        ).model_dump(mode="json", exclude_none=True)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
     return payload
@@ -241,7 +243,9 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     if not isinstance(capsule, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope capsule")
     try:
-        payload["capsule"] = ContinuityCapsule.model_validate(capsule).model_dump(mode="json", exclude_none=True)
+        payload["capsule"] = ContinuityCapsule.model_validate(
+            _upgrade_legacy_structured_entry_timestamps(capsule)
+        ).model_dump(mode="json", exclude_none=True)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope capsule: {e}") from e
     return payload
@@ -254,7 +258,9 @@ def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str
         raise HTTPException(status_code=404, detail="Continuity capsule not found")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
+        capsule = ContinuityCapsule.model_validate(
+            _upgrade_legacy_structured_entry_timestamps(payload)
+        ).model_dump(mode="json", exclude_none=True)
         if expected_subject is not None:
             expected_kind, expected_id = expected_subject
             capsule_kind = str(capsule.get("subject_kind") or "")
@@ -319,7 +325,9 @@ def _reject_stale_or_conflicting_write(path: Path, req: ContinuityUpsertRequest)
     if not path.exists() or not path.is_file():
         return
     try:
-        current = ContinuityCapsule.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        current = ContinuityCapsule.model_validate(
+            _upgrade_legacy_structured_entry_timestamps(json.loads(path.read_text(encoding="utf-8")))
+        )
     except (ValidationError, json.JSONDecodeError):
         return
     _reject_stale_timestamp(req.capsule.updated_at, current.updated_at)

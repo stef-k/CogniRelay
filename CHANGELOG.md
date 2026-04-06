@@ -9,6 +9,12 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Updated
 
+- Refined the structured continuity entry timestamp model for
+  `stable_preferences`, `rationale_entries`, and `negative_decisions`:
+  public payloads now use `created_at`, `updated_at`, and optional
+  `last_confirmed_at` instead of the older ambiguous `set_at` field, with
+  legacy persisted capsules upgraded compatibly on load and restore-test
+  validation.
 - Expanded `docs/external-references.md` with Friday's public bounded-memory
   continuity case study and letters archive as comparative external evidence
   for the same reset-bound problem class CogniRelay addresses.

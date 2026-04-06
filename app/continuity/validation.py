@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,78 @@ from app.models import (
     ContinuityVerificationSignal,
 )
 from app.storage import StorageError, canonical_json, safe_path
-from app.timestamps import parse_iso as _parse_iso
+from app.timestamps import format_iso, parse_iso as _parse_iso
+
+
+_LEGACY_TIMESTAMP_FLOOR = "1970-01-01T00:00:00Z"
+
+
+def _upgrade_legacy_structured_entry_timestamps(payload: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade stored legacy ``set_at`` fields into the current timestamp shape.
+
+    This helper is for persisted on-disk payloads only. Public write paths
+    should use the current schema and the service-layer stamping pass.
+
+    It also repairs legacy top-level capsule timestamps when they are
+    missing or unusable so persisted old capsules can still load through
+    modern read, patch, and restore paths deterministically.
+    """
+    upgraded = copy.deepcopy(payload)
+
+    def _timestamp_state(field_name: str) -> tuple[str, str | None]:
+        raw_value = upgraded.get(field_name)
+        if raw_value is None:
+            return "missing", None
+        text = str(raw_value).strip()
+        if not text:
+            return "missing", None
+        parsed = _parse_iso(text)
+        if parsed is None:
+            return "invalid", None
+        return "valid", format_iso(parsed)
+
+    updated_state, normalized_updated_at = _timestamp_state("updated_at")
+    verified_state, normalized_verified_at = _timestamp_state("verified_at")
+
+    if normalized_updated_at is not None:
+        resolved_updated_at = normalized_updated_at
+    elif updated_state == "missing" and normalized_verified_at is not None:
+        resolved_updated_at = normalized_verified_at
+    else:
+        resolved_updated_at = _LEGACY_TIMESTAMP_FLOOR
+
+    if normalized_verified_at is not None:
+        resolved_verified_at = normalized_verified_at
+    elif verified_state == "missing" and normalized_updated_at is not None:
+        resolved_verified_at = normalized_updated_at
+    else:
+        resolved_verified_at = _LEGACY_TIMESTAMP_FLOOR
+
+    upgraded["updated_at"] = resolved_updated_at
+    upgraded["verified_at"] = resolved_verified_at
+
+    def _upgrade_entry(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return entry
+        legacy_set_at = entry.pop("set_at", None)
+        if legacy_set_at is not None:
+            entry.setdefault("created_at", legacy_set_at)
+            entry.setdefault("updated_at", legacy_set_at)
+        if normalized_updated_at is not None:
+            entry.setdefault("created_at", normalized_updated_at)
+            entry.setdefault("updated_at", normalized_updated_at)
+        return entry
+
+    continuity = upgraded.get("continuity")
+    if isinstance(continuity, dict):
+        for field_name in ("negative_decisions", "rationale_entries"):
+            items = continuity.get(field_name)
+            if isinstance(items, list):
+                continuity[field_name] = [_upgrade_entry(item) for item in items]
+    stable_preferences = upgraded.get("stable_preferences")
+    if isinstance(stable_preferences, list):
+        upgraded["stable_preferences"] = [_upgrade_entry(item) for item in stable_preferences]
+    return upgraded
 
 
 def _require_utc_timestamp(value: str, field_name: str) -> datetime:
@@ -61,6 +133,7 @@ def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
             raise HTTPException(status_code=400, detail="Value too short in continuity.curiosity_queue")
         if len(value) > 120:
             raise HTTPException(status_code=400, detail="Value too long in continuity.curiosity_queue")
+    seen_negative_decisions: set[str] = set()
     for decision in list(capsule.continuity.negative_decisions):
         if len(decision.decision) < 1:
             raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.decision")
@@ -70,6 +143,18 @@ def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
             raise HTTPException(status_code=400, detail="Value too short in continuity.negative_decisions.rationale")
         if len(decision.rationale) > 240:
             raise HTTPException(status_code=400, detail="Value too long in continuity.negative_decisions.rationale")
+        if decision.created_at is not None:
+            _require_utc_timestamp(decision.created_at, "continuity.negative_decisions[].created_at")
+        if decision.updated_at is not None:
+            _require_utc_timestamp(decision.updated_at, "continuity.negative_decisions[].updated_at")
+        if decision.last_confirmed_at is not None:
+            _require_utc_timestamp(decision.last_confirmed_at, "continuity.negative_decisions[].last_confirmed_at")
+        if decision.decision in seen_negative_decisions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate negative_decisions decision: {decision.decision}",
+            )
+        seen_negative_decisions.add(decision.decision)
     for entry in list(capsule.continuity.rationale_entries):
         if len(entry.tag) < 1:
             raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].tag")
@@ -93,6 +178,12 @@ def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
                 raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].depends_on")
             if len(dep) > 120:
                 raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].depends_on")
+        if entry.created_at is not None:
+            _require_utc_timestamp(entry.created_at, "continuity.rationale_entries[].created_at")
+        if entry.updated_at is not None:
+            _require_utc_timestamp(entry.updated_at, "continuity.rationale_entries[].updated_at")
+        if entry.last_confirmed_at is not None:
+            _require_utc_timestamp(entry.last_confirmed_at, "continuity.rationale_entries[].last_confirmed_at")
 
 
 def _strip_service_managed_descriptor_fields(capsule: ContinuityCapsule) -> None:
@@ -232,7 +323,12 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
             )
         seen_tags: set[str] = set()
         for pref in capsule.stable_preferences:
-            _require_utc_timestamp(pref.set_at, "stable_preferences[].set_at")
+            if pref.created_at is not None:
+                _require_utc_timestamp(pref.created_at, "stable_preferences[].created_at")
+            if pref.updated_at is not None:
+                _require_utc_timestamp(pref.updated_at, "stable_preferences[].updated_at")
+            if pref.last_confirmed_at is not None:
+                _require_utc_timestamp(pref.last_confirmed_at, "stable_preferences[].last_confirmed_at")
             if pref.tag in seen_tags:
                 raise HTTPException(
                     status_code=400,
@@ -242,7 +338,6 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     if capsule.continuity.rationale_entries:
         seen_re_tags: set[str] = set()
         for entry in capsule.continuity.rationale_entries:
-            _require_utc_timestamp(entry.set_at, "rationale_entries[].set_at")
             if entry.tag in seen_re_tags:
                 raise HTTPException(
                     status_code=400,

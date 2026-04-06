@@ -11,8 +11,9 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.continuity.validation import _validate_capsule
 from app.main import continuity_read, continuity_upsert
-from app.models import ContinuityReadRequest, ContinuityUpsertRequest
+from app.models import ContinuityCapsule, ContinuityReadRequest, ContinuityUpsertRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
 
@@ -227,6 +228,24 @@ class TestContinuity33Phase1(unittest.TestCase):
 
             self.assertEqual(cm.exception.status_code, 400)
             self.assertEqual(cm.exception.detail, "Value too long in continuity.negative_decisions.rationale")
+
+    def test_validate_rejects_duplicate_negative_decisions(self) -> None:
+        """Validation must reject duplicate decision identities deterministically."""
+        with tempfile.TemporaryDirectory() as td:
+            capsule = self._capsule_payload()
+            duplicate = dict(capsule["continuity"]["negative_decisions"][0])
+            duplicate["rationale"] = "A conflicting duplicate rationale."
+            capsule["continuity"]["negative_decisions"].append(duplicate)
+            model = ContinuityCapsule.model_validate(capsule)
+
+            with self.assertRaises(HTTPException) as cm:
+                _validate_capsule(Path(td), model)
+
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertEqual(
+                cm.exception.detail,
+                "Duplicate negative_decisions decision: Do not broaden #33 into a decision-log subsystem.",
+            )
 
     def test_more_than_max_issue_33_items_fail_model_validation(self) -> None:
         """List-count bounds should still fail at model validation time."""

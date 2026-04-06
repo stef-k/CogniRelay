@@ -943,10 +943,22 @@ SAMPLE_STARTUP_SUMMARY_RESPONSE = {
             "active_constraints": ["No breaking changes"],
             "open_loops": ["Review PR #42"],
             "negative_decisions": [
-                {"decision": "No caching", "rationale": "Adds complexity"},
+                {
+                    "decision": "No caching",
+                    "rationale": "Adds complexity",
+                    "created_at": "2026-03-01T10:00:00Z",
+                    "updated_at": "2026-03-01T10:00:00Z",
+                },
             ],
             "rationale_entries": [
-                {"kind": "constraint", "tag": "perf", "summary": "Latency budget is 200ms"},
+                {
+                    "kind": "constraint",
+                    "tag": "perf",
+                    "summary": "Latency budget is 200ms",
+                    "created_at": "2026-03-01T10:00:00Z",
+                    "updated_at": "2026-03-02T10:00:00Z",
+                    "last_confirmed_at": "2026-03-03T10:00:00Z",
+                },
             ],
         },
         "context": {
@@ -962,7 +974,13 @@ SAMPLE_STARTUP_SUMMARY_RESPONSE = {
             "scope_match": {"exact": True},
         },
         "stable_preferences": [
-            {"tag": "communication", "content": "Prefer concise responses"},
+            {
+                "tag": "communication",
+                "content": "Prefer concise responses",
+                "created_at": "2026-03-01T10:00:00Z",
+                "updated_at": "2026-03-02T10:00:00Z",
+                "last_confirmed_at": "2026-03-03T10:00:00Z",
+            },
         ],
     },
 }
@@ -1002,6 +1020,7 @@ class TestFormatStartupSummary(unittest.TestCase):
         self.assertIn("- Started auth extraction", output)
         self.assertIn("=== Stable Preferences ===", output)
         self.assertIn("- [communication] Prefer concise responses", output)
+        self.assertNotIn("2026-03-01T10:00:00Z", output)
 
         # Not shown
         self.assertNotIn("updated_at", output)

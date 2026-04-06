@@ -703,8 +703,13 @@ class ContinuitySelector(BaseModel):
 class NegativeDecision(BaseModel):
     """A deliberate non-action plus rationale; bounds are enforced in the continuity service."""
 
+    model_config = ConfigDict(extra="forbid")
+
     decision: str = Field(description="1-160 chars, validated at the continuity service layer.")
     rationale: str = Field(description="1-240 chars, validated at the continuity service layer.")
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    last_confirmed_at: Optional[str] = None
 
 
 class RationaleEntry(BaseModel):
@@ -717,6 +722,8 @@ class RationaleEntry(BaseModel):
     ``NegativeDecision``.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     tag: str = Field(min_length=1, max_length=80)
     kind: Literal["decision", "assumption", "tension"]
     status: Literal["active", "superseded", "retired"]
@@ -725,7 +732,9 @@ class RationaleEntry(BaseModel):
     alternatives_considered: List[str] = Field(default_factory=list, max_length=3)
     depends_on: List[str] = Field(default_factory=list, max_length=3)
     supersedes: Optional[str] = Field(default=None, max_length=80)
-    set_at: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    last_confirmed_at: Optional[str] = None
 
 
 class ContinuityState(BaseModel):
@@ -756,9 +765,13 @@ class StablePreference(BaseModel):
     Tags must be unique within a capsule's ``stable_preferences`` list.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     tag: str = Field(min_length=1, max_length=80)
     content: str = Field(min_length=1, max_length=240)
-    set_at: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    last_confirmed_at: Optional[str] = None
 
 
 class IdentityAnchor(BaseModel):

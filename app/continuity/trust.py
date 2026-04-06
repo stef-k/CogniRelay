@@ -28,6 +28,7 @@ _ORIENTATION_FIELDS = (
     "stance_summary",
     "drift_signals",
 )
+_LEGACY_TIMESTAMP_FLOOR = "1970-01-01T00:00:00Z"
 
 
 
@@ -148,6 +149,9 @@ def _build_trust_signals(
         phase, _ = _continuity_phase(capsule, now)
     except Exception:
         phase = "expired"
+    if str(capsule.get("verified_at") or "") == _LEGACY_TIMESTAMP_FLOOR:
+        phase = "expired"
+        verified_age = None
     freshness_raw = capsule.get("freshness")
     freshness_dict = freshness_raw if isinstance(freshness_raw, dict) else {}
     fc = freshness_dict.get("freshness_class")
@@ -227,6 +231,8 @@ def _build_compact_trust_signals(
     try:
         phase, _ = _continuity_phase(capsule, now)
     except Exception:
+        phase = "expired"
+    if str(capsule.get("verified_at") or "") == _LEGACY_TIMESTAMP_FLOOR:
         phase = "expired"
     cont = capsule.get("continuity")
     cont_dict = cont if isinstance(cont, dict) else {}

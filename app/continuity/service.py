@@ -98,6 +98,7 @@ from app.continuity.validation import (
     _require_utc_timestamp,
     _strip_service_managed_descriptor_fields,
     _strip_verification_fields_for_upsert,
+    _upgrade_legacy_structured_entry_timestamps,
     _validate_capsule,
     _validate_candidate_selector_match,
     _validate_lifecycle_transition_request,
@@ -180,6 +181,27 @@ from app.continuity.trust import (
 
 _logger = logging.getLogger(__name__)
 
+_STRUCTURED_ENTRY_IDENTITY_FIELDS: dict[str, str] = {
+    "stable_preferences": "tag",
+    "continuity.rationale_entries": "tag",
+    "continuity.negative_decisions": "decision",
+}
+
+_STRUCTURED_ENTRY_CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
+    "stable_preferences": ("tag", "content"),
+    "continuity.rationale_entries": (
+        "tag",
+        "kind",
+        "status",
+        "summary",
+        "reasoning",
+        "alternatives_considered",
+        "depends_on",
+        "supersedes",
+    ),
+    "continuity.negative_decisions": ("decision", "rationale"),
+}
+
 
 def _coerce_preserve_value(field_name: str, value: Any) -> Any:
     """Coerce a stored JSON value into the appropriate Pydantic model for preserve merge."""
@@ -202,6 +224,105 @@ def _coerce_preserve_value(field_name: str, value: Any) -> Any:
     if field_name == "identity_anchors" and isinstance(value, list):
         return [IdentityAnchor.model_validate(v) if isinstance(v, dict) else v for v in value]
     return value
+
+
+def _structured_entry_field_value(entry: Any, field_name: str) -> Any:
+    """Return one structured-entry field from either a model or a raw dict."""
+    if isinstance(entry, dict):
+        value = entry.get(field_name)
+    else:
+        value = getattr(entry, field_name, None)
+    if isinstance(value, list):
+        return list(value)
+    return value
+
+
+def _stamp_structured_list(
+    *,
+    target: str,
+    items: list[Any],
+    stored_items: list[Any],
+    system_updated_at: str,
+) -> list[Any]:
+    """Apply deterministic child timestamp stamping for one structured list."""
+    identity_field = _STRUCTURED_ENTRY_IDENTITY_FIELDS[target]
+    content_fields = _STRUCTURED_ENTRY_CONTENT_FIELDS[target]
+    stored_by_identity: dict[str, Any] = {}
+    for stored_item in stored_items:
+        identity = _structured_entry_field_value(stored_item, identity_field)
+        if isinstance(identity, str) and identity:
+            stored_by_identity[identity] = stored_item
+
+    stamped: list[Any] = []
+    for item in items:
+        identity = _structured_entry_field_value(item, identity_field)
+        stored_item = stored_by_identity.get(identity) if isinstance(identity, str) else None
+        incoming_content = {
+            field_name: _structured_entry_field_value(item, field_name)
+            for field_name in content_fields
+        }
+        stored_content = {
+            field_name: _structured_entry_field_value(stored_item, field_name)
+            for field_name in content_fields
+        } if stored_item is not None else None
+        content_changed = stored_item is None or incoming_content != stored_content
+
+        created_at = (
+            _structured_entry_field_value(stored_item, "created_at")
+            or _structured_entry_field_value(stored_item, "updated_at")
+            or system_updated_at
+        ) if stored_item is not None else system_updated_at
+        updated_at = system_updated_at if content_changed else (
+            _structured_entry_field_value(stored_item, "updated_at")
+            or created_at
+        )
+
+        explicit_last_confirmed_at = _structured_entry_field_value(item, "last_confirmed_at")
+        if explicit_last_confirmed_at is not None:
+            last_confirmed_at = explicit_last_confirmed_at
+        elif stored_item is not None:
+            last_confirmed_at = _structured_entry_field_value(stored_item, "last_confirmed_at")
+        else:
+            last_confirmed_at = None
+
+        stamped.append(item.model_copy(update={
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "last_confirmed_at": last_confirmed_at,
+        }))
+    return stamped
+
+
+def _stamp_structured_entries(
+    capsule: ContinuityCapsule,
+    *,
+    stored_payload: dict[str, Any] | None,
+    system_updated_at: str,
+) -> None:
+    """Stamp system-managed structured-entry timestamps consistently in place."""
+    stored_payload = _upgrade_legacy_structured_entry_timestamps(stored_payload or {})
+    stored_continuity = stored_payload.get("continuity", {})
+    if not isinstance(stored_continuity, dict):
+        stored_continuity = {}
+
+    capsule.stable_preferences = _stamp_structured_list(
+        target="stable_preferences",
+        items=list(capsule.stable_preferences),
+        stored_items=list(stored_payload.get("stable_preferences", [])),
+        system_updated_at=system_updated_at,
+    )
+    capsule.continuity.rationale_entries = _stamp_structured_list(
+        target="continuity.rationale_entries",
+        items=list(capsule.continuity.rationale_entries),
+        stored_items=list(stored_continuity.get("rationale_entries", [])),
+        system_updated_at=system_updated_at,
+    )
+    capsule.continuity.negative_decisions = _stamp_structured_list(
+        target="continuity.negative_decisions",
+        items=list(capsule.continuity.negative_decisions),
+        stored_items=list(stored_continuity.get("negative_decisions", [])),
+        system_updated_at=system_updated_at,
+    )
 
 
 def _apply_preserve_merge(
@@ -411,7 +532,7 @@ def continuity_upsert_service(
                 pass  # malformed stored capsule — let downstream handle it
         # --- preserve-by-default merge (runs inside lock, after stale check) ---
         if req.merge_mode == "preserve" and raw_body is not None and old_bytes is not None:
-            stored = json.loads(old_bytes)
+            stored = _upgrade_legacy_structured_entry_timestamps(json.loads(old_bytes))
             snapshot_touched = _session_end_snapshot_touched_fields(req.session_end_snapshot)
             _apply_preserve_merge(capsule, stored, raw_body, snapshot_touched)
             # LOAD-BEARING: Re-construct capsule through the model so that
@@ -431,10 +552,15 @@ def continuity_upsert_service(
         # carries normalizations_applied from this single authoritative
         # pass.
         normalizations_applied = _normalize_capsule_fields(capsule)
+        _stamp_structured_entries(
+            capsule,
+            stored_payload=_upgrade_legacy_structured_entry_timestamps(json.loads(old_bytes)) if old_bytes else None,
+            system_updated_at=capsule.updated_at,
+        )
         _validate_capsule(repo_root, capsule)
         # --- lifecycle state machine (mutates capsule before serialization) ---
         if capsule.thread_descriptor is not None:
-            old_parsed = json.loads(old_bytes) if old_bytes else None
+            old_parsed = _upgrade_legacy_structured_entry_timestamps(json.loads(old_bytes)) if old_bytes else None
             old_td = old_parsed.get("thread_descriptor") if old_parsed else None
             if old_td is None:
                 # First creation or first descriptor addition
@@ -746,7 +872,9 @@ def continuity_patch_service(
 
         old_bytes = path.read_bytes()
         try:
-            capsule = ContinuityCapsule.model_validate(json.loads(old_bytes))
+            capsule = ContinuityCapsule.model_validate(
+                _upgrade_legacy_structured_entry_timestamps(json.loads(old_bytes))
+            )
         except (json.JSONDecodeError, Exception) as exc:
             raise HTTPException(status_code=400, detail=f"stored capsule is invalid: {exc}") from exc
 
@@ -754,7 +882,8 @@ def continuity_patch_service(
         _reject_stale_timestamp(req.updated_at, capsule.updated_at)
 
         # Snapshot for atomicity: if any operation fails, we discard the snapshot.
-        capsule_snapshot = ContinuityCapsule.model_validate(json.loads(old_bytes))
+        stored_payload = _upgrade_legacy_structured_entry_timestamps(json.loads(old_bytes))
+        capsule_snapshot = ContinuityCapsule.model_validate(stored_payload)
         try:
             ops_applied = _apply_patch_operations(capsule_snapshot, req.operations)
         except HTTPException:
@@ -765,6 +894,11 @@ def continuity_patch_service(
 
         # Post-patch normalization
         normalizations_applied = _normalize_capsule_fields(capsule_snapshot)
+        _stamp_structured_entries(
+            capsule_snapshot,
+            stored_payload=stored_payload,
+            system_updated_at=req.updated_at,
+        )
 
         # Full validation on mutated capsule
         _validate_capsule(repo_root, capsule_snapshot)
@@ -862,7 +996,9 @@ def continuity_lifecycle_service(
 
         old_bytes = path.read_bytes()
         try:
-            capsule = ContinuityCapsule.model_validate(json.loads(old_bytes))
+            capsule = ContinuityCapsule.model_validate(
+                _upgrade_legacy_structured_entry_timestamps(json.loads(old_bytes))
+            )
         except (json.JSONDecodeError, Exception) as exc:
             raise HTTPException(status_code=400, detail=f"stored capsule is invalid: {exc}") from exc
 
@@ -2208,12 +2344,19 @@ def continuity_cold_rehydrate_service(
                 raise ValueError("wrong schema_type")
             if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
                 raise ValueError("wrong schema_version")
-            capsule = ContinuityCapsule.model_validate(payload.get("capsule")).model_dump(mode="json", exclude_none=True)
+            raw_capsule = payload.get("capsule") or {}
+            upgraded_capsule = _upgrade_legacy_structured_entry_timestamps(raw_capsule)
+            capsule = ContinuityCapsule.model_validate(
+                upgraded_capsule
+            ).model_dump(mode="json", exclude_none=True)
             expected_archive_path = _archive_rel_path_from_envelope({**payload, "capsule": capsule})
             if expected_archive_path != source_archive_path:
                 raise HTTPException(status_code=400, detail="Continuity cold payload identity does not match requested source archive")
             if str(payload.get("active_path") or "") != continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])):
                 raise HTTPException(status_code=400, detail="Invalid continuity archive envelope in cold payload: active_path mismatch")
+            restored_archive_bytes = archive_bytes
+            if upgraded_capsule != raw_capsule:
+                restored_archive_bytes = canonical_json({**payload, "capsule": capsule}).encode("utf-8")
         except HTTPException:
             raise
         except FileNotFoundError as exc:
@@ -2223,7 +2366,7 @@ def continuity_cold_rehydrate_service(
 
         rehydrated_at = format_iso(iso_now())
         try:
-            write_bytes_file(archive_path, archive_bytes)
+            write_bytes_file(archive_path, restored_archive_bytes)
             # Cold file deletions and commit are inside the git lock so
             # that a process crash before commit cannot leave cold files
             # deleted without a durable rehydrated archive.
