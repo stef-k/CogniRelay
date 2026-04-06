@@ -196,12 +196,14 @@ class TestStartupView(unittest.TestCase):
                     auth=_AuthStub(),
                 )
             ss = out["startup_summary"]
-            self.assertEqual(ss["orientation"]["negative_decisions"], neg)
-            # Verify it's the same list content as the capsule's
             self.assertEqual(
                 ss["orientation"]["negative_decisions"],
                 out["capsule"]["continuity"]["negative_decisions"],
             )
+            self.assertEqual(len(ss["orientation"]["negative_decisions"]), 2)
+            self.assertEqual(ss["orientation"]["negative_decisions"][0]["decision"], "Decided not to X")
+            self.assertIn("created_at", ss["orientation"]["negative_decisions"][0])
+            self.assertIn("updated_at", ss["orientation"]["negative_decisions"][0])
 
     # --- Test 5: fallback capsule degraded surfacing ---
     def test_startup_view_fallback_surfaces_degraded(self) -> None:

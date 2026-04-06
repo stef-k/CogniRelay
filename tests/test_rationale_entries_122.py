@@ -84,7 +84,7 @@ def _sample_entry(
         "status": status,
         "summary": summary,
         "reasoning": reasoning,
-        "set_at": _now_iso(),
+        "last_confirmed_at": _now_iso(),
     }
     if alternatives is not None:
         entry["alternatives_considered"] = alternatives
@@ -232,7 +232,7 @@ class TestRationaleEntryModel(unittest.TestCase):
     def test_valid_construction(self) -> None:
         e = RationaleEntry(
             tag="auth_choice", kind="decision", status="active",
-            summary="Chose JWT", reasoning="Stateless scaling", set_at=_now_iso(),
+            summary="Chose JWT", reasoning="Stateless scaling", last_confirmed_at=_now_iso(),
         )
         self.assertEqual(e.tag, "auth_choice")
         self.assertEqual(e.kind, "decision")
@@ -242,7 +242,7 @@ class TestRationaleEntryModel(unittest.TestCase):
         for kind in ("decision", "assumption", "tension"):
             e = RationaleEntry(
                 tag="t", kind=kind, status="active",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             )
             self.assertEqual(e.kind, kind)
 
@@ -250,7 +250,7 @@ class TestRationaleEntryModel(unittest.TestCase):
         for status in ("active", "superseded", "retired"):
             e = RationaleEntry(
                 tag="t", kind="decision", status=status,
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             )
             self.assertEqual(e.status, status)
 
@@ -258,41 +258,41 @@ class TestRationaleEntryModel(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RationaleEntry(
                 tag="t", kind="unknown", status="active",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             )
 
     def test_invalid_status_rejected(self) -> None:
         with self.assertRaises(ValidationError):
             RationaleEntry(
                 tag="t", kind="decision", status="archived",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             )
 
     def test_tag_too_long(self) -> None:
         with self.assertRaises(ValidationError):
             RationaleEntry(
                 tag="x" * 81, kind="decision", status="active",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             )
 
     def test_empty_tag_rejected(self) -> None:
         with self.assertRaises(ValidationError):
             RationaleEntry(
                 tag="", kind="decision", status="active",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             )
 
     def test_max_length_tag_accepted(self) -> None:
         e = RationaleEntry(
             tag="t" * 80, kind="decision", status="active",
-            summary="s", reasoning="r", set_at=_now_iso(),
+            summary="s", reasoning="r", last_confirmed_at=_now_iso(),
         )
         self.assertEqual(len(e.tag), 80)
 
     def test_alternatives_max_3_accepted(self) -> None:
         e = RationaleEntry(
             tag="t", kind="decision", status="active",
-            summary="s", reasoning="r", set_at=_now_iso(),
+            summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             alternatives_considered=["a", "b", "c"],
         )
         self.assertEqual(len(e.alternatives_considered), 3)
@@ -301,14 +301,14 @@ class TestRationaleEntryModel(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RationaleEntry(
                 tag="t", kind="decision", status="active",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
                 alternatives_considered=["a", "b", "c", "d"],
             )
 
     def test_depends_on_max_3_accepted(self) -> None:
         e = RationaleEntry(
             tag="t", kind="assumption", status="active",
-            summary="s", reasoning="r", set_at=_now_iso(),
+            summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             depends_on=["x", "y", "z"],
         )
         self.assertEqual(len(e.depends_on), 3)
@@ -317,14 +317,14 @@ class TestRationaleEntryModel(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RationaleEntry(
                 tag="t", kind="assumption", status="active",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
                 depends_on=["a", "b", "c", "d"],
             )
 
     def test_supersedes_max_length_accepted(self) -> None:
         e = RationaleEntry(
             tag="t", kind="decision", status="active",
-            summary="s", reasoning="r", set_at=_now_iso(),
+            summary="s", reasoning="r", last_confirmed_at=_now_iso(),
             supersedes="s" * 80,
         )
         self.assertEqual(len(e.supersedes), 80)
@@ -333,14 +333,14 @@ class TestRationaleEntryModel(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RationaleEntry(
                 tag="t", kind="decision", status="active",
-                summary="s", reasoning="r", set_at=_now_iso(),
+                summary="s", reasoning="r", last_confirmed_at=_now_iso(),
                 supersedes="s" * 81,
             )
 
     def test_defaults_empty_lists(self) -> None:
         e = RationaleEntry(
             tag="t", kind="decision", status="active",
-            summary="s", reasoning="r", set_at=_now_iso(),
+            summary="s", reasoning="r", last_confirmed_at=_now_iso(),
         )
         self.assertEqual(e.alternatives_considered, [])
         self.assertEqual(e.depends_on, [])
@@ -531,9 +531,9 @@ class TestValidateRationaleEntries(unittest.TestCase):
             self.assertIn("too short", ctx.exception.detail.lower())
             self.assertIn("tag", ctx.exception.detail.lower())
 
-    def test_invalid_set_at_rejected(self) -> None:
+    def test_invalid_last_confirmed_at_rejected(self) -> None:
         entry = _sample_entry()
-        entry["set_at"] = "not-a-timestamp"
+        entry["last_confirmed_at"] = "not-a-timestamp"
         with tempfile.TemporaryDirectory() as td:
             payload = _base_capsule_payload(rationale_entries=[entry])
             capsule = ContinuityCapsule(**payload)
@@ -541,9 +541,9 @@ class TestValidateRationaleEntries(unittest.TestCase):
                 _validate_capsule(Path(td), capsule)
             self.assertEqual(ctx.exception.status_code, 400)
 
-    def test_non_utc_set_at_rejected(self) -> None:
+    def test_non_utc_last_confirmed_at_rejected(self) -> None:
         entry = _sample_entry()
-        entry["set_at"] = "2026-03-20T10:00:00+02:00"
+        entry["last_confirmed_at"] = "2026-03-20T10:00:00+02:00"
         with tempfile.TemporaryDirectory() as td:
             payload = _base_capsule_payload(rationale_entries=[entry])
             capsule = ContinuityCapsule(**payload)
@@ -946,6 +946,22 @@ class TestSessionEndSnapshotRationale(unittest.TestCase):
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["tag"], "snapshot_entry")
 
+    def test_snapshot_override_stamps_child_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            payload = _base_capsule_payload(rationale_entries=_sample_entries(1))
+            new_entries = [_sample_entry(tag="snapshot_entry", summary="From snapshot")]
+            new_entries[0]["last_confirmed_at"] = "2026-03-22T09:15:00Z"
+            self._do_upsert(repo, payload, self._snapshot_payload(rationale_entries=new_entries))
+
+            written = json.loads(
+                (repo / "memory" / "continuity" / "user-test-agent.json").read_text("utf-8")
+            )
+            stamped = written["continuity"]["rationale_entries"][0]
+            self.assertEqual(stamped["created_at"], written["updated_at"])
+            self.assertEqual(stamped["updated_at"], written["updated_at"])
+            self.assertEqual(stamped["last_confirmed_at"], "2026-03-22T09:15:00Z")
+
     def test_p1_preserve_when_none(self) -> None:
         """When snapshot has no rationale_entries field, capsule values are preserved."""
         with tempfile.TemporaryDirectory() as td:
@@ -1235,8 +1251,16 @@ class TestCompareDetectsRationaleChanges(unittest.TestCase):
             repo = Path(td)
             entries = _sample_entries(2)
             active = _base_capsule_payload(rationale_entries=entries)
+            for entry in active["continuity"]["rationale_entries"]:
+                entry["created_at"] = active["updated_at"]
+                entry["updated_at"] = active["updated_at"]
             _write_capsule(repo, active)
             candidate = _base_capsule_payload(rationale_entries=entries)
+            candidate["updated_at"] = active["updated_at"]
+            candidate["verified_at"] = active["verified_at"]
+            for entry in candidate["continuity"]["rationale_entries"]:
+                entry["created_at"] = active["updated_at"]
+                entry["updated_at"] = active["updated_at"]
             out = continuity_compare_service(
                 repo_root=repo,
                 auth=_AuthStub(),

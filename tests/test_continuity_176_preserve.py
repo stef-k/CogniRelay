@@ -118,7 +118,7 @@ def _base_capsule(*, updated_at: str | None = None) -> dict[str, Any]:
         "canonical_sources": ["memory/source-a.json", "memory/source-b.json"],
         "metadata": {"env": "test", "version": 1},
         "stable_preferences": [
-            {"tag": "pref-a", "content": "Always use dark mode", "set_at": now},
+            {"tag": "pref-a", "content": "Always use dark mode", "last_confirmed_at": now},
         ],
     }
 
@@ -348,10 +348,12 @@ class TestPreserveOptionalListFields(unittest.TestCase):
             self.assertEqual(written["continuity"]["session_trajectory"], ["stored-trajectory"])
             self.assertEqual(written["continuity"]["trailing_notes"], ["stored-note"])
             self.assertEqual(written["continuity"]["curiosity_queue"], ["stored-curiosity"])
-            self.assertEqual(
-                written["continuity"]["negative_decisions"],
-                [{"decision": "stored-decision", "rationale": "stored-rationale"}],
-            )
+            self.assertEqual(len(written["continuity"]["negative_decisions"]), 1)
+            stored_decision = written["continuity"]["negative_decisions"][0]
+            self.assertEqual(stored_decision["decision"], "stored-decision")
+            self.assertEqual(stored_decision["rationale"], "stored-rationale")
+            self.assertEqual(stored_decision["created_at"], _STORED_TS)
+            self.assertEqual(stored_decision["updated_at"], _STORED_TS)
 
     def test_empty_list_overrides_to_empty(self) -> None:
         """Sending [] for an optional list field overrides to empty list."""
@@ -532,14 +534,14 @@ class TestPreserveCapsuleLevelFields(unittest.TestCase):
             raw_cap["canonical_sources"] = ["memory/new-source.json"]
             raw_cap["metadata"] = {"env": "prod"}
             raw_cap["stable_preferences"] = [
-                {"tag": "new-pref", "content": "Always show line numbers", "set_at": _NEW_TS},
+                {"tag": "new-pref", "content": "Always show line numbers", "last_confirmed_at": _NEW_TS},
             ]
             raw = _build_raw_body(raw_cap)
             # Also add these to the capsule dict for Pydantic parsing
             cap["canonical_sources"] = ["memory/new-source.json"]
             cap["metadata"] = {"env": "prod"}
             cap["stable_preferences"] = [
-                {"tag": "new-pref", "content": "Always show line numbers", "set_at": _NEW_TS},
+                {"tag": "new-pref", "content": "Always show line numbers", "last_confirmed_at": _NEW_TS},
             ]
             out = _do_upsert(repo, cap, merge_mode="preserve", raw_body=raw)
             self.assertTrue(out["ok"])

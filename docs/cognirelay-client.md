@@ -64,6 +64,8 @@ python tools/cognirelay_client.py read \
 - `--format json` (default): pretty-printed JSON response body. Does not send `view` in the request — returns the full server response unchanged.
 - `--format startup`: sends `view="startup"` to the server and renders the `startup_summary` block as compact section-based text. If the server predates `view="startup"` (response lacks `startup_summary`), the client falls back to a legacy renderer that extracts fields from `capsule.continuity` directly.
 
+The client tolerates both continuity schema `1.0` and `1.1` payloads on read surfaces. For issue #194, newly written continuity capsules and continuity archive/fallback/cold artifacts move to schema `1.1`; stabilized-shape legacy `1.0` continuity payloads remain readable and upgrade safely where supported. Truly pre-stabilization payloads missing required modern continuity fields are still outside the automatic migration boundary.
+
 Use `--output <path>` to write to a file instead of stdout.
 
 ### Startup format sections

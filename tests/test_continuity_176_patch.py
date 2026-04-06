@@ -254,7 +254,7 @@ class TestPatchAppendStructuredList(unittest.TestCase):
                 "status": "active",
                 "summary": "Use FastAPI for the new service",
                 "reasoning": "Better async support and type hints",
-                "set_at": _now_iso(),
+                "last_confirmed_at": _now_iso(),
             }
             result = _patch(root, gm, auth, [
                 {"target": "continuity.rationale_entries", "action": "append", "value": entry},
@@ -273,7 +273,7 @@ class TestPatchAppendStructuredList(unittest.TestCase):
             auth = _AuthStub()
             _seed_capsule(root, gm, auth)
 
-            pref = {"tag": "editor-pref", "content": "Use dark mode", "set_at": _now_iso()}
+            pref = {"tag": "editor-pref", "content": "Use dark mode", "last_confirmed_at": _now_iso()}
             result = _patch(root, gm, auth, [
                 {"target": "stable_preferences", "action": "append", "value": pref},
             ])
@@ -388,7 +388,7 @@ class TestPatchRemoveStructuredList(unittest.TestCase):
             _seed_capsule(root, gm, auth, extra_continuity={
                 "rationale_entries": [
                     {"tag": "re-1", "kind": "decision", "status": "active",
-                     "summary": "s", "reasoning": "r", "set_at": now},
+                     "summary": "s", "reasoning": "r", "last_confirmed_at": now},
                 ],
             })
 
@@ -408,8 +408,8 @@ class TestPatchRemoveStructuredList(unittest.TestCase):
             auth = _AuthStub()
             _seed_capsule(root, gm, auth, extra_capsule={
                 "stable_preferences": [
-                    {"tag": "pref-a", "content": "Dark mode", "set_at": _now_iso()},
-                    {"tag": "pref-b", "content": "Vim keys", "set_at": _now_iso()},
+                    {"tag": "pref-a", "content": "Dark mode", "last_confirmed_at": _now_iso()},
+                    {"tag": "pref-b", "content": "Vim keys", "last_confirmed_at": _now_iso()},
                 ],
             })
 
@@ -490,12 +490,13 @@ class TestPatchReplaceAtStructuredList(unittest.TestCase):
             _setup_dirs(root)
             gm = _GitManagerStub(root)
             auth = _AuthStub()
-            _seed_capsule(root, gm, auth, extra_continuity={
+            _, seeded_updated_at = _seed_capsule(root, gm, auth, extra_continuity={
                 "negative_decisions": [
                     {"decision": "avoid X", "rationale": "old reason"},
                 ],
             })
 
+            patch_updated_at = _later_iso()
             result = _patch(root, gm, auth, [
                 {
                     "target": "continuity.negative_decisions",
@@ -503,13 +504,15 @@ class TestPatchReplaceAtStructuredList(unittest.TestCase):
                     "match": "avoid X",
                     "value": {"decision": "avoid X", "rationale": "updated reason"},
                 },
-            ])
+            ], updated_at=patch_updated_at)
 
             self.assertTrue(result["ok"])
             capsule = _read_persisted_capsule(root)
             decisions = capsule["continuity"]["negative_decisions"]
             self.assertEqual(len(decisions), 1)
             self.assertEqual(decisions[0]["rationale"], "updated reason")
+            self.assertEqual(decisions[0]["created_at"], seeded_updated_at)
+            self.assertEqual(decisions[0]["updated_at"], patch_updated_at)
 
 
 class TestPatchReplaceAtOutOfBounds(unittest.TestCase):
@@ -1108,6 +1111,50 @@ class TestPatchUpdatedAtWritten(unittest.TestCase):
 
             capsule = _read_persisted_capsule(root)
             self.assertEqual(capsule["updated_at"], patch_ts)
+
+    def test_patch_repairs_legacy_blank_top_level_timestamps(self) -> None:
+        """Patch should recover from legacy capsules whose stored top-level timestamps are unusable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _setup_dirs(root)
+            gm = _GitManagerStub(root)
+            auth = _AuthStub()
+            legacy_payload = {
+                "schema_version": "1.0",
+                "subject_kind": "user",
+                "subject_id": "test-agent",
+                "updated_at": "",
+                "verified_at": "",
+                "source": {"producer": "legacy", "update_reason": "manual", "inputs": []},
+                "continuity": {
+                    "top_priorities": ["p1"],
+                    "active_concerns": ["c1"],
+                    "active_constraints": ["k1"],
+                    "open_loops": ["loop1"],
+                    "stance_summary": "Legacy continuity payload",
+                    "drift_signals": ["d1"],
+                    "negative_decisions": [{"decision": "avoid x", "rationale": "legacy reason"}],
+                },
+                "confidence": {"continuity": 0.9, "relationship_model": 0.8},
+            }
+            (root / "memory" / "continuity" / "user-test-agent.json").write_text(
+                json.dumps(legacy_payload),
+                encoding="utf-8",
+            )
+
+            patch_ts = _later_iso()
+            _patch(
+                root,
+                gm,
+                auth,
+                [{"target": "continuity.open_loops", "action": "append", "value": "loop2"}],
+                updated_at=patch_ts,
+            )
+
+            capsule = _read_persisted_capsule(root)
+            self.assertEqual(capsule["updated_at"], patch_ts)
+            self.assertEqual(capsule["verified_at"], "1970-01-01T00:00:00Z")
+            self.assertEqual(capsule["continuity"]["open_loops"], ["loop1", "loop2"])
 
 
 class TestPatchNoOp(unittest.TestCase):

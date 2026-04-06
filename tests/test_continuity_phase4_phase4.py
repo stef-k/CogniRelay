@@ -6,11 +6,15 @@ import json
 import os
 import tempfile
 import unittest
+import gzip
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
+from app.continuity.cold import _build_cold_stub_text
+from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
+from app.continuity.validation import _upgrade_legacy_structured_entry_timestamps
 from app.indexer import rebuild_index
 from app.main import backup_create, backup_restore_test, context_retrieve
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, ContextRetrieveRequest
@@ -112,6 +116,49 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
             encoding="utf-8",
         )
         return path
+
+    def _legacy_structured_payload(
+        self,
+        *,
+        subject_id: str,
+        updated_at: str,
+        blank_top_level_timestamps: bool = False,
+    ) -> dict:
+        """Return a legacy persisted payload using set_at across all refactored entry types."""
+        payload = self._capsule_payload(
+            subject_kind="user",
+            subject_id=subject_id,
+            updated_at=updated_at,
+            verified_at=updated_at,
+        )
+        payload["continuity"]["negative_decisions"] = [
+            {
+                "decision": "Do not auto-confirm on read",
+                "rationale": "Reads must remain observational",
+                "set_at": "2026-03-01T10:00:00Z",
+            }
+        ]
+        payload["continuity"]["rationale_entries"] = [
+            {
+                "tag": "timestamp_refactor",
+                "kind": "decision",
+                "status": "active",
+                "summary": "Replace ambiguous structured entry timestamps",
+                "reasoning": "System and agent write responsibilities must stay separate",
+                "set_at": "2026-03-02T10:00:00Z",
+            }
+        ]
+        payload["stable_preferences"] = [
+            {
+                "tag": "response_style",
+                "content": "Prefer concise responses",
+                "set_at": "2026-03-03T10:00:00Z",
+            }
+        ]
+        if blank_top_level_timestamps:
+            payload["updated_at"] = ""
+            payload["verified_at"] = ""
+        return payload
 
     def test_backup_manifest_includes_continuity_counts(self) -> None:
         """Backup manifests should include continuity counts when memory/continuity is included."""
@@ -227,6 +274,198 @@ class TestContinuityPhase4Phase4(unittest.TestCase):
 
             self.assertEqual(listed["count"], 1)
             self.assertEqual([row["path"] for row in listed["capsules"]], ["memory/continuity/user-alpha.json"])
+
+    def test_backup_restore_accepts_legacy_structured_timestamp_capsules_across_all_artifact_types(self) -> None:
+        """Restore drills must accept legacy set_at continuity artifacts across active, fallback, archive, and cold."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            updated_at = datetime(2026, 3, 20, 12, 0, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+            self._write_valid_active(
+                repo_root,
+                subject_kind="user",
+                subject_id="alpha",
+                payload=self._legacy_structured_payload(subject_id="alpha", updated_at=updated_at),
+            )
+            self._write_fallback(
+                repo_root,
+                subject_kind="user",
+                subject_id="alpha",
+                payload=self._legacy_structured_payload(subject_id="alpha", updated_at=updated_at),
+            )
+
+            archive_payload = self._legacy_structured_payload(subject_id="gamma", updated_at=updated_at)
+            archive_rel = "memory/continuity/archive/user-gamma-20260320T120000Z.json"
+            archive_path = repo_root / archive_rel
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_text(
+                json.dumps(
+                    {
+                        "schema_type": "continuity_archive_envelope",
+                        "schema_version": "1.0",
+                        "archived_at": updated_at,
+                        "active_path": "memory/continuity/user-gamma.json",
+                        "capsule": archive_payload,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cold_payload = self._legacy_structured_payload(subject_id="delta", updated_at=updated_at)
+            cold_archive_rel = "memory/continuity/archive/user-delta-20260320T120000Z.json"
+            cold_storage_rel = continuity_cold_storage_rel_path(cold_archive_rel)
+            cold_stub_rel = continuity_cold_stub_rel_path(cold_archive_rel)
+            cold_envelope = {
+                "schema_type": "continuity_archive_envelope",
+                "schema_version": "1.0",
+                "archived_at": updated_at,
+                "active_path": "memory/continuity/user-delta.json",
+                "capsule": cold_payload,
+            }
+            cold_storage_path = repo_root / cold_storage_rel
+            cold_storage_path.parent.mkdir(parents=True, exist_ok=True)
+            cold_storage_path.write_bytes(gzip.compress(json.dumps(cold_envelope).encode("utf-8")))
+            cold_stub_path = repo_root / cold_stub_rel
+            cold_stub_path.parent.mkdir(parents=True, exist_ok=True)
+            cold_stub_path.write_text(
+                _build_cold_stub_text(
+                    envelope=cold_envelope,
+                    source_archive_path=cold_archive_rel,
+                    cold_storage_path=cold_storage_rel,
+                    cold_stored_at=updated_at,
+                    now=datetime.now(timezone.utc),
+                ),
+                encoding="utf-8",
+            )
+
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            with patch("app.main._services", return_value=(settings, gm)):
+                created = backup_create(
+                    req=BackupCreateRequest(include_prefixes=["memory"], note="phase4 legacy structured timestamps"),
+                    auth=_AuthStub(),
+                )
+                restored = backup_restore_test(
+                    req=BackupRestoreTestRequest(
+                        backup_path=created["backup_path"],
+                        verify_index_rebuild=False,
+                        verify_continuity=True,
+                    ),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(restored["ok"])
+            validation = restored["continuity_validation"]
+            self.assertTrue(validation["ok"])
+            self.assertEqual(validation["invalid_capsules"], [])
+            self.assertEqual(validation["invalid_fallbacks"], [])
+            self.assertEqual(validation["invalid_archives"], [])
+            self.assertEqual(validation["invalid_cold_payloads"], [])
+
+    def test_backup_restore_accepts_legacy_capsules_with_blank_top_level_timestamps(self) -> None:
+        """Restore drills must repair legacy capsules whose updated_at/verified_at are blank."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            archived_at = datetime(2026, 3, 21, 12, 0, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+            self._write_valid_active(
+                repo_root,
+                subject_kind="user",
+                subject_id="alpha",
+                payload=self._legacy_structured_payload(
+                    subject_id="alpha",
+                    updated_at=archived_at,
+                    blank_top_level_timestamps=True,
+                ),
+            )
+            self._write_fallback(
+                repo_root,
+                subject_kind="user",
+                subject_id="alpha",
+                payload=self._legacy_structured_payload(
+                    subject_id="alpha",
+                    updated_at=archived_at,
+                    blank_top_level_timestamps=True,
+                ),
+            )
+
+            archive_payload = self._legacy_structured_payload(
+                subject_id="gamma",
+                updated_at=archived_at,
+                blank_top_level_timestamps=True,
+            )
+            archive_rel = "memory/continuity/archive/user-gamma-20260321T120000Z.json"
+            archive_path = repo_root / archive_rel
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_text(
+                json.dumps(
+                    {
+                        "schema_type": "continuity_archive_envelope",
+                        "schema_version": "1.0",
+                        "archived_at": archived_at,
+                        "active_path": "memory/continuity/user-gamma.json",
+                        "capsule": archive_payload,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cold_payload = self._legacy_structured_payload(
+                subject_id="delta",
+                updated_at=archived_at,
+                blank_top_level_timestamps=True,
+            )
+            cold_archive_rel = "memory/continuity/archive/user-delta-20260321T120000Z.json"
+            cold_storage_rel = continuity_cold_storage_rel_path(cold_archive_rel)
+            cold_stub_rel = continuity_cold_stub_rel_path(cold_archive_rel)
+            cold_envelope = {
+                "schema_type": "continuity_archive_envelope",
+                "schema_version": "1.0",
+                "archived_at": archived_at,
+                "active_path": "memory/continuity/user-delta.json",
+                "capsule": cold_payload,
+            }
+            cold_storage_path = repo_root / cold_storage_rel
+            cold_storage_path.parent.mkdir(parents=True, exist_ok=True)
+            cold_storage_path.write_bytes(gzip.compress(json.dumps(cold_envelope).encode("utf-8")))
+            cold_stub_path = repo_root / cold_stub_rel
+            cold_stub_path.parent.mkdir(parents=True, exist_ok=True)
+            stub_envelope = dict(cold_envelope)
+            stub_envelope["capsule"] = _upgrade_legacy_structured_entry_timestamps(cold_payload)
+            cold_stub_path.write_text(
+                _build_cold_stub_text(
+                    envelope=stub_envelope,
+                    source_archive_path=cold_archive_rel,
+                    cold_storage_path=cold_storage_rel,
+                    cold_stored_at=archived_at,
+                    now=datetime.now(timezone.utc),
+                ),
+                encoding="utf-8",
+            )
+
+            settings = self._settings(repo_root)
+            gm = _GitManagerStub()
+            with patch("app.main._services", return_value=(settings, gm)):
+                created = backup_create(
+                    req=BackupCreateRequest(include_prefixes=["memory"], note="phase4 legacy blank top-level timestamps"),
+                    auth=_AuthStub(),
+                )
+                restored = backup_restore_test(
+                    req=BackupRestoreTestRequest(
+                        backup_path=created["backup_path"],
+                        verify_index_rebuild=False,
+                        verify_continuity=True,
+                    ),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(restored["ok"])
+            validation = restored["continuity_validation"]
+            self.assertTrue(validation["ok"])
+            self.assertEqual(validation["invalid_capsules"], [])
+            self.assertEqual(validation["invalid_fallbacks"], [])
+            self.assertEqual(validation["invalid_archives"], [])
+            self.assertEqual(validation["invalid_cold_payloads"], [])
 
     def test_context_retrieve_uses_indexed_path_when_index_is_stale(self) -> None:
         """Stale indexes should keep indexed retrieval and add a stale warning."""

@@ -71,9 +71,9 @@ def _make_capsule(overrides: dict[str, Any] | None = None) -> ContinuityCapsule:
     return ContinuityCapsule.model_validate(data)
 
 
-def _pref(tag: str, content: str, set_at: str = "2025-01-01T00:00:00Z") -> dict[str, Any]:
+def _pref(tag: str, content: str, last_confirmed_at: str = "2025-01-01T00:00:00Z") -> dict[str, Any]:
     """Build a stable_preferences dict entry."""
-    return {"tag": tag, "content": content, "set_at": set_at}
+    return {"tag": tag, "content": content, "last_confirmed_at": last_confirmed_at}
 
 
 def _rationale(
@@ -83,7 +83,7 @@ def _rationale(
     status: str = "active",
     summary: str = "summary here",
     reasoning: str = "reasoning text",
-    set_at: str = "2025-01-01T00:00:00Z",
+    last_confirmed_at: str = "2025-01-01T00:00:00Z",
 ) -> dict[str, Any]:
     """Build a rationale_entries dict entry."""
     return {
@@ -92,7 +92,7 @@ def _rationale(
         "status": status,
         "summary": summary,
         "reasoning": reasoning,
-        "set_at": set_at,
+        "last_confirmed_at": last_confirmed_at,
     }
 
 

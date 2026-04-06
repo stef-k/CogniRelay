@@ -30,6 +30,8 @@ If you are adding CogniRelay to an existing agent loop and want the smallest use
 
 Use the returned capsule to restore your constraints, drift signals, open loops, and stance before you begin working.
 
+Continuity schema note: newly written continuity capsules now use schema `1.1`. Stabilized legacy `1.0` continuity payloads are still supported when they already have the modern required capsule structure and only need structured-entry timestamp upgrade or top-level timestamp repair. Sammy's oldest real continuity capsule sample falls into that supported bucket. Truly pre-stabilization payloads missing required modern capsule fields are not auto-migrated.
+
 **Before compaction or handoff (when you are about to lose context):**
 
 1. `POST /v1/continuity/upsert` with your current orientation — persists your active constraints, drift signals, open loops, stance summary, and any negative decisions you want to survive the reset

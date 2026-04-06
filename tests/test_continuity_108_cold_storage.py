@@ -6,12 +6,20 @@ import gzip
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from fastapi import HTTPException
 from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
+from app.continuity.constants import (
+    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+    CONTINUITY_CAPSULE_SCHEMA_VERSION,
+)
+from app.continuity.cold import _build_cold_stub_text
+from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
 from app.continuity.service import continuity_cold_rehydrate_service, continuity_cold_store_service
+from app.continuity.validation import _upgrade_legacy_structured_entry_timestamps
 from app.indexer import rebuild_index
 from app.main import backup_create, backup_restore_test, context_retrieve, continuity_list, ops_run
 from app.models import BackupCreateRequest, BackupRestoreTestRequest, ContextRetrieveRequest, ContinuityListRequest, OpsRunRequest
@@ -55,7 +63,7 @@ class TestContinuityColdStorage(unittest.TestCase):
     def _capsule_payload(self, *, subject_id: str, now_iso: str) -> dict:
         """Return a continuity capsule payload with enough data for stub projection."""
         return {
-            "schema_version": "1.0",
+            "schema_version": CONTINUITY_CAPSULE_SCHEMA_VERSION,
             "subject_kind": "user",
             "subject_id": subject_id,
             "updated_at": now_iso,
@@ -80,6 +88,8 @@ class TestContinuityColdStorage(unittest.TestCase):
                     {
                         "decision": "Do not auto-load cold payloads in retrieve",
                         "rationale": "Cold artifacts stay explicit until rehydration.",
+                        "created_at": now_iso,
+                        "updated_at": now_iso,
                     }
                 ],
             },
@@ -103,7 +113,7 @@ class TestContinuityColdStorage(unittest.TestCase):
         now_iso = "2026-03-19T10:15:00Z"
         payload = {
             "schema_type": "continuity_archive_envelope",
-            "schema_version": "1.0",
+            "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
             "archived_at": now_iso,
             "archived_by": "peer-admin",
             "reason": "retention",
@@ -252,6 +262,93 @@ class TestContinuityColdStorage(unittest.TestCase):
             self.assertEqual((repo_root / archive_rel).read_bytes(), archive_bytes)
             self.assertFalse((repo_root / "memory/continuity/cold/user-alpha-20260319T101500Z.json.gz").exists())
             self.assertFalse((repo_root / "memory/continuity/cold/index/user-alpha-20260319T101500Z.md").exists())
+
+    def test_cold_rehydrate_upgrades_legacy_set_at_payload(self) -> None:
+        """Cold rehydrate must accept legacy set_at payloads and restore upgraded archive JSON."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            now_iso = "2026-03-19T10:15:00Z"
+            archive_rel = "memory/continuity/archive/user-alpha-20260319T101500Z.json"
+            cold_storage_rel = continuity_cold_storage_rel_path(archive_rel)
+            cold_stub_rel = continuity_cold_stub_rel_path(archive_rel)
+            capsule = self._capsule_payload(subject_id="alpha", now_iso=now_iso)
+            capsule["updated_at"] = ""
+            capsule["verified_at"] = ""
+            capsule["continuity"]["negative_decisions"] = [
+                {
+                    "decision": "Do not auto-load cold payloads in retrieve",
+                    "rationale": "Cold artifacts stay explicit until rehydration.",
+                    "set_at": "2026-03-01T10:00:00Z",
+                }
+            ]
+            capsule["continuity"]["rationale_entries"] = [
+                {
+                    "tag": "cold_rehydrate",
+                    "kind": "decision",
+                    "status": "active",
+                    "summary": "Cold payload should remain compatible",
+                    "reasoning": "Legacy archives still exist on disk",
+                    "set_at": "2026-03-02T10:00:00Z",
+                }
+            ]
+            capsule["stable_preferences"] = [
+                {
+                    "tag": "response_style",
+                    "content": "Prefer concise responses",
+                    "set_at": "2026-03-03T10:00:00Z",
+                }
+            ]
+            envelope = {
+                "schema_type": "continuity_archive_envelope",
+                "schema_version": "1.0",
+                "archived_at": now_iso,
+                "active_path": "memory/continuity/user-alpha.json",
+                "capsule": capsule,
+            }
+            cold_path = repo_root / cold_storage_rel
+            cold_path.parent.mkdir(parents=True, exist_ok=True)
+            cold_path.write_bytes(gzip.compress(json.dumps(envelope).encode("utf-8")))
+            stub_path = repo_root / cold_stub_rel
+            stub_path.parent.mkdir(parents=True, exist_ok=True)
+            stub_envelope = dict(envelope)
+            stub_envelope["capsule"] = _upgrade_legacy_structured_entry_timestamps(capsule)
+            stub_path.write_text(
+                _build_cold_stub_text(
+                    envelope=stub_envelope,
+                    source_archive_path=archive_rel,
+                    cold_storage_path=cold_storage_rel,
+                    cold_stored_at=now_iso,
+                    now=datetime.now(timezone.utc),
+                ),
+                encoding="utf-8",
+            )
+
+            result = continuity_cold_rehydrate_service(
+                repo_root=repo_root,
+                gm=_GitManagerStub(repo_root),
+                auth=_LocalOpsAuth(),
+                req=type("Req", (), {"source_archive_path": archive_rel, "cold_stub_path": None})(),
+                audit=lambda *_args: None,
+            )
+
+            self.assertTrue(result["ok"])
+            restored = json.loads((repo_root / archive_rel).read_text(encoding="utf-8"))
+            restored_capsule = restored["capsule"]
+            self.assertEqual(restored_capsule["updated_at"], "1970-01-01T00:00:00Z")
+            self.assertEqual(restored_capsule["verified_at"], "1970-01-01T00:00:00Z")
+            self.assertEqual(
+                restored_capsule["continuity"]["negative_decisions"][0]["created_at"],
+                "2026-03-01T10:00:00Z",
+            )
+            self.assertEqual(
+                restored_capsule["continuity"]["rationale_entries"][0]["updated_at"],
+                "2026-03-02T10:00:00Z",
+            )
+            self.assertEqual(
+                restored_capsule["stable_preferences"][0]["created_at"],
+                "2026-03-03T10:00:00Z",
+            )
+            self.assertNotIn("set_at", restored_capsule["stable_preferences"][0])
 
     def test_backup_manifest_and_restore_test_include_cold_artifacts(self) -> None:
         """Backup counts and restore validation should account for cold payloads and stubs."""

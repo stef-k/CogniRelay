@@ -13,10 +13,11 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.continuity.constants import CONTINUITY_COLD_STUB_FRONTMATTER_ORDER
 from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
+from app.continuity.persistence import _load_archive_envelope
 from app.continuity.service import build_continuity_state
 from app.continuity.trimming import _estimated_tokens, _render_value, _trim_capsule
 from app.continuity.trust import _build_startup_summary
-from app.continuity.validation import _validate_capsule
+from app.continuity.validation import _upgrade_legacy_structured_entry_timestamps, _validate_capsule
 from app.main import continuity_list, continuity_read, continuity_upsert
 from app.models import (
     ContinuityCapsule,
@@ -128,7 +129,7 @@ def _sample_prefs(n: int = 2) -> list[dict]:
     """Return n sample preference dicts with unique tags."""
     now = _now_iso()
     return [
-        {"tag": f"pref_{i}", "content": f"Preference content {i}", "set_at": now}
+        {"tag": f"pref_{i}", "content": f"Preference content {i}", "last_confirmed_at": now}
         for i in range(n)
     ]
 
@@ -141,32 +142,32 @@ class TestStablePreferenceModel(unittest.TestCase):
     """Validate StablePreference Pydantic model constraints."""
 
     def test_valid_construction(self) -> None:
-        p = StablePreference(tag="timezone", content="UTC+2 (Athens)", set_at=_now_iso())
+        p = StablePreference(tag="timezone", content="UTC+2 (Athens)", last_confirmed_at=_now_iso())
         self.assertEqual(p.tag, "timezone")
         self.assertEqual(p.content, "UTC+2 (Athens)")
 
     def test_tag_too_long(self) -> None:
         with self.assertRaises(ValidationError):
-            StablePreference(tag="x" * 81, content="ok", set_at=_now_iso())
+            StablePreference(tag="x" * 81, content="ok", last_confirmed_at=_now_iso())
 
     def test_content_too_long(self) -> None:
         with self.assertRaises(ValidationError):
-            StablePreference(tag="ok", content="x" * 241, set_at=_now_iso())
+            StablePreference(tag="ok", content="x" * 241, last_confirmed_at=_now_iso())
 
     def test_empty_tag_rejected(self) -> None:
         with self.assertRaises(ValidationError):
-            StablePreference(tag="", content="ok", set_at=_now_iso())
+            StablePreference(tag="", content="ok", last_confirmed_at=_now_iso())
 
     def test_empty_content_rejected(self) -> None:
         with self.assertRaises(ValidationError):
-            StablePreference(tag="ok", content="", set_at=_now_iso())
+            StablePreference(tag="ok", content="", last_confirmed_at=_now_iso())
 
     def test_max_length_tag_accepted(self) -> None:
-        p = StablePreference(tag="t" * 80, content="ok", set_at=_now_iso())
+        p = StablePreference(tag="t" * 80, content="ok", last_confirmed_at=_now_iso())
         self.assertEqual(len(p.tag), 80)
 
     def test_max_length_content_accepted(self) -> None:
-        p = StablePreference(tag="ok", content="c" * 240, set_at=_now_iso())
+        p = StablePreference(tag="ok", content="c" * 240, last_confirmed_at=_now_iso())
         self.assertEqual(len(p.content), 240)
 
 
@@ -255,8 +256,8 @@ class TestValidateCapsuleStablePreferences(unittest.TestCase):
     def test_duplicate_tags_rejected(self) -> None:
         now = _now_iso()
         prefs = [
-            {"tag": "dup", "content": "first", "set_at": now},
-            {"tag": "dup", "content": "second", "set_at": now},
+            {"tag": "dup", "content": "first", "last_confirmed_at": now},
+            {"tag": "dup", "content": "second", "last_confirmed_at": now},
         ]
         with tempfile.TemporaryDirectory() as td:
             payload = _base_capsule_payload(stable_preferences=prefs)
@@ -266,8 +267,8 @@ class TestValidateCapsuleStablePreferences(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 400)
             self.assertIn("Duplicate", str(ctx.exception.detail))
 
-    def test_invalid_set_at_rejected(self) -> None:
-        prefs = [{"tag": "tz", "content": "UTC+2", "set_at": "not-a-timestamp"}]
+    def test_invalid_last_confirmed_at_rejected(self) -> None:
+        prefs = [{"tag": "tz", "content": "UTC+2", "last_confirmed_at": "not-a-timestamp"}]
         with tempfile.TemporaryDirectory() as td:
             payload = _base_capsule_payload(stable_preferences=prefs)
             capsule = ContinuityCapsule(**payload)
@@ -275,9 +276,9 @@ class TestValidateCapsuleStablePreferences(unittest.TestCase):
                 _validate_capsule(Path(td), capsule)
             self.assertEqual(ctx.exception.status_code, 400)
 
-    def test_non_utc_set_at_rejected(self) -> None:
-        """set_at with timezone offset other than Z must be rejected."""
-        prefs = [{"tag": "tz", "content": "UTC+2", "set_at": "2026-03-20T10:00:00+02:00"}]
+    def test_non_utc_last_confirmed_at_rejected(self) -> None:
+        """last_confirmed_at with timezone offset other than Z must be rejected."""
+        prefs = [{"tag": "tz", "content": "UTC+2", "last_confirmed_at": "2026-03-20T10:00:00+02:00"}]
         with tempfile.TemporaryDirectory() as td:
             payload = _base_capsule_payload(stable_preferences=prefs)
             capsule = ContinuityCapsule(**payload)
@@ -452,12 +453,54 @@ class TestUpsertReadRoundtrip(unittest.TestCase):
             payload["updated_at"] = later
             payload["verified_at"] = later
             payload["stable_preferences"] = [
-                {"tag": "new_tag", "content": "new content", "set_at": later},
+                {"tag": "new_tag", "content": "new content", "last_confirmed_at": later},
             ]
             self._do_upsert(settings, gm, auth, payload)
             out = self._do_read(settings, gm, auth, "user", "test-agent")
             self.assertEqual(len(out["capsule"]["stable_preferences"]), 1)
             self.assertEqual(out["capsule"]["stable_preferences"][0]["tag"], "new_tag")
+
+    def test_child_timestamps_preserved_on_content_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            initial = _base_capsule_payload(stable_preferences=[
+                {
+                    "tag": "timezone",
+                    "content": "UTC+2 (Athens)",
+                    "last_confirmed_at": "2026-03-20T10:00:00Z",
+                }
+            ])
+            later = _base_capsule_payload(stable_preferences=[
+                {
+                    "tag": "timezone",
+                    "content": "UTC+2 (Athens)",
+                }
+            ])
+            later["updated_at"] = "2099-03-25T10:00:00Z"
+            later["verified_at"] = "2099-03-25T10:00:00Z"
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                continuity_upsert(req=ContinuityUpsertRequest(**{
+                    "subject_kind": "user",
+                    "subject_id": "test-agent",
+                    "capsule": initial,
+                }), auth=_AuthStub())
+                out = continuity_upsert(req=ContinuityUpsertRequest(**{
+                    "subject_kind": "user",
+                    "subject_id": "test-agent",
+                    "capsule": later,
+                }), auth=_AuthStub())
+
+            self.assertTrue(out["ok"])
+            persisted = json.loads(
+                (repo_root / "memory" / "continuity" / "user-test-agent.json").read_text("utf-8")
+            )
+            pref = persisted["stable_preferences"][0]
+            self.assertEqual(pref["created_at"], initial["updated_at"])
+            self.assertEqual(pref["updated_at"], initial["updated_at"])
+            self.assertEqual(pref["last_confirmed_at"], "2026-03-20T10:00:00Z")
 
     def test_clear_to_empty_list(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -495,21 +538,21 @@ class TestUpsertReadRoundtrip(unittest.TestCase):
             auth = _AuthStub()
             now = _now_iso()
             prefs = [
-                {"tag": "dup", "content": "a", "set_at": now},
-                {"tag": "dup", "content": "b", "set_at": now},
+                {"tag": "dup", "content": "a", "last_confirmed_at": now},
+                {"tag": "dup", "content": "b", "last_confirmed_at": now},
             ]
             payload = _base_capsule_payload(stable_preferences=prefs)
             with self.assertRaises(HTTPException) as ctx:
                 self._do_upsert(settings, gm, auth, payload)
             self.assertEqual(ctx.exception.status_code, 400)
 
-    def test_invalid_set_at_rejected_400(self) -> None:
+    def test_invalid_last_confirmed_at_rejected_400(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             settings = _settings(repo_root)
             gm = _GitManagerStub(repo_root)
             auth = _AuthStub()
-            prefs = [{"tag": "tz", "content": "UTC+2", "set_at": "invalid"}]
+            prefs = [{"tag": "tz", "content": "UTC+2", "last_confirmed_at": "invalid"}]
             payload = _base_capsule_payload(stable_preferences=prefs)
             with self.assertRaises(HTTPException) as ctx:
                 self._do_upsert(settings, gm, auth, payload)
@@ -710,6 +753,33 @@ class TestFallbackPreservesPrefs(unittest.TestCase):
             self.assertEqual(out["source_state"], "fallback")
             self.assertEqual(len(out["capsule"]["stable_preferences"]), 2)
 
+    def test_fallback_read_upgrades_legacy_set_at(self) -> None:
+        """Fallback reads must upgrade legacy set_at timestamps without inventing confirmation."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            legacy_set_at = "2026-03-01T10:00:00Z"
+            payload = _base_capsule_payload(
+                stable_preferences=[
+                    {"tag": "pref_legacy", "content": "Legacy stable preference", "set_at": legacy_set_at}
+                ]
+            )
+            _write_fallback(repo_root, payload)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+            with patch("app.main._services", return_value=(settings, gm)):
+                out = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="test-agent", allow_fallback=True),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["source_state"], "fallback")
+            pref = out["capsule"]["stable_preferences"][0]
+            self.assertEqual(pref["created_at"], legacy_set_at)
+            self.assertEqual(pref["updated_at"], legacy_set_at)
+            self.assertNotIn("set_at", pref)
+            self.assertNotIn("last_confirmed_at", pref)
+
 
 class TestArchivePreservesPrefs(unittest.TestCase):
     """Verify archive envelope preserves stable_preferences."""
@@ -741,6 +811,147 @@ class TestArchivePreservesPrefs(unittest.TestCase):
             self.assertTrue(len(archived) > 0)
             self.assertEqual(archived[0]["stable_preference_count"], 4)
 
+    def test_archive_loader_upgrades_legacy_set_at(self) -> None:
+        """Archive envelope loads must upgrade legacy set_at timestamps on nested prefs."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            legacy_set_at = "2026-03-02T11:30:00Z"
+            payload = _base_capsule_payload(
+                stable_preferences=[
+                    {"tag": "pref_legacy", "content": "Archived stable preference", "set_at": legacy_set_at}
+                ]
+            )
+            archive_rel = "memory/continuity/archive/user-test-agent-20260328.json"
+            archive_path = repo_root / archive_rel
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            envelope = {
+                "schema_type": "continuity_archive_envelope",
+                "schema_version": "1.0",
+                "active_path": "memory/continuity/user-test-agent.json",
+                "archived_at": _now_iso(),
+                "capsule": payload,
+            }
+            archive_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+            loaded = _load_archive_envelope(repo_root, archive_rel)
+            pref = loaded["capsule"]["stable_preferences"][0]
+            self.assertEqual(pref["created_at"], legacy_set_at)
+            self.assertEqual(pref["updated_at"], legacy_set_at)
+            self.assertNotIn("set_at", pref)
+            self.assertNotIn("last_confirmed_at", pref)
+
+
+class TestLegacyStructuredTimestampUpgrade(unittest.TestCase):
+    """Verify active legacy structured timestamps survive reads and follow-up writes."""
+
+    def test_upgrader_repairs_missing_top_level_timestamps_without_synthesizing_child_timestamps(self) -> None:
+        """Legacy payloads with no usable capsule timestamps get deterministic top-level repair only."""
+        legacy_payload = _base_capsule_payload(
+            stable_preferences=[{"tag": "pref_legacy", "content": "Legacy stable preference"}]
+        )
+        legacy_payload["updated_at"] = ""
+        legacy_payload["verified_at"] = ""
+
+        upgraded = _upgrade_legacy_structured_entry_timestamps(legacy_payload)
+
+        self.assertEqual(upgraded["updated_at"], "1970-01-01T00:00:00Z")
+        self.assertEqual(upgraded["verified_at"], "1970-01-01T00:00:00Z")
+        self.assertNotIn("created_at", upgraded["stable_preferences"][0])
+        self.assertNotIn("updated_at", upgraded["stable_preferences"][0])
+        self.assertNotIn("last_confirmed_at", upgraded["stable_preferences"][0])
+
+    def test_active_legacy_set_at_upsert_preserves_system_timestamps(self) -> None:
+        """Reading and rewriting a legacy active capsule must preserve migrated child timestamps."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            legacy_set_at = "2026-03-03T09:15:00Z"
+            legacy_payload = _base_capsule_payload(
+                stable_preferences=[
+                    {"tag": "pref_legacy", "content": "Legacy stable preference", "set_at": legacy_set_at}
+                ]
+            )
+            _write_capsule(repo_root, legacy_payload)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                read_out = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="test-agent"),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(read_out["ok"])
+            pref = read_out["capsule"]["stable_preferences"][0]
+            self.assertEqual(pref["created_at"], legacy_set_at)
+            self.assertEqual(pref["updated_at"], legacy_set_at)
+            self.assertNotIn("last_confirmed_at", pref)
+
+            updated_payload = _base_capsule_payload(
+                stable_preferences=[{"tag": "pref_legacy", "content": "Legacy stable preference"}]
+            )
+            updated_payload["updated_at"] = "2026-12-04T09:15:00Z"
+            updated_payload["verified_at"] = "2026-12-04T09:15:00Z"
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                write_out = continuity_upsert(
+                    req=ContinuityUpsertRequest(
+                        subject_kind="user",
+                        subject_id="test-agent",
+                        capsule=updated_payload,
+                    ),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(write_out["ok"])
+            persisted = json.loads(
+                (repo_root / "memory" / "continuity" / "user-test-agent.json").read_text(encoding="utf-8")
+            )
+            persisted_pref = persisted["stable_preferences"][0]
+            self.assertEqual(persisted_pref["created_at"], legacy_set_at)
+            self.assertEqual(persisted_pref["updated_at"], legacy_set_at)
+            self.assertNotIn("set_at", persisted_pref)
+            self.assertNotIn("last_confirmed_at", persisted_pref)
+
+    def test_active_legacy_blank_top_level_timestamps_read_repairs_capsule_timestamps(self) -> None:
+        """Reads should repair unusable legacy top-level timestamps deterministically."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            legacy_payload = _base_capsule_payload(
+                stable_preferences=[{"tag": "pref_legacy", "content": "Legacy stable preference"}]
+            )
+            legacy_payload["updated_at"] = ""
+            legacy_payload["verified_at"] = ""
+            _write_capsule(repo_root, legacy_payload)
+            settings = _settings(repo_root)
+            gm = _GitManagerStub(repo_root)
+
+            with patch("app.main._services", return_value=(settings, gm)):
+                read_out = continuity_read(
+                    req=ContinuityReadRequest(subject_kind="user", subject_id="test-agent"),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(read_out["ok"])
+            self.assertEqual(read_out["capsule"]["updated_at"], "1970-01-01T00:00:00Z")
+            self.assertEqual(read_out["capsule"]["verified_at"], "1970-01-01T00:00:00Z")
+            pref = read_out["capsule"]["stable_preferences"][0]
+            self.assertNotIn("created_at", pref)
+            self.assertNotIn("updated_at", pref)
+            self.assertNotIn("last_confirmed_at", pref)
+
+    def test_upgrader_does_not_borrow_freshness_from_updated_at_for_malformed_verified_at(self) -> None:
+        """Malformed verified_at should degrade to the deterministic floor, not inherit freshness."""
+        legacy_payload = _base_capsule_payload(
+            stable_preferences=[{"tag": "pref_legacy", "content": "Legacy stable preference"}]
+        )
+        legacy_payload["updated_at"] = "2026-03-04T09:15:00Z"
+        legacy_payload["verified_at"] = "not-a-valid-date"
+
+        upgraded = _upgrade_legacy_structured_entry_timestamps(legacy_payload)
+
+        self.assertEqual(upgraded["updated_at"], "2026-03-04T09:15:00Z")
+        self.assertEqual(upgraded["verified_at"], "1970-01-01T00:00:00Z")
+
 
 # ---------------------------------------------------------------------------
 # Integration tests: build_continuity_state (context/retrieve path)
@@ -771,6 +982,60 @@ class TestBuildContinuityStateStablePreferences(unittest.TestCase):
             self.assertEqual(len(prefs), 3)
             tags = {p["tag"] for p in prefs}
             self.assertEqual(tags, {"pref_0", "pref_1", "pref_2"})
+
+    def test_active_legacy_set_at_includes_migrated_pref_timestamps(self) -> None:
+        """Context retrieval should surface migrated timestamps from legacy active capsules."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            legacy_set_at = "2026-03-05T10:00:00Z"
+            payload = _base_capsule_payload(
+                stable_preferences=[
+                    {"tag": "pref_legacy", "content": "Legacy stable preference", "set_at": legacy_set_at}
+                ]
+            )
+            _write_capsule(repo_root, payload)
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "test-agent"}],
+                max_tokens_estimate=4000,
+            )
+
+            state = build_continuity_state(
+                repo_root=repo_root, auth=_AuthStub(), req=req,
+                now=datetime.now(timezone.utc),
+            )
+
+            self.assertTrue(state["present"])
+            pref = state["capsules"][0]["stable_preferences"][0]
+            self.assertEqual(pref["created_at"], legacy_set_at)
+            self.assertEqual(pref["updated_at"], legacy_set_at)
+            self.assertNotIn("set_at", pref)
+            self.assertNotIn("last_confirmed_at", pref)
+
+    def test_active_legacy_blank_top_level_timestamps_do_not_break_context_retrieval(self) -> None:
+        """Context retrieval should degrade safely past blank legacy top-level timestamps."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            payload = _base_capsule_payload(
+                stable_preferences=[{"tag": "pref_legacy", "content": "Legacy stable preference"}]
+            )
+            payload["updated_at"] = ""
+            payload["verified_at"] = ""
+            _write_capsule(repo_root, payload)
+            req = ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[{"subject_kind": "user", "subject_id": "test-agent"}],
+                max_tokens_estimate=4000,
+            )
+
+            state = build_continuity_state(
+                repo_root=repo_root, auth=_AuthStub(), req=req,
+                now=datetime.now(timezone.utc),
+            )
+
+            self.assertFalse(state["present"])
+            self.assertEqual(state["capsules"], [])
+            self.assertEqual(state["omitted_selectors"], ["user:test-agent"])
 
     def test_trimming_reflects_in_trust_signals(self) -> None:
         """When stable_preferences is trimmed under a tight budget, the
