@@ -7,6 +7,8 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-04-06
+
 ### Updated
 
 - Refined the structured continuity entry timestamp model for

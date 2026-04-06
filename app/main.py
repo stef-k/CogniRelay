@@ -261,7 +261,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         set_coordination_index(None)
 
 
-app = FastAPI(title="CogniRelay", version="0.3.0", lifespan=_lifespan)
+app = FastAPI(title="CogniRelay", version="1.1.0", lifespan=_lifespan)
 
 
 @app.middleware("http")
