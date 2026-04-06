@@ -59,6 +59,7 @@ from app.continuity.constants import (
     CONTINUITY_RETENTION_STATE_REL,
     CONTINUITY_SIGNAL_STATUS,
     CONTINUITY_STATE_METADATA_FILES,
+    CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS,
     CONTINUITY_WARNING_ACTIVE_INVALID,
     CONTINUITY_WARNING_ACTIVE_MISSING,
     CONTINUITY_WARNING_FALLBACK_MISSING,
@@ -2342,7 +2343,7 @@ def continuity_cold_rehydrate_service(
             payload = json.loads(archive_bytes.decode("utf-8"))
             if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
                 raise ValueError("wrong schema_type")
-            if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+            if payload.get("schema_version") not in CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
                 raise ValueError("wrong schema_version")
             raw_capsule = payload.get("capsule") or {}
             upgraded_capsule = _upgrade_legacy_structured_entry_timestamps(raw_capsule)
@@ -2355,8 +2356,14 @@ def continuity_cold_rehydrate_service(
             if str(payload.get("active_path") or "") != continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])):
                 raise HTTPException(status_code=400, detail="Invalid continuity archive envelope in cold payload: active_path mismatch")
             restored_archive_bytes = archive_bytes
-            if upgraded_capsule != raw_capsule:
-                restored_archive_bytes = canonical_json({**payload, "capsule": capsule}).encode("utf-8")
+            if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION or upgraded_capsule != raw_capsule:
+                restored_archive_bytes = canonical_json(
+                    {
+                        **payload,
+                        "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+                        "capsule": capsule,
+                    }
+                ).encode("utf-8")
         except HTTPException:
             raise
         except FileNotFoundError as exc:

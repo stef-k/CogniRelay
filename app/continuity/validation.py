@@ -12,6 +12,8 @@ from pydantic import ValidationError
 
 from app.continuity.constants import (
     CAPSULE_SIZE_LIMIT_BYTES,
+    CONTINUITY_CAPSULE_SCHEMA_VERSION,
+    CONTINUITY_SUPPORTED_CAPSULE_SCHEMA_VERSIONS,
     CONTINUITY_INTERACTION_BOUNDARY_KINDS,
     CONTINUITY_PATH_RE,
     THREAD_DESCRIPTOR_ANCHOR_KIND_RE,
@@ -41,6 +43,9 @@ def _upgrade_legacy_structured_entry_timestamps(payload: dict[str, Any]) -> dict
     modern read, patch, and restore paths deterministically.
     """
     upgraded = copy.deepcopy(payload)
+    schema_version = str(upgraded.get("schema_version") or "").strip()
+    if not schema_version or schema_version in CONTINUITY_SUPPORTED_CAPSULE_SCHEMA_VERSIONS:
+        upgraded["schema_version"] = CONTINUITY_CAPSULE_SCHEMA_VERSION
 
     def _timestamp_state(field_name: str) -> tuple[str, str | None]:
         raw_value = upgraded.get(field_name)
@@ -256,6 +261,7 @@ def _validate_lifecycle_transition_request(req: ContinuityUpsertRequest) -> None
 
 def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict[str, Any], str]:
     """Validate write-path continuity bounds and return normalized payload plus canonical JSON."""
+    capsule.schema_version = CONTINUITY_CAPSULE_SCHEMA_VERSION
     _require_utc_timestamp(capsule.updated_at, "updated_at")
     _require_utc_timestamp(capsule.verified_at, "verified_at")
     if capsule.freshness and capsule.freshness.expires_at:

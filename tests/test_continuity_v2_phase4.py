@@ -128,7 +128,7 @@ class TestContinuityV2Phase4(unittest.TestCase):
 
             envelope = json.loads(archive_path.read_text(encoding="utf-8"))
             self.assertEqual(envelope["schema_type"], "continuity_archive_envelope")
-            self.assertEqual(envelope["schema_version"], "1.0")
+            self.assertEqual(envelope["schema_version"], "1.1")
             self.assertEqual(envelope["archived_by"], "peer-test")
             self.assertEqual(envelope["active_path"], "memory/continuity/user-stef.json")
             self.assertEqual(envelope["capsule"]["subject_id"], "stef")

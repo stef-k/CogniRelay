@@ -11,8 +11,10 @@ from fastapi import HTTPException
 from app.continuity.constants import (
     CONTINUITY_COLD_INDEX_DIR_REL,
     CONTINUITY_COLD_STUB_FRONTMATTER_ORDER,
+    CONTINUITY_COLD_STUB_SCHEMA_VERSION,
     CONTINUITY_COLD_STUB_SCHEMA_TYPE,
     CONTINUITY_COLD_STUB_SECTION_ORDER,
+    CONTINUITY_SUPPORTED_COLD_STUB_SCHEMA_VERSIONS,
 )
 from app.continuity.freshness import (
     _capsule_health_summary,
@@ -87,7 +89,7 @@ def _build_cold_stub_text(*, envelope: dict[str, Any], source_archive_path: str,
     phase, _ = _continuity_phase(capsule, now)
     frontmatter = {
         "type": CONTINUITY_COLD_STUB_SCHEMA_TYPE,
-        "schema_version": '"1.0"',
+        "schema_version": f'"{CONTINUITY_COLD_STUB_SCHEMA_VERSION}"',
         "artifact_state": "cold",
         "subject_kind": _normalize_stub_scalar(capsule.get("subject_kind")),
         "subject_id": _normalize_stub_scalar(capsule.get("subject_id")),
@@ -169,7 +171,7 @@ def _load_cold_stub(repo_root: Path, rel: str) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid continuity cold stub frontmatter fields")
     if frontmatter.get("type") != CONTINUITY_COLD_STUB_SCHEMA_TYPE:
         raise HTTPException(status_code=400, detail="Invalid continuity cold stub type")
-    if frontmatter.get("schema_version") != '"1.0"':
+    if frontmatter.get("schema_version") not in {f'"{version}"' for version in CONTINUITY_SUPPORTED_COLD_STUB_SCHEMA_VERSIONS}:
         raise HTTPException(status_code=400, detail="Invalid continuity cold stub schema_version")
     source_archive_path = frontmatter["source_archive_path"]
     expected_stub_path = continuity_cold_stub_rel_path(source_archive_path)

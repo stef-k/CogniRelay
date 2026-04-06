@@ -12,6 +12,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
+from app.continuity.constants import (
+    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
+    CONTINUITY_CAPSULE_SCHEMA_VERSION,
+)
 from app.continuity.cold import _build_cold_stub_text
 from app.continuity.paths import continuity_cold_storage_rel_path, continuity_cold_stub_rel_path
 from app.continuity.service import continuity_cold_rehydrate_service, continuity_cold_store_service
@@ -59,7 +63,7 @@ class TestContinuityColdStorage(unittest.TestCase):
     def _capsule_payload(self, *, subject_id: str, now_iso: str) -> dict:
         """Return a continuity capsule payload with enough data for stub projection."""
         return {
-            "schema_version": "1.0",
+            "schema_version": CONTINUITY_CAPSULE_SCHEMA_VERSION,
             "subject_kind": "user",
             "subject_id": subject_id,
             "updated_at": now_iso,
@@ -109,7 +113,7 @@ class TestContinuityColdStorage(unittest.TestCase):
         now_iso = "2026-03-19T10:15:00Z"
         payload = {
             "schema_type": "continuity_archive_envelope",
-            "schema_version": "1.0",
+            "schema_version": CONTINUITY_ARCHIVE_SCHEMA_VERSION,
             "archived_at": now_iso,
             "archived_by": "peer-admin",
             "reason": "retention",

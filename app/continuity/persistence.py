@@ -12,9 +12,10 @@ from pydantic import ValidationError
 
 from app.continuity.constants import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
-    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
     CONTINUITY_FALLBACK_SCHEMA_TYPE,
     CONTINUITY_FALLBACK_SCHEMA_VERSION,
+    CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS,
+    CONTINUITY_SUPPORTED_FALLBACK_SCHEMA_VERSIONS,
 )
 from app.continuity.freshness import _capsule_health_summary, _verification_status
 from app.continuity.paths import (
@@ -146,7 +147,7 @@ def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]
         raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot JSON: {e}") from e
     if payload.get("schema_type") != CONTINUITY_FALLBACK_SCHEMA_TYPE:
         raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_type")
-    if payload.get("schema_version") != CONTINUITY_FALLBACK_SCHEMA_VERSION:
+    if payload.get("schema_version") not in CONTINUITY_SUPPORTED_FALLBACK_SCHEMA_VERSIONS:
         raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot schema_version")
     nested = payload.get("capsule")
     if not isinstance(nested, dict):
@@ -237,7 +238,7 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope JSON: {e}") from e
     if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope schema_type")
-    if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+    if payload.get("schema_version") not in CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope schema_version")
     capsule = payload.get("capsule")
     if not isinstance(capsule, dict):

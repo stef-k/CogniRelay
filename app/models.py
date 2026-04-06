@@ -795,7 +795,7 @@ class ThreadDescriptor(BaseModel):
 class ContinuityCapsule(BaseModel):
     """Persisted continuity capsule for one subject."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.0", "1.1"] = "1.1"
     subject_kind: Literal["user", "peer", "thread", "task"]
     subject_id: str = Field(min_length=1, max_length=200)
     updated_at: str

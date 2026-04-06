@@ -32,12 +32,12 @@ from app.artifact_lifecycle.service import (
 from app.config import DEFAULT_MAX_JSONL_READ_BYTES, SCOPE_REPLICATION_SYNC
 from app.continuity.constants import (
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
-    CONTINUITY_ARCHIVE_SCHEMA_VERSION,
     CONTINUITY_COLD_DIR_REL,
     CONTINUITY_COLD_INDEX_DIR_REL,
     CONTINUITY_DIR_REL,
     CONTINUITY_FALLBACK_SCHEMA_TYPE,
-    CONTINUITY_FALLBACK_SCHEMA_VERSION,
+    CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS,
+    CONTINUITY_SUPPORTED_FALLBACK_SCHEMA_VERSIONS,
 )
 from app.continuity.paths import (
     _archive_rel_path_from_envelope,
@@ -201,7 +201,7 @@ def _validate_fallback_snapshot_payload(path: Path, restore_root: Path) -> tuple
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("schema_type") != CONTINUITY_FALLBACK_SCHEMA_TYPE:
             return False, None
-        if payload.get("schema_version") != CONTINUITY_FALLBACK_SCHEMA_VERSION:
+        if payload.get("schema_version") not in CONTINUITY_SUPPORTED_FALLBACK_SCHEMA_VERSIONS:
             return False, None
         capsule = _validate_continuity_capsule_payload(payload.get("capsule"))
         expected_rel = continuity_fallback_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
@@ -219,7 +219,7 @@ def _validate_archive_envelope_payload(path: Path, restore_root: Path) -> tuple[
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
             return False, None
-        if payload.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+        if payload.get("schema_version") not in CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
             return False, None
         capsule = _validate_continuity_capsule_payload(payload.get("capsule"))
         expected_active_rel = continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"]))
@@ -312,7 +312,7 @@ def _validate_restored_continuity(restore_root: Path) -> dict[str, Any]:
             decoded = json.loads(payload.decode("utf-8"))
             if decoded.get("schema_type") != CONTINUITY_ARCHIVE_SCHEMA_TYPE:
                 raise ValueError("wrong schema_type")
-            if decoded.get("schema_version") != CONTINUITY_ARCHIVE_SCHEMA_VERSION:
+            if decoded.get("schema_version") not in CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
                 raise ValueError("wrong schema_version")
             capsule = _validate_continuity_capsule_payload(decoded.get("capsule"))
             if str(decoded.get("active_path") or "") != continuity_rel_path(str(capsule["subject_kind"]), str(capsule["subject_id"])):

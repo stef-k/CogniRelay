@@ -123,13 +123,13 @@ Agents should keep individual list item strings concise (roughly 80–120 chars)
 
 A continuity capsule is the core unit of orientation state. It is stored as a JSON file under `memory/continuity/`.
 
-Persisted legacy compatibility is intentionally bounded. On-disk capsules from older releases can be upgraded automatically when they still have the stabilized capsule shape and only need timestamp repair or structured-entry field upgrade. Pre-stabilization payloads that are missing required top-level fields such as `updated_at`, `verified_at`, `source`, or `confidence`, or that omit required core `continuity` fields such as `active_concerns`, `active_constraints`, `open_loops`, `stance_summary`, or `drift_signals`, are not auto-migrated by the runtime loader and are treated as invalid legacy state.
+Persisted legacy compatibility is intentionally bounded. On-disk capsules from older releases can be upgraded automatically when they still have the stabilized capsule shape and only need timestamp repair or structured-entry field upgrade. This supported legacy bucket includes older active capsules, fallback snapshots, archive envelopes, and cold artifacts whose capsule payload already contains the modern required fields (`updated_at`, `verified_at`, `source`, `confidence`, and the required core `continuity` fields). Sammy's oldest real continuity capsule sample falls into this supported bucket. Pre-stabilization payloads that are missing required top-level fields such as `updated_at`, `verified_at`, `source`, or `confidence`, or that omit required core `continuity` fields such as `active_concerns`, `active_constraints`, `open_loops`, `stance_summary`, or `drift_signals`, are not auto-migrated by the runtime loader and are treated as invalid legacy state.
 
 ### ContinuityCapsule
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `schema_version` | `"1.0"` | no | default `"1.0"` |
+| `schema_version` | `"1.1"` | no | default `"1.1"`. Stabilized legacy `"1.0"` capsules are still accepted and upgraded on load where supported. |
 | `subject_kind` | `"user"` \| `"peer"` \| `"thread"` \| `"task"` | yes | |
 | `subject_id` | string | yes | 1–200 chars |
 | `updated_at` | ISO datetime string | yes | |
