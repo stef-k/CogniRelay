@@ -1,6 +1,8 @@
 <section class="panel">
   <h2>Filters</h2>
   <form method="get" action="/ui/continuity" class="filter-form">
+    <label for="q">Search query</label>
+    <input id="q" name="q" type="text" value="${query_value}" placeholder="subject, path, state, status" />
     <label for="subject_kind">Subject kind</label>
     <select id="subject_kind" name="subject_kind">
       <option value="">all</option>
@@ -11,6 +13,11 @@
       <option value="">all</option>
       ${artifact_options}
     </select>
+    <label for="health_status">Health</label>
+    <select id="health_status" name="health_status">
+      <option value="">all</option>
+      ${health_options}
+    </select>
     <button type="submit">Apply</button>
   </form>
   <div class="badge-row summary-row">
@@ -19,8 +26,9 @@
     <span class="summary-chip">archived ${archived_count}</span>
     <span class="summary-chip">cold ${cold_count}</span>
   </div>
-  <p class="muted">Showing ${displayed_count} result(s) from ${matched_count} matched row(s). Current filters: ${selected_kind}; ${selected_artifact_state}</p>
+  <p class="muted">Showing ${displayed_count} result(s) from ${matched_count} matched row(s). Current filters: query "${query_value}"; ${selected_kind}; ${selected_artifact_state}; ${selected_health_status}</p>
   <p class="muted">Display truncated: ${result_truncated}</p>
+  <p class="muted">Query tokens use case-insensitive substring matching across subject, lifecycle, health, and artifact path fields.</p>
 </section>
 <section class="panel">
   <h2>Continuity Capsules</h2>
