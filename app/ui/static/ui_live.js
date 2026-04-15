@@ -2,6 +2,7 @@
   var LIVE_BASE_DELAY_MS = 1000;
   var LIVE_MAX_DELAY_MS = 16000;
   var LIVE_OFFLINE_THRESHOLD = 4;
+  var UI_THEME_KEY = "cognirelay-ui-theme";
 
   function setText(root, selector, value) {
     var node = root.querySelector(selector);
@@ -185,7 +186,29 @@
     connect();
   }
 
+  function applyTheme(theme) {
+    var value = theme === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", value);
+    try {
+      window.localStorage.setItem(UI_THEME_KEY, value);
+    } catch (_err) {}
+    return value;
+  }
+
+  function initThemeSelect() {
+    var selector = document.querySelector("[data-theme-select]");
+    if (!selector) {
+      return;
+    }
+    var currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
+    selector.value = currentTheme === "light" ? "light" : "dark";
+    selector.addEventListener("change", function (event) {
+      applyTheme(event.target.value);
+    });
+  }
+
   window.addEventListener("DOMContentLoaded", function () {
+    initThemeSelect();
     var roots = document.querySelectorAll("[data-live-page]");
     for (var idx = 0; idx < roots.length; idx += 1) {
       connectLiveRegion(roots[idx]);

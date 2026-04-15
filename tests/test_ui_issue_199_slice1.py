@@ -733,6 +733,28 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Capsule updated at:", detail.text)
         self.assertIn("Recovery warnings:", detail.text)
 
+    def test_ui_layout_vendors_mucss_and_exposes_dark_theme_selector(self) -> None:
+        """The operator UI should serve the vendored µCSS slate theme and expose a dark-default theme selector."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="stef")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            overview = client.get("/ui/")
+            theme_css = client.get("/ui/static/mu.slate.css")
+
+        self.assertEqual(overview.status_code, 200)
+        self.assertIn('/ui/static/mu.slate.css', overview.text)
+        self.assertIn('data-theme="dark"', overview.text)
+        self.assertIn('data-theme-select', overview.text)
+        self.assertIn('<option value="dark" selected="selected">Dark</option>', overview.text)
+        self.assertEqual(theme_css.status_code, 200)
+        self.assertIn("µCSS", theme_css.text)
+
     def test_ui_live_script_backoff_grows_and_caps_at_declared_max_delay(self) -> None:
         """Reconnect delay should grow exponentially and then stop at the declared cap."""
         policy = _ui_live_backoff_policy()
