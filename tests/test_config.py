@@ -65,6 +65,32 @@ class TestConfigTokens(unittest.TestCase):
 
             self.assertEqual(settings.continuity_retention_archive_days, 1)
 
+    def test_ui_flags_load_from_env_with_expected_defaults(self) -> None:
+        """UI flags should load from env and default to safe read-only posture."""
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {"COGNIRELAY_REPO_ROOT": td}, clear=True):
+                defaults = get_settings(force_reload=True)
+
+            self.assertFalse(defaults.ui_enabled)
+            self.assertTrue(defaults.ui_require_localhost)
+            self.assertTrue(defaults.ui_read_only)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "COGNIRELAY_REPO_ROOT": td,
+                    "COGNIRELAY_UI_ENABLED": "true",
+                    "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false",
+                    "COGNIRELAY_UI_READ_ONLY": "false",
+                },
+                clear=True,
+            ):
+                configured = get_settings(force_reload=True)
+
+            self.assertTrue(configured.ui_enabled)
+            self.assertFalse(configured.ui_require_localhost)
+            self.assertFalse(configured.ui_read_only)
+
 
 if __name__ == "__main__":
     unittest.main()

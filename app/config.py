@@ -74,6 +74,9 @@ class Settings:
     tokens: Dict[str, PeerToken]
     audit_log_enabled: bool
     require_signed_ingress: bool = False
+    ui_enabled: bool = False
+    ui_require_localhost: bool = True
+    ui_read_only: bool = True
 
     # Go-live hardening controls
     use_external_key_store: bool = True
@@ -423,6 +426,9 @@ def get_settings(force_reload: bool = False) -> Settings:
         tokens=_merge_tokens(repo_root),
         audit_log_enabled=_parse_bool(_env_first("COGNIRELAY_AUDIT_LOG_ENABLED", "AMR_AUDIT_LOG_ENABLED"), True),
         require_signed_ingress=_parse_bool(_env_first("COGNIRELAY_REQUIRE_SIGNED_INGRESS", "AMR_REQUIRE_SIGNED_INGRESS"), False),
+        ui_enabled=_parse_bool(_env_first("COGNIRELAY_UI_ENABLED"), False),
+        ui_require_localhost=_parse_bool(_env_first("COGNIRELAY_UI_REQUIRE_LOCALHOST"), True),
+        ui_read_only=_parse_bool(_env_first("COGNIRELAY_UI_READ_ONLY"), True),
         use_external_key_store=_parse_bool(_env_first("COGNIRELAY_USE_EXTERNAL_KEY_STORE", "AMR_USE_EXTERNAL_KEY_STORE"), True),
         key_store_path=Path(key_store_raw).expanduser().resolve(),
         max_payload_bytes=_parse_int(_env_first("COGNIRELAY_MAX_PAYLOAD_BYTES", "AMR_MAX_PAYLOAD_BYTES"), 262_144, minimum=1024),

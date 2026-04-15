@@ -207,6 +207,7 @@ from .tasks import (
     tasks_query_service,
     tasks_update_service,
 )
+from .ui import build_ui_router
 
 _log = logging.getLogger(__name__)
 
@@ -262,6 +263,9 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="CogniRelay", version="1.1.0", lifespan=_lifespan)
+
+if get_settings().ui_enabled:
+    app.include_router(build_ui_router(app_version=app.version))
 
 
 @app.middleware("http")

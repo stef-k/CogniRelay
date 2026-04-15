@@ -104,6 +104,8 @@ git init
 
 For non-local exposure, prefer file-based peer tokens in `data_repo/config/peer_tokens.json` instead of the plaintext development token in `.env`.
 
+The optional operator UI is disabled by default. To expose the first read-only continuity inspection slice locally, set `COGNIRELAY_UI_ENABLED=true`; keep `COGNIRELAY_UI_REQUIRE_LOCALHOST=true` unless you are intentionally relaxing the boundary, since this slice enforces localhost from the transport peer itself rather than forwarded headers. Leave `COGNIRELAY_UI_READ_ONLY=true`; in this slice it documents and preserves the read-only posture, and no mutable UI actions exist yet.
+
 Each CogniRelay instance serves a single owner-agent. If you operate multiple agents that each need their own continuity, run a separate instance per agent.
 
 For shell-based agent hooks, the [CLI client](docs/cognirelay-client.md) (`tools/cognirelay_client.py`) can read and upsert continuity capsules without a third-party HTTP library.

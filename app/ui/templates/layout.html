@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+  <link rel="stylesheet" href="/ui/static/ui.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="shell">
+      <div>
+        <p class="eyebrow">CogniRelay</p>
+        <h1 class="page-title">${title}</h1>
+      </div>
+      <nav class="site-nav">
+        <a class="${overview_nav_class}" href="/ui/">Overview</a>
+        <a class="${continuity_nav_class}" href="/ui/continuity">Continuity</a>
+      </nav>
+    </div>
+  </header>
+  <main class="shell">
+    ${content}
+  </main>
+</body>
+</html>
