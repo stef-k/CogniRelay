@@ -29,6 +29,7 @@ from .render import render_template
 
 UI_SUBJECT_KINDS: tuple[str, ...] = ("user", "peer", "thread", "task")
 UI_ARTIFACT_STATES: tuple[str, ...] = ("active", "fallback", "archived", "cold")
+UI_HEALTH_STATUSES: tuple[str, ...] = ("healthy", "degraded", "conflicted")
 UI_CONTINUITY_DISPLAY_LIMIT = 200
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -109,8 +110,10 @@ def build_ui_router(*, app_version: str) -> APIRouter:
     @router.get("/continuity", response_class=HTMLResponse)
     def ui_continuity(
         request: Request,
+        q: str | None = Query(default=None),
         subject_kind: Literal["user", "peer", "thread", "task"] | None = Query(default=None),
         artifact_state: Literal["active", "fallback", "archived", "cold"] | None = Query(default=None),
+        health_status: Literal["healthy", "degraded", "conflicted"] | None = Query(default=None),
     ) -> HTMLResponse:
         """Render the continuity list view."""
         settings = get_settings()
@@ -126,8 +129,9 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             now=now,
             retention_archive_days=settings.continuity_retention_archive_days,
         )
-        lifecycle_counts = _artifact_state_counts(all_rows)
-        filtered_rows = _filter_rows_by_artifact_state(all_rows, artifact_state)
+        scoped_rows = _filter_rows_by_query_and_health(all_rows, q=q, health_status=health_status)
+        lifecycle_counts = _artifact_state_counts(scoped_rows)
+        filtered_rows = _filter_rows_by_artifact_state(scoped_rows, artifact_state)
         display_rows = filtered_rows[:UI_CONTINUITY_DISPLAY_LIMIT]
         rows = []
         for capsule in display_rows:
@@ -150,12 +154,19 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             _option_row(value=state, selected=(state == artifact_state))
             for state in UI_ARTIFACT_STATES
         )
+        health_options = "".join(
+            _option_row(value=status, selected=(status == health_status))
+            for status in UI_HEALTH_STATUSES
+        )
         body = render_template(
             "continuity_list.html",
+            query_value=html.escape(_normalized_query_display(q)),
             selected_kind=html.escape(subject_kind or "all kinds"),
             selected_artifact_state=html.escape(artifact_state or "all lifecycle states"),
+            selected_health_status=html.escape(health_status or "all health states"),
             filter_options=filter_options,
             artifact_options=artifact_options,
+            health_options=health_options,
             displayed_count=str(len(display_rows)),
             matched_count=str(len(filtered_rows)),
             result_truncated=_bool_label(len(filtered_rows) > UI_CONTINUITY_DISPLAY_LIMIT),
@@ -406,6 +417,76 @@ def _filter_rows_by_artifact_state(
     if artifact_state is None:
         return rows
     return [row for row in rows if row.get("artifact_state") == artifact_state]
+
+
+def _filter_rows_by_query_and_health(
+    rows: list[dict[str, Any]],
+    *,
+    q: str | None,
+    health_status: str | None,
+) -> list[dict[str, Any]]:
+    """Apply explicit server-side query and health filters.
+
+    Query matching is deterministic and bounded:
+    - trim and lowercase the query
+    - split on whitespace into tokens
+    - each token must appear as a substring in at least one fixed searchable field
+    """
+    tokens = _search_tokens(q)
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if health_status is not None and row.get("health_status") != health_status:
+            continue
+        if tokens and not _row_matches_query(row, tokens):
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _search_tokens(value: str | None) -> list[str]:
+    """Normalize one search query into bounded lowercase tokens."""
+    if value is None:
+        return []
+    return [token for token in value.strip().lower().split() if token]
+
+
+def _normalized_query_display(value: str | None) -> str:
+    """Return the displayed query value using the same normalization as matching."""
+    return " ".join(_search_tokens(value))
+
+
+def _row_matches_query(row: dict[str, Any], tokens: list[str]) -> bool:
+    """Return whether every token matches one of the row's searchable fields."""
+    fields = _row_search_fields(row)
+    return all(any(token in field for field in fields) for token in tokens)
+
+
+def _row_search_fields(row: dict[str, Any]) -> list[str]:
+    """Return the explicit fields searchable from continuity list rows."""
+    values = [
+        row.get("subject_kind"),
+        row.get("subject_id"),
+        row.get("artifact_state"),
+        row.get("health_status"),
+        row.get("phase"),
+        row.get("verification_status"),
+        row.get("freshness_class"),
+        row.get("verification_kind"),
+        row.get("retention_class"),
+        row.get("path"),
+        row.get("archive_path"),
+        row.get("cold_stub_path"),
+        row.get("source_archive_path"),
+        row.get("cold_storage_path"),
+    ]
+    fields: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        normalized = str(value).strip().lower()
+        if normalized:
+            fields.append(normalized)
+    return fields
 
 
 def _continuity_counts(*, repo_root: Path, auth: AuthContext, now: datetime) -> dict[str, Any]:

@@ -49,10 +49,10 @@ def _request_with_transport_host(host: str | None, *, headers: list[tuple[bytes,
     return Request(scope)
 
 
-def _capsule_payload(*, subject_kind: str, subject_id: str) -> dict:
+def _capsule_payload(*, subject_kind: str, subject_id: str, capsule_health_status: str | None = None) -> dict:
     """Build a deterministic continuity capsule payload for UI tests."""
     now = datetime(2026, 4, 15, 9, 30, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-    return {
+    payload = {
         "schema_version": "1.0",
         "subject_kind": subject_kind,
         "subject_id": subject_id,
@@ -103,14 +103,31 @@ def _capsule_payload(*, subject_kind: str, subject_id: str) -> dict:
         "confidence": {"continuity": 0.82, "relationship_model": 0.0},
         "freshness": {"freshness_class": "situational"},
     }
+    if capsule_health_status is not None:
+        payload["capsule_health"] = {
+            "status": capsule_health_status,
+            "last_checked_at": now,
+            "reasons": [] if capsule_health_status == "healthy" else ["test health override"],
+        }
+    return payload
 
 
-def _write_capsule(repo_root: Path, *, subject_kind: str, subject_id: str) -> None:
+def _write_capsule(
+    repo_root: Path,
+    *,
+    subject_kind: str,
+    subject_id: str,
+    capsule_health_status: str | None = None,
+) -> None:
     """Write one active continuity capsule to the repository fixture."""
     continuity_dir = repo_root / "memory" / "continuity"
     continuity_dir.mkdir(parents=True, exist_ok=True)
     normalized = subject_id.strip().lower().replace(" ", "-")
-    payload = _capsule_payload(subject_kind=subject_kind, subject_id=subject_id)
+    payload = _capsule_payload(
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+        capsule_health_status=capsule_health_status,
+    )
     (continuity_dir / f"{subject_kind}-{normalized}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -136,9 +153,19 @@ def _write_fallback(repo_root: Path, *, subject_kind: str, subject_id: str) -> N
     )
 
 
-def _write_archive(repo_root: Path, *, subject_kind: str, subject_id: str) -> str:
+def _write_archive(
+    repo_root: Path,
+    *,
+    subject_kind: str,
+    subject_id: str,
+    capsule_health_status: str | None = None,
+) -> str:
     """Write an archived continuity envelope and return its repo-relative path."""
-    capsule = _capsule_payload(subject_kind=subject_kind, subject_id=subject_id)
+    capsule = _capsule_payload(
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+        capsule_health_status=capsule_health_status,
+    )
     archived_at = capsule["updated_at"]
     archive_rel = f"memory/continuity/archive/{subject_kind}-{subject_id}-20260415T093000Z.json"
     archive_path = repo_root / archive_rel
@@ -369,6 +396,102 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(archived_only.status_code, 200)
         self.assertIn("late-archive", archived_only.text)
         self.assertIn("Showing 1 result(s) from 1 matched row(s).", archived_only.text)
+
+    def test_ui_continuity_query_matches_bounded_fields_case_insensitively(self) -> None:
+        """Search should use deterministic token matching across fixed row fields."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="Alpha Agent")
+            _write_archive(repo_root, subject_kind="task", subject_id="Beta-Memory")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            response = client.get("/ui/continuity?q=ALPHA+healthy")
+            archive_response = client.get("/ui/continuity?q=archive+beta-memory")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Alpha Agent", response.text)
+        self.assertNotIn("Beta-Memory", response.text)
+        self.assertIn('query "alpha healthy"', response.text)
+        self.assertIn("case-insensitive substring matching", response.text)
+        self.assertEqual(archive_response.status_code, 200)
+        self.assertIn("Beta-Memory", archive_response.text)
+        self.assertNotIn("Alpha Agent", archive_response.text)
+
+    def test_ui_continuity_health_filter_and_missing_optional_fields_degrade_cleanly(self) -> None:
+        """Health filtering should work while rows missing optional search fields remain searchable."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="Degraded User",
+                capsule_health_status="degraded",
+            )
+            _write_cold(repo_root, subject_kind="user", subject_id="Cold Only")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            degraded_only = client.get("/ui/continuity?health_status=degraded")
+            cold_search = client.get("/ui/continuity?q=cold+only")
+
+        self.assertEqual(degraded_only.status_code, 200)
+        self.assertIn("Degraded User", degraded_only.text)
+        self.assertNotIn("Cold Only", degraded_only.text)
+        self.assertIn("all lifecycle states; degraded", degraded_only.text)
+        self.assertEqual(cold_search.status_code, 200)
+        self.assertIn("Cold Only", cold_search.text)
+        self.assertIn("memory/continuity/cold/index/user-Cold Only-20260415T093000Z.md", cold_search.text)
+
+    def test_ui_continuity_combined_filters_are_conjunctive_and_preserve_chip_scope(self) -> None:
+        """Combined q/kind/health/lifecycle filters should stay conjunctive while chips keep pre-lifecycle scope."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="Scoped Match",
+                capsule_health_status="degraded",
+            )
+            _write_archive(
+                repo_root,
+                subject_kind="user",
+                subject_id="Scoped Match",
+                capsule_health_status="degraded",
+            )
+            _write_capsule(
+                repo_root,
+                subject_kind="peer",
+                subject_id="Scoped Match",
+                capsule_health_status="degraded",
+            )
+            _write_archive(repo_root, subject_kind="user", subject_id="Healthy Match")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            response = client.get(
+                "/ui/continuity?q=%20SCOPED%20MATCH%20&subject_kind=user&artifact_state=archived&health_status=degraded"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('value="scoped match"', response.text)
+        self.assertIn('query "scoped match"; user; archived; degraded', response.text)
+        self.assertIn("Showing 1 result(s) from 1 matched row(s).", response.text)
+        self.assertIn("Scoped Match", response.text)
+        self.assertNotIn("Healthy Match", response.text)
+        self.assertNotIn("/ui/continuity/peer/Scoped%20Match", response.text)
+        self.assertIn("active 1", response.text)
+        self.assertIn("archived 1", response.text)
+        self.assertIn("Lifecycle chips reflect the current subject/query/health scope before lifecycle-state narrowing", response.text)
 
     def test_ui_detail_page_shows_related_lifecycle_artifacts(self) -> None:
         """The detail page should show related fallback/archive/cold lifecycle visibility for one subject."""
