@@ -734,7 +734,7 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Recovery warnings:", detail.text)
 
     def test_ui_layout_vendors_mucss_and_exposes_dark_theme_selector(self) -> None:
-        """The operator UI should serve the vendored µCSS slate theme and expose a dark-default theme selector."""
+        """The operator UI should serve the vendored µCSS slate theme, dark-default selector, and shared back-to-top control."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="stef")
@@ -751,6 +751,7 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn('/ui/static/mu.slate.css', overview.text)
         self.assertIn('data-theme="dark"', overview.text)
         self.assertIn('data-theme-select', overview.text)
+        self.assertIn('data-back-to-top', overview.text)
         self.assertIn('<option value="dark" selected="selected">Dark</option>', overview.text)
         self.assertEqual(theme_css.status_code, 200)
         self.assertIn("µCSS", theme_css.text)

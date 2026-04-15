@@ -207,8 +207,27 @@
     });
   }
 
+  function initBackToTop() {
+    var button = document.querySelector("[data-back-to-top]");
+    if (!button) {
+      return;
+    }
+
+    function updateVisibility() {
+      if (window.scrollY > 360) {
+        button.classList.add("is-visible");
+      } else {
+        button.classList.remove("is-visible");
+      }
+    }
+
+    updateVisibility();
+    window.addEventListener("scroll", updateVisibility, { passive: true });
+  }
+
   window.addEventListener("DOMContentLoaded", function () {
     initThemeSelect();
+    initBackToTop();
     var roots = document.querySelectorAll("[data-live-page]");
     for (var idx = 0; idx < roots.length; idx += 1) {
       connectLiveRegion(roots[idx]);

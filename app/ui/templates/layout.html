@@ -20,10 +20,10 @@
   <link rel="stylesheet" href="/ui/static/ui.css">
   <script defer src="/ui/static/ui_live.js"></script>
 </head>
-<body>
+<body id="top">
   <header class="site-header">
     <div class="shell">
-      <div>
+      <div class="header-title-block">
         <p class="eyebrow">CogniRelay</p>
         <h1 class="page-title">${title}</h1>
       </div>
@@ -45,5 +45,6 @@
   <main class="shell">
     ${content}
   </main>
+  <a class="back-to-top" href="#top" aria-label="Back to top" data-back-to-top>Top</a>
 </body>
 </html>

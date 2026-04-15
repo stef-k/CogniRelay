@@ -6,6 +6,10 @@ html[data-theme="light"] {
   color-scheme: light;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   min-height: 100vh;
   background:
@@ -55,6 +59,12 @@ td {
   gap: 1rem;
   padding: 0.45rem 0;
   align-items: start;
+  flex-wrap: wrap;
+}
+
+.header-title-block {
+  flex: 1 1 720px;
+  min-width: 0;
 }
 
 .eyebrow {
@@ -68,9 +78,9 @@ td {
 
 .page-title {
   margin: 0;
-  font-size: clamp(1.05rem, 0.8vw + 0.8rem, 1.7rem);
+  font-size: clamp(0.92rem, 0.55vw + 0.78rem, 1.4rem);
   line-height: 1.02;
-  max-width: 34ch;
+  max-width: none;
   text-wrap: pretty;
 }
 
@@ -80,6 +90,8 @@ td {
   gap: 0.5rem;
   flex-wrap: wrap;
   justify-content: flex-end;
+  flex: 0 1 auto;
+  margin-left: auto;
 }
 
 .site-nav {
@@ -321,7 +333,7 @@ main.shell {
 
 .summary-row-item {
   display: grid;
-  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 360px) minmax(0, 1fr);
   gap: 0.5rem 1rem;
   align-items: start;
 }
@@ -330,12 +342,14 @@ main.shell {
   min-width: 0;
   color: var(--mu-color);
   font-weight: 700;
+  font-size: 0.96rem;
   overflow-wrap: break-word;
   word-break: normal;
 }
 
 .summary-value {
   min-width: 0;
+  font-size: 0.96rem;
   overflow-wrap: break-word;
   word-break: normal;
 }
@@ -362,7 +376,36 @@ main.shell {
 }
 
 .summary-card .summary-row-item {
-  grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+}
+
+.back-to-top {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3.2rem;
+  min-height: 2.2rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--mu-muted-border-color) 70%, transparent);
+  background: color-mix(in srgb, var(--mu-background-color) 82%, transparent);
+  color: var(--mu-color);
+  text-decoration: none;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.5rem);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.back-to-top.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .muted {
@@ -473,6 +516,7 @@ article.panel ol,
   .header-controls {
     width: 100%;
     justify-content: flex-start;
+    margin-left: 0;
   }
 
   .page-title {
@@ -490,6 +534,11 @@ article.panel ol,
   .summary-card .summary-row-item {
     grid-template-columns: 1fr;
     gap: 0.2rem 0;
+  }
+
+  .back-to-top {
+    right: 0.75rem;
+    bottom: 0.75rem;
   }
 
   .kv-list {
