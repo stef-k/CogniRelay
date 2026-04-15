@@ -358,6 +358,7 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(listing.status_code, 200)
         self.assertIn("Continuity Capsules", listing.text)
         self.assertIn("stef", listing.text)
+        self.assertIn('class="table-wrap"', listing.text)
         self.assertIn("/ui/continuity/user/stef", listing.text)
 
     def test_ui_overview_does_not_initialize_git_when_auto_init_enabled(self) -> None:

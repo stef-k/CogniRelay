@@ -993,7 +993,7 @@ def _html_table(*, headers: list[str], rows: list[list[str]], empty_message: str
         return f'<p class="muted">{html.escape(empty_message)}</p>'
     head = "".join(f"<th>{html.escape(label)}</th>" for label in headers)
     body_rows = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body_rows}</tbody></table>"
+    return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{body_rows}</tbody></table></div>'
 
 
 def _subject_link(subject_kind: str, subject_id: str) -> str:
