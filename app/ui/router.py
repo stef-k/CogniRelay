@@ -277,6 +277,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             ),
             live_detail_updated_at=html.escape(str(capsule.get("updated_at") or "n/a")),
             live_detail_verified_at=html.escape(str(capsule.get("verified_at") or "n/a")),
+            live_detail_warning_count=html.escape(str(len(list(detail.get("recovery_warnings") or [])))),
             live_detail_latest_recorded_at=html.escape(_continuity_live_latest_recorded_at(related_rows)),
             live_detail_source_state=html.escape(str(detail.get("source_state", "unknown"))),
             live_detail_active_count=html.escape(str(related_counts["active"])),
@@ -574,7 +575,6 @@ def _ui_live_overview_summary(
         "git_initialized": bool(health.get("git_initialized")),
         "latest_commit": str(health.get("latest_commit") or "none"),
         "reported_at": str(health.get("time", "")),
-        "status_label": "connected",
         "continuity_counts": continuity_counts,
     }
 

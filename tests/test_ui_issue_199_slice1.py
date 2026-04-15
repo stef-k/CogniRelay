@@ -6,6 +6,7 @@ import importlib
 import asyncio
 import json
 import os
+import re
 import tempfile
 import unittest
 import gzip
@@ -76,6 +77,36 @@ async def _read_first_sse_event_chunk(response: Any) -> dict[str, str]:
             event[key] = value
     await response.body_iterator.aclose()
     raise AssertionError("No SSE event payload received")
+
+
+def _ui_live_script() -> str:
+    """Return the current UI live-update script text."""
+    return (Path(__file__).resolve().parents[1] / "app" / "ui" / "static" / "ui_live.js").read_text(encoding="utf-8")
+
+
+def _ui_live_backoff_policy() -> dict[str, int]:
+    """Parse the reconnect policy constants declared in ui_live.js."""
+    script = _ui_live_script()
+    policy: dict[str, int] = {}
+    for name in ("LIVE_BASE_DELAY_MS", "LIVE_MAX_DELAY_MS", "LIVE_OFFLINE_THRESHOLD"):
+        match = re.search(rf"var {name} = (\d+);", script)
+        if not match:
+            raise AssertionError(f"Could not find {name} in ui_live.js")
+        policy[name] = int(match.group(1))
+    return policy
+
+
+def _simulated_backoff_delay(attempt: int) -> int:
+    """Simulate the reconnect delay policy declared in ui_live.js."""
+    policy = _ui_live_backoff_policy()
+    exponent = max(attempt - 1, 0)
+    return min(policy["LIVE_MAX_DELAY_MS"], policy["LIVE_BASE_DELAY_MS"] * (2 ** exponent))
+
+
+def _simulated_reconnect_state(attempt: int) -> str:
+    """Simulate the operator-visible reconnect state declared in ui_live.js."""
+    threshold = _ui_live_backoff_policy()["LIVE_OFFLINE_THRESHOLD"]
+    return "offline" if attempt >= threshold else "reconnecting"
 
 
 def _capsule_payload(*, subject_kind: str, subject_id: str, capsule_health_status: str | None = None) -> dict:
@@ -590,6 +621,7 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(payload["continuity"]["matched_count"], 1)
         self.assertEqual(payload["continuity"]["artifact_counts"]["archived"], 1)
         self.assertEqual(payload["continuity"]["recent_change"]["subject_id"], "archived-user")
+        self.assertNotIn("status_label", payload["overview"])
 
     def test_ui_events_stream_degrades_instead_of_failing_on_snapshot_error(self) -> None:
         """Snapshot failures should stay in-band as degraded SSE payloads instead of breaking the stream."""
@@ -669,6 +701,7 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(payload["detail"]["artifact_counts"]["active"], 1)
         self.assertEqual(payload["detail"]["artifact_counts"]["archived"], 1)
         self.assertEqual(payload["detail"]["source_state"], "active")
+        self.assertEqual(payload["detail"]["recovery_warning_count"], 0)
 
     def test_ui_pages_include_progressive_live_update_hooks_without_js_requirement(self) -> None:
         """Overview, continuity, and detail pages should expose optional live hooks while remaining server-rendered."""
@@ -698,19 +731,40 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn('data-live-page="detail"', detail.text)
         self.assertIn("Current source state:", detail.text)
         self.assertIn("Capsule updated at:", detail.text)
+        self.assertIn("Recovery warnings:", detail.text)
 
-    def test_ui_live_script_contains_bounded_backoff_and_operator_states(self) -> None:
-        """The live-update script should use bounded backoff and explicit operator-visible states."""
-        script = (Path(__file__).resolve().parents[1] / "app" / "ui" / "static" / "ui_live.js").read_text(encoding="utf-8")
+    def test_ui_live_script_backoff_grows_and_caps_at_declared_max_delay(self) -> None:
+        """Reconnect delay should grow exponentially and then stop at the declared cap."""
+        policy = _ui_live_backoff_policy()
 
-        self.assertIn("LIVE_BASE_DELAY_MS = 1000", script)
-        self.assertIn("LIVE_MAX_DELAY_MS = 16000", script)
-        self.assertIn("Math.min(LIVE_MAX_DELAY_MS, LIVE_BASE_DELAY_MS * Math.pow(2, exponent))", script)
+        self.assertEqual(policy["LIVE_BASE_DELAY_MS"], 1000)
+        self.assertEqual(policy["LIVE_MAX_DELAY_MS"], 16000)
+        self.assertEqual(
+            [_simulated_backoff_delay(attempt) for attempt in range(1, 8)],
+            [1000, 2000, 4000, 8000, 16000, 16000, 16000],
+        )
+
+    def test_ui_live_script_reconnect_state_transitions_match_threshold(self) -> None:
+        """Reconnect attempts should stay reconnecting until the offline threshold is reached."""
+        policy = _ui_live_backoff_policy()
+
+        self.assertEqual(policy["LIVE_OFFLINE_THRESHOLD"], 4)
+        self.assertEqual(
+            [_simulated_reconnect_state(attempt) for attempt in range(1, 6)],
+            ["reconnecting", "reconnecting", "reconnecting", "offline", "offline"],
+        )
+
+    def test_ui_live_script_declares_visible_connection_states_and_degraded_paths(self) -> None:
+        """The script should still explicitly surface connected, reconnecting, degraded, and offline states."""
+        script = _ui_live_script()
+
+        self.assertIn("function reconnectState(attempt)", script)
         self.assertIn('setState(root, "connected"', script)
         self.assertIn('setState(root, "reconnecting"', script)
         self.assertIn('setState(root, "degraded"', script)
         self.assertIn('setState(root, "offline"', script)
-
+        self.assertIn("Live updates degraded; malformed snapshot ignored.", script)
+        self.assertIn("Live updates connected with degraded snapshot data.", script)
 
     def test_ui_detail_page_keeps_degraded_reads_while_showing_archived_and_cold_visibility(self) -> None:
         """Missing active/fallback continuity should still render related archived/cold lifecycle visibility."""
@@ -732,6 +786,23 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Cold artifacts present", detail.text)
         self.assertIn(">true<", detail.text)
         self.assertIn("memory/continuity/archive/user-history-only-20260415T093000Z.json", detail.text)
+
+    def test_ui_detail_page_live_region_includes_bounded_recovery_warning_count(self) -> None:
+        """Detail live coverage may expand only within the header/meta region."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_archive(repo_root, subject_kind="user", subject_id="history-only")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            detail = client.get("/ui/continuity/user/history-only")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn('data-live-detail-warning-count', detail.text)
+        self.assertIn("Recovery warnings: <span data-live-detail-warning-count>2</span>", detail.text)
 
 
 if __name__ == "__main__":
