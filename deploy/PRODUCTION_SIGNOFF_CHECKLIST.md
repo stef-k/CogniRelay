@@ -20,6 +20,7 @@ Domain: ____________________
 - [ ] HTTPS endpoint responds: `curl https://<domain>/health`.
 - [ ] HTTP is redirected to HTTPS.
 - [ ] External access to `/v1/ops/*` is blocked by nginx (returns 403).
+- [ ] External access to `/ui*` is blocked by nginx (returns 403).
 
 ## Security model
 
@@ -30,6 +31,8 @@ Domain: ____________________
 - [ ] File-based tokens exist in `repo/config/peer_tokens.json` using `token_sha256`.
 - [ ] Host-only secrets (`/etc/cognirelay/ops.token`, `/etc/cognirelay/host_admin.token`) have restricted perms (`0640`, root:cognirelay).
 - [ ] Firewall policy allows only required inbound ports (`22`, `80`, `443`) and blocks direct `8080`.
+- [ ] `COGNIRELAY_UI_ENABLED=false` unless a local operator explicitly needs the shipped read-only UI.
+- [ ] If the UI is enabled, `COGNIRELAY_UI_REQUIRE_LOCALHOST=true` and `COGNIRELAY_UI_READ_ONLY=true` remain set.
 
 ## Host ops automation
 
@@ -77,4 +80,3 @@ Notes:
 ______________________________________________________________________________
 ______________________________________________________________________________
 ______________________________________________________________________________
-
