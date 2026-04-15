@@ -7,6 +7,22 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-15
+
+### Added
+
+- Shipped issue `#199`: an optional local-only read-only operator UI under
+  `/ui`, implemented as a server-rendered observability surface with local
+  assets only and no SPA/npm toolchain.
+- Added lifecycle visibility across active, fallback, archived, and cold
+  continuity artifacts on the overview, continuity list, and continuity detail
+  UI surfaces.
+- Added bounded server-rendered filtering and search on `/ui/continuity` by
+  query, subject kind, lifecycle artifact state, and health status.
+- Added bounded `/ui/events` SSE live updates with reconnect backoff for small
+  progressive live regions on the overview, continuity list, and continuity
+  detail pages.
+
 ### Updated
 
 - Aligned issue `#199` documentation, env guidance, changelog text, and
