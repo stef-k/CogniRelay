@@ -160,7 +160,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         )
         body = render_template(
             "continuity_list.html",
-            query_value=html.escape(q or ""),
+            query_value=html.escape(_normalized_query_display(q)),
             selected_kind=html.escape(subject_kind or "all kinds"),
             selected_artifact_state=html.escape(artifact_state or "all lifecycle states"),
             selected_health_status=html.escape(health_status or "all health states"),
@@ -448,6 +448,11 @@ def _search_tokens(value: str | None) -> list[str]:
     if value is None:
         return []
     return [token for token in value.strip().lower().split() if token]
+
+
+def _normalized_query_display(value: str | None) -> str:
+    """Return the displayed query value using the same normalization as matching."""
+    return " ".join(_search_tokens(value))
 
 
 def _row_matches_query(row: dict[str, Any], tokens: list[str]) -> bool:
