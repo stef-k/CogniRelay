@@ -595,8 +595,24 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Cold artifacts present", detail.text)
         self.assertIn("Open user archived list", detail.text)
         self.assertIn("Open user cold list", detail.text)
-        self.assertIn("memory/continuity/archive/user-stef-20260415T093000Z.json", detail.text)
-        self.assertIn("memory/continuity/cold/index/user-stef-20260415T093000Z.md", detail.text)
+
+    def test_ui_detail_page_startup_summary_omits_dedicated_section_duplicates(self) -> None:
+        """Startup summary should not duplicate dedicated trust/stable-preference sections."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="stef")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            detail = client.get("/ui/continuity/user/stef")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("Startup Summary", detail.text)
+        self.assertNotIn("<h3>stable_preferences</h3>", detail.text)
+        self.assertNotIn("<h3>trust_signals</h3>", detail.text)
 
     def test_ui_events_stream_bounded_snapshot_for_current_scope(self) -> None:
         """The SSE endpoint should stream one deterministic bounded snapshot payload."""

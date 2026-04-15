@@ -247,7 +247,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         )
         capsule = detail.get("capsule") or {}
         continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
-        startup_summary = detail.get("startup_summary")
+        startup_summary = _startup_summary_for_ui(detail.get("startup_summary"))
         trust_signals = detail.get("trust_signals")
         related_rows = _related_artifact_rows(
             repo_root=settings.repo_root,
@@ -993,7 +993,7 @@ def _html_table(*, headers: list[str], rows: list[list[str]], empty_message: str
         return f'<p class="muted">{html.escape(empty_message)}</p>'
     head = "".join(f"<th>{html.escape(label)}</th>" for label in headers)
     body_rows = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
-    return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{body_rows}</tbody></table></div>'
+    return f'<div class="table-wrap"><table class="table-hover"><thead><tr>{head}</tr></thead><tbody>{body_rows}</tbody></table></div>'
 
 
 def _subject_link(subject_kind: str, subject_id: str) -> str:
@@ -1124,6 +1124,18 @@ def _render_object(value: Any, *, empty_message: str) -> str:
     if value is None:
         return f'<p class="muted">{html.escape(empty_message)}</p>'
     return _render_value(value)
+
+
+def _startup_summary_for_ui(value: Any) -> Any:
+    """Trim startup-summary data to fields that are not already rendered elsewhere."""
+    if not isinstance(value, dict):
+        return value
+    filtered: dict[str, Any] = {}
+    if "recovery" in value:
+        filtered["recovery"] = value.get("recovery")
+    if "updated_at" in value:
+        filtered["updated_at"] = value.get("updated_at")
+    return filtered
 
 
 def _render_summary_document(value: Any, *, empty_message: str) -> str:
