@@ -414,13 +414,13 @@ main.shell {
 
 .filter-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 0.9rem 1rem;
   align-items: end;
   margin-bottom: 1rem;
 }
 
-.filter-form label {
+.filter-field {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
@@ -428,8 +428,21 @@ main.shell {
   font-weight: 600;
 }
 
+.filter-field > span {
+  min-width: 0;
+}
+
 .filter-form button {
   align-self: end;
+}
+
+.filter-actions {
+  display: flex;
+  align-items: end;
+}
+
+.filter-actions button {
+  width: 100%;
 }
 
 .badge-row {

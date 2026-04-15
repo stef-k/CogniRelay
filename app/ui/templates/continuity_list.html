@@ -1,24 +1,34 @@
 <section class="panel">
   <h2>Filters</h2>
   <form method="get" action="/ui/continuity" class="filter-form">
-    <label for="q">Search query</label>
-    <input id="q" name="q" type="text" value="${query_value}" placeholder="subject, path, state, status" />
-    <label for="subject_kind">Subject kind</label>
-    <select id="subject_kind" name="subject_kind">
-      <option value="">all</option>
-      ${filter_options}
-    </select>
-    <label for="artifact_state">Lifecycle state</label>
-    <select id="artifact_state" name="artifact_state">
-      <option value="">all</option>
-      ${artifact_options}
-    </select>
-    <label for="health_status">Health</label>
-    <select id="health_status" name="health_status">
-      <option value="">all</option>
-      ${health_options}
-    </select>
-    <button type="submit">Apply</button>
+    <label class="filter-field" for="q">
+      <span>Search query</span>
+      <input id="q" name="q" type="text" value="${query_value}" placeholder="subject, path, state, status" />
+    </label>
+    <label class="filter-field" for="subject_kind">
+      <span>Subject kind</span>
+      <select id="subject_kind" name="subject_kind">
+        <option value="">all</option>
+        ${filter_options}
+      </select>
+    </label>
+    <label class="filter-field" for="artifact_state">
+      <span>Lifecycle state</span>
+      <select id="artifact_state" name="artifact_state">
+        <option value="">all</option>
+        ${artifact_options}
+      </select>
+    </label>
+    <label class="filter-field" for="health_status">
+      <span>Health</span>
+      <select id="health_status" name="health_status">
+        <option value="">all</option>
+        ${health_options}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button type="submit">Apply</button>
+    </div>
   </form>
   <div class="badge-row summary-row">
     <span class="summary-chip">active ${active_count}</span>

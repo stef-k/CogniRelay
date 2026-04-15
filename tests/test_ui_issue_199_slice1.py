@@ -434,6 +434,24 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertNotIn("fallback-user", archived_only.text)
         self.assertNotIn("cold-user", archived_only.text)
 
+    def test_ui_continuity_empty_filter_values_degrade_to_all_instead_of_422(self) -> None:
+        """Empty select values from the server-rendered filter form should behave like no filter."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="stef")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            response = client.get("/ui/continuity?subject_kind=user&artifact_state=&health_status=&q=")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="filter-field"', response.text)
+        self.assertIn("stef", response.text)
+        self.assertNotIn("Unprocessable Entity", response.text)
+
     def test_ui_continuity_filter_finds_archived_rows_beyond_mixed_display_limit(self) -> None:
         """Lifecycle filtering must stay correct even when the mixed view exceeds the display cap."""
         with tempfile.TemporaryDirectory() as td:
