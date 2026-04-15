@@ -7,6 +7,22 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Updated
+
+- Aligned issue `#199` documentation, env guidance, changelog text, and
+  deployment examples with the now-shipped operator UI scope: optional
+  local-only read-only `/ui`, server-rendered pages with local assets only,
+  bounded continuity lifecycle visibility across active/fallback/archived/cold
+  artifacts, bounded continuity filtering/search on `/ui/continuity`, and
+  bounded `/ui/events` SSE live updates with reconnect backoff for small
+  progressive overview/list/detail live regions.
+- Clarified deferred operator UI items as explicit non-goals of the shipped
+  scope: non-local auth/session model, mutable UI behavior, WebSockets,
+  standalone archive/cold maintenance consoles, and broader reactive UI
+  behavior.
+- Tightened reverse-proxy deployment examples so they do not accidentally
+  publish `/ui` remotely under the current local-only support boundary.
+
 ## [1.1.0] - 2026-04-06
 
 ### Updated

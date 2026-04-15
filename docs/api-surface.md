@@ -10,6 +10,8 @@ The sections below mirror that runtime shape and group endpoints by behavior rat
 
 For practical agent integration guidance, start with [Agent Onboarding](agent-onboarding.md). For capsule structure and request/response schemas, see [Payload Reference](payload-reference.md). For the higher-level system thesis, recovery model, and authority boundaries, see [Reviewer Guide](reviewer-guide.md).
 
+This document covers the machine-facing HTTP contract. The optional `/ui` operator surface shipped for issue `#199` is intentionally outside that API contract: it is a local-only, read-only, server-rendered observability layer over existing read-side services, not a second programmable interface.
+
 ## Discovery and contracts
 
 - `GET /health`: liveness and git-state check
