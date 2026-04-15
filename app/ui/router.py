@@ -12,7 +12,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
-from app.auth import AuthContext, _extract_client_ip
+from app.auth import AuthContext
 from app.config import Settings, get_settings
 from app.continuity import continuity_list_service, continuity_read_service
 from app.continuity.listing import (
@@ -50,7 +50,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         """Render the operator overview page."""
         settings = get_settings()
         client_ip = _enforce_ui_access(request, settings)
-        _settings, gm = _ui_services()
+        gm = _ui_git_manager(settings)
         auth = _ui_auth(client_ip)
         now = datetime.now(timezone.utc)
         health = health_payload(
@@ -112,7 +112,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         """Render the continuity list view."""
         settings = get_settings()
         client_ip = _enforce_ui_access(request, settings)
-        settings, _gm = _ui_services()
+        _gm = _ui_git_manager(settings)
         auth = _ui_auth(client_ip)
         now = datetime.now(timezone.utc)
         listing = continuity_list_service(
@@ -176,7 +176,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         """Render one continuity detail page with graceful degradation."""
         settings = get_settings()
         client_ip = _enforce_ui_access(request, settings)
-        settings, _gm = _ui_services()
+        _gm = _ui_git_manager(settings)
         auth = _ui_auth(client_ip)
         detail = continuity_read_service(
             repo_root=settings.repo_root,
@@ -251,16 +251,13 @@ def build_ui_router(*, app_version: str) -> APIRouter:
     return router
 
 
-def _ui_services() -> tuple[Settings, GitManager]:
-    """Load settings and ensure the repository-backed git manager is ready."""
-    settings = get_settings()
-    gm = GitManager(
+def _ui_git_manager(settings: Settings) -> GitManager:
+    """Build a git manager for read-only metadata access without repo initialization."""
+    return GitManager(
         repo_root=settings.repo_root,
         author_name=settings.git_author_name,
         author_email=settings.git_author_email,
     )
-    gm.ensure_repo(settings.auto_init_git)
-    return settings, gm
 
 
 def _ui_auth(client_ip: str | None) -> AuthContext:
@@ -277,24 +274,20 @@ def _ui_auth(client_ip: str | None) -> AuthContext:
 
 def _enforce_ui_access(request: Request, settings: Settings) -> str | None:
     """Enforce the optional local-only UI policy."""
-    client_ip = _ui_client_ip(request)
+    client_ip = _ui_transport_client_ip(request)
     if settings.ui_require_localhost and not _is_local_client_ip(client_ip):
         raise HTTPException(status_code=403, detail="Operator UI is local-only")
     return client_ip
 
 
-def _ui_client_ip(request: Request) -> str | None:
-    """Resolve the best available client IP for UI access checks."""
-    request_ip = None
-    if request.client is not None:
-        request_ip = request.client.host
-        if request_ip == "testclient":
-            request_ip = None
-    return _extract_client_ip(
-        request.headers.get("X-Forwarded-For"),
-        request.headers.get("X-Real-IP"),
-        request_ip,
-    )
+def _ui_transport_client_ip(request: Request) -> str | None:
+    """Return the transport peer host for strict UI localhost enforcement."""
+    if request.client is None or request.client.host is None:
+        return None
+    value = str(request.client.host).strip()
+    if not value:
+        return None
+    return value
 
 
 def _is_local_client_ip(client_ip: str | None) -> bool:

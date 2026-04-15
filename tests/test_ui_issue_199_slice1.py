@@ -9,18 +9,40 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 
 def _reload_main_module():
     """Reload config and main so env-controlled UI mounting is recalculated."""
     import app.config as config_module
     import app.main as main_module
+    import app.ui.router as ui_router_module
 
     importlib.reload(config_module)
+    importlib.reload(ui_router_module)
     return importlib.reload(main_module)
+
+
+def _request_with_transport_host(host: str | None, *, headers: list[tuple[bytes, bytes]] | None = None) -> Request:
+    """Build a Request carrying an explicit transport client host."""
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/ui/",
+        "raw_path": b"/ui/",
+        "query_string": b"",
+        "headers": headers or [],
+        "client": None if host is None else (host, 12345),
+        "server": ("testserver", 80),
+        "scheme": "http",
+        "http_version": "1.1",
+    }
+    return Request(scope)
 
 
 def _capsule_payload(*, subject_kind: str, subject_id: str) -> dict:
@@ -136,17 +158,38 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_ui_localhost_restriction_blocks_non_local_requests(self) -> None:
-        """The local-only UI posture should reject non-loopback callers."""
-        with tempfile.TemporaryDirectory() as td:
-            client = self._client(
-                Path(td),
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="true",
-            )
-            response = client.get("/ui/", headers={"X-Forwarded-For": "10.20.30.40"})
+        """The local-only UI posture should reject non-loopback transport peers."""
+        import app.ui.router as ui_router
 
-        self.assertEqual(response.status_code, 403)
-        self.assertIn("local-only", response.text)
+        request = _request_with_transport_host("10.20.30.40")
+        with self.assertRaises(HTTPException) as err:
+            ui_router._enforce_ui_access(request, SimpleNamespace(ui_require_localhost=True))
+
+        self.assertEqual(err.exception.status_code, 403)
+        self.assertIn("local-only", str(err.exception.detail))
+
+    def test_ui_localhost_restriction_ignores_forwarded_localhost_spoof(self) -> None:
+        """Forwarded localhost headers must not bypass a non-local transport source."""
+        import app.ui.router as ui_router
+
+        request = _request_with_transport_host(
+            "10.20.30.40",
+            headers=[
+                (b"x-forwarded-for", b"127.0.0.1"),
+                (b"x-real-ip", b"127.0.0.1"),
+            ],
+        )
+        with self.assertRaises(HTTPException) as err:
+            ui_router._enforce_ui_access(request, SimpleNamespace(ui_require_localhost=True))
+
+        self.assertEqual(err.exception.status_code, 403)
+
+    def test_ui_localhost_restriction_allows_loopback_transport(self) -> None:
+        """Loopback transport peers should satisfy the strict local-only gate."""
+        import app.ui.router as ui_router
+
+        request = _request_with_transport_host("127.0.0.1")
+        self.assertEqual(ui_router._enforce_ui_access(request, SimpleNamespace(ui_require_localhost=True)), "127.0.0.1")
 
     def test_ui_overview_and_list_pages_render_key_data(self) -> None:
         """Overview and list pages should render health and continuity summaries."""
@@ -157,11 +200,11 @@ class TestOperatorUiSlice1(unittest.TestCase):
             client = self._client(
                 repo_root,
                 COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
             )
 
-            overview = client.get("/ui/", headers={"X-Forwarded-For": "127.0.0.1"})
-            listing = client.get("/ui/continuity?subject_kind=user", headers={"X-Forwarded-For": "127.0.0.1"})
+            overview = client.get("/ui/")
+            listing = client.get("/ui/continuity?subject_kind=user")
 
         self.assertEqual(overview.status_code, 200)
         self.assertIn("Operator Overview", overview.text)
@@ -172,6 +215,28 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("stef", listing.text)
         self.assertIn("/ui/continuity/user/stef", listing.text)
 
+    def test_ui_overview_does_not_initialize_git_when_auto_init_enabled(self) -> None:
+        """UI GETs must not create .git even when service-wide auto-init is enabled."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            git_dir = repo_root / ".git"
+            self.assertFalse(git_dir.exists())
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                COGNIRELAY_AUTO_INIT_GIT="true",
+            )
+
+            overview = client.get("/ui/")
+
+        self.assertEqual(overview.status_code, 200)
+        self.assertFalse(git_dir.exists())
+        self.assertIn("Git initialized", overview.text)
+        self.assertIn("false", overview.text)
+        self.assertIn("Latest commit", overview.text)
+        self.assertIn("none", overview.text)
+
     def test_ui_detail_page_handles_fallback_and_missing_capsules(self) -> None:
         """Detail pages should degrade gracefully for fallback-only and missing continuity."""
         with tempfile.TemporaryDirectory() as td:
@@ -180,11 +245,11 @@ class TestOperatorUiSlice1(unittest.TestCase):
             client = self._client(
                 repo_root,
                 COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
             )
 
-            fallback = client.get("/ui/continuity/user/fallback-only", headers={"X-Forwarded-For": "127.0.0.1"})
-            missing = client.get("/ui/continuity/user/missing-user", headers={"X-Forwarded-For": "127.0.0.1"})
+            fallback = client.get("/ui/continuity/user/fallback-only")
+            missing = client.get("/ui/continuity/user/missing-user")
 
         self.assertEqual(fallback.status_code, 200)
         self.assertIn("Source state: fallback", fallback.text)
