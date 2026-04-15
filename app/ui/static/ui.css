@@ -119,6 +119,26 @@ main.shell {
   margin-top: 0;
 }
 
+[data-live-page] {
+  position: relative;
+}
+
+[data-live-connection] {
+  padding-left: 1rem;
+  position: relative;
+}
+
+[data-live-connection]::before {
+  content: "";
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #c0862e;
+  position: absolute;
+  left: 0;
+  top: 0.42rem;
+}
+
 .kv-list {
   display: grid;
   grid-template-columns: minmax(140px, 220px) 1fr;

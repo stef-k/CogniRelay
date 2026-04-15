@@ -104,7 +104,7 @@ git init
 
 For non-local exposure, prefer file-based peer tokens in `data_repo/config/peer_tokens.json` instead of the plaintext development token in `.env`.
 
-The optional operator UI is disabled by default. To expose the read-only continuity inspection surface in the supported posture for issue `#199`, set `COGNIRELAY_UI_ENABLED=true` and keep `COGNIRELAY_UI_REQUIRE_LOCALHOST=true`, since this slice enforces localhost from the transport peer itself rather than forwarded headers. Leave `COGNIRELAY_UI_READ_ONLY=true`; the current UI remains strictly read-only and now includes bounded lifecycle visibility across active, fallback, archived, and cold continuity artifacts without introducing any maintenance actions.
+The optional operator UI is disabled by default. To expose the read-only continuity inspection surface in the supported posture for issue `#199`, set `COGNIRELAY_UI_ENABLED=true` and keep `COGNIRELAY_UI_REQUIRE_LOCALHOST=true`, since this slice enforces localhost from the transport peer itself rather than forwarded headers. Leave `COGNIRELAY_UI_READ_ONLY=true`; the current UI remains strictly read-only and now includes bounded lifecycle visibility across active, fallback, archived, and cold continuity artifacts without introducing any maintenance actions. The latest bounded slice also adds a local-only `/ui/events` SSE stream so the overview and continuity list can refresh small observability regions without requiring page reloads or JavaScript for core navigation.
 
 Each CogniRelay instance serves a single owner-agent. If you operate multiple agents that each need their own continuity, run a separate instance per agent.
 

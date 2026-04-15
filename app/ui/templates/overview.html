@@ -9,6 +9,27 @@
   </article>
 </section>
 <section class="grid two-up">
+  <article class="panel" data-live-page="overview">
+    <h2>Live Updates</h2>
+    <p class="muted" data-live-connection>Live updates waiting for connection.</p>
+    <dl class="kv-list">
+      <dt>Snapshot received</dt>
+      <dd data-live-generated-at>Not connected</dd>
+      <dt>Latest commit</dt>
+      <dd data-live-latest-commit>${live_latest_commit}</dd>
+      <dt>Health reported</dt>
+      <dd data-live-reported-at>${live_reported_at}</dd>
+      <dt>Active capsules</dt>
+      <dd data-live-active-count>${live_active_count}</dd>
+      <dt>Fallback snapshots</dt>
+      <dd data-live-fallback-count>${live_fallback_count}</dd>
+      <dt>Archived envelopes</dt>
+      <dd data-live-archived-count>${live_archived_count}</dd>
+      <dt>Cold stubs</dt>
+      <dd data-live-cold-count>${live_cold_count}</dd>
+    </dl>
+    <noscript><p class="muted">JavaScript disabled; live updates are unavailable.</p></noscript>
+  </article>
   <article class="panel">
     <h2>Capabilities</h2>
     ${capability_list}

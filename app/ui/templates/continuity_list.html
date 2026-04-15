@@ -31,6 +31,20 @@
   <p class="muted">Lifecycle chips reflect the current subject/query/health scope before lifecycle-state narrowing, so they may exceed the rows currently listed when a lifecycle state filter is active.</p>
   <p class="muted">Query tokens use case-insensitive substring matching across subject, lifecycle, health, and artifact path fields.</p>
 </section>
+<section class="panel" data-live-page="continuity">
+  <h2>Live Updates</h2>
+  <p class="muted" data-live-connection>Live updates waiting for connection.</p>
+  <div class="badge-row summary-row">
+    <span class="summary-chip">active <span data-live-active-count>${active_count}</span></span>
+    <span class="summary-chip">fallback <span data-live-fallback-count>${fallback_count}</span></span>
+    <span class="summary-chip">archived <span data-live-archived-count>${archived_count}</span></span>
+    <span class="summary-chip">cold <span data-live-cold-count>${cold_count}</span></span>
+  </div>
+  <p class="muted">Snapshot received: <span data-live-generated-at>Not connected</span></p>
+  <p class="muted">Latest visible lifecycle timestamp: <span data-live-latest-recorded-at>${live_latest_recorded_at}</span></p>
+  <p class="muted">Recent visible change: <span data-live-recent-change>${live_recent_change}</span></p>
+  <noscript><p class="muted">JavaScript disabled; live updates are unavailable.</p></noscript>
+</section>
 <section class="panel">
   <h2>Continuity Capsules</h2>
   ${continuity_table}

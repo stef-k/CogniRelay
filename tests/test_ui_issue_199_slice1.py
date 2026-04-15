@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import json
 import os
 import tempfile
@@ -11,6 +12,7 @@ import gzip
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -32,14 +34,20 @@ def _reload_main_module():
     return importlib.reload(main_module)
 
 
-def _request_with_transport_host(host: str | None, *, headers: list[tuple[bytes, bytes]] | None = None) -> Request:
+def _request_with_transport_host(
+    host: str | None,
+    *,
+    path: str = "/ui/",
+    query_string: bytes = b"",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
     """Build a Request carrying an explicit transport client host."""
     scope = {
         "type": "http",
         "method": "GET",
-        "path": "/ui/",
-        "raw_path": b"/ui/",
-        "query_string": b"",
+        "path": path,
+        "raw_path": path.encode("utf-8"),
+        "query_string": query_string,
         "headers": headers or [],
         "client": None if host is None else (host, 12345),
         "server": ("testserver", 80),
@@ -47,6 +55,27 @@ def _request_with_transport_host(host: str | None, *, headers: list[tuple[bytes,
         "http_version": "1.1",
     }
     return Request(scope)
+
+
+async def _read_first_sse_event_chunk(response: Any) -> dict[str, str]:
+    """Read the first SSE event frame from a StreamingResponse iterator."""
+    event: dict[str, str] = {}
+    async for raw_chunk in response.body_iterator:
+        chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
+        for line in chunk.splitlines():
+            if not line:
+                if "data" in event:
+                    await response.body_iterator.aclose()
+                    return event
+                continue
+            if ": " not in line:
+                continue
+            key, value = line.split(": ", 1)
+            if key == "retry":
+                continue
+            event[key] = value
+    await response.body_iterator.aclose()
+    raise AssertionError("No SSE event payload received")
 
 
 def _capsule_payload(*, subject_kind: str, subject_id: str, capsule_health_status: str | None = None) -> dict:
@@ -518,6 +547,104 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Open user cold list", detail.text)
         self.assertIn("memory/continuity/archive/user-stef-20260415T093000Z.json", detail.text)
         self.assertIn("memory/continuity/cold/index/user-stef-20260415T093000Z.md", detail.text)
+
+    def test_ui_events_stream_bounded_snapshot_for_current_scope(self) -> None:
+        """The SSE endpoint should stream one deterministic bounded snapshot payload."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="active-user")
+            _write_archive(repo_root, subject_kind="user", subject_id="archived-user")
+            self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host(
+                "127.0.0.1",
+                path="/ui/events",
+                query_string=b"artifact_state=archived",
+            )
+            response = asyncio.run(
+                endpoint(
+                    request,
+                    q=None,
+                    subject_kind=None,
+                    artifact_state="archived",
+                    health_status=None,
+                )
+            )
+            event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertEqual(event["event"], "ui-snapshot")
+        payload = json.loads(event["data"])
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema_version"], "1.0")
+        self.assertEqual(payload["continuity"]["scope"]["artifact_state"], "archived")
+        self.assertEqual(payload["continuity"]["matched_count"], 1)
+        self.assertEqual(payload["continuity"]["artifact_counts"]["archived"], 1)
+        self.assertEqual(payload["continuity"]["recent_change"]["subject_id"], "archived-user")
+
+    def test_ui_events_stream_degrades_instead_of_failing_on_snapshot_error(self) -> None:
+        """Snapshot failures should stay in-band as degraded SSE payloads instead of breaking the stream."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="active-user")
+            self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host("127.0.0.1", path="/ui/events")
+
+            with patch("app.ui.router._ui_live_continuity_summary", side_effect=RuntimeError("boom")):
+                response = asyncio.run(
+                    endpoint(
+                        request,
+                        q=None,
+                        subject_kind=None,
+                        artifact_state=None,
+                        health_status=None,
+                    )
+                )
+                event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        self.assertEqual(response.media_type, "text/event-stream")
+        payload = json.loads(event["data"])
+        self.assertFalse(payload["ok"])
+        self.assertIn("ui_continuity_snapshot_failed:RuntimeError", payload["warnings"])
+        self.assertFalse(payload["continuity"]["available"])
+        self.assertEqual(payload["continuity"]["latest_recorded_at"], "unavailable")
+
+    def test_ui_pages_include_progressive_live_update_hooks_without_js_requirement(self) -> None:
+        """Overview and continuity pages should expose live hooks while remaining server-rendered."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="stef")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            overview = client.get("/ui/")
+            continuity = client.get("/ui/continuity")
+
+        self.assertEqual(overview.status_code, 200)
+        self.assertIn('/ui/static/ui_live.js', overview.text)
+        self.assertIn('data-live-page="overview"', overview.text)
+        self.assertIn("JavaScript disabled; live updates are unavailable.", overview.text)
+        self.assertEqual(continuity.status_code, 200)
+        self.assertIn('data-live-page="continuity"', continuity.text)
+        self.assertIn("Recent visible change:", continuity.text)
 
     def test_ui_detail_page_keeps_degraded_reads_while_showing_archived_and_cold_visibility(self) -> None:
         """Missing active/fallback continuity should still render related archived/cold lifecycle visibility."""
