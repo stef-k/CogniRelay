@@ -36,6 +36,10 @@
     return Math.min(LIVE_MAX_DELAY_MS, LIVE_BASE_DELAY_MS * Math.pow(2, exponent));
   }
 
+  function reconnectState(attempt) {
+    return attempt >= LIVE_OFFLINE_THRESHOLD ? "offline" : "reconnecting";
+  }
+
   function applyOverview(root, payload) {
     if (!payload.overview) {
       return;
@@ -87,6 +91,7 @@
     setText(root, "[data-live-detail-source-state]", payload.detail.source_state || "unavailable");
     setText(root, "[data-live-detail-updated-at]", payload.detail.updated_at || "unavailable");
     setText(root, "[data-live-detail-verified-at]", payload.detail.verified_at || "unavailable");
+    setText(root, "[data-live-detail-warning-count]", String(payload.detail.recovery_warning_count || 0));
     setText(root, "[data-live-latest-recorded-at]", payload.detail.latest_recorded_at || "unavailable");
   }
 
@@ -133,7 +138,7 @@
       }
       reconnectAttempt += 1;
       var delayMs = backoffDelay(reconnectAttempt);
-      var state = reconnectAttempt >= LIVE_OFFLINE_THRESHOLD ? "offline" : "reconnecting";
+      var state = reconnectState(reconnectAttempt);
       setState(root, state, "Live updates reconnecting in " + formatDelay(delayMs) + ".");
       reconnectTimer = window.setTimeout(function () {
         reconnectTimer = null;
