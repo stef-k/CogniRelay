@@ -137,6 +137,19 @@ The default deployment is one owner-agent per CogniRelay instance.
 
 The system should not be read as a peer-equal shared-instance platform. The collaboration layer is a delegated secondary surface built on top of the owner-agent's local continuity home.
 
+### Optional operator UI
+
+The shipped operator UI for issue `#199` is an optional local-operator observability surface mounted under `/ui`.
+
+- It is disabled by default.
+- It is server-rendered HTML with local static assets only.
+- It is not a SPA and does not require npm, Node, bundlers, or CDN assets.
+- It is read-only in the currently supported posture.
+- It exposes bounded continuity inspection rather than a general admin/control panel.
+- It includes bounded live updates through `/ui/events` SSE for small overview/list/detail live regions, with pages remaining usable without JS.
+
+The supported posture keeps `COGNIRELAY_UI_REQUIRE_LOCALHOST=true`, so `/ui` remains a loopback-scoped operator surface rather than a normal remotely exposed web app. Non-local auth/session models, mutation actions, standalone archive/cold maintenance consoles, WebSockets, and broader reactive UI behavior are deferred to future explicit issues rather than implied by the current deployment model.
+
 Access isolation between agents is enforced entirely by token scopes and namespace/path restrictions. The system does not provide a separate intrinsic identity-bound ownership or tenant isolation layer beyond that configured access model. Any token with read access to `memory/continuity` can read any capsule in that namespace — capsule privacy depends on the operator not granting that access to collaborator tokens. In the default `collaboration_peer` template this access is excluded, which protects owner-private continuity as configured policy.
 
 ### Runtime Concurrency Model

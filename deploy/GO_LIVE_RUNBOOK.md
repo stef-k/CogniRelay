@@ -29,7 +29,7 @@ What it does:
 - creates virtualenv and installs dependencies
 - installs `systemd` units and ops timers
 - generates host tokens and writes hashed entries to `peer_tokens.json`
-- configures nginx reverse proxy and blocks external `/v1/ops/*`
+- configures nginx reverse proxy and blocks external `/v1/ops/*` and `/ui*`
 - enables firewall baseline
 - optionally provisions TLS cert via certbot (`--email`)
 
@@ -80,6 +80,12 @@ Set at minimum:
 - `COGNIRELAY_REQUIRE_SIGNED_INGRESS=true`
 - `COGNIRELAY_KEY_STORE_PATH=/var/lib/cognirelay/security/security_keys.json`
 - leave `COGNIRELAY_TOKENS=` empty when using file-backed tokens
+
+UI guidance:
+
+- Leave `COGNIRELAY_UI_ENABLED=false` unless a local operator actually needs the shipped read-only UI.
+- If enabled, keep `COGNIRELAY_UI_REQUIRE_LOCALHOST=true` and `COGNIRELAY_UI_READ_ONLY=true`.
+- Do not expose `/ui` through the public reverse proxy. The supported posture is local-only operator access, for example direct loopback access on the host or an operator-controlled SSH tunnel to loopback.
 
 ### 3.5 Host token generation (hashed storage)
 
@@ -161,6 +167,8 @@ sudo systemctl reload nginx
 sudo certbot --nginx -d your.domain.example
 ```
 
+The shipped nginx example explicitly denies `/ui*` as well as `/v1/ops/*`. Keep that deny rule in place unless a future issue explicitly defines and implements a supported non-local auth model for the UI.
+
 ### 3.8 Firewall baseline
 
 ```bash
@@ -187,9 +195,15 @@ curl -sS https://relay.example.com/v1/discovery | jq .ok
 # local-only ops boundary: should be forbidden externally
 curl -i -sS https://relay.example.com/v1/ops/catalog
 
+# local-only UI boundary: should also be forbidden externally
+curl -i -sS https://relay.example.com/ui/
+
 # local host ops should work
 OPS_TOKEN="$(sudo cat /etc/cognirelay/ops.token)"
 curl -sS http://127.0.0.1:8080/v1/ops/catalog -H "Authorization: Bearer ${OPS_TOKEN}" | jq .ok
+
+# local host UI should only be used on loopback when explicitly enabled
+curl -i -sS http://127.0.0.1:8080/ui/
 
 # logs
 sudo -u cognirelay test -f /var/lib/cognirelay/repo/logs/api_audit.jsonl
@@ -212,4 +226,3 @@ Optional destructive cleanup is explicit (`--purge-app`, `--purge-data`, `--purg
 - Weekly: verify restore drill output and replication drift.
 - Monthly: rotate host tokens and signing keys.
 - Per release: run test suite before deploy and smoke checks after deploy.
-

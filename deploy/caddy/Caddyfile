@@ -3,6 +3,11 @@ relay.example.com {
     @ops path /v1/ops/*
     respond @ops "forbidden" 403
 
+    # Optional operator UI boundary: keep `/ui` local-only even when the main
+    # API is reverse-proxied publicly.
+    @ui path /ui*
+    respond @ui "forbidden" 403
+
     reverse_proxy 127.0.0.1:8080 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Real-IP {remote_host}
