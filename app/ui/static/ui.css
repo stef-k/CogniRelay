@@ -53,14 +53,14 @@ td {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.7rem 0;
+  padding: 0.45rem 0;
   align-items: start;
 }
 
 .eyebrow {
   margin: 0 0 0.25rem;
   color: var(--mu-muted-color);
-  font-size: 0.72rem;
+  font-size: 0.66rem;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -68,9 +68,9 @@ td {
 
 .page-title {
   margin: 0;
-  font-size: clamp(1.35rem, 1vw + 1rem, 2.1rem);
-  line-height: 1.05;
-  max-width: 28ch;
+  font-size: clamp(1.05rem, 0.8vw + 0.8rem, 1.7rem);
+  line-height: 1.02;
+  max-width: 34ch;
   text-wrap: pretty;
 }
 
@@ -92,14 +92,14 @@ td {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 2rem;
-  padding: 0.32rem 0.8rem;
+  min-height: 1.75rem;
+  padding: 0.2rem 0.65rem;
   border: 1px solid color-mix(in srgb, var(--mu-muted-border-color) 70%, transparent);
   border-radius: 999px;
   text-decoration: none;
   background: color-mix(in srgb, var(--mu-secondary-background) 75%, transparent);
   color: var(--mu-color);
-  font-size: 0.92rem;
+  font-size: 0.82rem;
   font-weight: 600;
 }
 
@@ -113,21 +113,21 @@ td {
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
-  padding: 0.2rem 0.3rem 0.2rem 0.65rem;
+  padding: 0.12rem 0.22rem 0.12rem 0.5rem;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--mu-muted-border-color) 70%, transparent);
   background: color-mix(in srgb, var(--mu-secondary-background) 75%, transparent);
   color: var(--mu-muted-color);
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
 .theme-control select {
-  min-width: 5.25rem;
+  min-width: 4.6rem;
   margin: 0;
   border-radius: 999px;
-  padding-block: 0.15rem;
-  font-size: 0.9rem;
+  padding-block: 0.05rem;
+  font-size: 0.82rem;
 }
 
 main.shell {
@@ -289,6 +289,82 @@ main.shell {
   hyphens: none;
 }
 
+.summary-document {
+  display: grid;
+  gap: 1rem;
+}
+
+.summary-group {
+  display: grid;
+  gap: 0.65rem;
+  padding-top: 0.2rem;
+}
+
+.summary-group + .summary-group {
+  padding-top: 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--mu-muted-border-color) 45%, transparent);
+}
+
+.summary-group h3 {
+  margin: 0;
+  color: var(--mu-muted-color);
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.summary-rows {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.summary-row-item {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  gap: 0.5rem 1rem;
+  align-items: start;
+}
+
+.summary-key {
+  min-width: 0;
+  color: var(--mu-color);
+  font-weight: 700;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.summary-value {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.summary-value p {
+  margin: 0;
+}
+
+.summary-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.summary-card-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.summary-card {
+  padding: 0.8rem 0.9rem;
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--mu-secondary-background) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mu-muted-border-color) 45%, transparent);
+}
+
+.summary-card .summary-row-item {
+  grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
+}
+
 .muted {
   color: var(--mu-muted-color);
 }
@@ -408,6 +484,12 @@ article.panel ol,
 @media (max-width: 640px) {
   .shell {
     width: min(100% - 1rem, 1440px);
+  }
+
+  .summary-row-item,
+  .summary-card .summary-row-item {
+    grid-template-columns: 1fr;
+    gap: 0.2rem 0;
   }
 
   .kv-list {
