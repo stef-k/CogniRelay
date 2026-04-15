@@ -575,6 +575,8 @@ class TestOperatorUiSlice1(unittest.TestCase):
                     subject_kind=None,
                     artifact_state="archived",
                     health_status=None,
+                    detail_subject_kind=None,
+                    detail_subject_id=None,
                 )
             )
             event = asyncio.run(_read_first_sse_event_chunk(response))
@@ -613,6 +615,8 @@ class TestOperatorUiSlice1(unittest.TestCase):
                         subject_kind=None,
                         artifact_state=None,
                         health_status=None,
+                        detail_subject_kind=None,
+                        detail_subject_id=None,
                     )
                 )
                 event = asyncio.run(_read_first_sse_event_chunk(response))
@@ -624,8 +628,50 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertFalse(payload["continuity"]["available"])
         self.assertEqual(payload["continuity"]["latest_recorded_at"], "unavailable")
 
+    def test_ui_events_stream_includes_bounded_detail_summary_when_requested(self) -> None:
+        """The SSE endpoint should expose a small detail summary for one subject when requested."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="stef")
+            _write_archive(repo_root, subject_kind="user", subject_id="stef")
+            self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host(
+                "127.0.0.1",
+                path="/ui/events",
+                query_string=b"detail_subject_kind=user&detail_subject_id=stef",
+            )
+            response = asyncio.run(
+                endpoint(
+                    request,
+                    q=None,
+                    subject_kind=None,
+                    artifact_state=None,
+                    health_status=None,
+                    detail_subject_kind="user",
+                    detail_subject_id="stef",
+                )
+            )
+            event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertIsNotNone(payload["detail"])
+        self.assertTrue(payload["detail"]["available"])
+        self.assertEqual(payload["detail"]["subject_kind"], "user")
+        self.assertEqual(payload["detail"]["subject_id"], "stef")
+        self.assertEqual(payload["detail"]["artifact_counts"]["active"], 1)
+        self.assertEqual(payload["detail"]["artifact_counts"]["archived"], 1)
+        self.assertEqual(payload["detail"]["source_state"], "active")
+
     def test_ui_pages_include_progressive_live_update_hooks_without_js_requirement(self) -> None:
-        """Overview and continuity pages should expose live hooks while remaining server-rendered."""
+        """Overview, continuity, and detail pages should expose optional live hooks while remaining server-rendered."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="stef")
@@ -637,14 +683,34 @@ class TestOperatorUiSlice1(unittest.TestCase):
 
             overview = client.get("/ui/")
             continuity = client.get("/ui/continuity")
+            detail = client.get("/ui/continuity/user/stef")
 
         self.assertEqual(overview.status_code, 200)
         self.assertIn('/ui/static/ui_live.js', overview.text)
         self.assertIn('data-live-page="overview"', overview.text)
+        self.assertIn('data-live-stream="/ui/events"', overview.text)
         self.assertIn("JavaScript disabled; live updates are unavailable.", overview.text)
         self.assertEqual(continuity.status_code, 200)
         self.assertIn('data-live-page="continuity"', continuity.text)
-        self.assertIn("Recent visible change:", continuity.text)
+        self.assertIn("Data refreshed:", continuity.text)
+        self.assertIn("Showing <span data-live-displayed-count>", continuity.text)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn('data-live-page="detail"', detail.text)
+        self.assertIn("Current source state:", detail.text)
+        self.assertIn("Capsule updated at:", detail.text)
+
+    def test_ui_live_script_contains_bounded_backoff_and_operator_states(self) -> None:
+        """The live-update script should use bounded backoff and explicit operator-visible states."""
+        script = (Path(__file__).resolve().parents[1] / "app" / "ui" / "static" / "ui_live.js").read_text(encoding="utf-8")
+
+        self.assertIn("LIVE_BASE_DELAY_MS = 1000", script)
+        self.assertIn("LIVE_MAX_DELAY_MS = 16000", script)
+        self.assertIn("Math.min(LIVE_MAX_DELAY_MS, LIVE_BASE_DELAY_MS * Math.pow(2, exponent))", script)
+        self.assertIn('setState(root, "connected"', script)
+        self.assertIn('setState(root, "reconnecting"', script)
+        self.assertIn('setState(root, "degraded"', script)
+        self.assertIn('setState(root, "offline"', script)
+
 
     def test_ui_detail_page_keeps_degraded_reads_while_showing_archived_and_cold_visibility(self) -> None:
         """Missing active/fallback continuity should still render related archived/cold lifecycle visibility."""

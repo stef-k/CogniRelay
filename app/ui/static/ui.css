@@ -139,6 +139,30 @@ main.shell {
   top: 0.42rem;
 }
 
+[data-live-page="overview"][data-live-state="connected"] [data-live-connection]::before,
+[data-live-page="continuity"][data-live-state="connected"] [data-live-connection]::before,
+[data-live-page="detail"][data-live-state="connected"] [data-live-connection]::before {
+  background: #2f855a;
+}
+
+[data-live-page="overview"][data-live-state="reconnecting"] [data-live-connection]::before,
+[data-live-page="continuity"][data-live-state="reconnecting"] [data-live-connection]::before,
+[data-live-page="detail"][data-live-state="reconnecting"] [data-live-connection]::before {
+  background: #c0862e;
+}
+
+[data-live-page="overview"][data-live-state="degraded"] [data-live-connection]::before,
+[data-live-page="continuity"][data-live-state="degraded"] [data-live-connection]::before,
+[data-live-page="detail"][data-live-state="degraded"] [data-live-connection]::before {
+  background: #b45309;
+}
+
+[data-live-page="overview"][data-live-state="offline"] [data-live-connection]::before,
+[data-live-page="continuity"][data-live-state="offline"] [data-live-connection]::before,
+[data-live-page="detail"][data-live-state="offline"] [data-live-connection]::before {
+  background: #b42318;
+}
+
 .kv-list {
   display: grid;
   grid-template-columns: minmax(140px, 220px) 1fr;
