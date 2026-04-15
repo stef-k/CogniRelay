@@ -1,0 +1,16 @@
+<section class="panel">
+  <h2>Filters</h2>
+  <form method="get" action="/ui/continuity" class="filter-form">
+    <label for="subject_kind">Subject kind</label>
+    <select id="subject_kind" name="subject_kind">
+      <option value="">all</option>
+      ${filter_options}
+    </select>
+    <button type="submit">Apply</button>
+  </form>
+  <p class="muted">Showing ${result_count} result(s). Current filter: ${selected_kind}</p>
+</section>
+<section class="panel">
+  <h2>Continuity Capsules</h2>
+  ${continuity_table}
+</section>
