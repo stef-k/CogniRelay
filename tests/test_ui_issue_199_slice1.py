@@ -358,6 +358,7 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(listing.status_code, 200)
         self.assertIn("Continuity Capsules", listing.text)
         self.assertIn("stef", listing.text)
+        self.assertIn('class="table-wrap"', listing.text)
         self.assertIn("/ui/continuity/user/stef", listing.text)
 
     def test_ui_overview_does_not_initialize_git_when_auto_init_enabled(self) -> None:
@@ -433,6 +434,24 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertNotIn("active-user", archived_only.text)
         self.assertNotIn("fallback-user", archived_only.text)
         self.assertNotIn("cold-user", archived_only.text)
+
+    def test_ui_continuity_empty_filter_values_degrade_to_all_instead_of_422(self) -> None:
+        """Empty select values from the server-rendered filter form should behave like no filter."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="stef")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            response = client.get("/ui/continuity?subject_kind=user&artifact_state=&health_status=&q=")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="filter-field"', response.text)
+        self.assertIn("stef", response.text)
+        self.assertNotIn("Unprocessable Entity", response.text)
 
     def test_ui_continuity_filter_finds_archived_rows_beyond_mixed_display_limit(self) -> None:
         """Lifecycle filtering must stay correct even when the mixed view exceeds the display cap."""
@@ -576,8 +595,24 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Cold artifacts present", detail.text)
         self.assertIn("Open user archived list", detail.text)
         self.assertIn("Open user cold list", detail.text)
-        self.assertIn("memory/continuity/archive/user-stef-20260415T093000Z.json", detail.text)
-        self.assertIn("memory/continuity/cold/index/user-stef-20260415T093000Z.md", detail.text)
+
+    def test_ui_detail_page_startup_summary_omits_dedicated_section_duplicates(self) -> None:
+        """Startup summary should not duplicate dedicated trust/stable-preference sections."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="user", subject_id="stef")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            detail = client.get("/ui/continuity/user/stef")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("Startup Summary", detail.text)
+        self.assertNotIn("<h3>stable_preferences</h3>", detail.text)
+        self.assertNotIn("<h3>trust_signals</h3>", detail.text)
 
     def test_ui_events_stream_bounded_snapshot_for_current_scope(self) -> None:
         """The SSE endpoint should stream one deterministic bounded snapshot payload."""

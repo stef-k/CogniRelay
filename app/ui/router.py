@@ -127,9 +127,9 @@ def build_ui_router(*, app_version: str) -> APIRouter:
     def ui_continuity(
         request: Request,
         q: str | None = Query(default=None),
-        subject_kind: Literal["user", "peer", "thread", "task"] | None = Query(default=None),
-        artifact_state: Literal["active", "fallback", "archived", "cold"] | None = Query(default=None),
-        health_status: Literal["healthy", "degraded", "conflicted"] | None = Query(default=None),
+        subject_kind: str | None = Query(default=None),
+        artifact_state: str | None = Query(default=None),
+        health_status: str | None = Query(default=None),
     ) -> HTMLResponse:
         """Render the continuity list view."""
         settings = get_settings()
@@ -137,6 +137,9 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         _gm = _ui_git_manager(settings)
         auth = _ui_auth(client_ip)
         now = datetime.now(timezone.utc)
+        subject_kind = _normalize_ui_filter(subject_kind, UI_SUBJECT_KINDS)
+        artifact_state = _normalize_ui_filter(artifact_state, UI_ARTIFACT_STATES)
+        health_status = _normalize_ui_filter(health_status, UI_HEALTH_STATUSES)
         all_rows = _ui_continuity_rows(
             repo_root=settings.repo_root,
             auth=auth,
@@ -244,7 +247,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         )
         capsule = detail.get("capsule") or {}
         continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
-        startup_summary = detail.get("startup_summary")
+        startup_summary = _startup_summary_for_ui(detail.get("startup_summary"))
         trust_signals = detail.get("trust_signals")
         related_rows = _related_artifact_rows(
             repo_root=settings.repo_root,
@@ -337,16 +340,20 @@ def build_ui_router(*, app_version: str) -> APIRouter:
     async def ui_events(
         request: Request,
         q: str | None = Query(default=None),
-        subject_kind: Literal["user", "peer", "thread", "task"] | None = Query(default=None),
-        artifact_state: Literal["active", "fallback", "archived", "cold"] | None = Query(default=None),
-        health_status: Literal["healthy", "degraded", "conflicted"] | None = Query(default=None),
-        detail_subject_kind: Literal["user", "peer", "thread", "task"] | None = Query(default=None),
+        subject_kind: str | None = Query(default=None),
+        artifact_state: str | None = Query(default=None),
+        health_status: str | None = Query(default=None),
+        detail_subject_kind: str | None = Query(default=None),
         detail_subject_id: str | None = Query(default=None),
     ) -> StreamingResponse:
         """Stream bounded read-only UI snapshots for progressive enhancement."""
         settings = get_settings()
         client_ip = _enforce_ui_access(request, settings)
         auth = _ui_auth(client_ip)
+        subject_kind = _normalize_ui_filter(subject_kind, UI_SUBJECT_KINDS)
+        artifact_state = _normalize_ui_filter(artifact_state, UI_ARTIFACT_STATES)
+        health_status = _normalize_ui_filter(health_status, UI_HEALTH_STATUSES)
+        detail_subject_kind = _normalize_ui_filter(detail_subject_kind, UI_SUBJECT_KINDS)
 
         async def event_stream() -> Any:
             event_id = 0
@@ -451,6 +458,18 @@ def _page(*, title: str, current_path: str, content: str) -> HTMLResponse:
 def _nav_class(active: bool) -> str:
     """Return the nav link class for the current page."""
     return "nav-link active" if active else "nav-link"
+
+
+def _normalize_ui_filter(value: str | None, allowed: tuple[str, ...]) -> str | None:
+    """Normalize optional UI filters so empty or unsupported values degrade safely."""
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if normalized in allowed:
+        return normalized
+    return None
 
 
 def _bool_label(value: bool) -> str:
@@ -974,7 +993,7 @@ def _html_table(*, headers: list[str], rows: list[list[str]], empty_message: str
         return f'<p class="muted">{html.escape(empty_message)}</p>'
     head = "".join(f"<th>{html.escape(label)}</th>" for label in headers)
     body_rows = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body_rows}</tbody></table>"
+    return f'<div class="table-wrap"><table class="table-hover"><thead><tr>{head}</tr></thead><tbody>{body_rows}</tbody></table></div>'
 
 
 def _subject_link(subject_kind: str, subject_id: str) -> str:
@@ -1105,6 +1124,18 @@ def _render_object(value: Any, *, empty_message: str) -> str:
     if value is None:
         return f'<p class="muted">{html.escape(empty_message)}</p>'
     return _render_value(value)
+
+
+def _startup_summary_for_ui(value: Any) -> Any:
+    """Trim startup-summary data to fields that are not already rendered elsewhere."""
+    if not isinstance(value, dict):
+        return value
+    filtered: dict[str, Any] = {}
+    if "recovery" in value:
+        filtered["recovery"] = value.get("recovery")
+    if "updated_at" in value:
+        filtered["updated_at"] = value.get("updated_at")
+    return filtered
 
 
 def _render_summary_document(value: Any, *, empty_message: str) -> str:
