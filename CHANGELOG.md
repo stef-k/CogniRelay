@@ -7,6 +7,26 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-04-16
+
+### Updated
+
+- Polished the shipped operator UI presentation with a locally vendored µCSS
+  Slate theme, dark mode as the default, a user theme selector, smaller shared
+  header/navigation sizing, a shared back-to-top control, and more responsive
+  detail-page layout behavior for dense continuity content.
+- Improved continuity detail rendering so dense summary/trust sections use a
+  flatter full-width layout, stable-preference tables can use the full detail
+  row width, and dedicated sections no longer duplicate the same
+  `trust_signals` or `stable_preferences` data already rendered elsewhere on
+  the page.
+- Fixed `/ui/continuity` filter handling so empty server-rendered select values
+  degrade to “all” instead of producing 422 responses, and repaired the filter
+  form layout so each filter field remains aligned as a single grid item.
+- Updated shared UI table rendering so operator tables use hover states and
+  scroll safely inside bounded panels instead of clipping wide structured
+  content.
+
 ## [1.2.0] - 2026-04-15
 
 ### Added
