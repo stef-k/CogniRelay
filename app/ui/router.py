@@ -303,8 +303,8 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                 rows=related_summary,
                 empty_message="No related lifecycle artifacts were found for this subject.",
             ),
-            startup_summary_html=_render_object(startup_summary, empty_message="Startup summary unavailable."),
-            trust_signals_html=_render_object(trust_signals, empty_message="Trust signals unavailable."),
+            startup_summary_html=_render_summary_document(startup_summary, empty_message="Startup summary unavailable."),
+            trust_signals_html=_render_summary_document(trust_signals, empty_message="Trust signals unavailable."),
             top_priorities_html=detail_sections["top_priorities"],
             active_concerns_html=detail_sections["active_concerns"],
             active_constraints_html=detail_sections["active_constraints"],
@@ -1105,6 +1105,65 @@ def _render_object(value: Any, *, empty_message: str) -> str:
     if value is None:
         return f'<p class="muted">{html.escape(empty_message)}</p>'
     return _render_value(value)
+
+
+def _render_summary_document(value: Any, *, empty_message: str) -> str:
+    """Render dense summary/trust data using flatter, full-width groups."""
+    if value is None:
+        return f'<p class="muted">{html.escape(empty_message)}</p>'
+    if not isinstance(value, dict):
+        return _render_value(value)
+    if not value:
+        return '<p class="muted">None</p>'
+    parts = ['<div class="summary-document">']
+    for key, item in value.items():
+        parts.append(
+            "<section class=\"summary-group\">"
+            f"<h3>{html.escape(str(key))}</h3>"
+            f"{_render_summary_content(item)}"
+            "</section>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_summary_content(value: Any) -> str:
+    """Render one summary-group value using flatter rows/cards."""
+    if value is None:
+        return '<p class="muted">None</p>'
+    if isinstance(value, bool):
+        return html.escape(_bool_label(value))
+    if isinstance(value, (int, float)):
+        return html.escape(str(value))
+    if isinstance(value, str):
+        return html.escape(value)
+    if isinstance(value, dict):
+        return _render_summary_rows(value)
+    if isinstance(value, list):
+        if not value:
+            return '<p class="muted">None</p>'
+        if all(isinstance(item, dict) for item in value):
+            parts = ['<div class="summary-card-list">']
+            for item in value:
+                parts.append(f'<article class="summary-card">{_render_summary_rows(item)}</article>')
+            parts.append("</div>")
+            return "".join(parts)
+        return '<ul class="summary-list">' + "".join(f"<li>{_render_summary_content(item)}</li>" for item in value) + "</ul>"
+    return html.escape(str(value))
+
+
+def _render_summary_rows(value: dict[str, Any]) -> str:
+    """Render key/value rows for one summary-group or summary-card."""
+    parts = ['<div class="summary-rows">']
+    for key, item in value.items():
+        parts.append(
+            "<div class=\"summary-row-item\">"
+            f"<div class=\"summary-key\">{html.escape(str(key))}</div>"
+            f"<div class=\"summary-value\">{_render_summary_content(item)}</div>"
+            "</div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _render_value(value: Any) -> str:

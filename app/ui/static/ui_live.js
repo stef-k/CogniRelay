@@ -2,6 +2,7 @@
   var LIVE_BASE_DELAY_MS = 1000;
   var LIVE_MAX_DELAY_MS = 16000;
   var LIVE_OFFLINE_THRESHOLD = 4;
+  var UI_THEME_KEY = "cognirelay-ui-theme";
 
   function setText(root, selector, value) {
     var node = root.querySelector(selector);
@@ -185,7 +186,48 @@
     connect();
   }
 
+  function applyTheme(theme) {
+    var value = theme === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", value);
+    try {
+      window.localStorage.setItem(UI_THEME_KEY, value);
+    } catch (_err) {}
+    return value;
+  }
+
+  function initThemeSelect() {
+    var selector = document.querySelector("[data-theme-select]");
+    if (!selector) {
+      return;
+    }
+    var currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
+    selector.value = currentTheme === "light" ? "light" : "dark";
+    selector.addEventListener("change", function (event) {
+      applyTheme(event.target.value);
+    });
+  }
+
+  function initBackToTop() {
+    var button = document.querySelector("[data-back-to-top]");
+    if (!button) {
+      return;
+    }
+
+    function updateVisibility() {
+      if (window.scrollY > 360) {
+        button.classList.add("is-visible");
+      } else {
+        button.classList.remove("is-visible");
+      }
+    }
+
+    updateVisibility();
+    window.addEventListener("scroll", updateVisibility, { passive: true });
+  }
+
   window.addEventListener("DOMContentLoaded", function () {
+    initThemeSelect();
+    initBackToTop();
     var roots = document.querySelectorAll("[data-live-page]");
     for (var idx = 0; idx < roots.length; idx += 1) {
       connectLiveRegion(roots[idx]);
