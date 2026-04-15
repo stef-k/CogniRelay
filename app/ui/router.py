@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
+import json
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from app.auth import AuthContext
 from app.config import Settings, get_settings
@@ -31,6 +33,8 @@ UI_SUBJECT_KINDS: tuple[str, ...] = ("user", "peer", "thread", "task")
 UI_ARTIFACT_STATES: tuple[str, ...] = ("active", "fallback", "archived", "cold")
 UI_HEALTH_STATUSES: tuple[str, ...] = ("healthy", "degraded", "conflicted")
 UI_CONTINUITY_DISPLAY_LIMIT = 200
+UI_SSE_RETRY_MS = 5000
+UI_SSE_POLL_INTERVAL_SECONDS = 5
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -100,6 +104,18 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                     ("Task capsules", str(continuity_counts["by_subject_kind"].get("task", 0))),
                 ]
             ),
+            live_latest_commit=html.escape(str(health.get("latest_commit") or "none")),
+            live_reported_at=html.escape(str(health.get("time", ""))),
+            live_service_version=html.escape(str(health.get("version", ""))),
+            live_git_initialized=html.escape(_bool_label(bool(health.get("git_initialized")))),
+            live_active_count=html.escape(str(continuity_counts["active"])),
+            live_fallback_count=html.escape(str(continuity_counts["fallback"])),
+            live_archived_count=html.escape(str(continuity_counts["archived"])),
+            live_cold_count=html.escape(str(continuity_counts["cold"])),
+            live_user_count=html.escape(str(continuity_counts["by_subject_kind"].get("user", 0))),
+            live_peer_count=html.escape(str(continuity_counts["by_subject_kind"].get("peer", 0))),
+            live_thread_count=html.escape(str(continuity_counts["by_subject_kind"].get("thread", 0))),
+            live_task_count=html.escape(str(continuity_counts["by_subject_kind"].get("task", 0))),
         )
         return _page(
             title="Operator Overview",
@@ -174,6 +190,19 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             fallback_count=str(lifecycle_counts["fallback"]),
             archived_count=str(lifecycle_counts["archived"]),
             cold_count=str(lifecycle_counts["cold"]),
+            live_displayed_count=html.escape(str(len(display_rows))),
+            live_matched_count=html.escape(str(len(filtered_rows))),
+            live_result_truncated=html.escape(_bool_label(len(filtered_rows) > UI_CONTINUITY_DISPLAY_LIMIT)),
+            live_latest_recorded_at=html.escape(_continuity_live_latest_recorded_at(filtered_rows)),
+            live_recent_change=html.escape(_continuity_live_recent_change_label(filtered_rows)),
+            live_stream_path=html.escape(
+                _ui_events_href(
+                    q=q,
+                    subject_kind=subject_kind,
+                    artifact_state=artifact_state,
+                    health_status=health_status,
+                )
+            ),
             continuity_table=_html_table(
                 headers=[
                     "Kind",
@@ -226,6 +255,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             retention_archive_days=settings.continuity_retention_archive_days,
         )
         related_summary = _related_artifact_summary_rows(subject_kind=subject_kind, rows=related_rows)
+        related_counts = _artifact_state_counts(related_rows)
         detail_sections = {
             "top_priorities": _html_list(_coerce_str_list(continuity.get("top_priorities"))),
             "active_concerns": _html_list(_coerce_str_list(continuity.get("active_concerns"))),
@@ -239,6 +269,20 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             subject_kind=html.escape(subject_kind),
             subject_id=html.escape(subject_id),
             source_state=html.escape(str(detail.get("source_state", "unknown"))),
+            live_stream_path=html.escape(
+                _ui_events_href(
+                    detail_subject_kind=subject_kind,
+                    detail_subject_id=subject_id,
+                )
+            ),
+            live_detail_updated_at=html.escape(str(capsule.get("updated_at") or "n/a")),
+            live_detail_verified_at=html.escape(str(capsule.get("verified_at") or "n/a")),
+            live_detail_latest_recorded_at=html.escape(_continuity_live_latest_recorded_at(related_rows)),
+            live_detail_source_state=html.escape(str(detail.get("source_state", "unknown"))),
+            live_detail_active_count=html.escape(str(related_counts["active"])),
+            live_detail_fallback_count=html.escape(str(related_counts["fallback"])),
+            live_detail_archived_count=html.escape(str(related_counts["archived"])),
+            live_detail_cold_count=html.escape(str(related_counts["cold"])),
             recovery_warnings=_html_list([str(item) for item in detail.get("recovery_warnings", [])]),
             capsule_meta_rows=_definition_rows(
                 [
@@ -286,6 +330,53 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             title=f"Continuity Detail: {subject_kind}/{subject_id}",
             current_path="/ui/continuity",
             content=body,
+        )
+
+    @router.get("/events")
+    async def ui_events(
+        request: Request,
+        q: str | None = Query(default=None),
+        subject_kind: Literal["user", "peer", "thread", "task"] | None = Query(default=None),
+        artifact_state: Literal["active", "fallback", "archived", "cold"] | None = Query(default=None),
+        health_status: Literal["healthy", "degraded", "conflicted"] | None = Query(default=None),
+        detail_subject_kind: Literal["user", "peer", "thread", "task"] | None = Query(default=None),
+        detail_subject_id: str | None = Query(default=None),
+    ) -> StreamingResponse:
+        """Stream bounded read-only UI snapshots for progressive enhancement."""
+        settings = get_settings()
+        client_ip = _enforce_ui_access(request, settings)
+        auth = _ui_auth(client_ip)
+
+        async def event_stream() -> Any:
+            event_id = 0
+            yield f"retry: {UI_SSE_RETRY_MS}\n\n"
+            while True:
+                snapshot = _ui_live_snapshot(
+                    app_version=app_version,
+                    settings=settings,
+                    auth=auth,
+                    now=datetime.now(timezone.utc),
+                    q=q,
+                    subject_kind=subject_kind,
+                    artifact_state=artifact_state,
+                    health_status=health_status,
+                    detail_subject_kind=detail_subject_kind,
+                    detail_subject_id=detail_subject_id,
+                )
+                event_id += 1
+                yield _sse_event("ui-snapshot", snapshot, event_id)
+                if await request.is_disconnected():
+                    break
+                await asyncio.sleep(UI_SSE_POLL_INTERVAL_SECONDS)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     return router
@@ -364,6 +455,357 @@ def _nav_class(active: bool) -> str:
 def _bool_label(value: bool) -> str:
     """Return a lowercase boolean label for human-readable tables."""
     return "true" if value else "false"
+
+
+def _sse_event(event: str, data: dict[str, Any], event_id: int) -> str:
+    """Encode one deterministic SSE event frame."""
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return f"id: {event_id}\nevent: {event}\ndata: {payload}\n\n"
+
+
+def _ui_live_snapshot(
+    *,
+    app_version: str,
+    settings: Settings,
+    auth: AuthContext,
+    now: datetime,
+    q: str | None,
+    subject_kind: str | None,
+    artifact_state: str | None,
+    health_status: str | None,
+    detail_subject_kind: str | None,
+    detail_subject_id: str | None,
+) -> dict[str, Any]:
+    """Build one bounded live-update snapshot for the operator UI."""
+    warnings: list[str] = []
+    overview = _empty_ui_overview_summary(warning=None)
+    continuity = _empty_ui_continuity_summary(
+        q=q,
+        subject_kind=subject_kind,
+        artifact_state=artifact_state,
+        health_status=health_status,
+        warning=None,
+    )
+    detail: dict[str, Any] | None = None
+
+    try:
+        overview = _ui_live_overview_summary(
+            app_version=app_version,
+            settings=settings,
+            auth=auth,
+            now=now,
+        )
+    except Exception as exc:
+        warnings.append(f"ui_overview_snapshot_failed:{exc.__class__.__name__}")
+        overview = _empty_ui_overview_summary(warning="ui_overview_snapshot_failed")
+
+    try:
+        continuity = _ui_live_continuity_summary(
+            settings=settings,
+            auth=auth,
+            now=now,
+            q=q,
+            subject_kind=subject_kind,
+            artifact_state=artifact_state,
+            health_status=health_status,
+        )
+    except Exception as exc:
+        warnings.append(f"ui_continuity_snapshot_failed:{exc.__class__.__name__}")
+        continuity = _empty_ui_continuity_summary(
+            q=q,
+            subject_kind=subject_kind,
+            artifact_state=artifact_state,
+            health_status=health_status,
+            warning="ui_continuity_snapshot_failed",
+        )
+
+    if detail_subject_kind and detail_subject_id:
+        try:
+            detail = _ui_live_detail_summary(
+                settings=settings,
+                auth=auth,
+                now=now,
+                subject_kind=detail_subject_kind,
+                subject_id=detail_subject_id,
+            )
+        except Exception as exc:
+            warnings.append(f"ui_detail_snapshot_failed:{exc.__class__.__name__}")
+            detail = _empty_ui_detail_summary(
+                subject_kind=detail_subject_kind,
+                subject_id=detail_subject_id,
+                warning="ui_detail_snapshot_failed",
+            )
+
+    return {
+        "schema_version": "1.0",
+        "ok": not warnings,
+        "generated_at": now.isoformat().replace("+00:00", "Z"),
+        "warnings": warnings,
+        "overview": overview,
+        "continuity": continuity,
+        "detail": detail,
+    }
+
+
+def _ui_live_overview_summary(
+    *,
+    app_version: str,
+    settings: Settings,
+    auth: AuthContext,
+    now: datetime,
+) -> dict[str, Any]:
+    """Build the bounded overview summary used by the SSE stream."""
+    gm = _ui_git_manager(settings)
+    health = health_payload(
+        app_version=app_version,
+        contract_version=settings.contract_version,
+        repo_root=str(settings.repo_root),
+        git_initialized=gm.is_repo(),
+        latest_commit=gm.latest_commit(),
+        signed_ingress_required=bool(settings.require_signed_ingress),
+    )
+    continuity_counts = _continuity_counts(repo_root=settings.repo_root, auth=auth, now=now)
+    return {
+        "available": True,
+        "warning": None,
+        "service": str(health.get("service", "")),
+        "version": str(health.get("version", "")),
+        "contract_version": str(health.get("contract_version", "")),
+        "git_initialized": bool(health.get("git_initialized")),
+        "latest_commit": str(health.get("latest_commit") or "none"),
+        "reported_at": str(health.get("time", "")),
+        "status_label": "connected",
+        "continuity_counts": continuity_counts,
+    }
+
+
+def _ui_live_continuity_summary(
+    *,
+    settings: Settings,
+    auth: AuthContext,
+    now: datetime,
+    q: str | None,
+    subject_kind: str | None,
+    artifact_state: str | None,
+    health_status: str | None,
+) -> dict[str, Any]:
+    """Build the bounded continuity summary used by the SSE stream."""
+    all_rows = _ui_continuity_rows(
+        repo_root=settings.repo_root,
+        auth=auth,
+        subject_kind=subject_kind,
+        artifact_state=None,
+        now=now,
+        retention_archive_days=settings.continuity_retention_archive_days,
+    )
+    scoped_rows = _filter_rows_by_query_and_health(all_rows, q=q, health_status=health_status)
+    lifecycle_counts = _artifact_state_counts(scoped_rows)
+    filtered_rows = _filter_rows_by_artifact_state(scoped_rows, artifact_state)
+    recent_change = _latest_continuity_change(filtered_rows)
+    latest_recorded_at = recent_change["recorded_at"] if recent_change is not None else "n/a"
+    return {
+        "available": True,
+        "warning": None,
+        "scope": {
+            "q": _normalized_query_display(q),
+            "subject_kind": subject_kind or "",
+            "artifact_state": artifact_state or "",
+            "health_status": health_status or "",
+        },
+        "matched_count": len(filtered_rows),
+        "displayed_count": min(len(filtered_rows), UI_CONTINUITY_DISPLAY_LIMIT),
+        "result_truncated": len(filtered_rows) > UI_CONTINUITY_DISPLAY_LIMIT,
+        "artifact_counts": lifecycle_counts,
+        "latest_recorded_at": latest_recorded_at,
+        "recent_change": recent_change,
+    }
+
+
+def _ui_live_detail_summary(
+    *,
+    settings: Settings,
+    auth: AuthContext,
+    now: datetime,
+    subject_kind: str,
+    subject_id: str,
+) -> dict[str, Any]:
+    """Build the bounded detail-header summary used by the SSE stream."""
+    detail = continuity_read_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        req=ContinuityReadRequest(
+            subject_kind=subject_kind,
+            subject_id=subject_id,
+            allow_fallback=True,
+            view="startup",
+        ),
+        now=now,
+        audit=_noop_audit,
+    )
+    capsule = detail.get("capsule") or {}
+    related_rows = _related_artifact_rows(
+        repo_root=settings.repo_root,
+        auth=auth,
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+        now=now,
+        retention_archive_days=settings.continuity_retention_archive_days,
+    )
+    related_counts = _artifact_state_counts(related_rows)
+    latest_recorded_at = _continuity_live_latest_recorded_at(related_rows)
+    return {
+        "available": True,
+        "warning": None,
+        "subject_kind": subject_kind,
+        "subject_id": subject_id,
+        "source_state": str(detail.get("source_state", "unknown")),
+        "updated_at": str(capsule.get("updated_at") or "n/a"),
+        "verified_at": str(capsule.get("verified_at") or "n/a"),
+        "recovery_warning_count": len(list(detail.get("recovery_warnings") or [])),
+        "artifact_counts": related_counts,
+        "latest_recorded_at": latest_recorded_at,
+    }
+
+
+def _empty_ui_overview_summary(*, warning: str | None) -> dict[str, Any]:
+    """Return a deterministic degraded overview summary."""
+    return {
+        "available": False,
+        "warning": warning,
+        "service": "",
+        "version": "",
+        "contract_version": "",
+        "git_initialized": False,
+        "latest_commit": "unavailable",
+        "reported_at": "unavailable",
+        "continuity_counts": {
+            "active": 0,
+            "fallback": 0,
+            "archived": 0,
+            "cold": 0,
+            "by_subject_kind": {kind: 0 for kind in UI_SUBJECT_KINDS},
+        },
+    }
+
+
+def _empty_ui_continuity_summary(
+    *,
+    q: str | None,
+    subject_kind: str | None,
+    artifact_state: str | None,
+    health_status: str | None,
+    warning: str | None,
+) -> dict[str, Any]:
+    """Return a deterministic degraded continuity summary."""
+    return {
+        "available": False,
+        "warning": warning,
+        "scope": {
+            "q": _normalized_query_display(q),
+            "subject_kind": subject_kind or "",
+            "artifact_state": artifact_state or "",
+            "health_status": health_status or "",
+        },
+        "matched_count": 0,
+        "displayed_count": 0,
+        "result_truncated": False,
+        "artifact_counts": {state: 0 for state in UI_ARTIFACT_STATES},
+        "latest_recorded_at": "unavailable",
+        "recent_change": None,
+    }
+
+
+def _empty_ui_detail_summary(*, subject_kind: str, subject_id: str, warning: str | None) -> dict[str, Any]:
+    """Return a deterministic degraded detail summary."""
+    return {
+        "available": False,
+        "warning": warning,
+        "subject_kind": subject_kind,
+        "subject_id": subject_id,
+        "source_state": "unavailable",
+        "updated_at": "unavailable",
+        "verified_at": "unavailable",
+        "recovery_warning_count": 0,
+        "artifact_counts": {state: 0 for state in UI_ARTIFACT_STATES},
+        "latest_recorded_at": "unavailable",
+    }
+
+
+def _ui_events_href(
+    *,
+    q: str | None = None,
+    subject_kind: str | None = None,
+    artifact_state: str | None = None,
+    health_status: str | None = None,
+    detail_subject_kind: str | None = None,
+    detail_subject_id: str | None = None,
+) -> str:
+    """Build a deterministic SSE URL for one page scope."""
+    pairs: list[tuple[str, str]] = []
+    if q is not None and _normalized_query_display(q):
+        pairs.append(("q", _normalized_query_display(q)))
+    if subject_kind is not None:
+        pairs.append(("subject_kind", subject_kind))
+    if artifact_state is not None:
+        pairs.append(("artifact_state", artifact_state))
+    if health_status is not None:
+        pairs.append(("health_status", health_status))
+    if detail_subject_kind is not None:
+        pairs.append(("detail_subject_kind", detail_subject_kind))
+    if detail_subject_id is not None:
+        pairs.append(("detail_subject_id", detail_subject_id))
+    if not pairs:
+        return "/ui/events"
+    return "/ui/events?" + urlencode(pairs)
+
+
+def _latest_continuity_change(rows: list[dict[str, Any]]) -> dict[str, str] | None:
+    """Return the latest lifecycle change visible in the current continuity scope."""
+    latest_row: dict[str, Any] | None = None
+    latest_sort_key: tuple[str, str, str, str] | None = None
+    for row in rows:
+        recorded_at = _display_recorded_at(row)
+        sort_key = (
+            recorded_at,
+            str(row.get("subject_kind") or ""),
+            str(row.get("subject_id") or ""),
+            str(row.get("artifact_state") or ""),
+        )
+        if latest_sort_key is None or sort_key > latest_sort_key:
+            latest_sort_key = sort_key
+            latest_row = row
+    if latest_row is None:
+        return None
+    return {
+        "subject_kind": str(latest_row.get("subject_kind") or ""),
+        "subject_id": str(latest_row.get("subject_id") or ""),
+        "artifact_state": str(latest_row.get("artifact_state") or ""),
+        "recorded_at": _display_recorded_at(latest_row),
+    }
+
+
+def _continuity_live_latest_recorded_at(rows: list[dict[str, Any]]) -> str:
+    """Return the initial continuity live-summary timestamp label."""
+    recent_change = _latest_continuity_change(rows)
+    if recent_change is None:
+        return "n/a"
+    return recent_change["recorded_at"]
+
+
+def _continuity_live_recent_change_label(rows: list[dict[str, Any]]) -> str:
+    """Return the initial continuity live-summary recent change label."""
+    recent_change = _latest_continuity_change(rows)
+    return _recent_change_label(recent_change)
+
+
+def _recent_change_label(recent_change: dict[str, str] | None) -> str:
+    """Render one bounded recent-change summary label."""
+    if recent_change is None:
+        return "No recent continuity change in the current view."
+    return (
+        f'{recent_change["subject_kind"]}/{recent_change["subject_id"]} '
+        f'[{recent_change["artifact_state"]}] at {recent_change["recorded_at"]}'
+    )
 
 
 def _artifact_state_counts(rows: list[dict[str, Any]]) -> dict[str, int]:

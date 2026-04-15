@@ -4,6 +4,22 @@
   <p class="muted">Source state: ${source_state}</p>
   ${capsule_meta_rows}
 </section>
+<section class="panel" data-live-page="detail" data-live-stream="${live_stream_path}">
+  <h2>Live Status</h2>
+  <p class="muted" data-live-connection>Live updates waiting for connection.</p>
+  <div class="badge-row summary-row">
+    <span class="summary-chip">active <span data-live-active-count>${live_detail_active_count}</span></span>
+    <span class="summary-chip">fallback <span data-live-fallback-count>${live_detail_fallback_count}</span></span>
+    <span class="summary-chip">archived <span data-live-archived-count>${live_detail_archived_count}</span></span>
+    <span class="summary-chip">cold <span data-live-cold-count>${live_detail_cold_count}</span></span>
+  </div>
+  <p class="muted">Data refreshed: <span data-live-generated-at>Not connected</span></p>
+  <p class="muted">Current source state: <span data-live-detail-source-state>${live_detail_source_state}</span></p>
+  <p class="muted">Capsule updated at: <span data-live-detail-updated-at>${live_detail_updated_at}</span></p>
+  <p class="muted">Capsule verified at: <span data-live-detail-verified-at>${live_detail_verified_at}</span></p>
+  <p class="muted">Latest lifecycle timestamp: <span data-live-latest-recorded-at>${live_detail_latest_recorded_at}</span></p>
+  <noscript><p class="muted">JavaScript disabled; live updates are unavailable.</p></noscript>
+</section>
 <section class="panel">
   <h2>Related Lifecycle Artifacts</h2>
   ${related_artifact_rows}

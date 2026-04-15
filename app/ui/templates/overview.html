@@ -9,6 +9,38 @@
   </article>
 </section>
 <section class="grid two-up">
+  <article class="panel" data-live-page="overview" data-live-stream="/ui/events">
+    <h2>Live Updates</h2>
+    <p class="muted" data-live-connection>Live updates waiting for connection.</p>
+    <p class="muted">Data refreshed: <span data-live-generated-at>Not connected</span></p>
+    <dl class="kv-list">
+      <dt>Service version</dt>
+      <dd data-live-service-version>${live_service_version}</dd>
+      <dt>Git initialized</dt>
+      <dd data-live-git-initialized>${live_git_initialized}</dd>
+      <dt>Latest commit</dt>
+      <dd data-live-latest-commit>${live_latest_commit}</dd>
+      <dt>Health reported</dt>
+      <dd data-live-reported-at>${live_reported_at}</dd>
+      <dt>Active capsules</dt>
+      <dd data-live-active-count>${live_active_count}</dd>
+      <dt>Fallback snapshots</dt>
+      <dd data-live-fallback-count>${live_fallback_count}</dd>
+      <dt>Archived envelopes</dt>
+      <dd data-live-archived-count>${live_archived_count}</dd>
+      <dt>Cold stubs</dt>
+      <dd data-live-cold-count>${live_cold_count}</dd>
+      <dt>User capsules</dt>
+      <dd data-live-user-count>${live_user_count}</dd>
+      <dt>Peer capsules</dt>
+      <dd data-live-peer-count>${live_peer_count}</dd>
+      <dt>Thread capsules</dt>
+      <dd data-live-thread-count>${live_thread_count}</dd>
+      <dt>Task capsules</dt>
+      <dd data-live-task-count>${live_task_count}</dd>
+    </dl>
+    <noscript><p class="muted">JavaScript disabled; live updates are unavailable.</p></noscript>
+  </article>
   <article class="panel">
     <h2>Capabilities</h2>
     ${capability_list}
