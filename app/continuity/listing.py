@@ -185,6 +185,10 @@ def _scan_archive_summaries(
                 now=now,
                 artifact_state="archived",
                 retention_class=retention_class,
+                extra={
+                    "archive_path": rel,
+                    "archived_at": envelope.get("archived_at"),
+                },
             )
         )
     return summaries

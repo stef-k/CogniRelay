@@ -28,6 +28,7 @@ from app.models import ContinuityListRequest, ContinuityReadRequest
 from .render import render_template
 
 UI_SUBJECT_KINDS: tuple[str, ...] = ("user", "peer", "thread", "task")
+UI_ARTIFACT_STATES: tuple[str, ...] = ("active", "fallback", "archived", "cold")
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -108,6 +109,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
     def ui_continuity(
         request: Request,
         subject_kind: Literal["user", "peer", "thread", "task"] | None = Query(default=None),
+        artifact_state: Literal["active", "fallback", "archived", "cold"] | None = Query(default=None),
     ) -> HTMLResponse:
         """Render the continuity list view."""
         settings = get_settings()
@@ -122,44 +124,57 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                 subject_kind=subject_kind,
                 limit=200,
                 include_fallback=True,
-                include_archived=False,
-                include_cold=False,
+                include_archived=True,
+                include_cold=True,
             ),
             now=now,
             retention_archive_days=settings.continuity_retention_archive_days,
             audit=_noop_audit,
         )
+        all_rows = list(listing["capsules"])
+        lifecycle_counts = _artifact_state_counts(all_rows)
+        filtered_rows = _filter_rows_by_artifact_state(all_rows, artifact_state)
         rows = []
-        for capsule in listing["capsules"]:
+        for capsule in filtered_rows:
             rows.append(
                 [
                     html.escape(str(capsule.get("subject_kind", ""))),
                     _subject_link(str(capsule.get("subject_kind", "")), str(capsule.get("subject_id", ""))),
-                    html.escape(str(capsule.get("artifact_state", ""))),
+                    _lifecycle_badges(capsule),
+                    _artifact_location_cell(capsule),
+                    html.escape(_display_recorded_at(capsule)),
                     html.escape(str(capsule.get("health_status", ""))),
-                    html.escape(str(capsule.get("updated_at", ""))),
-                    html.escape(str(capsule.get("stable_preference_count", 0))),
-                    html.escape(str(capsule.get("rationale_entry_count", 0))),
+                    _signal_counts_cell(capsule),
                 ]
             )
         filter_options = "".join(
             _option_row(value=kind, selected=(kind == subject_kind))
             for kind in UI_SUBJECT_KINDS
         )
+        artifact_options = "".join(
+            _option_row(value=state, selected=(state == artifact_state))
+            for state in UI_ARTIFACT_STATES
+        )
         body = render_template(
             "continuity_list.html",
-            selected_kind=html.escape(subject_kind or "all"),
+            selected_kind=html.escape(subject_kind or "all kinds"),
+            selected_artifact_state=html.escape(artifact_state or "all lifecycle states"),
             filter_options=filter_options,
-            result_count=str(listing["count"]),
+            artifact_options=artifact_options,
+            result_count=str(len(filtered_rows)),
+            active_count=str(lifecycle_counts["active"]),
+            fallback_count=str(lifecycle_counts["fallback"]),
+            archived_count=str(lifecycle_counts["archived"]),
+            cold_count=str(lifecycle_counts["cold"]),
             continuity_table=_html_table(
                 headers=[
                     "Kind",
                     "Subject",
-                    "Source",
+                    "Lifecycle",
+                    "Artifact",
+                    "Recorded",
                     "Health",
-                    "Updated",
-                    "Stable prefs",
-                    "Rationale entries",
+                    "Signals",
                 ],
                 rows=rows,
                 empty_message="No continuity capsules matched the current filter.",
@@ -194,6 +209,15 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
         startup_summary = detail.get("startup_summary")
         trust_signals = detail.get("trust_signals")
+        related_rows = _related_artifact_rows(
+            repo_root=settings.repo_root,
+            auth=auth,
+            subject_kind=subject_kind,
+            subject_id=subject_id,
+            now=datetime.now(timezone.utc),
+            retention_archive_days=settings.continuity_retention_archive_days,
+        )
+        related_summary = _related_artifact_summary_rows(subject_kind=subject_kind, rows=related_rows)
         detail_sections = {
             "top_priorities": _html_list(_coerce_str_list(continuity.get("top_priorities"))),
             "active_concerns": _html_list(_coerce_str_list(continuity.get("active_concerns"))),
@@ -213,10 +237,18 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                     ("Path", str(detail.get("path", ""))),
                     ("Source state", str(detail.get("source_state", "unknown"))),
                     ("Archived", _bool_label(bool(detail.get("archived")))),
+                    ("Fallback snapshot present", _bool_label(any(row["artifact_state"] == "fallback" for row in related_rows))),
+                    ("Archived artifacts present", _bool_label(any(row["artifact_state"] == "archived" for row in related_rows))),
+                    ("Cold artifacts present", _bool_label(any(row["artifact_state"] == "cold" for row in related_rows))),
                     ("Updated at", str(capsule.get("updated_at") or "n/a")),
                     ("Verified at", str(capsule.get("verified_at") or "n/a")),
                     ("Verification kind", str(capsule.get("verification_kind") or "n/a")),
                 ]
+            ),
+            related_artifact_rows=_html_table(
+                headers=["Lifecycle", "Present", "Count", "Latest artifact", "Recorded", "Browse"],
+                rows=related_summary,
+                empty_message="No related lifecycle artifacts were found for this subject.",
             ),
             startup_summary_html=_render_object(startup_summary, empty_message="Startup summary unavailable."),
             trust_signals_html=_render_object(trust_signals, empty_message="Trust signals unavailable."),
@@ -326,6 +358,26 @@ def _bool_label(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _artifact_state_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Count continuity rows by lifecycle state for list-view summaries."""
+    counts = {state: 0 for state in UI_ARTIFACT_STATES}
+    for row in rows:
+        state = str(row.get("artifact_state") or "")
+        if state in counts:
+            counts[state] += 1
+    return counts
+
+
+def _filter_rows_by_artifact_state(
+    rows: list[dict[str, Any]],
+    artifact_state: str | None,
+) -> list[dict[str, Any]]:
+    """Apply the optional lifecycle filter used by the continuity list page."""
+    if artifact_state is None:
+        return rows
+    return [row for row in rows if row.get("artifact_state") == artifact_state]
+
+
 def _continuity_counts(*, repo_root: Path, auth: AuthContext, now: datetime) -> dict[str, Any]:
     """Collect cheap high-level continuity counts for the overview page."""
     active = _scan_active_summaries(repo_root, auth, None, now)
@@ -382,6 +434,123 @@ def _option_row(*, value: str, selected: bool) -> str:
     """Render one filter option."""
     selected_attr = ' selected="selected"' if selected else ""
     return f'<option value="{html.escape(value)}"{selected_attr}>{html.escape(value)}</option>'
+
+
+def _badge(*, label: str, tone: str = "default") -> str:
+    """Render a compact badge label."""
+    safe_label = html.escape(label)
+    safe_tone = html.escape(tone)
+    return f'<span class="badge badge-{safe_tone}">{safe_label}</span>'
+
+
+def _lifecycle_badges(row: dict[str, Any]) -> str:
+    """Render lifecycle-related badges for one continuity row."""
+    state = str(row.get("artifact_state") or "unknown")
+    parts = [_badge(label=state, tone=state)]
+    retention_class = str(row.get("retention_class") or "")
+    if retention_class and retention_class not in {"active", "fallback", "cold"}:
+        parts.append(_badge(label=retention_class.replace("_", " "), tone="retention"))
+    return '<div class="badge-row">' + "".join(parts) + "</div>"
+
+
+def _artifact_location_cell(row: dict[str, Any]) -> str:
+    """Render the most useful artifact path metadata for one continuity row."""
+    parts = []
+    state = str(row.get("artifact_state") or "")
+    primary_path = _primary_artifact_path(row)
+    if primary_path:
+        parts.append(f"<div>{html.escape(primary_path)}</div>")
+    if state == "cold" and row.get("source_archive_path"):
+        parts.append(f'<div class="muted">archive: {html.escape(str(row.get("source_archive_path")))}</div>')
+    elif state == "archived" and row.get("path"):
+        parts.append(f'<div class="muted">active path: {html.escape(str(row.get("path")))}</div>')
+    return "".join(parts) or '<span class="muted">n/a</span>'
+
+
+def _primary_artifact_path(row: dict[str, Any]) -> str:
+    """Return the most relevant artifact path for one continuity row."""
+    state = str(row.get("artifact_state") or "")
+    if state == "archived":
+        return str(row.get("archive_path") or row.get("path") or "")
+    if state == "cold":
+        return str(row.get("cold_stub_path") or row.get("path") or "")
+    return str(row.get("path") or "")
+
+
+def _display_recorded_at(row: dict[str, Any]) -> str:
+    """Return the best lifecycle timestamp to show for one row."""
+    state = str(row.get("artifact_state") or "")
+    if state == "cold":
+        return str(row.get("cold_stored_at") or row.get("archived_at") or "n/a")
+    if state == "archived":
+        return str(row.get("archived_at") or row.get("updated_at") or "n/a")
+    return str(row.get("updated_at") or "n/a")
+
+
+def _signal_counts_cell(row: dict[str, Any]) -> str:
+    """Render stable-preference and rationale-entry counts for one row."""
+    stable = row.get("stable_preference_count")
+    rationale = row.get("rationale_entry_count")
+    stable_label = "n/a" if stable is None else str(stable)
+    rationale_label = "n/a" if rationale is None else str(rationale)
+    return html.escape(f"{stable_label} prefs / {rationale_label} rationale")
+
+
+def _related_artifact_rows(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    subject_kind: str,
+    subject_id: str,
+    now: datetime,
+    retention_archive_days: int,
+) -> list[dict[str, Any]]:
+    """Collect all lifecycle rows for one subject using existing continuity scanners."""
+    rows: list[dict[str, Any]] = []
+    rows.extend(_scan_active_summaries(repo_root, auth, subject_kind, now))
+    rows.extend(_scan_fallback_summaries(repo_root, auth, subject_kind, now))
+    rows.extend(_scan_archive_summaries(repo_root, auth, subject_kind, now, retention_archive_days))
+    rows.extend(_scan_cold_summaries(repo_root, auth, subject_kind))
+    filtered = [row for row in rows if str(row.get("subject_id")) == subject_id]
+    artifact_order = {state: idx for idx, state in enumerate(UI_ARTIFACT_STATES)}
+    filtered.sort(
+        key=lambda row: (
+            artifact_order.get(str(row.get("artifact_state")), 99),
+            str(_display_recorded_at(row)),
+            str(_primary_artifact_path(row)),
+        ),
+        reverse=False,
+    )
+    return filtered
+
+
+def _related_artifact_summary_rows(
+    *,
+    subject_kind: str,
+    rows: list[dict[str, Any]],
+) -> list[list[str]]:
+    """Build a bounded per-lifecycle summary table for the detail page."""
+    summary_rows: list[list[str]] = []
+    for state in UI_ARTIFACT_STATES:
+        matching = [row for row in rows if row.get("artifact_state") == state]
+        latest = matching[-1] if matching else None
+        browse_href = f"/ui/continuity?subject_kind={quote(subject_kind, safe='')}&artifact_state={quote(state, safe='')}"
+        latest_html = '<span class="muted">None</span>'
+        recorded = "n/a"
+        if latest is not None:
+            latest_html = _artifact_location_cell(latest)
+            recorded = _display_recorded_at(latest)
+        summary_rows.append(
+            [
+                _lifecycle_badges({"artifact_state": state, "retention_class": latest.get("retention_class") if latest else ""}),
+                html.escape(_bool_label(bool(matching))),
+                html.escape(str(len(matching))),
+                latest_html,
+                html.escape(recorded),
+                f'<a href="{browse_href}">Browse {html.escape(state)}</a>',
+            ]
+        )
+    return summary_rows
 
 
 def _render_object(value: Any, *, empty_message: str) -> str:
