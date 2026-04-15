@@ -347,6 +347,29 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertNotIn("fallback-user", archived_only.text)
         self.assertNotIn("cold-user", archived_only.text)
 
+    def test_ui_continuity_filter_finds_archived_rows_beyond_mixed_display_limit(self) -> None:
+        """Lifecycle filtering must stay correct even when the mixed view exceeds the display cap."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            for idx in range(205):
+                _write_capsule(repo_root, subject_kind="user", subject_id=f"active-{idx:03d}")
+            _write_archive(repo_root, subject_kind="user", subject_id="late-archive")
+            client = self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+
+            listing = client.get("/ui/continuity")
+            archived_only = client.get("/ui/continuity?artifact_state=archived")
+
+        self.assertEqual(listing.status_code, 200)
+        self.assertIn("archived 1", listing.text)
+        self.assertIn("Display truncated: true", listing.text)
+        self.assertEqual(archived_only.status_code, 200)
+        self.assertIn("late-archive", archived_only.text)
+        self.assertIn("Showing 1 result(s) from 1 matched row(s).", archived_only.text)
+
     def test_ui_detail_page_shows_related_lifecycle_artifacts(self) -> None:
         """The detail page should show related fallback/archive/cold lifecycle visibility for one subject."""
         with tempfile.TemporaryDirectory() as td:
@@ -368,8 +391,8 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Fallback snapshot present", detail.text)
         self.assertIn("Archived artifacts present", detail.text)
         self.assertIn("Cold artifacts present", detail.text)
-        self.assertIn("Browse archived", detail.text)
-        self.assertIn("Browse cold", detail.text)
+        self.assertIn("Open user archived list", detail.text)
+        self.assertIn("Open user cold list", detail.text)
         self.assertIn("memory/continuity/archive/user-stef-20260415T093000Z.json", detail.text)
         self.assertIn("memory/continuity/cold/index/user-stef-20260415T093000Z.md", detail.text)
 

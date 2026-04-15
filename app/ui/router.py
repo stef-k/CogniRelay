@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from app.auth import AuthContext
 from app.config import Settings, get_settings
-from app.continuity import continuity_list_service, continuity_read_service
+from app.continuity import continuity_read_service
 from app.continuity.listing import (
     _scan_active_summaries,
     _scan_archive_summaries,
@@ -23,12 +23,13 @@ from app.continuity.listing import (
 )
 from app.discovery import capabilities_payload, health_payload
 from app.git_manager import GitManager
-from app.models import ContinuityListRequest, ContinuityReadRequest
+from app.models import ContinuityReadRequest
 
 from .render import render_template
 
 UI_SUBJECT_KINDS: tuple[str, ...] = ("user", "peer", "thread", "task")
 UI_ARTIFACT_STATES: tuple[str, ...] = ("active", "fallback", "archived", "cold")
+UI_CONTINUITY_DISPLAY_LIMIT = 200
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -117,25 +118,19 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         _gm = _ui_git_manager(settings)
         auth = _ui_auth(client_ip)
         now = datetime.now(timezone.utc)
-        listing = continuity_list_service(
+        all_rows = _ui_continuity_rows(
             repo_root=settings.repo_root,
             auth=auth,
-            req=ContinuityListRequest(
-                subject_kind=subject_kind,
-                limit=200,
-                include_fallback=True,
-                include_archived=True,
-                include_cold=True,
-            ),
+            subject_kind=subject_kind,
+            artifact_state=None,
             now=now,
             retention_archive_days=settings.continuity_retention_archive_days,
-            audit=_noop_audit,
         )
-        all_rows = list(listing["capsules"])
         lifecycle_counts = _artifact_state_counts(all_rows)
         filtered_rows = _filter_rows_by_artifact_state(all_rows, artifact_state)
+        display_rows = filtered_rows[:UI_CONTINUITY_DISPLAY_LIMIT]
         rows = []
-        for capsule in filtered_rows:
+        for capsule in display_rows:
             rows.append(
                 [
                     html.escape(str(capsule.get("subject_kind", ""))),
@@ -161,7 +156,9 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             selected_artifact_state=html.escape(artifact_state or "all lifecycle states"),
             filter_options=filter_options,
             artifact_options=artifact_options,
-            result_count=str(len(filtered_rows)),
+            displayed_count=str(len(display_rows)),
+            matched_count=str(len(filtered_rows)),
+            result_truncated=_bool_label(len(filtered_rows) > UI_CONTINUITY_DISPLAY_LIMIT),
             active_count=str(lifecycle_counts["active"]),
             fallback_count=str(lifecycle_counts["fallback"]),
             archived_count=str(lifecycle_counts["archived"]),
@@ -368,6 +365,39 @@ def _artifact_state_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _ui_continuity_rows(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    subject_kind: str | None,
+    artifact_state: str | None,
+    now: datetime,
+    retention_archive_days: int,
+) -> list[dict[str, Any]]:
+    """Collect lifecycle rows for the UI without pre-filter truncation."""
+    states = [artifact_state] if artifact_state in UI_ARTIFACT_STATES else list(UI_ARTIFACT_STATES)
+    rows: list[dict[str, Any]] = []
+    for state in states:
+        if state == "active":
+            rows.extend(_scan_active_summaries(repo_root, auth, subject_kind, now))
+        elif state == "fallback":
+            rows.extend(_scan_fallback_summaries(repo_root, auth, subject_kind, now))
+        elif state == "archived":
+            rows.extend(_scan_archive_summaries(repo_root, auth, subject_kind, now, retention_archive_days))
+        elif state == "cold":
+            rows.extend(_scan_cold_summaries(repo_root, auth, subject_kind))
+    artifact_order = {state: idx for idx, state in enumerate(UI_ARTIFACT_STATES)}
+    rows.sort(
+        key=lambda row: (
+            str(row.get("subject_kind")),
+            str(row.get("subject_id")),
+            artifact_order.get(str(row.get("artifact_state")), 99),
+            str(_primary_artifact_path(row)),
+        )
+    )
+    return rows
+
+
 def _filter_rows_by_artifact_state(
     rows: list[dict[str, Any]],
     artifact_state: str | None,
@@ -506,21 +536,15 @@ def _related_artifact_rows(
     retention_archive_days: int,
 ) -> list[dict[str, Any]]:
     """Collect all lifecycle rows for one subject using existing continuity scanners."""
-    rows: list[dict[str, Any]] = []
-    rows.extend(_scan_active_summaries(repo_root, auth, subject_kind, now))
-    rows.extend(_scan_fallback_summaries(repo_root, auth, subject_kind, now))
-    rows.extend(_scan_archive_summaries(repo_root, auth, subject_kind, now, retention_archive_days))
-    rows.extend(_scan_cold_summaries(repo_root, auth, subject_kind))
-    filtered = [row for row in rows if str(row.get("subject_id")) == subject_id]
-    artifact_order = {state: idx for idx, state in enumerate(UI_ARTIFACT_STATES)}
-    filtered.sort(
-        key=lambda row: (
-            artifact_order.get(str(row.get("artifact_state")), 99),
-            str(_display_recorded_at(row)),
-            str(_primary_artifact_path(row)),
-        ),
-        reverse=False,
+    rows = _ui_continuity_rows(
+        repo_root=repo_root,
+        auth=auth,
+        subject_kind=subject_kind,
+        artifact_state=None,
+        now=now,
+        retention_archive_days=retention_archive_days,
     )
+    filtered = [row for row in rows if str(row.get("subject_id")) == subject_id]
     return filtered
 
 
@@ -547,7 +571,7 @@ def _related_artifact_summary_rows(
                 html.escape(str(len(matching))),
                 latest_html,
                 html.escape(recorded),
-                f'<a href="{browse_href}">Browse {html.escape(state)}</a>',
+                f'<a href="{browse_href}">Open {html.escape(subject_kind)} {html.escape(state)} list</a>',
             ]
         )
     return summary_rows
