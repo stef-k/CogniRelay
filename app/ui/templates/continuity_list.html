@@ -6,9 +6,21 @@
       <option value="">all</option>
       ${filter_options}
     </select>
+    <label for="artifact_state">Lifecycle state</label>
+    <select id="artifact_state" name="artifact_state">
+      <option value="">all</option>
+      ${artifact_options}
+    </select>
     <button type="submit">Apply</button>
   </form>
-  <p class="muted">Showing ${result_count} result(s). Current filter: ${selected_kind}</p>
+  <div class="badge-row summary-row">
+    <span class="summary-chip">active ${active_count}</span>
+    <span class="summary-chip">fallback ${fallback_count}</span>
+    <span class="summary-chip">archived ${archived_count}</span>
+    <span class="summary-chip">cold ${cold_count}</span>
+  </div>
+  <p class="muted">Showing ${displayed_count} result(s) from ${matched_count} matched row(s). Current filters: ${selected_kind}; ${selected_artifact_state}</p>
+  <p class="muted">Display truncated: ${result_truncated}</p>
 </section>
 <section class="panel">
   <h2>Continuity Capsules</h2>

@@ -145,6 +145,62 @@ main.shell {
   align-items: end;
 }
 
+.badge-row {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.22rem 0.55rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  border: 1px solid var(--border);
+  background: #f2ede2;
+}
+
+.badge-active {
+  background: #e4f0eb;
+  border-color: #b7d3c7;
+}
+
+.badge-fallback {
+  background: #f4ead9;
+  border-color: #d7c3a2;
+}
+
+.badge-archived {
+  background: #e8edf5;
+  border-color: #c0cadb;
+}
+
+.badge-cold {
+  background: #e3eef6;
+  border-color: #b0cadf;
+}
+
+.badge-retention {
+  background: #f5efe3;
+  border-color: #dbc7a1;
+}
+
+.summary-row {
+  margin-top: 0.9rem;
+}
+
+.summary-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  background: #f2ede2;
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
 select,
 button {
   font: inherit;
