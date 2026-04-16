@@ -34,7 +34,6 @@ UI_ARTIFACT_STATES: tuple[str, ...] = ("active", "fallback", "archived", "cold")
 UI_HEALTH_STATUSES: tuple[str, ...] = ("healthy", "degraded", "conflicted")
 UI_CONTINUITY_DISPLAY_LIMIT = 200
 UI_SSE_RETRY_MS = 5000
-UI_SSE_POLL_INTERVAL_SECONDS = 5
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -332,7 +331,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                 yield _sse_event("ui-snapshot", snapshot, event_id)
                 if await request.is_disconnected():
                     break
-                await asyncio.sleep(UI_SSE_POLL_INTERVAL_SECONDS)
+                await asyncio.sleep(settings.ui_sse_poll_interval_seconds)
 
         return StreamingResponse(
             event_stream(),
