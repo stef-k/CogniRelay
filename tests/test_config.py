@@ -74,6 +74,7 @@ class TestConfigTokens(unittest.TestCase):
             self.assertFalse(defaults.ui_enabled)
             self.assertTrue(defaults.ui_require_localhost)
             self.assertTrue(defaults.ui_read_only)
+            self.assertEqual(defaults.ui_sse_poll_interval_seconds, 5)
 
             with patch.dict(
                 os.environ,
@@ -82,6 +83,7 @@ class TestConfigTokens(unittest.TestCase):
                     "COGNIRELAY_UI_ENABLED": "true",
                     "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false",
                     "COGNIRELAY_UI_READ_ONLY": "false",
+                    "COGNIRELAY_UI_SSE_POLL_INTERVAL_SECONDS": "3",
                 },
                 clear=True,
             ):
@@ -90,6 +92,31 @@ class TestConfigTokens(unittest.TestCase):
             self.assertTrue(configured.ui_enabled)
             self.assertFalse(configured.ui_require_localhost)
             self.assertFalse(configured.ui_read_only)
+            self.assertEqual(configured.ui_sse_poll_interval_seconds, 3)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "COGNIRELAY_REPO_ROOT": td,
+                    "COGNIRELAY_UI_SSE_POLL_INTERVAL_SECONDS": "0",
+                },
+                clear=True,
+            ):
+                clamped_low = get_settings(force_reload=True)
+
+            self.assertEqual(clamped_low.ui_sse_poll_interval_seconds, 1)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "COGNIRELAY_REPO_ROOT": td,
+                    "COGNIRELAY_UI_SSE_POLL_INTERVAL_SECONDS": "999",
+                },
+                clear=True,
+            ):
+                clamped_high = get_settings(force_reload=True)
+
+            self.assertEqual(clamped_high.ui_sse_poll_interval_seconds, 60)
 
 
 if __name__ == "__main__":
