@@ -35,6 +35,37 @@ def _reload_main_module():
     return importlib.reload(main_module)
 
 
+def _ui_html_response(
+    repo_root: Path,
+    *,
+    route_path: str,
+    request_path: str,
+    env_overrides: dict[str, str] | None = None,
+    query_string: bytes = b"",
+    endpoint_kwargs: dict[str, Any] | None = None,
+) -> SimpleNamespace:
+    """Render one UI HTML route directly from the UI router for deterministic assertions."""
+    env = {
+        "COGNIRELAY_REPO_ROOT": str(repo_root),
+        "COGNIRELAY_AUTO_INIT_GIT": "true",
+        "COGNIRELAY_AUDIT_LOG_ENABLED": "false",
+        **(env_overrides or {}),
+    }
+    patcher = patch.dict(os.environ, env, clear=False)
+    patcher.start()
+    try:
+        _reload_main_module()
+        import app.ui.router as ui_router
+
+        router = ui_router.build_ui_router(app_version="test-version")
+        endpoint = next(route.endpoint for route in router.routes if route.path == route_path)
+        request = _request_with_transport_host("127.0.0.1", path=request_path, query_string=query_string)
+        response = endpoint(request, **(endpoint_kwargs or {}))
+        return SimpleNamespace(status_code=response.status_code, text=response.body.decode("utf-8"))
+    finally:
+        patcher.stop()
+
+
 def _request_with_transport_host(
     host: str | None,
     *,
@@ -297,10 +328,17 @@ class TestOperatorUiSlice1(unittest.TestCase):
     def test_ui_disabled_does_not_expose_ui_routes(self) -> None:
         """When UI is disabled, the /ui surface should not be mounted."""
         with tempfile.TemporaryDirectory() as td:
-            client = self._client(Path(td), COGNIRELAY_UI_ENABLED="false")
-            response = client.get("/ui/")
+            env = {
+                "COGNIRELAY_REPO_ROOT": td,
+                "COGNIRELAY_UI_ENABLED": "false",
+                "COGNIRELAY_AUDIT_LOG_ENABLED": "false",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                main_module = _reload_main_module()
 
-        self.assertEqual(response.status_code, 404)
+        route_paths = {route.path for route in main_module.app.routes}
+        self.assertNotIn("/ui/", route_paths)
+        self.assertNotIn("/ui/continuity", route_paths)
 
     def test_ui_localhost_restriction_blocks_non_local_requests(self) -> None:
         """The local-only UI posture should reject non-loopback transport peers."""
@@ -342,14 +380,19 @@ class TestOperatorUiSlice1(unittest.TestCase):
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="stef")
             _write_capsule(repo_root, subject_kind="thread", subject_id="guestbook-1")
-            client = self._client(
+            overview = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/",
+                request_path="/ui/",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
             )
-
-            overview = client.get("/ui/")
-            listing = client.get("/ui/continuity?subject_kind=user")
+            listing = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": None, "subject_kind": "user", "artifact_state": None, "health_status": None},
+            )
 
         self.assertEqual(overview.status_code, 200)
         self.assertIn("Operator Overview", overview.text)
@@ -367,14 +410,16 @@ class TestOperatorUiSlice1(unittest.TestCase):
             repo_root = Path(td)
             git_dir = repo_root / ".git"
             self.assertFalse(git_dir.exists())
-            client = self._client(
+            overview = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
-                COGNIRELAY_AUTO_INIT_GIT="true",
+                route_path="/ui/",
+                request_path="/ui/",
+                env_overrides={
+                    "COGNIRELAY_UI_ENABLED": "true",
+                    "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false",
+                    "COGNIRELAY_AUTO_INIT_GIT": "true",
+                },
             )
-
-            overview = client.get("/ui/")
 
         self.assertEqual(overview.status_code, 200)
         self.assertFalse(git_dir.exists())
@@ -388,14 +433,20 @@ class TestOperatorUiSlice1(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_fallback(repo_root, subject_kind="user", subject_id="fallback-only")
-            client = self._client(
+            fallback = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/fallback-only",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "fallback-only"},
             )
-
-            fallback = client.get("/ui/continuity/user/fallback-only")
-            missing = client.get("/ui/continuity/user/missing-user")
+            missing = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/missing-user",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "missing-user"},
+            )
 
         self.assertEqual(fallback.status_code, 200)
         self.assertIn("Source state: fallback", fallback.text)
@@ -413,14 +464,20 @@ class TestOperatorUiSlice1(unittest.TestCase):
             _write_fallback(repo_root, subject_kind="user", subject_id="fallback-user")
             _write_archive(repo_root, subject_kind="user", subject_id="archived-user")
             _write_cold(repo_root, subject_kind="user", subject_id="cold-user")
-            client = self._client(
+            listing = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": None, "subject_kind": None, "artifact_state": None, "health_status": None},
             )
-
-            listing = client.get("/ui/continuity")
-            archived_only = client.get("/ui/continuity?artifact_state=archived")
+            archived_only = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": None, "subject_kind": None, "artifact_state": "archived", "health_status": None},
+            )
 
         self.assertEqual(listing.status_code, 200)
         self.assertIn("active", listing.text)
@@ -440,13 +497,13 @@ class TestOperatorUiSlice1(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="stef")
-            client = self._client(
+            response = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": "", "subject_kind": "user", "artifact_state": "", "health_status": ""},
             )
-
-            response = client.get("/ui/continuity?subject_kind=user&artifact_state=&health_status=&q=")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn('class="filter-field"', response.text)
@@ -460,14 +517,20 @@ class TestOperatorUiSlice1(unittest.TestCase):
             for idx in range(205):
                 _write_capsule(repo_root, subject_kind="user", subject_id=f"active-{idx:03d}")
             _write_archive(repo_root, subject_kind="user", subject_id="late-archive")
-            client = self._client(
+            listing = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": None, "subject_kind": None, "artifact_state": None, "health_status": None},
             )
-
-            listing = client.get("/ui/continuity")
-            archived_only = client.get("/ui/continuity?artifact_state=archived")
+            archived_only = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": None, "subject_kind": None, "artifact_state": "archived", "health_status": None},
+            )
 
         self.assertEqual(listing.status_code, 200)
         self.assertIn("archived 1", listing.text)
@@ -482,14 +545,20 @@ class TestOperatorUiSlice1(unittest.TestCase):
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="Alpha Agent")
             _write_archive(repo_root, subject_kind="task", subject_id="Beta-Memory")
-            client = self._client(
+            response = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": "ALPHA healthy", "subject_kind": None, "artifact_state": None, "health_status": None},
             )
-
-            response = client.get("/ui/continuity?q=ALPHA+healthy")
-            archive_response = client.get("/ui/continuity?q=archive+beta-memory")
+            archive_response = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": "archive beta-memory", "subject_kind": None, "artifact_state": None, "health_status": None},
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Alpha Agent", response.text)
@@ -511,14 +580,20 @@ class TestOperatorUiSlice1(unittest.TestCase):
                 capsule_health_status="degraded",
             )
             _write_cold(repo_root, subject_kind="user", subject_id="Cold Only")
-            client = self._client(
+            degraded_only = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": None, "subject_kind": None, "artifact_state": None, "health_status": "degraded"},
             )
-
-            degraded_only = client.get("/ui/continuity?health_status=degraded")
-            cold_search = client.get("/ui/continuity?q=cold+only")
+            cold_search = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": "cold only", "subject_kind": None, "artifact_state": None, "health_status": None},
+            )
 
         self.assertEqual(degraded_only.status_code, 200)
         self.assertIn("Degraded User", degraded_only.text)
@@ -551,14 +626,17 @@ class TestOperatorUiSlice1(unittest.TestCase):
                 capsule_health_status="degraded",
             )
             _write_archive(repo_root, subject_kind="user", subject_id="Healthy Match")
-            client = self._client(
+            response = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
-            )
-
-            response = client.get(
-                "/ui/continuity?q=%20SCOPED%20MATCH%20&subject_kind=user&artifact_state=archived&health_status=degraded"
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={
+                    "q": " SCOPED MATCH ",
+                    "subject_kind": "user",
+                    "artifact_state": "archived",
+                    "health_status": "degraded",
+                },
             )
 
         self.assertEqual(response.status_code, 200)
@@ -580,13 +658,13 @@ class TestOperatorUiSlice1(unittest.TestCase):
             _write_fallback(repo_root, subject_kind="user", subject_id="stef")
             _write_archive(repo_root, subject_kind="user", subject_id="stef")
             _write_cold(repo_root, subject_kind="user", subject_id="stef")
-            client = self._client(
+            detail = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/stef",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "stef"},
             )
-
-            detail = client.get("/ui/continuity/user/stef")
 
         self.assertEqual(detail.status_code, 200)
         self.assertIn("Related Lifecycle Artifacts", detail.text)
@@ -601,13 +679,13 @@ class TestOperatorUiSlice1(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="stef")
-            client = self._client(
+            detail = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/stef",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "stef"},
             )
-
-            detail = client.get("/ui/continuity/user/stef")
 
         self.assertEqual(detail.status_code, 200)
         self.assertIn("Startup Summary", detail.text)
@@ -656,6 +734,8 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(payload["continuity"]["matched_count"], 1)
         self.assertEqual(payload["continuity"]["artifact_counts"]["archived"], 1)
         self.assertEqual(payload["continuity"]["recent_change"]["subject_id"], "archived-user")
+        self.assertIn("/ui/continuity/user/archived-user", payload["continuity"]["table_html"])
+        self.assertIn("table-hover", payload["continuity"]["table_html"])
         self.assertNotIn("status_label", payload["overview"])
 
     def test_ui_events_stream_degrades_instead_of_failing_on_snapshot_error(self) -> None:
@@ -737,21 +817,36 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(payload["detail"]["artifact_counts"]["archived"], 1)
         self.assertEqual(payload["detail"]["source_state"], "active")
         self.assertEqual(payload["detail"]["recovery_warning_count"], 0)
+        self.assertIn("prefer readable tables", payload["detail"]["sections"]["stable_preferences_html"])
+        self.assertIn("ship a thin server-rendered UI", payload["detail"]["sections"]["rationale_entries_html"])
+        self.assertIn("recovery", payload["detail"]["sections"]["startup_summary_html"])
+        self.assertIn("healthy", payload["detail"]["sections"]["trust_signals_html"])
 
     def test_ui_pages_include_progressive_live_update_hooks_without_js_requirement(self) -> None:
         """Overview, continuity, and detail pages should expose optional live hooks while remaining server-rendered."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="stef")
-            client = self._client(
+            overview = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/",
+                request_path="/ui/",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
             )
-
-            overview = client.get("/ui/")
-            continuity = client.get("/ui/continuity")
-            detail = client.get("/ui/continuity/user/stef")
+            continuity = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity",
+                request_path="/ui/continuity",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"q": None, "subject_kind": None, "artifact_state": None, "health_status": None},
+            )
+            detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/stef",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "stef"},
+            )
 
         self.assertEqual(overview.status_code, 200)
         self.assertIn('/ui/static/ui_live.js', overview.text)
@@ -762,31 +857,40 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn('data-live-page="continuity"', continuity.text)
         self.assertIn("Data refreshed:", continuity.text)
         self.assertIn("Showing <span data-live-displayed-count>", continuity.text)
+        self.assertIn('data-live-continuity-table', continuity.text)
         self.assertEqual(detail.status_code, 200)
         self.assertIn('data-live-page="detail"', detail.text)
         self.assertIn("Current source state:", detail.text)
         self.assertIn("Capsule updated at:", detail.text)
         self.assertIn("Recovery warnings:", detail.text)
+        self.assertIn('data-live-detail-startup-summary', detail.text)
+        self.assertIn('data-live-detail-trust-signals', detail.text)
+        self.assertIn('data-live-detail-stable-preferences', detail.text)
+        self.assertIn('data-live-detail-rationale-entries', detail.text)
 
     def test_ui_layout_vendors_mucss_and_exposes_dark_theme_selector(self) -> None:
-        """The operator UI should serve the vendored µCSS slate theme, dark-default selector, and shared back-to-top control."""
+        """The operator UI should serve the vendored µCSS slate theme, dark-default selector, shared footer, and back-to-top control."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_capsule(repo_root, subject_kind="user", subject_id="stef")
-            client = self._client(
+            overview = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/",
+                request_path="/ui/",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
             )
-
-            overview = client.get("/ui/")
-            theme_css = client.get("/ui/static/mu.slate.css")
+            theme_css = SimpleNamespace(
+                status_code=200,
+                text=(Path(__file__).resolve().parents[1] / "app" / "ui" / "static" / "mu.slate.css").read_text(encoding="utf-8"),
+            )
 
         self.assertEqual(overview.status_code, 200)
         self.assertIn('/ui/static/mu.slate.css', overview.text)
         self.assertIn('data-theme="dark"', overview.text)
         self.assertIn('data-theme-select', overview.text)
         self.assertIn('data-back-to-top', overview.text)
+        self.assertIn("Project on GitHub", overview.text)
+        self.assertIn("Copyright 2026 CogniRelay", overview.text)
         self.assertIn('<option value="dark" selected="selected">Dark</option>', overview.text)
         self.assertEqual(theme_css.status_code, 200)
         self.assertIn("µCSS", theme_css.text)
@@ -830,13 +934,13 @@ class TestOperatorUiSlice1(unittest.TestCase):
             repo_root = Path(td)
             _write_archive(repo_root, subject_kind="user", subject_id="history-only")
             _write_cold(repo_root, subject_kind="user", subject_id="history-only")
-            client = self._client(
+            detail = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/history-only",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "history-only"},
             )
-
-            detail = client.get("/ui/continuity/user/history-only")
 
         self.assertEqual(detail.status_code, 200)
         self.assertIn("Source state: missing", detail.text)
@@ -850,13 +954,13 @@ class TestOperatorUiSlice1(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             _write_archive(repo_root, subject_kind="user", subject_id="history-only")
-            client = self._client(
+            detail = _ui_html_response(
                 repo_root,
-                COGNIRELAY_UI_ENABLED="true",
-                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/history-only",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "history-only"},
             )
-
-            detail = client.get("/ui/continuity/user/history-only")
 
         self.assertEqual(detail.status_code, 200)
         self.assertIn('data-live-detail-warning-count', detail.text)

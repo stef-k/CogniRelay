@@ -11,6 +11,13 @@
     }
   }
 
+  function setHTML(root, selector, value) {
+    var node = root.querySelector(selector);
+    if (node && typeof value === "string" && node.innerHTML !== value) {
+      node.innerHTML = value;
+    }
+  }
+
   function setState(root, state, message) {
     if (root.getAttribute("data-live-state") !== state) {
       root.setAttribute("data-live-state", state);
@@ -77,6 +84,7 @@
     setText(root, "[data-live-result-truncated]", String(payload.continuity.result_truncated || false));
     setText(root, "[data-live-latest-recorded-at]", payload.continuity.latest_recorded_at || "unavailable");
     setText(root, "[data-live-recent-change]", formatRecentChange(payload.continuity.recent_change || null));
+    setHTML(root, "[data-live-continuity-table]", payload.continuity.table_html || "");
   }
 
   function applyDetail(root, payload) {
@@ -94,6 +102,21 @@
     setText(root, "[data-live-detail-verified-at]", payload.detail.verified_at || "unavailable");
     setText(root, "[data-live-detail-warning-count]", String(payload.detail.recovery_warning_count || 0));
     setText(root, "[data-live-latest-recorded-at]", payload.detail.latest_recorded_at || "unavailable");
+    if (payload.detail.sections) {
+      setHTML(root, "[data-live-detail-related-artifacts]", payload.detail.sections.related_artifact_rows || "");
+      setHTML(root, "[data-live-detail-recovery-warnings]", payload.detail.sections.recovery_warnings_html || "");
+      setHTML(root, "[data-live-detail-startup-summary]", payload.detail.sections.startup_summary_html || "");
+      setHTML(root, "[data-live-detail-trust-signals]", payload.detail.sections.trust_signals_html || "");
+      setHTML(root, "[data-live-detail-top-priorities]", payload.detail.sections.top_priorities_html || "");
+      setHTML(root, "[data-live-detail-active-concerns]", payload.detail.sections.active_concerns_html || "");
+      setHTML(root, "[data-live-detail-active-constraints]", payload.detail.sections.active_constraints_html || "");
+      setHTML(root, "[data-live-detail-open-loops]", payload.detail.sections.open_loops_html || "");
+      setHTML(root, "[data-live-detail-session-trajectory]", payload.detail.sections.session_trajectory_html || "");
+      setHTML(root, "[data-live-detail-stance-summary]", payload.detail.sections.stance_summary_html || "");
+      setHTML(root, "[data-live-detail-stable-preferences]", payload.detail.sections.stable_preferences_html || "");
+      setHTML(root, "[data-live-detail-negative-decisions]", payload.detail.sections.negative_decisions_html || "");
+      setHTML(root, "[data-live-detail-rationale-entries]", payload.detail.sections.rationale_entries_html || "");
+    }
   }
 
   function applySnapshot(root, payload) {

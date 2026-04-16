@@ -152,19 +152,6 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         lifecycle_counts = _artifact_state_counts(scoped_rows)
         filtered_rows = _filter_rows_by_artifact_state(scoped_rows, artifact_state)
         display_rows = filtered_rows[:UI_CONTINUITY_DISPLAY_LIMIT]
-        rows = []
-        for capsule in display_rows:
-            rows.append(
-                [
-                    html.escape(str(capsule.get("subject_kind", ""))),
-                    _subject_link(str(capsule.get("subject_kind", "")), str(capsule.get("subject_id", ""))),
-                    _lifecycle_badges(capsule),
-                    _artifact_location_cell(capsule),
-                    html.escape(_display_recorded_at(capsule)),
-                    html.escape(str(capsule.get("health_status", ""))),
-                    _signal_counts_cell(capsule),
-                ]
-            )
         filter_options = "".join(
             _option_row(value=kind, selected=(kind == subject_kind))
             for kind in UI_SUBJECT_KINDS
@@ -206,19 +193,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                     health_status=health_status,
                 )
             ),
-            continuity_table=_html_table(
-                headers=[
-                    "Kind",
-                    "Subject",
-                    "Lifecycle",
-                    "Artifact",
-                    "Recorded",
-                    "Health",
-                    "Signals",
-                ],
-                rows=rows,
-                empty_message="No continuity capsules matched the current filter.",
-            ),
+            continuity_table=_continuity_table_html(display_rows),
         )
         return _page(title="Continuity Capsules", current_path="/ui/continuity", content=body)
 
@@ -247,8 +222,6 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         )
         capsule = detail.get("capsule") or {}
         continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
-        startup_summary = _startup_summary_for_ui(detail.get("startup_summary"))
-        trust_signals = detail.get("trust_signals")
         related_rows = _related_artifact_rows(
             repo_root=settings.repo_root,
             auth=auth,
@@ -259,14 +232,14 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         )
         related_summary = _related_artifact_summary_rows(subject_kind=subject_kind, rows=related_rows)
         related_counts = _artifact_state_counts(related_rows)
-        detail_sections = {
-            "top_priorities": _html_list(_coerce_str_list(continuity.get("top_priorities"))),
-            "active_concerns": _html_list(_coerce_str_list(continuity.get("active_concerns"))),
-            "active_constraints": _html_list(_coerce_str_list(continuity.get("active_constraints"))),
-            "open_loops": _html_list(_coerce_str_list(continuity.get("open_loops"))),
-            "session_trajectory": _html_list(_coerce_str_list(continuity.get("session_trajectory"))),
-            "stance_summary": _paragraph(continuity.get("stance_summary")),
-        }
+        rendered_sections = _ui_detail_render_sections(
+            detail=detail,
+            capsule=capsule,
+            continuity=continuity,
+            startup_summary=_startup_summary_for_ui(detail.get("startup_summary")),
+            trust_signals=detail.get("trust_signals"),
+            related_summary=related_summary,
+        )
         body = render_template(
             "continuity_detail.html",
             subject_kind=html.escape(subject_kind),
@@ -287,7 +260,6 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             live_detail_fallback_count=html.escape(str(related_counts["fallback"])),
             live_detail_archived_count=html.escape(str(related_counts["archived"])),
             live_detail_cold_count=html.escape(str(related_counts["cold"])),
-            recovery_warnings=_html_list([str(item) for item in detail.get("recovery_warnings", [])]),
             capsule_meta_rows=_definition_rows(
                 [
                     ("Path", str(detail.get("path", ""))),
@@ -301,34 +273,19 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                     ("Verification kind", str(capsule.get("verification_kind") or "n/a")),
                 ]
             ),
-            related_artifact_rows=_html_table(
-                headers=["Lifecycle", "Present", "Count", "Latest artifact", "Recorded", "Browse"],
-                rows=related_summary,
-                empty_message="No related lifecycle artifacts were found for this subject.",
-            ),
-            startup_summary_html=_render_summary_document(startup_summary, empty_message="Startup summary unavailable."),
-            trust_signals_html=_render_summary_document(trust_signals, empty_message="Trust signals unavailable."),
-            top_priorities_html=detail_sections["top_priorities"],
-            active_concerns_html=detail_sections["active_concerns"],
-            active_constraints_html=detail_sections["active_constraints"],
-            open_loops_html=detail_sections["open_loops"],
-            session_trajectory_html=detail_sections["session_trajectory"],
-            stance_summary_html=detail_sections["stance_summary"],
-            stable_preferences_html=_structured_table(
-                rows=list(capsule.get("stable_preferences") or []),
-                columns=["tag", "content", "created_at", "updated_at", "last_confirmed_at"],
-                empty_message="No stable preferences recorded.",
-            ),
-            negative_decisions_html=_structured_table(
-                rows=list(continuity.get("negative_decisions") or []),
-                columns=["decision", "rationale", "created_at", "updated_at", "last_confirmed_at"],
-                empty_message="No negative decisions recorded.",
-            ),
-            rationale_entries_html=_structured_table(
-                rows=list(continuity.get("rationale_entries") or []),
-                columns=["tag", "kind", "status", "summary", "reasoning", "updated_at"],
-                empty_message="No rationale entries recorded.",
-            ),
+            related_artifact_rows=rendered_sections["related_artifact_rows"],
+            startup_summary_html=rendered_sections["startup_summary_html"],
+            trust_signals_html=rendered_sections["trust_signals_html"],
+            top_priorities_html=rendered_sections["top_priorities_html"],
+            active_concerns_html=rendered_sections["active_concerns_html"],
+            active_constraints_html=rendered_sections["active_constraints_html"],
+            open_loops_html=rendered_sections["open_loops_html"],
+            session_trajectory_html=rendered_sections["session_trajectory_html"],
+            stance_summary_html=rendered_sections["stance_summary_html"],
+            stable_preferences_html=rendered_sections["stable_preferences_html"],
+            negative_decisions_html=rendered_sections["negative_decisions_html"],
+            rationale_entries_html=rendered_sections["rationale_entries_html"],
+            recovery_warnings_html=rendered_sections["recovery_warnings_html"],
         )
         return _page(
             title=f"Continuity Detail: {subject_kind}/{subject_id}",
@@ -622,6 +579,7 @@ def _ui_live_continuity_summary(
     filtered_rows = _filter_rows_by_artifact_state(scoped_rows, artifact_state)
     recent_change = _latest_continuity_change(filtered_rows)
     latest_recorded_at = recent_change["recorded_at"] if recent_change is not None else "n/a"
+    display_rows = filtered_rows[:UI_CONTINUITY_DISPLAY_LIMIT]
     return {
         "available": True,
         "warning": None,
@@ -632,11 +590,12 @@ def _ui_live_continuity_summary(
             "health_status": health_status or "",
         },
         "matched_count": len(filtered_rows),
-        "displayed_count": min(len(filtered_rows), UI_CONTINUITY_DISPLAY_LIMIT),
+        "displayed_count": len(display_rows),
         "result_truncated": len(filtered_rows) > UI_CONTINUITY_DISPLAY_LIMIT,
         "artifact_counts": lifecycle_counts,
         "latest_recorded_at": latest_recorded_at,
         "recent_change": recent_change,
+        "table_html": _continuity_table_html(display_rows),
     }
 
 
@@ -672,6 +631,15 @@ def _ui_live_detail_summary(
     )
     related_counts = _artifact_state_counts(related_rows)
     latest_recorded_at = _continuity_live_latest_recorded_at(related_rows)
+    continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
+    rendered_sections = _ui_detail_render_sections(
+        detail=detail,
+        capsule=capsule,
+        continuity=continuity,
+        startup_summary=_startup_summary_for_ui(detail.get("startup_summary")),
+        trust_signals=detail.get("trust_signals"),
+        related_summary=_related_artifact_summary_rows(subject_kind=subject_kind, rows=related_rows),
+    )
     return {
         "available": True,
         "warning": None,
@@ -683,6 +651,21 @@ def _ui_live_detail_summary(
         "recovery_warning_count": len(list(detail.get("recovery_warnings") or [])),
         "artifact_counts": related_counts,
         "latest_recorded_at": latest_recorded_at,
+        "sections": {
+            "related_artifact_rows": rendered_sections["related_artifact_rows"],
+            "recovery_warnings_html": rendered_sections["recovery_warnings_html"],
+            "startup_summary_html": rendered_sections["startup_summary_html"],
+            "trust_signals_html": rendered_sections["trust_signals_html"],
+            "top_priorities_html": rendered_sections["top_priorities_html"],
+            "active_concerns_html": rendered_sections["active_concerns_html"],
+            "active_constraints_html": rendered_sections["active_constraints_html"],
+            "open_loops_html": rendered_sections["open_loops_html"],
+            "session_trajectory_html": rendered_sections["session_trajectory_html"],
+            "stance_summary_html": rendered_sections["stance_summary_html"],
+            "stable_preferences_html": rendered_sections["stable_preferences_html"],
+            "negative_decisions_html": rendered_sections["negative_decisions_html"],
+            "rationale_entries_html": rendered_sections["rationale_entries_html"],
+        },
     }
 
 
@@ -731,6 +714,7 @@ def _empty_ui_continuity_summary(
         "artifact_counts": {state: 0 for state in UI_ARTIFACT_STATES},
         "latest_recorded_at": "unavailable",
         "recent_change": None,
+        "table_html": '<p class="muted">No continuity capsules matched the current filter.</p>',
     }
 
 
@@ -747,6 +731,21 @@ def _empty_ui_detail_summary(*, subject_kind: str, subject_id: str, warning: str
         "recovery_warning_count": 0,
         "artifact_counts": {state: 0 for state in UI_ARTIFACT_STATES},
         "latest_recorded_at": "unavailable",
+        "sections": {
+            "related_artifact_rows": '<p class="muted">No related lifecycle artifacts were found for this subject.</p>',
+            "recovery_warnings_html": '<p class="muted">None</p>',
+            "startup_summary_html": '<p class="muted">Startup summary unavailable.</p>',
+            "trust_signals_html": '<p class="muted">Trust signals unavailable.</p>',
+            "top_priorities_html": '<p class="muted">None</p>',
+            "active_concerns_html": '<p class="muted">None</p>',
+            "active_constraints_html": '<p class="muted">None</p>',
+            "open_loops_html": '<p class="muted">None</p>',
+            "session_trajectory_html": '<p class="muted">None</p>',
+            "stance_summary_html": '<p class="muted">None</p>',
+            "stable_preferences_html": '<p class="muted">No stable preferences recorded.</p>',
+            "negative_decisions_html": '<p class="muted">No negative decisions recorded.</p>',
+            "rationale_entries_html": '<p class="muted">No rationale entries recorded.</p>',
+        },
     }
 
 
@@ -969,6 +968,71 @@ def _continuity_counts(*, repo_root: Path, auth: AuthContext, now: datetime) -> 
 def _noop_audit(_auth: AuthContext, _event: str, _detail: dict[str, Any]) -> None:
     """Skip audit writes for read-only UI rendering paths."""
     return None
+
+
+def _continuity_table_html(rows: list[dict[str, Any]]) -> str:
+    """Render the continuity list table for both page and live updates."""
+    table_rows: list[list[str]] = []
+    for capsule in rows:
+        table_rows.append(
+            [
+                html.escape(str(capsule.get("subject_kind", ""))),
+                _subject_link(str(capsule.get("subject_kind", "")), str(capsule.get("subject_id", ""))),
+                _lifecycle_badges(capsule),
+                _artifact_location_cell(capsule),
+                html.escape(_display_recorded_at(capsule)),
+                html.escape(str(capsule.get("health_status", ""))),
+                _signal_counts_cell(capsule),
+            ]
+        )
+    return _html_table(
+        headers=["Kind", "Subject", "Lifecycle", "Artifact", "Recorded", "Health", "Signals"],
+        rows=table_rows,
+        empty_message="No continuity capsules matched the current filter.",
+    )
+
+
+def _ui_detail_render_sections(
+    *,
+    detail: dict[str, Any],
+    capsule: dict[str, Any],
+    continuity: dict[str, Any],
+    startup_summary: Any,
+    trust_signals: Any,
+    related_summary: list[list[str]],
+) -> dict[str, str]:
+    """Render bounded continuity detail fragments for page and SSE refreshes."""
+    return {
+        "related_artifact_rows": _html_table(
+            headers=["Lifecycle", "Present", "Count", "Latest artifact", "Recorded", "Browse"],
+            rows=related_summary,
+            empty_message="No related lifecycle artifacts were found for this subject.",
+        ),
+        "recovery_warnings_html": _html_list([str(item) for item in detail.get("recovery_warnings", [])]),
+        "startup_summary_html": _render_summary_document(startup_summary, empty_message="Startup summary unavailable."),
+        "trust_signals_html": _render_summary_document(trust_signals, empty_message="Trust signals unavailable."),
+        "top_priorities_html": _html_list(_coerce_str_list(continuity.get("top_priorities"))),
+        "active_concerns_html": _html_list(_coerce_str_list(continuity.get("active_concerns"))),
+        "active_constraints_html": _html_list(_coerce_str_list(continuity.get("active_constraints"))),
+        "open_loops_html": _html_list(_coerce_str_list(continuity.get("open_loops"))),
+        "session_trajectory_html": _html_list(_coerce_str_list(continuity.get("session_trajectory"))),
+        "stance_summary_html": _paragraph(continuity.get("stance_summary")),
+        "stable_preferences_html": _structured_table(
+            rows=list(capsule.get("stable_preferences") or []),
+            columns=["tag", "content", "created_at", "updated_at", "last_confirmed_at"],
+            empty_message="No stable preferences recorded.",
+        ),
+        "negative_decisions_html": _structured_table(
+            rows=list(continuity.get("negative_decisions") or []),
+            columns=["decision", "rationale", "created_at", "updated_at", "last_confirmed_at"],
+            empty_message="No negative decisions recorded.",
+        ),
+        "rationale_entries_html": _structured_table(
+            rows=list(continuity.get("rationale_entries") or []),
+            columns=["tag", "kind", "status", "summary", "reasoning", "updated_at"],
+            empty_message="No rationale entries recorded.",
+        ),
+    }
 
 
 def _definition_rows(rows: list[tuple[str, str]]) -> str:
