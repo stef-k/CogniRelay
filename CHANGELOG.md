@@ -7,6 +7,26 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-16
+
+### Added
+
+- Expanded `/ui/events` live updates so the operator UI refreshes the
+  continuity list table and bounded continuity detail sections in place,
+  rather than updating only summary counters and header metadata.
+- Added a small shared operator UI footer with project identity and a GitHub
+  project link.
+- Added the `COGNIRELAY_UI_SSE_POLL_INTERVAL_SECONDS` config knob so operators
+  can tune the UI SSE snapshot interval, with bounded clamping to safe values.
+
+### Updated
+
+- Reworked the operator UI SSE/detail rendering path to reuse the same
+  server-rendered HTML fragments for initial page loads and bounded live
+  updates, reducing drift between the static and live views.
+- Updated operator UI docs and environment examples to document the new SSE
+  interval knob and its safe default/clamping behavior.
+
 ## [1.2.1] - 2026-04-16
 
 ### Updated
