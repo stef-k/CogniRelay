@@ -3,7 +3,6 @@
 import json
 import tempfile
 import unittest
-from fastapi.routing import APIRoute
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,13 +71,15 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["result"]["protocolVersion"], "2026-02-25")
         self.assertIn("tools", res["result"]["capabilities"])
 
-    def test_http_route_binds_payload_from_body(self) -> None:
-        """The HTTP MCP endpoint should register payload as a body param for FastAPI."""
-        route = next(
-            r for r in app.routes if isinstance(r, APIRoute) and r.path == "/v1/mcp" and "POST" in r.methods
-        )
-        self.assertEqual([p.name for p in route.dependant.body_params], ["payload"])
-        self.assertEqual([p.name for p in route.dependant.query_params], [])
+    def test_http_initialize_accepts_jsonrpc_body(self) -> None:
+        """The generated HTTP contract should require a JSON request body for MCP initialize."""
+        operation = app.openapi()["paths"]["/v1/mcp"]["post"]
+        self.assertIn("requestBody", operation)
+        self.assertTrue(operation["requestBody"]["required"])
+        self.assertIn("application/json", operation["requestBody"]["content"])
+        parameters = operation.get("parameters", [])
+        payload_query_params = [p for p in parameters if p.get("name") == "payload" and p.get("in") == "query"]
+        self.assertEqual(payload_query_params, [])
 
     def test_notifications_initialized_no_response_body(self) -> None:
         """Initialization notifications should return an empty 204 response."""
