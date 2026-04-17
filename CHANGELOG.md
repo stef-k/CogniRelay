@@ -7,6 +7,13 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-04-17
+
+### Fixed
+
+- MCP HTTP initialize requests now bind JSON-RPC payloads from the request body instead of rejecting standard clients with `422 Unprocessable Entity` due to a mistaken `payload` query parameter requirement.
+- Strengthened MCP regression coverage so the generated `/v1/mcp` HTTP contract requires a JSON request body and no longer advertises `payload` as a query parameter.
+
 ## [1.3.0] - 2026-04-16
 
 ### Added
