@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from fastapi.routing import APIRoute
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,7 +11,7 @@ from starlette.responses import Response
 
 from app.auth import AuthContext
 from app.config import Settings
-from app.main import mcp_rpc, well_known_mcp
+from app.main import app, mcp_rpc, well_known_mcp
 from tests.helpers import SimpleGitManagerStub
 
 
@@ -70,6 +71,14 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["id"], 99)
         self.assertEqual(res["result"]["protocolVersion"], "2026-02-25")
         self.assertIn("tools", res["result"]["capabilities"])
+
+    def test_http_route_binds_payload_from_body(self) -> None:
+        """The HTTP MCP endpoint should register payload as a body param for FastAPI."""
+        route = next(
+            r for r in app.routes if isinstance(r, APIRoute) and r.path == "/v1/mcp" and "POST" in r.methods
+        )
+        self.assertEqual([p.name for p in route.dependant.body_params], ["payload"])
+        self.assertEqual([p.name for p in route.dependant.query_params], [])
 
     def test_notifications_initialized_no_response_body(self) -> None:
         """Initialization notifications should return an empty 204 response."""
