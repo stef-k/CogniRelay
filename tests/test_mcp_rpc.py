@@ -10,7 +10,7 @@ from starlette.responses import Response
 
 from app.auth import AuthContext
 from app.config import Settings
-from app.main import mcp_rpc, well_known_mcp
+from app.main import app, mcp_rpc, well_known_mcp
 from tests.helpers import SimpleGitManagerStub
 
 
@@ -70,6 +70,16 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["id"], 99)
         self.assertEqual(res["result"]["protocolVersion"], "2026-02-25")
         self.assertIn("tools", res["result"]["capabilities"])
+
+    def test_http_initialize_accepts_jsonrpc_body(self) -> None:
+        """The generated HTTP contract should require a JSON request body for MCP initialize."""
+        operation = app.openapi()["paths"]["/v1/mcp"]["post"]
+        self.assertIn("requestBody", operation)
+        self.assertTrue(operation["requestBody"]["required"])
+        self.assertIn("application/json", operation["requestBody"]["content"])
+        parameters = operation.get("parameters", [])
+        payload_query_params = [p for p in parameters if p.get("name") == "payload" and p.get("in") == "query"]
+        self.assertEqual(payload_query_params, [])
 
     def test_notifications_initialized_no_response_body(self) -> None:
         """Initialization notifications should return an empty 204 response."""

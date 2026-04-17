@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Any, Callable, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -262,7 +262,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         set_coordination_index(None)
 
 
-app = FastAPI(title="CogniRelay", version="1.3.0", lifespan=_lifespan)
+app = FastAPI(title="CogniRelay", version="1.3.1", lifespan=_lifespan)
 
 if get_settings().ui_enabled:
     app.include_router(build_ui_router(app_version=app.version))
@@ -480,7 +480,7 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
 
 @app.post("/v1/mcp")
 def mcp_rpc(
-    payload: Any,
+    payload: Any = Body(...),
     authorization: str | None = Header(default=None),
     x_forwarded_for: str | None = Header(default=None, alias="X-Forwarded-For"),
     x_real_ip: str | None = Header(default=None, alias="X-Real-IP"),
