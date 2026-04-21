@@ -16,6 +16,7 @@ from app.main import (
     manifest,
     mcp_rpc,
 )
+from app.mcp.service import reset_bootstrap_state
 from app.storage import canonical_json
 from tests.helpers import SimpleGitManagerStub
 
@@ -35,6 +36,10 @@ class _GitManagerStub(SimpleGitManagerStub):
 
 class TestCoordination38Phase3Discovery(unittest.TestCase):
     """Validate reconciliation endpoints appear in discovery, manifest, and MCP surfaces."""
+
+    def setUp(self) -> None:
+        """Reset shared MCP bootstrap state before each test."""
+        reset_bootstrap_state()
 
     def test_tool_catalog_includes_reconciliation_tools(self) -> None:
         """Discovery tool catalog should list all four reconciliation tools."""
@@ -109,6 +114,17 @@ class TestCoordination38Phase3Discovery(unittest.TestCase):
 
     def test_mcp_tools_list_includes_reconciliation_tools(self) -> None:
         """MCP tools/list should expose all four reconciliation tools."""
+        init = mcp_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            }
+        )
+        self.assertIn("result", init)
+        notify = mcp_rpc({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        self.assertEqual(notify.status_code, 204)
         req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
         res = mcp_rpc(req)
         tools = res["result"]["tools"]
@@ -121,6 +137,10 @@ class TestCoordination38Phase3Discovery(unittest.TestCase):
 
 class TestCoordination38Phase3MCPDispatch(unittest.TestCase):
     """Validate MCP tool dispatch for reconciliation operations."""
+
+    def setUp(self) -> None:
+        """Reset shared MCP bootstrap state before each test."""
+        reset_bootstrap_state()
 
     def _settings(self, repo_root: Path) -> Settings:
         """Return repo-rooted settings for MCP dispatch tests."""
@@ -147,6 +167,24 @@ class TestCoordination38Phase3MCPDispatch(unittest.TestCase):
             write_namespaces={"*"},
             client_ip="127.0.0.1",
         )
+
+    def _bootstrap(self, *, authorization: str | None = None) -> None:
+        """Advance one caller context through the MCP bootstrap flow."""
+        init = mcp_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            },
+            authorization=authorization,
+        )
+        self.assertIn("result", init)
+        notify = mcp_rpc(
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            authorization=authorization,
+        )
+        self.assertEqual(notify.status_code, 204)
 
     def _write_peer_registry(self, repo_root: Path, peer_id: str, *, trust_level: str = "restricted") -> None:
         """Persist one peer registry row."""
@@ -282,6 +320,7 @@ class TestCoordination38Phase3MCPDispatch(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, gm)), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 req = {
                     "jsonrpc": "2.0",
                     "id": 10,
@@ -332,6 +371,7 @@ class TestCoordination38Phase3MCPDispatch(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 req = {
                     "jsonrpc": "2.0",
                     "id": 11,
@@ -358,6 +398,7 @@ class TestCoordination38Phase3MCPDispatch(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 req = {
                     "jsonrpc": "2.0",
                     "id": 12,
@@ -385,6 +426,7 @@ class TestCoordination38Phase3MCPDispatch(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, gm)), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 req = {
                     "jsonrpc": "2.0",
                     "id": 13,
