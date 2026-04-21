@@ -6,6 +6,7 @@ from .service import (
     help_root_payload,
     help_tool_payload,
     help_topic_payload,
+    is_forbidden_help_alias_path,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "help_root_payload",
     "help_tool_payload",
     "help_topic_payload",
+    "is_forbidden_help_alias_path",
 ]

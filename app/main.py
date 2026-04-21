@@ -213,6 +213,7 @@ from .help import (
     help_root_payload,
     help_tool_payload,
     help_topic_payload,
+    is_forbidden_help_alias_path,
 )
 from .ui import build_ui_router
 
@@ -283,6 +284,9 @@ async def _cache_raw_json_body(request: FastAPIRequest, call_next):  # type: ign
     contains ``"merge_mode": "preserve"``.  All other requests pass
     through untouched.
     """
+    if is_forbidden_help_alias_path(request.url.path):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
     if request.url.path.endswith("/v1/continuity/upsert") and request.method == "POST":
         body_bytes = await request.body()
         try:

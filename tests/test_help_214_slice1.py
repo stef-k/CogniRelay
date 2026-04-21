@@ -1,18 +1,10 @@
 """HTTP help baseline contract tests for issue #214 slice 1."""
 
-import json
 import unittest
 
-from starlette.responses import JSONResponse
+from fastapi.testclient import TestClient
 
-from app.main import (
-    app,
-    help_error,
-    help_hooks,
-    help_root,
-    help_tool,
-    help_topic,
-)
+from app.main import app
 
 
 EXPECTED_ROOT = {
@@ -429,13 +421,22 @@ EXPECTED_ERRORS = {
     },
 }
 
+class HelpHttpTestCase(unittest.TestCase):
+    """Share a real HTTP client for the slice-1 help contract tests."""
 
-def _json_response_body(response: JSONResponse) -> dict:
-    """Decode a JSONResponse body into a dict."""
-    return json.loads(response.body.decode("utf-8"))
+    @classmethod
+    def setUpClass(cls) -> None:
+        """Start a real client so routing assertions exercise FastAPI itself."""
+        cls._client_context = TestClient(app)
+        cls.client = cls._client_context.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        """Close the shared client after the HTTP contract checks finish."""
+        cls._client_context.__exit__(None, None, None)
 
 
-class TestHelp214Slice1Routes(unittest.TestCase):
+class TestHelp214Slice1Routes(HelpHttpTestCase):
     """The HTTP help surface is closed to the five slice-1 routes."""
 
     def test_help_routes_are_exact(self) -> None:
@@ -456,47 +457,78 @@ class TestHelp214Slice1Routes(unittest.TestCase):
             },
         )
 
+    def test_alternate_topic_routing_path_is_not_exposed(self) -> None:
+        """Only the canonical single-segment topic path is live over HTTP."""
+        response = self.client.get("/v1/help/topics/continuity.read/startup_view", follow_redirects=False)
+        self.assertEqual(response.status_code, 404)
+        self.assertNotIn("location", response.headers)
+        self.assertEqual(response.json(), {"detail": "Not Found"})
 
-class TestHelp214Slice1SuccessBodies(unittest.TestCase):
+
+class TestHelp214Slice1SuccessBodies(HelpHttpTestCase):
     """Successful slice-1 help responses must match the hardened issue body exactly."""
 
     def test_root_body(self) -> None:
         """GET /v1/help returns the exact closed root body."""
-        self.assertEqual(help_root(), EXPECTED_ROOT)
+        response = self.client.get("/v1/help")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), EXPECTED_ROOT)
 
     def test_tool_bodies(self) -> None:
         """Each supported tool target returns its exact closed body."""
         for name, expected in EXPECTED_TOOLS.items():
             with self.subTest(name=name):
-                self.assertEqual(help_tool(name), expected)
+                response = self.client.get(f"/v1/help/tools/{name}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), expected)
 
     def test_topic_bodies(self) -> None:
         """Each supported topic target returns its exact closed body."""
         for topic_id, expected in EXPECTED_TOPICS.items():
             with self.subTest(topic_id=topic_id):
-                self.assertEqual(help_topic(topic_id), expected)
+                response = self.client.get(f"/v1/help/topics/{topic_id}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), expected)
 
     def test_hooks_body(self) -> None:
         """GET /v1/help/hooks returns the exact closed hook map."""
-        self.assertEqual(help_hooks(), EXPECTED_HOOKS)
+        response = self.client.get("/v1/help/hooks")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), EXPECTED_HOOKS)
 
     def test_error_bodies(self) -> None:
         """Each supported error target returns its exact closed body."""
         for code, expected in EXPECTED_ERRORS.items():
             with self.subTest(code=code):
-                self.assertEqual(help_error(code), expected)
+                response = self.client.get(f"/v1/help/errors/{code}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), expected)
+
+    def test_slash_suffixed_variants_do_not_redirect_or_succeed(self) -> None:
+        """Slash aliases must fail directly so the help surface stays exact."""
+        for path in (
+            "/v1/help/",
+            "/v1/help/tools/continuity.read/",
+            "/v1/help/topics/continuity.read.startup_view/",
+            "/v1/help/hooks/",
+            "/v1/help/errors/validation/",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path, follow_redirects=False)
+                self.assertEqual(response.status_code, 404)
+                self.assertNotIn("location", response.headers)
+                self.assertEqual(response.json(), {"detail": "Not Found"})
 
 
-class TestHelp214Slice1Validation(unittest.TestCase):
+class TestHelp214Slice1Validation(HelpHttpTestCase):
     """Unsupported help targets are validation failures, not not-found lookups."""
 
     def test_unsupported_tool_name_returns_400_validation_body(self) -> None:
         """Unsupported tool names use the exact validation contract."""
-        response = help_tool("memory.write")
-        self.assertIsInstance(response, JSONResponse)
+        response = self.client.get("/v1/help/tools/memory.write", follow_redirects=False)
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
-            _json_response_body(response),
+            response.json(),
             {
                 "error": {
                     "code": "validation",
@@ -521,11 +553,10 @@ class TestHelp214Slice1Validation(unittest.TestCase):
 
     def test_unsupported_topic_id_returns_400_validation_body(self) -> None:
         """Unsupported topic ids use the exact validation contract."""
-        response = help_topic("continuity.read.startup")
-        self.assertIsInstance(response, JSONResponse)
+        response = self.client.get("/v1/help/topics/continuity.read.startup", follow_redirects=False)
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
-            _json_response_body(response),
+            response.json(),
             {
                 "error": {
                     "code": "validation",
@@ -550,11 +581,10 @@ class TestHelp214Slice1Validation(unittest.TestCase):
 
     def test_unsupported_error_code_returns_400_validation_body(self) -> None:
         """Unsupported error codes use the exact validation contract."""
-        response = help_error("not_found")
-        self.assertIsInstance(response, JSONResponse)
+        response = self.client.get("/v1/help/errors/not_found", follow_redirects=False)
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
-            _json_response_body(response),
+            response.json(),
             {
                 "error": {
                     "code": "validation",

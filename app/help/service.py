@@ -25,6 +25,19 @@ _ERROR_CODES = [
     "unknown_help_topic",
 ]
 
+_EXACT_HELP_PATHS = frozenset(
+    {
+        "/v1/help",
+        "/v1/help/hooks",
+    }
+)
+
+_PARAMETERIZED_HELP_PREFIXES = (
+    "/v1/help/tools/",
+    "/v1/help/topics/",
+    "/v1/help/errors/",
+)
+
 _ROOT_BODY = {
     "http_endpoints": [
         "GET /v1/help",
@@ -465,6 +478,21 @@ def _validation_error(
 def help_root_payload() -> dict[str, Any]:
     """Return the exact slice-1 HTTP help root body."""
     return _copy(_ROOT_BODY)
+
+
+def is_forbidden_help_alias_path(path: str) -> bool:
+    """Return ``True`` when a slash-suffixed alias targets the closed help surface."""
+    if not path.startswith("/v1/help") or not path.endswith("/"):
+        return False
+
+    canonical_path = path[:-1]
+    if canonical_path in _EXACT_HELP_PATHS:
+        return True
+
+    return any(
+        canonical_path.startswith(prefix) and len(canonical_path) > len(prefix)
+        for prefix in _PARAMETERIZED_HELP_PREFIXES
+    )
 
 
 def help_tool_payload(name: str) -> dict[str, Any] | JSONResponse:
