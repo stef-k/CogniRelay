@@ -1,4 +1,4 @@
-"""Tests for MCP-compatible RPC handling and tool dispatch behavior."""
+"""Tests for the bounded MCP 2025-11-25 RPC handling and tool dispatch behavior."""
 
 import json
 import tempfile
@@ -36,7 +36,7 @@ class _RequestStub:
 
 
 class TestMcpRpcCompatibility(unittest.TestCase):
-    """Validate the MCP-compatible JSON-RPC surface and edge cases."""
+    """Validate the bounded MCP 2025-11-25 RPC surface and edge cases."""
 
     _CALLER_AUTH = "Bearer bootstrap-token"
 

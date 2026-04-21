@@ -571,6 +571,49 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
             },
         )
 
+    def test_anonymous_bootstrap_state_is_stateless_between_callers(self) -> None:
+        """Anonymous bootstrap steps must not persist across callers."""
+        caller_a_headers = {"x-forwarded-for": "198.51.100.10"}
+        caller_b_headers = {"x-forwarded-for": "198.51.100.11"}
+
+        initialize = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            },
+            headers=caller_a_headers,
+        )
+        self.assertEqual(initialize.status_code, 200)
+
+        notify = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            headers=caller_a_headers,
+        )
+        self.assertEqual(notify.status_code, 204)
+
+        response = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 62, "method": "tools/list", "params": {}},
+            headers=caller_b_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 62,
+                "error": {
+                    "code": -32000,
+                    "message": "Server not initialized",
+                    "data": {"required_step": "initialize"},
+                },
+            },
+        )
+
     def test_reinitialize_after_ready_does_not_regress_caller_state(self) -> None:
         """A ready caller must not be pushed back into a waiting bootstrap phase."""
         headers = {"authorization": self._CALLER_A_AUTH}
@@ -607,6 +650,63 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         )
         self.assertEqual(tools_list.status_code, 200)
         self.assertIn("result", tools_list.json())
+
+    def test_wrong_type_params_use_exact_invalid_params_mapping(self) -> None:
+        """Wrong-type hardened branches must keep the exact invalid-params mapping."""
+        self._bootstrap(headers={"authorization": self._CALLER_A_AUTH})
+
+        cases = [
+            (
+                80,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 80,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25", "capabilities": []},
+                },
+                None,
+                {"reason": "capabilities must be an object"},
+            ),
+            (
+                81,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 81,
+                    "method": "tools/list",
+                    "params": {"cursor": 1},
+                },
+                {"authorization": self._CALLER_A_AUTH},
+                {"reason": "cursor must be a string or null"},
+            ),
+            (
+                82,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 82,
+                    "method": "tools/call",
+                    "params": {"name": "system.manifest", "arguments": "wrong-type"},
+                },
+                {"authorization": self._CALLER_A_AUTH},
+                {"reason": "arguments must be an object"},
+            ),
+        ]
+
+        for request_id, payload, headers, error_data in cases:
+            with self.subTest(method=payload["method"], error_data=error_data):
+                response = self.client.post("/v1/mcp", json=payload, headers=headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid params",
+                            "data": error_data,
+                        },
+                    },
+                )
 
 
 if __name__ == "__main__":

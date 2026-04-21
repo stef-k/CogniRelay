@@ -79,20 +79,24 @@ EXPECTED_MATRIX = [
         "transport.post_v1_mcp_endpoint",
         "slice_2",
         "partially_converged",
-        "`POST /v1/mcp` exists and can succeed for `initialize`, `ping`, `tools/list`, and `tools/call`, but request handling still follows the legacy bridge contract.",
+        (
+            "`POST /v1/mcp` is the only MCP request endpoint that can succeed, and "
+            "the slice-2 runtime now applies the hardened bootstrap, auth, origin, "
+            "and method/error mapping rules. Exact JSON-RPC envelope closure still "
+            "remains tracked separately in `transport.jsonrpc_envelope`."
+        ),
         "`POST /v1/mcp` is the only MCP request endpoint that may succeed, and it must apply the exact `#216` envelope, bootstrap, auth, and error rules.",
         "intentionally_deferred",
-        "slice_2",
+        "transport.jsonrpc_envelope",
     ),
     _row(
         "transport.get_v1_mcp_behavior",
         "slice_2",
         "not_yet_converged",
         (
-            "`GET /v1/mcp` already returns 405 with `Allow: POST` and no success "
-            "payload; the hardened `#216` body fixes that as the slice-2 posture and "
-            "requires any future GET success behavior to move to a "
-            "`later_issue:<number>` follow-up instead."
+            "`GET /v1/mcp` returns 405 with `Allow: POST` and no success payload; "
+            "the current `#216` body still classifies that temporary slice-2 "
+            "posture as deferred rather than converged."
         ),
         (
             "Keep `GET /v1/mcp` at 405 with `Allow: POST`; no SSE and no alternate GET "
@@ -100,16 +104,20 @@ EXPECTED_MATRIX = [
             "row must point to `later_issue:<number>` instead of `slice_2`."
         ),
         "intentionally_deferred",
-        "implemented",
+        "slice_2",
     ),
     _row(
         "transport.origin_validation",
         "slice_2",
-        "not_yet_converged",
-        "`POST /v1/mcp` does not validate `Origin`; present and missing origins are treated the same today.",
+        "converged",
+        (
+            "`POST /v1/mcp` now allows missing `Origin`, accepts loopback origins "
+            "only when `Origin` is present, and rejects every other present origin "
+            "with the exact 403 JSON-RPC body."
+        ),
         "When `Origin` is present on `POST /v1/mcp`, allow only loopback origins and reject every other present origin with the exact 403 JSON-RPC body from `#216`.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "transport.localhost_posture",
@@ -132,47 +140,56 @@ EXPECTED_MATRIX = [
     _row(
         "transport.well_known_metadata_accuracy",
         "audit_only",
-        "partially_converged",
-        "`/.well-known/mcp.json` points at `/v1/mcp` and bearer auth, but it still advertises legacy `mcp-compatible` wording and omits the `2025-11-25` target plus deferred GET posture.",
+        "converged",
+        (
+            "`/.well-known/mcp.json` remains supplemental metadata only and now "
+            "accurately describes `/v1/mcp`, bearer auth, the `2025-11-25` target, "
+            "and the deferred GET posture."
+        ),
         "`/.well-known/mcp.json` must remain supplemental metadata only and accurately describe the narrowed `#216` posture instead of implying a broader MCP bridge.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.initialize_request_acceptance",
         "slice_2",
-        "partially_converged",
-        "`initialize` accepts missing or arbitrary params, treats missing request ids as acceptable, and does not reject extra fields or malformed `clientInfo`.",
+        "converged",
+        (
+            "`initialize` now requires a request id plus a params object containing "
+            "only `protocolVersion`, optional object `capabilities`, and optional "
+            "well-formed `clientInfo`, with the exact invalid-params mappings for "
+            "missing, extra, null, and wrong-type fields."
+        ),
         "Accept only the `#216` `initialize` request shape, require a params object with the allowed keys only, and use the exact invalid-params mappings.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.initialize_response_shape",
         "slice_2",
-        "partially_converged",
-        "`initialize` returns `protocolVersion`, `capabilities`, `serverInfo`, and an extra `instructions` field.",
+        "converged",
+        "`initialize` now returns only `protocolVersion`, `capabilities`, and `serverInfo`, with no extra success keys.",
         "Return only `result.protocolVersion`, `result.capabilities`, and `result.serverInfo` with no extra success keys.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.protocol_version_negotiation",
         "slice_2",
-        "not_yet_converged",
-        "`initialize` echoes any requested protocol version and falls back to the server contract version.",
+        "converged",
+        "`initialize` now supports only `protocolVersion = \"2025-11-25\"` and rejects every other value with the exact unsupported-version error without advancing bootstrap state.",
         "Support only `protocolVersion = \"2025-11-25\"` and reject every other value with the exact unsupported-version error.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.server_capability_schema",
         "slice_2",
-        "partially_converged",
-        "The initialize result already includes `tools.listChanged = false`, but it also exposes forbidden `sampling`.",
+        "converged",
+        "The initialize result now advertises exactly `{\"tools\":{\"listChanged\":false}}` and no other top-level capability keys.",
         "Advertise exactly `{\"tools\":{\"listChanged\":false}}` and no other top-level capability keys.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.pre_initialize_ping",
@@ -186,20 +203,20 @@ EXPECTED_MATRIX = [
     _row(
         "bootstrap.pre_initialize_tools_list",
         "slice_2",
-        "not_yet_converged",
-        "Before `initialize`, `tools/list` succeeds immediately instead of returning a bootstrap gate error.",
+        "converged",
+        "Before `initialize`, `tools/list` now returns `-32000` `Server not initialized` with `{\"required_step\":\"initialize\"}`.",
         "Before successful `initialize`, `tools/list` must return `-32000` `Server not initialized` with `{\"required_step\":\"initialize\"}`.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.pre_initialize_tools_call",
         "slice_2",
-        "not_yet_converged",
-        "Before `initialize`, `tools/call` proceeds to normal validation and execution instead of returning a bootstrap gate error.",
+        "converged",
+        "Before `initialize`, `tools/call` now returns `-32000` `Server not initialized` with `{\"required_step\":\"initialize\"}`.",
         "Before successful `initialize`, `tools/call` must return `-32000` `Server not initialized` with `{\"required_step\":\"initialize\"}`.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.pre_initialize_other_methods",
@@ -213,35 +230,39 @@ EXPECTED_MATRIX = [
     _row(
         "bootstrap.post_initialize_pre_initialized_ping",
         "slice_2",
-        "not_yet_converged",
-        "No bootstrap state is tracked after `initialize`, so there is no distinct post-initialize and pre-notification phase to preserve.",
+        "converged",
+        "Bootstrap state is now tracked after `initialize`; during the post-initialize and pre-notification phase, `ping` continues to succeed.",
         "After successful `initialize` and before `notifications/initialized`, `ping` must succeed while that intermediate bootstrap phase remains active.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.post_initialize_pre_initialized_tools_list",
         "slice_2",
-        "not_yet_converged",
-        "No intermediate bootstrap phase exists, so `tools/list` never returns the post-initialize gate error.",
+        "converged",
+        "After successful `initialize` and before `notifications/initialized`, `tools/list` now returns `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
         "After successful `initialize` and before `notifications/initialized`, `tools/list` must return `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.post_initialize_pre_initialized_tools_call",
         "slice_2",
-        "not_yet_converged",
-        "No intermediate bootstrap phase exists, so `tools/call` never returns the post-initialize gate error.",
+        "converged",
+        "After successful `initialize` and before `notifications/initialized`, `tools/call` now returns `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
         "After successful `initialize` and before `notifications/initialized`, `tools/call` must return `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "bootstrap.post_initialize_pre_initialized_other_methods",
         "slice_2",
         "converged",
-        "Unknown methods already return method-not-found even though bootstrap state is not persisted between calls.",
+        (
+            "Unknown methods already return method-not-found, and authenticated "
+            "callers retain bootstrap state between calls during the "
+            "post-initialize phase."
+        ),
         "After successful `initialize` and before `notifications/initialized`, unknown methods must still use method-not-found.",
         "none",
         "implemented",
@@ -249,11 +270,11 @@ EXPECTED_MATRIX = [
     _row(
         "bootstrap.notifications_initialized_acceptance",
         "slice_2",
-        "partially_converged",
-        "Proper `notifications/initialized` notifications return 204, but requests with `id` are accepted and no bootstrap completion state is recorded.",
+        "converged",
+        "Only notification-form `notifications/initialized` is accepted; it returns 204 and marks the caller bootstrap flow complete.",
         "Accept only notification-form `notifications/initialized`, return 204, and mark bootstrap complete.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "tools.list.response_shape",
@@ -277,7 +298,12 @@ EXPECTED_MATRIX = [
         "tools.list.pagination",
         "slice_2",
         "not_yet_converged",
-        "`tools/list` ignores pagination today; non-empty cursors are not rejected with the exact slice-2 error.",
+        (
+            "`tools/list` now treats omitted, `null`, and empty-string cursors as "
+            "the first page only and rejects non-empty cursor strings with the "
+            "exact slice-2 invalid-params error, but the current `#216` body still "
+            "classifies unsupported pagination as deferred rather than converged."
+        ),
         "Treat omitted, `null`, and empty-string cursors as the first page only, and reject non-empty cursor strings with the exact slice-2 invalid-params error.",
         "intentionally_deferred",
         "slice_2",
@@ -285,33 +311,33 @@ EXPECTED_MATRIX = [
     _row(
         "tools.call.request_shape",
         "slice_2",
-        "partially_converged",
+        "converged",
         (
-            "`tools/call` requires a string `name` in practice, but it does not enforce "
-            "the exact params key allowlist, missing-params mapping, whitespace-only "
-            "rejection, or `arguments` object validation."
+            "`tools/call` now enforces a params object with only `name` and optional "
+            "object `arguments`, rejects missing or whitespace-only names, and uses "
+            "the exact invalid-params mappings."
         ),
         "Apply the exact `#216` `tools/call` request contract, including params requirement, key allowlist, byte-for-byte name matching, whitespace-only rejection, and `arguments` object validation.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "tools.call.success_shape",
         "slice_2",
-        "partially_converged",
-        "Successful `tools/call` responses include `content` and `structuredContent`, but they still carry the forbidden `toolName` wrapper field.",
+        "converged",
+        "Successful `tools/call` responses now return only `content` and `structuredContent` at top-level JSON-RPC `result`.",
         "Return only `content` and `structuredContent` at top-level JSON-RPC `result`, with no wrapper fields such as `toolName`, `ok`, `status`, or `isError`.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "tools.call.error_mapping",
         "slice_2",
-        "partially_converged",
-        "Error codes roughly map auth, not-found, and runtime classes, but unknown-tool, schema-validation, and `error.data` shapes do not match the exact `#216` contract.",
+        "converged",
+        "`tools/call` now uses the exact slice-2 failure mapping for unknown tools, schema validation, auth, forbidden, not-found, and runtime failures, with the hardened `error.data` shapes.",
         "Use the exact `#216` `tools/call` failure mapping, including unknown-tool invalid-params, schema-validation `details`, exact auth and forbidden shapes, and the narrow `-32004` rule.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "help.mcp_error_actionability",

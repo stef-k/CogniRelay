@@ -19,13 +19,16 @@ Slice 2 is intentionally tools-first. It does not add MCP resources, MCP prompts
 
 ## Bootstrap Flow
 
-For an MCP-oriented client, the expected startup sequence is:
+For an MCP-oriented client, the canonical slice-2 bootstrap sequence is exactly:
 
 1. `GET /.well-known/mcp.json`
 2. `POST /v1/mcp` with `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`
 3. `POST /v1/mcp` with `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
-4. `POST /v1/mcp` with `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
-5. `POST /v1/mcp` with `tools/call` requests as needed
+
+After bootstrap is complete, post-bootstrap usage may call:
+
+- `POST /v1/mcp` with `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
+- `POST /v1/mcp` with `tools/call` requests as needed
 
 The well-known descriptor advertises:
 
