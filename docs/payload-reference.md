@@ -294,7 +294,7 @@ Response includes `normalizations_applied` (list of strings) describing write-pa
 
 #### Session-end snapshot helper
 
-When `session_end_snapshot` is provided, the server merges its fields into `capsule.continuity` before validation and persistence. This reduces caller burden at session end by focusing on the six startup-critical fields. The base capsule carries forward all non-snapshot fields unchanged.
+When `session_end_snapshot` is provided, the server merges its fields into `capsule.continuity` before validation and persistence. This reduces caller burden at session end by focusing on the fixed startup-critical snapshot field set: required P0 fields `open_loops`, `top_priorities`, `active_constraints`, `stance_summary`, plus optional P1 fields `negative_decisions`, `session_trajectory`, and `rationale_entries`. The base capsule carries forward all non-snapshot fields unchanged.
 
 **`SessionEndSnapshot` fields:**
 
@@ -309,6 +309,8 @@ When `session_end_snapshot` is provided, the server merges its fields into `caps
 | `rationale_entries` | list of RationaleEntry (max 6) | no | `capsule.continuity.rationale_entries` | `null` = preserve capsule value; explicit value = override |
 
 **Merge algorithm:** P0 fields (required) always override their `capsule.continuity` counterparts. P1 fields (optional) override only when non-null; null means the capsule's existing value is preserved. All other `ContinuityState` fields remain from the capsule unchanged. The merged capsule is then validated and persisted through the standard path. Note: the snapshot does not update `capsule.updated_at` — the caller must still set `updated_at` to the current time on the base capsule to avoid a 409 conflict rejection.
+
+**Canonical hook-contract usage rule:** Under the canonical `pre_compaction_or_handoff` contract, use `session_end_snapshot` only when no write-eligible field outside the snapshot field set changed relative to the last persisted capsule. If `active_concerns`, `drift_signals`, `stable_preferences`, `thread_descriptor.lifecycle`, `thread_descriptor.superseded_by`, or any other write-eligible non-snapshot field changed, omit `session_end_snapshot` and send a full `capsule`-only upsert instead.
 
 Per-item string length constraints (e.g. each ≤ 160 chars for list fields, each ≤ 80 chars for `session_trajectory`) are enforced by capsule validation after the merge, consistent with `ContinuityState` validation. See [NegativeDecision](#negativedecision) for per-item constraints on `negative_decisions` items.
 
