@@ -54,21 +54,21 @@ For external experiments, third-party usage notes, and public case studies, see 
 
 Agents integrate with CogniRelay through hook points in their runtime loop. CogniRelay does not control when it is invoked — agents own invocation timing, and CogniRelay owns response quality once invoked.
 
-**Minimum viable integration** (two hook points):
+**Minimum viable integration** (two canonical hook points):
 
-- `startup`: read continuity capsule and retrieve context to restore orientation after a reset
-- `pre-compaction / handoff`: upsert continuity capsule to preserve current orientation before the context window compacts or the agent hands off
+- `startup`: call `POST /v1/continuity/read` / `continuity.read` with `view: "startup"` and `allow_fallback: true` to restore orientation after a reset
+- `pre_compaction_or_handoff`: evaluate write eligibility and call `POST /v1/continuity/upsert` / `continuity.upsert` only when the closed persisted-orientation field set changed, before known context loss or a real inter-agent handoff
 
 This is enough for basic orientation recovery across resets.
 
-**Recommended fuller integration** (four hook points):
+**Recommended fuller integration** (four canonical hook points):
 
 - `startup`: restore orientation (same as above)
-- `pre-prompt`: retrieve fresh context and check for pending messages, coordination artifacts, or task updates
-- `post-prompt`: persist any orientation changes, new decisions, or negative decisions after the agent acts
-- `pre-compaction / handoff`: ensure the latest orientation is durable before context loss
+- `pre_prompt`: read-only retrieval hook bound to `POST /v1/context/retrieve` / `context.retrieve`
+- `post_prompt`: persist orientation changes with `POST /v1/continuity/upsert` / `continuity.upsert` only when at least one meaning-bearing field changed
+- `pre_compaction_or_handoff`: satisfy the local continuity step before compaction or a real inter-agent handoff; only after that step completes may a real handoff additionally call `POST /v1/coordination/handoff/create` / `coordination.handoff_create`
 
-The fuller pattern gives tighter continuity — the agent's orientation stays current within the session, not just across resets.
+The fuller pattern gives tighter continuity without widening the write surface: `startup` and `pre_prompt` stay read-only by default, `post_prompt` skips writes when nothing meaning-bearing changed, and `pre_compaction_or_handoff` remains the primary write-before-context-loss hook. For the authoritative contract, including anti-noise rules and deterministic examples, see [Agent Onboarding](docs/agent-onboarding.md#canonical-hook-contract).
 
 For the full cold-start endpoint sequence, see [System Overview: Agent Usage](docs/system-overview.md#agent-usage).
 

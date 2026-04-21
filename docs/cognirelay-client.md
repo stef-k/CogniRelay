@@ -133,13 +133,13 @@ python tools/cognirelay_client.py upsert \
 
 The JSON file is the complete `POST /v1/continuity/upsert` request body (must include `subject_kind`, `subject_id`, `capsule`). The client sends it verbatim — no field injection or validation.
 
-The request body may include an optional `session_end_snapshot` to merge fresh startup-critical fields into the capsule before persistence — see [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm and field constraints. It may also include `lifecycle_transition` and `superseded_by` to atomically transition a thread capsule's lifecycle — see [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert).
+The request body may include an optional `session_end_snapshot` to merge the fixed startup-critical snapshot field set into the capsule before persistence — see [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm and field constraints. It may also include `lifecycle_transition` and `superseded_by` to atomically transition a thread capsule's lifecycle — see [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert).
 
 Use `--stdin` instead of `--input` to pipe JSON from another process. Exactly one of the two is required. Payloads over 256 KiB are rejected client-side.
 
 ### Session-End Snapshot
 
-Include `session_end_snapshot` in the upsert request body to merge fresh startup-critical fields into the capsule before persistence — the server applies the merge, the client sends it verbatim.
+Include `session_end_snapshot` in the upsert request body to merge the fixed startup-critical snapshot field set into the capsule before persistence — the server applies the merge, the client sends it verbatim.
 
 ```json
 {
@@ -228,7 +228,7 @@ Use this to generate token hashes for `peer_tokens.json` and other config files.
 
 ## Usage Patterns
 
-**Agent startup hook** — restore orientation after a context reset:
+**Canonical `startup` hook** — restore orientation after a context reset:
 
 ```bash
 python tools/cognirelay_client.py read \
@@ -236,7 +236,9 @@ python tools/cognirelay_client.py read \
   --format startup
 ```
 
-**Pre-compaction hook** — persist orientation before context loss:
+This client read path sends `allow_fallback: true`. Under the canonical `startup` contract, pair it with `--format startup` so the request uses `view: "startup"` and the runtime forwards the response unchanged.
+
+**Canonical `pre_compaction_or_handoff` hook** — persist orientation before context loss:
 
 ```bash
 python tools/cognirelay_client.py upsert --input /tmp/capsule.json

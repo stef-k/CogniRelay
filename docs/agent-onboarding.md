@@ -19,42 +19,50 @@ CogniRelay does not make decisions for you. It does not silently rewrite your st
 
 ## Integration Levels
 
-### Minimum viable: two hook points
+### Minimum viable: two canonical hook points
 
 If you are adding CogniRelay to an existing agent loop and want the smallest useful integration, use two hook points:
 
-**On startup (or after any context reset):**
+**At `startup` (or after any context reset):**
 
-1. `POST /v1/continuity/read` with your selector — returns your last persisted orientation capsule. Pass `view="startup"` to include a pre-structured `startup_summary` with recovery, orientation, and context tiers alongside the full capsule (see [Payload Reference: Startup view](payload-reference.md#startup-view-viewstartup))
-2. `POST /v1/context/retrieve` for your active task — returns a continuity-shaped context bundle including relevant memory, recent items, and any loaded capsule state
+1. `POST /v1/continuity/read` with your selector, `view="startup"`, and `allow_fallback=true` — returns your last persisted orientation capsule plus the startup-oriented `startup_summary` view (see [Payload Reference: Startup view](payload-reference.md#startup-view-viewstartup))
+2. Forward that `continuity.read` result unchanged into your runtime. Do not translate or rewrite the read result under the canonical `startup` contract.
+3. Optionally call `POST /v1/context/retrieve` for your active task after the startup read if you need fresh bounded working context for the first work step
 
 Use the returned capsule to restore your constraints, drift signals, open loops, and stance before you begin working.
 
 Continuity schema note: newly written continuity capsules now use schema `1.1`. Stabilized legacy `1.0` continuity payloads are still supported when they already have the modern required capsule structure and only need structured-entry timestamp upgrade or top-level timestamp repair. Sammy's oldest real continuity capsule sample falls into that supported bucket. Truly pre-stabilization payloads missing required modern capsule fields are not auto-migrated.
 
-**Before compaction or handoff (when you are about to lose context):**
+**At `pre_compaction_or_handoff` (when you are about to lose context):**
 
-1. `POST /v1/continuity/upsert` with your current orientation — persists your active constraints, drift signals, open loops, stance summary, and any negative decisions you want to survive the reset
+1. Compare your candidate orientation state to the last persisted capsule for the same subject, including fallback-only state when that is the most recent persisted capsule.
+2. Call `POST /v1/continuity/upsert` only when at least one field in the canonical closed persisted-orientation field list changed.
+3. If nothing changed, satisfy the hook with an explicit skip. Do not invent a write because compaction or handoff is happening.
 
-You can include an optional `session_end_snapshot` in the upsert request to focus on the six startup-critical fields without rebuilding the entire capsule. Send your base capsule (from the last read — stale continuity fields are fine, but `updated_at` must still be set to the current time) and a snapshot containing fresh values for `open_loops`, `top_priorities`, `active_constraints`, `stance_summary`, and optionally `negative_decisions` and `session_trajectory`. The server merges the snapshot into the capsule before persisting. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for details.
+You can include an optional `session_end_snapshot` only when you are refreshing only the snapshot field set: required P0 fields `open_loops`, `top_priorities`, `active_constraints`, `stance_summary`, plus optional P1 fields `negative_decisions`, `session_trajectory`, and `rationale_entries`. Send the base capsule plus the snapshot, and the server merges those fields before persisting. If any write-eligible field outside that set changed, omit `session_end_snapshot` and send a full capsule upsert instead. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for details.
 
 This is enough for basic orientation recovery. Your next startup will retrieve what you persisted here.
 
-### Recommended fuller integration: four hook points
+### Recommended fuller integration: four canonical hook points
 
 For tighter continuity within a session, add two more hook points:
 
-**Before each prompt (pre-prompt):**
+**At `pre_prompt`:**
 
 1. `POST /v1/context/retrieve` — refresh your context with the latest indexed material
-2. `GET /v1/messages/pending` — check for messages, delivery state, or coordination artifacts
-3. `GET /v1/tasks/query` — check for task updates if you are coordinating shared work
+2. Optionally `GET /v1/messages/pending` — check for messages or coordination artifacts if your runtime uses messaging
+3. Optionally `GET /v1/tasks/query` — check for task updates if you are coordinating shared work
+4. Do not write continuity here under the canonical default contract
+5. Do not persist prompt text, retrieved snippets, or transcript material here
 
-**After each prompt (post-prompt):**
+**At `post_prompt`:**
 
-1. `POST /v1/continuity/upsert` — persist any orientation changes, new constraints, or negative decisions from the work you just did
+1. Compare the candidate orientation state to the last persisted capsule for the same subject
+2. `POST /v1/continuity/upsert` only when at least one field in the canonical closed persisted-orientation field list changed
+3. Skip the write when none of those fields changed
+4. Never persist raw prompt text, response text, or chat transcript here
 
-With the fuller pattern, your orientation stays current within the session — not just across resets. If you crash mid-session, your last post-prompt upsert is recoverable.
+With the fuller pattern, your orientation stays current within the session — not just across resets. If you crash mid-session, your last `post_prompt` upsert is recoverable.
 
 ### Full cold-start sequence
 
@@ -68,13 +76,340 @@ If your agent is already running and you want to integrate CogniRelay incrementa
 
 1. **Start with the two-hook minimum.** Add continuity upsert before your next compaction and continuity read on your next startup. This gives you orientation recovery with no changes to your prompt-level loop.
 
-2. **Add pre-prompt and post-prompt hooks when ready.** These tighten within-session continuity but are not required for basic operation.
+2. **Add `pre_prompt` and `post_prompt` hooks when ready.** These tighten within-session continuity but are not required for basic operation.
 
 3. **Add coordination when you need it.** Handoffs, shared artifacts, and reconciliation records are useful when you need to coordinate with external collaborator peers. As the owner-agent, you issue delegated tokens to those peers and they interact through these coordination surfaces. You can ignore coordination until you have a multi-agent use case.
 
 4. **Use MCP if your runtime speaks JSON-RPC.** The same capabilities are available through `POST /v1/mcp` as through the HTTP endpoints. See [MCP Guide](mcp.md) for the bootstrap flow.
 
 5. **Use the CLI client for shell-based hooks.** If your agent runtime invokes hooks as shell commands, `tools/cognirelay_client.py` can read and upsert capsules without a third-party HTTP library. See [CLI Client](cognirelay-client.md) for usage.
+
+## Canonical Hook Contract
+
+Runtime-specific hook names may differ, but each runtime hook must map 1:1 to exactly one canonical identifier:
+
+- `startup`
+- `pre_prompt`
+- `post_prompt`
+- `pre_compaction_or_handoff`
+
+This section is normative for slice 1 of `#215`.
+
+### Exact operation mapping
+
+| Canonical hook | HTTP operation | MCP tool | Write allowed | Default action |
+|---|---|---|---|---|
+| `startup` | `POST /v1/continuity/read` | `continuity.read` | no | read only |
+| `pre_prompt` | `POST /v1/context/retrieve` | `context.retrieve` | no | read only |
+| `post_prompt` | `POST /v1/continuity/upsert` | `continuity.upsert` | yes | write only when eligible |
+| `pre_compaction_or_handoff` | `POST /v1/continuity/upsert` | `continuity.upsert` | yes | write only when eligible |
+
+Additional real-handoff-only operation:
+
+- After `pre_compaction_or_handoff` satisfies the local continuity step, a real inter-agent handoff may additionally call HTTP `POST /v1/coordination/handoff/create` or MCP `coordination.handoff_create`.
+
+### Closed write eligibility and skip rules
+
+Only these persisted-orientation fields are allowed to make `post_prompt` or `pre_compaction_or_handoff` eligible for a continuity write:
+
+- `top_priorities`
+- `open_loops`
+- `active_constraints`
+- `active_concerns`
+- `drift_signals`
+- `stance_summary`
+- `negative_decisions`
+- `session_trajectory`
+- `rationale_entries`
+- `stable_preferences`
+- `thread_descriptor.lifecycle`
+- `thread_descriptor.superseded_by`
+
+Write-decision anchor:
+
+- Compare against the most recent persisted continuity capsule for the subject, even when that capsule is only reachable through fallback.
+
+First-write baseline:
+
+- Use the first-write baseline only when no persisted capsule exists at all for the subject.
+- Compare against `[]` for list fields, `""` for `stance_summary`, and `null` for `thread_descriptor.lifecycle` and `thread_descriptor.superseded_by`.
+
+Exact change-comparison semantics:
+
+- Comparison is direct field-by-field equality with no normalization.
+- Array order is significant; reorder-only changes count as changes.
+- Arrays must not be sorted or deduplicated before comparison.
+- Strings must not be trimmed or normalized before comparison.
+- `null`, omitted, `[]`, and `""` stay distinct except for the explicit first-write baseline above.
+
+Skip rules:
+
+- `startup` skips writes by default.
+- `pre_prompt` skips writes by default.
+- `post_prompt` skips writes when none of the closed persisted-orientation fields changed.
+- `pre_compaction_or_handoff` is the primary write-before-context-loss hook, but it still skips when none of the closed persisted-orientation fields changed.
+
+### Startup and fallback rules
+
+- Canonical `startup` must call `continuity.read` with `view: "startup"` and `allow_fallback: true`.
+- No other `view` value and no omitted `view` is allowed for canonical `startup`.
+- The runtime must forward the normal `continuity.read` result unchanged.
+- Missing active continuity during `startup` must degrade to the contract-defined fallback or missing result, not to a synthetic HTTP error.
+
+### Session-end snapshot rules
+
+- `session_end_snapshot` is for `pre_compaction_or_handoff`, not for `startup` or `pre_prompt`.
+- Use it only when you are refreshing only the snapshot field set:
+  - P0 required: `open_loops`, `top_priorities`, `active_constraints`, `stance_summary`
+  - P1 optional: `negative_decisions`, `session_trajectory`, `rationale_entries`
+- If any write-eligible field outside that set changed, omit `session_end_snapshot` and send a full `capsule`-only upsert.
+- Snapshot mode requires both `capsule` and `session_end_snapshot`.
+
+### Real inter-agent handoff definition and ordering
+
+For this contract, a real inter-agent handoff means task control transfers to a different agent identity that is expected to continue execution after the current agent stops.
+
+These are not real inter-agent handoffs:
+
+- local compaction
+- same-agent resume or re-entry
+- tool calls
+- internal helper or subtask execution without continuity-ownership transfer
+
+Required ordering:
+
+1. Evaluate local write eligibility first.
+2. Satisfy the local continuity step as either an eligible `continuity.upsert` write or an explicit skip.
+3. Only then may a real handoff call `coordination.handoff_create`.
+
+Parallel execution of `continuity.upsert` and `coordination.handoff_create` is not allowed.
+
+### Anti-noise rules
+
+- Do not persist raw prompt text, response text, retrieved snippets, shell output, or transcript material in continuity.
+- Do not write merely because a prompt completed, a tool ran, a summary was generated, the runtime reached a stop hook, a compaction boundary occurred, or a handoff boundary occurred.
+- Do not use `post_prompt` or `pre_compaction_or_handoff` as interaction-log, transcript-archive, or prompt/response-summary sinks.
+
+## Deterministic Examples
+
+### Example A: `startup`
+
+Trigger condition:
+
+- The agent is starting, resuming after a context reset, or re-entering after losing local working context.
+
+Exact operation:
+
+- HTTP: `POST /v1/continuity/read`
+- MCP: `continuity.read`
+
+Minimal request payload:
+
+```json
+{
+  "subject_kind": "thread",
+  "subject_id": "issue-215",
+  "view": "startup",
+  "allow_fallback": true
+}
+```
+
+Expected decision:
+
+- Skip writes. `startup` is read-only by default.
+
+Persisted fields if a write occurs:
+
+- None. A canonical `startup` call does not perform a continuity write.
+
+Explicit non-example:
+
+- Do not call `continuity.upsert` at `startup` merely to mark that the agent resumed.
+
+### Example B: `pre_prompt`
+
+Trigger condition:
+
+- The agent is about to start a major work step and needs fresh bounded working context.
+
+Exact operation:
+
+- HTTP: `POST /v1/context/retrieve`
+- MCP: `context.retrieve`
+
+Minimal request payload:
+
+```json
+{
+  "task_id": "issue-215-slice-1",
+  "query": "canonical hook contract for issue 215",
+  "max_tokens_estimate": 2500
+}
+```
+
+Expected decision:
+
+- Skip writes. `pre_prompt` is read-only by default.
+
+Persisted fields if a write occurs:
+
+- None. A canonical `pre_prompt` call does not perform a continuity write.
+
+Explicit non-example:
+
+- Do not persist the prompt body or retrieved snippets because `pre_prompt` fired.
+
+### Example C: `post_prompt`
+
+Trigger condition:
+
+- The agent completed a work step and updated durable orientation state in a meaning-bearing way.
+
+Exact operation:
+
+- HTTP: `POST /v1/continuity/upsert`
+- MCP: `continuity.upsert`
+
+Minimal request payload:
+
+```json
+{
+  "subject_kind": "thread",
+  "subject_id": "issue-215",
+  "capsule": {
+    "schema_version": "1.1",
+    "subject_kind": "thread",
+    "subject_id": "issue-215",
+    "updated_at": "2026-04-21T12:00:00Z",
+    "verified_at": "2026-04-21T12:00:00Z",
+    "source": {
+      "producer": "agent-runtime",
+      "update_reason": "interaction_boundary",
+      "inputs": []
+    },
+    "continuity": {
+      "top_priorities": ["publish the canonical hook contract docs"],
+      "active_concerns": ["keep slice 1 documentation-only"],
+      "active_constraints": ["follow issue #215 exactly"],
+      "open_loops": ["verify the examples match HTTP and MCP names"],
+      "stance_summary": "The hook contract is now documented as a closed, deterministic mapping.",
+      "drift_signals": [],
+      "negative_decisions": [
+        {
+          "decision": "Do not add runtime help surfaces",
+          "rationale": "Issue #214 is out of scope for slice 1."
+        }
+      ],
+      "session_trajectory": ["spec_hardened", "docs_updated"],
+      "rationale_entries": [],
+      "stable_preferences": []
+    },
+    "confidence": {
+      "continuity": 0.92,
+      "relationship_model": 0.0
+    }
+  }
+}
+```
+
+Expected decision:
+
+- Write only if at least one closed persisted-orientation field changed compared with the last persisted capsule.
+- Skip if the candidate values are exactly equal to the last persisted values.
+
+Persisted fields if a write occurs:
+
+- `top_priorities`
+- `open_loops`
+- `active_constraints`
+- `active_concerns`
+- `drift_signals`
+- `stance_summary`
+- `negative_decisions`
+- `session_trajectory`
+- `rationale_entries`
+
+Explicit non-example:
+
+- Do not persist a prompt/response summary such as `"Discussed the docs update and produced a final answer."`
+
+### Example D: `pre_compaction_or_handoff`
+
+Trigger condition:
+
+- The runtime is about to compact local context, lose local working state, or transfer control to a different agent identity that will continue the task.
+
+Exact operation:
+
+- HTTP: `POST /v1/continuity/upsert`
+- MCP: `continuity.upsert`
+- Optional additional real-handoff-only HTTP call after the local continuity step completes: `POST /v1/coordination/handoff/create`
+- Optional additional real-handoff-only MCP call after the local continuity step completes: `coordination.handoff_create`
+
+Minimal request payload:
+
+```json
+{
+  "subject_kind": "thread",
+  "subject_id": "issue-215",
+  "capsule": {
+    "schema_version": "1.1",
+    "subject_kind": "thread",
+    "subject_id": "issue-215",
+    "updated_at": "2026-04-21T12:30:00Z",
+    "verified_at": "2026-04-21T12:30:00Z",
+    "source": {
+      "producer": "agent-runtime",
+      "update_reason": "pre_compaction",
+      "inputs": []
+    },
+    "continuity": {
+      "top_priorities": ["land deterministic wording for issue #215"],
+      "active_concerns": ["do not broaden scope into #214"],
+      "active_constraints": ["documentation slice only"],
+      "open_loops": ["confirm the hook examples match the issue body"],
+      "stance_summary": "The canonical hook contract is documented and ready for review.",
+      "drift_signals": [],
+      "negative_decisions": [],
+      "session_trajectory": ["docs_ready_for_review"],
+      "rationale_entries": []
+    },
+    "confidence": {
+      "continuity": 0.9,
+      "relationship_model": 0.0
+    }
+  },
+  "session_end_snapshot": {
+    "open_loops": ["confirm the hook examples match the issue body"],
+    "top_priorities": ["land deterministic wording for issue #215"],
+    "active_constraints": ["documentation slice only"],
+    "stance_summary": "The canonical hook contract is documented and ready for review.",
+    "negative_decisions": [],
+    "session_trajectory": ["docs_ready_for_review"],
+    "rationale_entries": []
+  }
+}
+```
+
+Expected decision:
+
+- Write if one or more snapshot fields changed and no write-eligible field outside the snapshot field set changed.
+- Skip the local continuity write if no write-eligible field changed.
+- For a real inter-agent handoff, `coordination.handoff_create` may run only after the local continuity step completed as either a write or an explicit skip.
+
+Persisted fields if a write occurs:
+
+- `open_loops`
+- `top_priorities`
+- `active_constraints`
+- `stance_summary`
+- `negative_decisions`
+- `session_trajectory`
+- `rationale_entries`
+
+Explicit non-example:
+
+- Do not treat same-agent resume, local compaction alone, or an internal helper subtask as a real inter-agent handoff.
 
 ## The Responsibility Boundary
 
