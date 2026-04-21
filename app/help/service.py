@@ -537,3 +537,245 @@ def help_error_payload(code: str) -> dict[str, Any] | JSONResponse:
         allowed_values=list(_ERROR_CODES),
         correction_hint="Use one of: validation, tool_not_found, unknown_help_topic.",
     )
+
+
+_MCP_HELP_TOOL_DEFINITIONS = [
+    {
+        "name": "system.help",
+        "description": "Return the closed machine-facing help index.",
+        "method": "GET",
+        "path": "/v1/help",
+        "scopes": [],
+        "idempotent": True,
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "system.tool_usage",
+        "description": "Return closed help guidance for one supported tool topic.",
+        "method": "GET",
+        "path": "/v1/help/tools/{name}",
+        "scopes": [],
+        "idempotent": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "system.topic_help",
+        "description": "Return closed help guidance for one supported non-tool topic.",
+        "method": "GET",
+        "path": "/v1/help/topics/{id}",
+        "scopes": [],
+        "idempotent": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "system.hook_guide",
+        "description": "Return the closed hook guidance map.",
+        "method": "GET",
+        "path": "/v1/help/hooks",
+        "scopes": [],
+        "idempotent": True,
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "system.error_guide",
+        "description": "Return closed guidance for one supported help-surface error class.",
+        "method": "GET",
+        "path": "/v1/help/errors/{code}",
+        "scopes": [],
+        "idempotent": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+_MCP_HELP_ALLOWED_VALUES = {
+    "system.tool_usage": list(_TOOL_IDS),
+    "system.topic_help": list(_TOPIC_IDS),
+    "system.error_guide": list(_ERROR_CODES),
+}
+
+
+def mcp_help_tool_definitions() -> list[dict[str, Any]]:
+    """Return the exact MCP help-tool catalog entries."""
+    return _copy({"items": _MCP_HELP_TOOL_DEFINITIONS})["items"]
+
+
+def is_mcp_help_tool(name: str) -> bool:
+    """Return whether *name* is one of the five closed MCP help tools."""
+    return name in {
+        "system.help",
+        "system.tool_usage",
+        "system.topic_help",
+        "system.hook_guide",
+        "system.error_guide",
+    }
+
+
+def _mcp_validation_hint(
+    *,
+    field: str,
+    reason: str,
+    correction_hint: str,
+    limit: int | None = None,
+    allowed_values: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "field": field,
+        "area": "params.arguments",
+        "reason": reason,
+        "limit": limit,
+        "allowed_values": allowed_values,
+        "correction_hint": correction_hint,
+    }
+
+
+def _mcp_validation_error(
+    *,
+    detail: str,
+    field: str,
+    reason: str,
+    correction_hint: str,
+    limit: int | None = None,
+    allowed_values: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "error": {
+            "code": "validation",
+            "detail": detail,
+            "validation_hints": [
+                _mcp_validation_hint(
+                    field=field,
+                    reason=reason,
+                    limit=limit,
+                    allowed_values=allowed_values,
+                    correction_hint=correction_hint,
+                )
+            ],
+        }
+    }
+
+
+def resolve_mcp_help_tool_call(
+    name: str,
+    *,
+    arguments_present: bool,
+    arguments: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve one closed MCP help tool call into either a result or validation error."""
+    if name in {"system.help", "system.hook_guide"}:
+        if not arguments_present:
+            return None, _mcp_validation_error(
+                detail="Arguments object is required.",
+                field="arguments",
+                reason="arguments_required",
+                correction_hint="Provide arguments as an empty JSON object.",
+            )
+        if not isinstance(arguments, dict):
+            return None, _mcp_validation_error(
+                detail="Arguments must be a JSON object.",
+                field="arguments",
+                reason="arguments_must_be_object",
+                correction_hint="Use arguments as a JSON object.",
+            )
+        if arguments:
+            return None, _mcp_validation_error(
+                detail="Arguments must be an empty object.",
+                field="arguments",
+                reason="arguments_must_be_empty_object",
+                limit=0,
+                correction_hint="Use arguments as {} with no keys.",
+            )
+        if name == "system.help":
+            return help_root_payload(), None
+        return help_hooks_payload(), None
+
+    if not arguments_present:
+        return None, _mcp_validation_error(
+            detail="Arguments object is required.",
+            field="arguments",
+            reason="arguments_required",
+            correction_hint="Provide arguments as an empty JSON object.",
+        )
+    if not isinstance(arguments, dict):
+        return None, _mcp_validation_error(
+            detail="Arguments must be a JSON object.",
+            field="arguments",
+            reason="arguments_must_be_object",
+            correction_hint="Use arguments as a JSON object.",
+        )
+
+    field_name = {"system.tool_usage": "name", "system.topic_help": "id", "system.error_guide": "code"}[name]
+    if field_name not in arguments:
+        return None, _mcp_validation_error(
+            detail=f"Missing required field {field_name}.",
+            field=field_name,
+            reason="required_field_missing",
+            correction_hint=f"Provide the required {field_name} field.",
+        )
+
+    value = arguments[field_name]
+    if not isinstance(value, str):
+        return None, _mcp_validation_error(
+            detail=f"Field {field_name} must be a string.",
+            field=field_name,
+            reason="wrong_type",
+            correction_hint=f"Use {field_name} as a JSON string.",
+        )
+
+    for key in arguments:
+        if key != field_name:
+            return None, _mcp_validation_error(
+                detail=f"Unexpected field {key}.",
+                field=key,
+                reason="unexpected_field",
+                correction_hint=f"Remove the unsupported {key} field.",
+            )
+
+    if name == "system.tool_usage":
+        payload = help_tool_payload(value)
+        if isinstance(payload, JSONResponse):
+            return None, _mcp_validation_error(
+                detail="Unsupported tool name.",
+                field="name",
+                reason="unsupported_value",
+                allowed_values=list(_TOOL_IDS),
+                correction_hint="Use one of: continuity.read, continuity.upsert, context.retrieve.",
+            )
+        return payload, None
+
+    if name == "system.topic_help":
+        payload = help_topic_payload(value)
+        if isinstance(payload, JSONResponse):
+            return None, _mcp_validation_error(
+                detail="Unsupported topic id.",
+                field="id",
+                reason="unsupported_value",
+                allowed_values=list(_TOPIC_IDS),
+                correction_hint="Use one of: continuity.read.startup_view, continuity.read.trust_signals, continuity.upsert.session_end_snapshot.",
+            )
+        return payload, None
+
+    payload = help_error_payload(value)
+    if isinstance(payload, JSONResponse):
+        return None, _mcp_validation_error(
+            detail="Unsupported error code.",
+            field="code",
+            reason="unsupported_value",
+            allowed_values=list(_ERROR_CODES),
+            correction_hint="Use one of: validation, tool_not_found, unknown_help_topic.",
+        )
+    return payload, None

@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
+from app.help import is_mcp_help_tool, resolve_mcp_help_tool_call
 from app.timestamps import format_iso, iso_now
 
 SUPPORTED_PROTOCOL_VERSION = "2025-11-25"
@@ -440,7 +441,7 @@ def _validate_tools_list_params(request_id: Any, params: Any, *, params_present:
     return _invalid_params(request_id, "cursor pagination is not supported in slice 2")
 
 
-def _validate_tools_call_params(request_id: Any, params: Any) -> McpHttpResponse | tuple[str, dict[str, Any]]:
+def _validate_tools_call_params(request_id: Any, params: Any) -> McpHttpResponse | tuple[str, bool, Any]:
     if not isinstance(params, dict):
         return _invalid_params(request_id, "params must be an object")
     for key in params:
@@ -453,10 +454,7 @@ def _validate_tools_call_params(request_id: Any, params: Any) -> McpHttpResponse
         return _invalid_params(request_id, "name must be a non-empty string")
     if name == "" or _ascii_whitespace_only(name):
         return _invalid_params(request_id, "name is required")
-    arguments = params.get("arguments", {})
-    if not isinstance(arguments, dict):
-        return _invalid_params(request_id, "arguments must be an object")
-    return name, arguments
+    return name, "arguments" in params, params.get("arguments")
 
 
 def handle_mcp_request_payload(
@@ -550,11 +548,25 @@ def handle_mcp_request_payload(
     call_params = _validate_tools_call_params(request_id, request_payload.get("params"))
     if isinstance(call_params, McpHttpResponse):
         return call_params
-    tool_name, arguments = call_params
+    tool_name, arguments_present, raw_arguments = call_params
 
     tool = _tool_by_name(tool_name, tools)
     if tool is None:
         return _jsonrpc_error(200, request_id, -32602, "Invalid params", {"reason": "unknown tool", "name": tool_name})
+
+    if is_mcp_help_tool(tool_name):
+        result, validation_error = resolve_mcp_help_tool_call(
+            tool_name,
+            arguments_present=arguments_present,
+            arguments=raw_arguments,
+        )
+        if validation_error is not None:
+            return _jsonrpc_error(200, request_id, -32602, "Invalid params", validation_error)
+        return _jsonrpc_success(request_id, result or {})
+
+    arguments = raw_arguments if arguments_present else {}
+    if not isinstance(arguments, dict):
+        return _invalid_params(request_id, "arguments must be an object")
 
     schema = tool.get("input_schema")
     if isinstance(schema, dict):
