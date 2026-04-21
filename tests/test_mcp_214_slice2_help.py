@@ -6,7 +6,6 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from app.help import help_error_payload, help_hooks_payload, help_root_payload, help_tool_payload, help_topic_payload
 from app.main import app
 from app.mcp.service import reset_bootstrap_state
 
@@ -104,9 +103,13 @@ class TestMcp214Slice2Help(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        listed = {tool["name"]: tool for tool in payload["result"]["tools"]}
+        listed = {
+            tool["name"]: tool
+            for tool in payload["result"]["tools"]
+            if tool["name"].startswith("system.") and tool["metadata"]["path"].startswith("/v1/help")
+        }
 
-        self.assertTrue(EXPECTED_HELP_SCHEMAS.keys() <= listed.keys())
+        self.assertEqual(set(listed), set(EXPECTED_HELP_SCHEMAS))
         self.assertEqual(listed["system.help"]["inputSchema"], EXPECTED_HELP_SCHEMAS["system.help"])
         self.assertEqual(listed["system.tool_usage"]["inputSchema"], EXPECTED_HELP_SCHEMAS["system.tool_usage"])
         self.assertEqual(listed["system.topic_help"]["inputSchema"], EXPECTED_HELP_SCHEMAS["system.topic_help"])
@@ -118,44 +121,45 @@ class TestMcp214Slice2Help(unittest.TestCase):
         response = self._tools_call("system.help", arguments_marker={}, request_id=3)
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["result"], help_root_payload())
+        self.assertEqual(payload["result"], self.client.get("/v1/help").json())
         self.assertNotIn("structuredContent", payload["result"])
         self.assertNotIn("content", payload["result"])
-        self.assertEqual(payload["result"], self.client.get("/v1/help").json())
 
     def test_targeted_help_tools_return_exact_http_parity_bodies(self) -> None:
         """Every supported help target must round-trip the exact closed HTTP body."""
         cases = [
-            ("system.tool_usage", {"name": "continuity.read"}, help_tool_payload("continuity.read")),
-            ("system.tool_usage", {"name": "continuity.upsert"}, help_tool_payload("continuity.upsert")),
-            ("system.tool_usage", {"name": "context.retrieve"}, help_tool_payload("context.retrieve")),
+            ("system.tool_usage", {"name": "continuity.read"}, "/v1/help/tools/continuity.read"),
+            ("system.tool_usage", {"name": "continuity.upsert"}, "/v1/help/tools/continuity.upsert"),
+            ("system.tool_usage", {"name": "context.retrieve"}, "/v1/help/tools/context.retrieve"),
             (
                 "system.topic_help",
                 {"id": "continuity.read.startup_view"},
-                help_topic_payload("continuity.read.startup_view"),
+                "/v1/help/topics/continuity.read.startup_view",
             ),
             (
                 "system.topic_help",
                 {"id": "continuity.read.trust_signals"},
-                help_topic_payload("continuity.read.trust_signals"),
+                "/v1/help/topics/continuity.read.trust_signals",
             ),
             (
                 "system.topic_help",
                 {"id": "continuity.upsert.session_end_snapshot"},
-                help_topic_payload("continuity.upsert.session_end_snapshot"),
+                "/v1/help/topics/continuity.upsert.session_end_snapshot",
             ),
-            ("system.hook_guide", {}, help_hooks_payload()),
-            ("system.error_guide", {"code": "validation"}, help_error_payload("validation")),
-            ("system.error_guide", {"code": "tool_not_found"}, help_error_payload("tool_not_found")),
-            ("system.error_guide", {"code": "unknown_help_topic"}, help_error_payload("unknown_help_topic")),
+            ("system.hook_guide", {}, "/v1/help/hooks"),
+            ("system.error_guide", {"code": "validation"}, "/v1/help/errors/validation"),
+            ("system.error_guide", {"code": "tool_not_found"}, "/v1/help/errors/tool_not_found"),
+            ("system.error_guide", {"code": "unknown_help_topic"}, "/v1/help/errors/unknown_help_topic"),
         ]
 
-        for index, (name, arguments, expected) in enumerate(cases, start=30):
-            with self.subTest(name=name, arguments=arguments):
+        for index, (name, arguments, http_path) in enumerate(cases, start=30):
+            with self.subTest(name=name, arguments=arguments, http_path=http_path):
                 response = self._tools_call(name, arguments_marker=arguments, request_id=index)
                 self.assertEqual(response.status_code, 200)
+                http_response = self.client.get(http_path)
+                self.assertEqual(http_response.status_code, 200)
                 payload = response.json()
-                self.assertEqual(payload["result"], expected)
+                self.assertEqual(payload["result"], http_response.json())
                 self.assertNotIn("content", payload["result"])
                 self.assertNotIn("structuredContent", payload["result"])
 

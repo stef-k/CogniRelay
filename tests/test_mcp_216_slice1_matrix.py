@@ -325,8 +325,19 @@ EXPECTED_MATRIX = [
         "tools.call.success_shape",
         "slice_2",
         "converged",
-        "Successful `tools/call` responses now return only `content` and `structuredContent` at top-level JSON-RPC `result`.",
-        "Return only `content` and `structuredContent` at top-level JSON-RPC `result`, with no wrapper fields such as `toolName`, `ok`, `status`, or `isError`.",
+        (
+            "Successful non-help `tools/call` responses now return only `content` and "
+            "`structuredContent` at top-level JSON-RPC `result`; the `#214` help tools "
+            "remain the explicit exception and return exact HTTP help JSON directly at "
+            "`result`."
+        ),
+        (
+            "For non-help tools, return only `content` and `structuredContent` at top-level "
+            "JSON-RPC `result`, with no wrapper fields such as `toolName`, `ok`, `status`, "
+            "or `isError`; keep `system.help`, `system.tool_usage`, `system.topic_help`, "
+            "`system.hook_guide`, and `system.error_guide` on their exact `#214` "
+            "direct-`result` help-body contract."
+        ),
         "none",
         "implemented",
     ),
