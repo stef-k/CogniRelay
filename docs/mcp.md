@@ -30,9 +30,12 @@ For an MCP-oriented client, the expected startup sequence is:
 The well-known descriptor advertises:
 
 - endpoint: `/v1/mcp`
+- transport posture: `streamable-http`
 - protocol target: MCP `2025-11-25`
 - methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`
 - auth: bearer token in `Authorization`
+- supplemental metadata only: `true`
+- deferred GET posture: `GET /v1/mcp` remains `405 Method Not Allowed` with `Allow: POST`
 
 ## What MCP Exposes
 

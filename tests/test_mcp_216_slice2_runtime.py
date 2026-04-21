@@ -19,6 +19,9 @@ from tests.helpers import SimpleGitManagerStub
 class TestMcp216Slice2Runtime(unittest.TestCase):
     """Validate the exact slice-2 MCP runtime contract."""
 
+    _CALLER_A_AUTH = "Bearer caller-a"
+    _CALLER_B_AUTH = "Bearer caller-b"
+
     @classmethod
     def setUpClass(cls) -> None:
         """Create one HTTP client for the app."""
@@ -133,9 +136,11 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
 
     def test_initialize_enforces_exact_protocol_and_bootstrap_gating(self) -> None:
         """Initialize must use the exact request, result, and state-transition rules."""
+        headers = {"authorization": self._CALLER_A_AUTH}
         pre_init = self.client.post(
             "/v1/mcp",
             json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            headers=headers,
         )
         self.assertEqual(pre_init.status_code, 200)
         self.assertEqual(
@@ -159,6 +164,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25", "capabilities": {}},
             },
+            headers=headers,
         )
         self.assertEqual(initialize.status_code, 200)
         payload = initialize.json()
@@ -173,6 +179,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         pre_notify = self.client.post(
             "/v1/mcp",
             json={"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}},
+            headers=headers,
         )
         self.assertEqual(pre_notify.status_code, 200)
         self.assertEqual(
@@ -256,7 +263,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
 
     def test_tools_list_rejects_non_empty_cursor_and_omits_next_cursor(self) -> None:
         """Slice 2 supports only the first tools/list page."""
-        self._bootstrap()
+        self._bootstrap(headers={"authorization": self._CALLER_A_AUTH})
 
         bad_cursor = self.client.post(
             "/v1/mcp",
@@ -266,6 +273,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 "method": "tools/list",
                 "params": {"cursor": "page-2"},
             },
+            headers={"authorization": self._CALLER_A_AUTH},
         )
         self.assertEqual(bad_cursor.status_code, 200)
         self.assertEqual(
@@ -284,6 +292,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         success = self.client.post(
             "/v1/mcp",
             json={"jsonrpc": "2.0", "id": 13, "method": "tools/list", "params": {"cursor": ""}},
+            headers={"authorization": self._CALLER_A_AUTH},
         )
         self.assertEqual(success.status_code, 200)
         payload = success.json()
@@ -294,20 +303,31 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
 
     def test_tools_call_uses_exact_success_shape(self) -> None:
         """Successful tools/call responses must expose only content and structuredContent."""
-        self._bootstrap()
-        response = self.client.post(
-            "/v1/mcp",
-            json={
-                "jsonrpc": "2.0",
-                "id": "manifest",
-                "method": "tools/call",
-                "params": {"name": "system.manifest", "arguments": {}},
-            },
+        headers = {"authorization": self._CALLER_A_AUTH}
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-test",
+            scopes=set(),
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
         )
+        with patch("app.main.require_auth", return_value=auth):
+            self._bootstrap(headers=headers)
+            response = self.client.post(
+                "/v1/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "discovery",
+                    "method": "tools/call",
+                    "params": {"name": "system.discovery", "arguments": {}},
+                },
+                headers=headers,
+            )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["jsonrpc"], "2.0")
-        self.assertEqual(payload["id"], "manifest")
+        self.assertEqual(payload["id"], "discovery")
         self.assertEqual(sorted(payload["result"].keys()), ["content", "structuredContent"])
         self.assertEqual(payload["result"]["content"][0]["type"], "text")
         self.assertTrue(payload["result"]["content"][0]["text"])
@@ -315,7 +335,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
 
     def test_tools_call_maps_unknown_tool_and_schema_validation_errors(self) -> None:
         """tools/call failures must use the exact slice-2 JSON-RPC mappings."""
-        self._bootstrap()
+        self._bootstrap(headers={"authorization": self._CALLER_A_AUTH})
 
         unknown = self.client.post(
             "/v1/mcp",
@@ -325,6 +345,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 "method": "tools/call",
                 "params": {"name": "missing.tool", "arguments": {}},
             },
+            headers={"authorization": self._CALLER_A_AUTH},
         )
         self.assertEqual(unknown.status_code, 200)
         self.assertEqual(
@@ -375,7 +396,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
 
     def test_tools_call_maps_unauthorized_and_forbidden_failures(self) -> None:
         """Auth failures must use the exact unauthorized and forbidden codes."""
-        self._bootstrap()
+        self._bootstrap(headers={"authorization": self._CALLER_A_AUTH})
 
         unauthorized = self.client.post(
             "/v1/mcp",
@@ -385,6 +406,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 "method": "tools/call",
                 "params": {"name": "memory.read", "arguments": {"path": "memory/core/identity.md"}},
             },
+            headers={"authorization": self._CALLER_A_AUTH},
         )
         self.assertEqual(unauthorized.status_code, 200)
         self.assertEqual(
@@ -439,6 +461,152 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 },
             },
         )
+
+    def test_initialize_null_present_values_use_exact_invalid_params_mapping(self) -> None:
+        """Explicit null initialize fields must stay distinct from missing fields."""
+        cases = [
+            (
+                {"protocolVersion": None},
+                {"reason": "protocolVersion must be a string"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "capabilities": None},
+                {"reason": "capabilities must be an object"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": None},
+                {"reason": "clientInfo must be an object"},
+            ),
+        ]
+
+        for request_id, (params, error_data) in enumerate(cases, start=40):
+            with self.subTest(params=params):
+                response = self.client.post(
+                    "/v1/mcp",
+                    json={"jsonrpc": "2.0", "id": request_id, "method": "initialize", "params": params},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid params",
+                            "data": error_data,
+                        },
+                    },
+                )
+
+    def test_tools_list_params_null_is_invalid_params(self) -> None:
+        """Explicit null params for tools/list must not be treated as omitted."""
+        self._bootstrap(headers={"authorization": self._CALLER_A_AUTH})
+        response = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 50, "method": "tools/list", "params": None},
+            headers={"authorization": self._CALLER_A_AUTH},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 50,
+                "error": {
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": {"reason": "params must be an object"},
+                },
+            },
+        )
+
+    def test_tools_call_arguments_null_is_invalid_params(self) -> None:
+        """Explicit null arguments for tools/call must not be treated as omitted."""
+        self._bootstrap(headers={"authorization": self._CALLER_A_AUTH})
+        response = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 51,
+                "method": "tools/call",
+                "params": {"name": "system.manifest", "arguments": None},
+            },
+            headers={"authorization": self._CALLER_A_AUTH},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 51,
+                "error": {
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": {"reason": "arguments must be an object"},
+                },
+            },
+        )
+
+    def test_bootstrap_state_is_isolated_by_caller_identity(self) -> None:
+        """One caller's bootstrap state must not satisfy another caller."""
+        self._bootstrap(headers={"authorization": self._CALLER_A_AUTH})
+
+        response = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 60, "method": "tools/list", "params": {}},
+            headers={"authorization": self._CALLER_B_AUTH},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 60,
+                "error": {
+                    "code": -32000,
+                    "message": "Server not initialized",
+                    "data": {"required_step": "initialize"},
+                },
+            },
+        )
+
+    def test_reinitialize_after_ready_does_not_regress_caller_state(self) -> None:
+        """A ready caller must not be pushed back into a waiting bootstrap phase."""
+        headers = {"authorization": self._CALLER_A_AUTH}
+        self._bootstrap(headers=headers)
+
+        reinitialize = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 70,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            },
+            headers=headers,
+        )
+        self.assertEqual(reinitialize.status_code, 200)
+        self.assertEqual(
+            reinitialize.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 70,
+                "error": {
+                    "code": -32000,
+                    "message": "Server not initialized",
+                    "data": {"required_step": "notifications/initialized"},
+                },
+            },
+        )
+
+        tools_list = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 71, "method": "tools/list", "params": {}},
+            headers=headers,
+        )
+        self.assertEqual(tools_list.status_code, 200)
+        self.assertIn("result", tools_list.json())
 
 
 if __name__ == "__main__":

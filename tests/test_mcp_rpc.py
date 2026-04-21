@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from starlette.responses import Response
 
 from app.auth import AuthContext
@@ -36,6 +37,8 @@ class _RequestStub:
 
 class TestMcpRpcCompatibility(unittest.TestCase):
     """Validate the MCP-compatible JSON-RPC surface and edge cases."""
+
+    _CALLER_AUTH = "Bearer bootstrap-token"
 
     def setUp(self) -> None:
         """Reset shared bootstrap state before each test."""
@@ -78,6 +81,10 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         payload = well_known_mcp()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["endpoint"], "/v1/mcp")
+        self.assertEqual(payload["transport"], "streamable-http")
+        self.assertEqual(payload["mcp_protocol_version"], "2025-11-25")
+        self.assertTrue(payload["supplemental"])
+        self.assertEqual(payload["get_endpoint"], {"path": "/v1/mcp", "status": 405, "allow": "POST"})
         self.assertIn("initialize", payload["methods"])
         self.assertIn("notifications/initialized", payload["methods"])
         self.assertIn("tools/list", payload["methods"])
@@ -125,9 +132,9 @@ class TestMcpRpcCompatibility(unittest.TestCase):
 
     def test_tools_list(self) -> None:
         """Tools list should expose the expected public tool catalog."""
-        self._bootstrap()
+        self._bootstrap(authorization=self._CALLER_AUTH)
         req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-        res = mcp_rpc(req)
+        res = mcp_rpc(req, authorization=self._CALLER_AUTH)
         self.assertEqual(res["jsonrpc"], "2.0")
         self.assertEqual(res["id"], 1)
         tools = res["result"]["tools"]
@@ -482,31 +489,41 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(structured["outcome"], "confirm")
         self.assertEqual(structured["verification_state"]["status"], "peer_confirmed")
 
-    def test_tools_call_system_manifest_without_auth(self) -> None:
-        """Public tools should be invokable without auth when designed that way."""
-        self._bootstrap()
+    def test_tools_call_system_manifest(self) -> None:
+        """Public tools should keep the exact slice-2 success shape."""
         req = {
             "jsonrpc": "2.0",
             "id": "abc",
             "method": "tools/call",
-            "params": {"name": "system.manifest", "arguments": {}},
+            "params": {"name": "system.discovery", "arguments": {}},
         }
-        res = mcp_rpc(req)
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes=set(),
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+        with patch("app.main.require_auth", return_value=auth):
+            self._bootstrap(authorization=self._CALLER_AUTH)
+            res = mcp_rpc(req, authorization=self._CALLER_AUTH)
         self.assertIn("result", res)
         structured = res["result"]["structuredContent"]
-        self.assertIn("endpoints", structured)
+        self.assertIn("entrypoints", structured)
         self.assertEqual(sorted(res["result"].keys()), ["content", "structuredContent"])
 
     def test_tools_call_protected_tool_requires_auth(self) -> None:
         """Protected tools should fail with an auth error when auth is absent."""
-        self._bootstrap()
         req = {
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/call",
             "params": {"name": "memory.read", "arguments": {"path": "memory/core/identity.md"}},
         }
-        res = mcp_rpc(req)
+        with patch("app.main.require_auth", side_effect=HTTPException(status_code=401)):
+            self._bootstrap(authorization=self._CALLER_AUTH)
+            res = mcp_rpc(req, authorization=self._CALLER_AUTH)
         self.assertIn("error", res)
         self.assertEqual(res["error"]["code"], -32001)
 

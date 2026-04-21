@@ -116,35 +116,32 @@ def _bootstrap_key(
     x_forwarded_for: str | None,
     x_real_ip: str | None,
     request: Any,
-) -> str:
-    """Derive a deterministic bootstrap key from auth or transport identity.
+) -> str | None:
+    """Derive the narrowest bootstrap key allowed by slice 2.
 
     The hardened issue body closes the state machine but does not define a
-    separate session carrier in slice 2. This runtime therefore keys the
-    bootstrap phase narrowly on the bearer header when present, otherwise on
-    the transport peer address that is already available to the route.
+    session carrier for anonymous callers in slice 2. Persist bootstrap state
+    only when the caller presents an explicit Authorization identity; otherwise
+    treat the request as anonymous and stateless.
     """
 
     auth_key = (authorization or "").strip()
     if auth_key:
         return f"auth:{auth_key}"
 
-    request_ip = None
-    if request is not None and getattr(request, "client", None) is not None:
-        request_ip = getattr(request.client, "host", None)
-    forwarded_ip = None
-    if isinstance(x_forwarded_for, str) and x_forwarded_for.strip():
-        forwarded_ip = x_forwarded_for.split(",", 1)[0].strip()
-    real_ip = x_real_ip.strip() if isinstance(x_real_ip, str) and x_real_ip.strip() else None
-    return f"peer:{request_ip or real_ip or forwarded_ip or 'anonymous'}"
+    return None
 
 
-def _bootstrap_phase(key: str) -> str:
+def _bootstrap_phase(key: str | None) -> str:
+    if key is None:
+        return _BOOTSTRAP_NONE
     with _BOOTSTRAP_LOCK:
         return _bootstrap_state.get(key, _BOOTSTRAP_NONE)
 
 
-def _set_bootstrap_phase(key: str, phase: str) -> None:
+def _set_bootstrap_phase(key: str | None, phase: str) -> None:
+    if key is None:
+        return
     with _BOOTSTRAP_LOCK:
         _bootstrap_state[key] = phase
 
@@ -385,9 +382,9 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
         if key not in allowed_keys:
             return _invalid_params(request_id, "unexpected initialize param", field=key)
 
-    protocol_version = params.get("protocolVersion")
-    if protocol_version is None:
+    if "protocolVersion" not in params:
         return _invalid_params(request_id, "protocolVersion is required")
+    protocol_version = params["protocolVersion"]
     if not isinstance(protocol_version, str):
         return _invalid_params(request_id, "protocolVersion must be a string")
     if protocol_version != SUPPORTED_PROTOCOL_VERSION:
@@ -399,12 +396,11 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
             {"supported": [SUPPORTED_PROTOCOL_VERSION], "requested": protocol_version},
         )
 
-    capabilities = params.get("capabilities")
-    if capabilities is not None and not isinstance(capabilities, dict):
+    if "capabilities" in params and not isinstance(params["capabilities"], dict):
         return _invalid_params(request_id, "capabilities must be an object")
 
-    client_info = params.get("clientInfo")
-    if client_info is not None:
+    if "clientInfo" in params:
+        client_info = params["clientInfo"]
         if not isinstance(client_info, dict):
             return _invalid_params(request_id, "clientInfo must be an object")
         for key in client_info:
@@ -426,8 +422,11 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
     }
 
 
-def _validate_tools_list_params(request_id: Any, params: Any) -> McpHttpResponse | dict[str, Any]:
-    effective = {} if params is None else params
+def _validate_tools_list_params(request_id: Any, params: Any, *, params_present: bool) -> McpHttpResponse | dict[str, Any]:
+    if not params_present:
+        effective: dict[str, Any] = {}
+    else:
+        effective = params
     if not isinstance(effective, dict):
         return _invalid_params(request_id, "params must be an object")
     for key in effective:
@@ -455,8 +454,6 @@ def _validate_tools_call_params(request_id: Any, params: Any) -> McpHttpResponse
     if name == "" or _ascii_whitespace_only(name):
         return _invalid_params(request_id, "name is required")
     arguments = params.get("arguments", {})
-    if arguments is None:
-        arguments = {}
     if not isinstance(arguments, dict):
         return _invalid_params(request_id, "arguments must be an object")
     return name, arguments
@@ -515,7 +512,7 @@ def handle_mcp_request_payload(
     phase = _bootstrap_phase(bootstrap_key)
 
     if method == "initialize":
-        if phase == _BOOTSTRAP_INITIALIZED:
+        if phase != _BOOTSTRAP_NONE:
             return _server_not_initialized(request_id, "notifications/initialized")
         result = _validate_initialize(request_id, request_payload.get("params"), server_version)
         if isinstance(result, McpHttpResponse):
@@ -541,7 +538,11 @@ def handle_mcp_request_payload(
         return _method_not_found(request_id, method)
 
     if method == "tools/list":
-        params_result = _validate_tools_list_params(request_id, request_payload.get("params"))
+        params_result = _validate_tools_list_params(
+            request_id,
+            request_payload.get("params"),
+            params_present="params" in request_payload,
+        )
         if isinstance(params_result, McpHttpResponse):
             return params_result
         return _jsonrpc_success(request_id, _tools_list_result(tools))

@@ -1043,14 +1043,16 @@ def well_known_cognirelay_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def well_known_mcp_payload(contract_version: str) -> dict[str, Any]:
-    """Build the well-known MCP-compatible descriptor for the service."""
+    """Build the bounded slice-2 MCP supplemental metadata descriptor."""
     return {
         "ok": True,
         "protocol": "jsonrpc-2.0",
-        "style": "mcp-compatible",
-        "transport": "http+json",
+        "transport": "streamable-http",
         "endpoint": "/v1/mcp",
         "contract_version": contract_version,
+        "mcp_protocol_version": "2025-11-25",
+        "supplemental": True,
+        "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST"},
         "methods": ["initialize", "notifications/initialized", "ping", "tools/list", "tools/call"],
         "auth": {"type": "bearer", "header": "Authorization: Bearer <token>"},
     }
