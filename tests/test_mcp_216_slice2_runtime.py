@@ -302,7 +302,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         self.assertNotIn("nextCursor", payload["result"])
 
     def test_tools_call_uses_exact_success_shape(self) -> None:
-        """Successful tools/call responses must expose only content and structuredContent."""
+        """Successful non-help tools/call responses must expose only content and structuredContent."""
         headers = {"authorization": self._CALLER_A_AUTH}
         auth = AuthContext(
             token="token",

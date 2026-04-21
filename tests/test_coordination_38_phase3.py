@@ -37,6 +37,8 @@ class _GitManagerStub(SimpleGitManagerStub):
 class TestCoordination38Phase3Discovery(unittest.TestCase):
     """Validate reconciliation endpoints appear in discovery, manifest, and MCP surfaces."""
 
+    _AUTH = "Bearer discovery-phase3"
+
     def setUp(self) -> None:
         """Reset shared MCP bootstrap state before each test."""
         reset_bootstrap_state()
@@ -120,13 +122,17 @@ class TestCoordination38Phase3Discovery(unittest.TestCase):
                 "id": 0,
                 "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25"},
-            }
+            },
+            authorization=self._AUTH,
         )
         self.assertIn("result", init)
-        notify = mcp_rpc({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        notify = mcp_rpc(
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            authorization=self._AUTH,
+        )
         self.assertEqual(notify.status_code, 204)
         req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-        res = mcp_rpc(req)
+        res = mcp_rpc(req, authorization=self._AUTH)
         tools = res["result"]["tools"]
         by_name = {t["name"]: t for t in tools}
         self.assertIn("coordination.reconciliation_open", by_name)
