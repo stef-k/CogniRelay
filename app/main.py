@@ -207,6 +207,13 @@ from .tasks import (
     tasks_query_service,
     tasks_update_service,
 )
+from .help import (
+    help_error_payload,
+    help_hooks_payload,
+    help_root_payload,
+    help_tool_payload,
+    help_topic_payload,
+)
 from .ui import build_ui_router
 
 _log = logging.getLogger(__name__)
@@ -574,6 +581,36 @@ def contracts() -> dict:
     """Return contract version metadata and compatibility policy."""
     settings = get_settings()
     return contracts_payload(contract_version=settings.contract_version, tools=_tool_catalog())
+
+
+@app.get("/v1/help")
+def help_root() -> dict:
+    """Return the exact machine-facing HTTP help root body for issue #214 slice 1."""
+    return help_root_payload()
+
+
+@app.get("/v1/help/tools/{name}")
+def help_tool(name: str) -> Any:
+    """Return the exact supported tool-help body or the exact slice-1 validation error."""
+    return help_tool_payload(name)
+
+
+@app.get("/v1/help/topics/{id}")
+def help_topic(id: str) -> Any:
+    """Return the exact supported topic-help body or the exact slice-1 validation error."""
+    return help_topic_payload(id)
+
+
+@app.get("/v1/help/hooks")
+def help_hooks() -> dict:
+    """Return the exact hook guidance body for issue #214 slice 1."""
+    return help_hooks_payload()
+
+
+@app.get("/v1/help/errors/{code}")
+def help_error(code: str) -> Any:
+    """Return the exact supported error-help body or the exact slice-1 validation error."""
+    return help_error_payload(code)
 
 
 @app.get("/v1/governance/policy")
