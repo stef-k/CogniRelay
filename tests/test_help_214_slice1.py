@@ -464,6 +464,12 @@ class TestHelp214Slice1Routes(HelpHttpTestCase):
         self.assertNotIn("location", response.headers)
         self.assertEqual(response.json(), {"detail": "Not Found"})
 
+    def test_non_help_trailing_slash_paths_keep_existing_redirects(self) -> None:
+        """The help-alias guard must not intercept unrelated slash redirects."""
+        response = self.client.get("/v1/capabilities/", follow_redirects=False)
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], "http://testserver/v1/capabilities")
+
 
 class TestHelp214Slice1SuccessBodies(HelpHttpTestCase):
     """Successful slice-1 help responses must match the hardened issue body exactly."""

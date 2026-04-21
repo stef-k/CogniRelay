@@ -278,11 +278,11 @@ if get_settings().ui_enabled:
 
 @app.middleware("http")
 async def _cache_raw_json_body(request: FastAPIRequest, call_next):  # type: ignore[no-untyped-def]
-    """Cache the raw JSON body on request.state for preserve-mode upsert.
+    """Reject forbidden help aliases and cache preserve-mode upsert bodies.
 
-    Only activates for the continuity upsert endpoint when the body
-    contains ``"merge_mode": "preserve"``.  All other requests pass
-    through untouched.
+    Returns a direct 404 for forbidden trailing-slash help aliases. For
+    POST /v1/continuity/upsert, caches the raw JSON body only when
+    ``merge_mode`` is ``"preserve"``.
     """
     if is_forbidden_help_alias_path(request.url.path):
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
