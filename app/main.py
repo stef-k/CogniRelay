@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Any, Callable, Literal
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request as FastAPIRequest, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from .mcp import handle_mcp_http_request
 from .auth import AuthContext, require_auth
 from .git_locking import GitLockInfrastructureError, GitLockTimeout
 from .lifecycle_warnings import make_error_detail
@@ -79,7 +80,6 @@ from .discovery import (
     health_payload,
     invoke_tool_by_name,
     manifest_payload,
-    rpc_error_payload,
     tool_catalog,
     well_known_cognirelay_payload,
     well_known_mcp_payload,
@@ -489,51 +489,33 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
     )
 
 
-@app.post("/v1/mcp")
+def _materialize_mcp_result(result: Any) -> Any:
+    """Convert the MCP runtime response into the testing helper return shape."""
+    if result.body is None:
+        return Response(status_code=result.status_code, headers=result.headers)
+    return result.body
+
+
 def mcp_rpc(
-    payload: Any = Body(...),
-    authorization: str | None = Header(default=None),
-    x_forwarded_for: str | None = Header(default=None, alias="X-Forwarded-For"),
-    x_real_ip: str | None = Header(default=None, alias="X-Real-IP"),
+    payload: Any,
+    authorization: str | None = None,
+    x_forwarded_for: str | None = None,
+    x_real_ip: str | None = None,
+    origin: str | None = None,
     http_request: FastAPIRequest = None,  # type: ignore[assignment]
 ) -> Any:
-    """Handle MCP-compatible JSON-RPC requests over HTTP."""
+    """Handle one already-parsed MCP request for unit tests and local callers."""
     # When called directly in unit tests, FastAPI's Header sentinel can appear here.
     if authorization is not None and not isinstance(authorization, str):
         authorization = None
-    if isinstance(payload, list):
-        if not payload:
-            return rpc_error_payload(None, -32600, "Invalid Request: empty batch")
-        out = []
-        for item in payload:
-            result = _handle_mcp_rpc_request(
-                item,
-                authorization=authorization,
-                x_forwarded_for=x_forwarded_for,
-                x_real_ip=x_real_ip,
-                request=http_request,
-                contract_version=get_settings().contract_version,
-                tools=_tool_catalog(),
-                resolve_auth_context_fn=lambda authz, required, **kwargs: _resolve_auth_context(
-                    require_auth,
-                    authz,
-                    required,
-                    **kwargs,
-                ),
-                invoke_tool_by_name=_invoke_tool_by_name,
-            )
-            if result is not None:
-                out.append(result)
-        if not out:
-            return Response(status_code=204)
-        return out
     result = _handle_mcp_rpc_request(
         payload,
+        origin=origin,
         authorization=authorization,
         x_forwarded_for=x_forwarded_for,
         x_real_ip=x_real_ip,
         request=http_request,
-        contract_version=get_settings().contract_version,
+        server_version=app.version,
         tools=_tool_catalog(),
         resolve_auth_context_fn=lambda authz, required, **kwargs: _resolve_auth_context(
             require_auth,
@@ -543,9 +525,59 @@ def mcp_rpc(
         ),
         invoke_tool_by_name=_invoke_tool_by_name,
     )
-    if result is None:
-        return Response(status_code=204)
-    return result
+    return _materialize_mcp_result(result)
+
+
+@app.get("/v1/mcp")
+def mcp_rpc_get() -> Response:
+    """Keep GET /v1/mcp explicitly deferred in slice 2."""
+    return Response(status_code=405, headers={"Allow": "POST"})
+
+
+@app.post(
+    "/v1/mcp",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {"type": "object"}
+                }
+            },
+        }
+    },
+)
+async def mcp_rpc_http(
+    authorization: str | None = Header(default=None),
+    x_forwarded_for: str | None = Header(default=None, alias="X-Forwarded-For"),
+    x_real_ip: str | None = Header(default=None, alias="X-Real-IP"),
+    origin: str | None = Header(default=None),
+    http_request: FastAPIRequest = None,  # type: ignore[assignment]
+) -> Response:
+    """Handle MCP JSON-RPC requests over HTTP with exact slice-2 parsing rules."""
+    if authorization is not None and not isinstance(authorization, str):
+        authorization = None
+    raw_body = await http_request.body()
+    result = handle_mcp_http_request(
+        raw_body,
+        origin=origin,
+        authorization=authorization,
+        x_forwarded_for=x_forwarded_for,
+        x_real_ip=x_real_ip,
+        request=http_request,
+        server_version=app.version,
+        tools=_tool_catalog(),
+        resolve_auth_context=lambda authz, required, **kwargs: _resolve_auth_context(
+            require_auth,
+            authz,
+            required,
+            **kwargs,
+        ),
+        invoke_tool_by_name=_invoke_tool_by_name,
+    )
+    if result.body is None:
+        return Response(status_code=result.status_code, headers=result.headers)
+    return JSONResponse(status_code=result.status_code, content=result.body, headers=result.headers)
 
 
 @app.get("/health")

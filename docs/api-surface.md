@@ -24,8 +24,9 @@ This document covers the machine-facing HTTP contract. The optional `/ui` operat
 - `GET /v1/discovery/tools`: tool catalog with schemas and scopes
 - `GET /v1/discovery/workflows`: suggested autonomous workflows
 - `GET /.well-known/cognirelay.json`: well-known discovery entrypoint
-- `GET /.well-known/mcp.json`: MCP compatibility descriptor
-- `POST /v1/mcp`: JSON-RPC bridge for `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`
+- `GET /.well-known/mcp.json`: bounded MCP 2025-11-25 supplemental descriptor
+- `GET /v1/mcp`: deferred in slice 2; returns `405` with `Allow: POST`
+- `POST /v1/mcp`: bounded MCP 2025-11-25 Streamable HTTP posture for `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`
 
 ### `GET /v1/capabilities` — versioned feature map
 
@@ -62,13 +63,13 @@ Returns a deterministic, machine-readable feature map for the current build. No 
 | `coordination.shared_state` | Owner-authored shared coordination artifacts with version control |
 | `messaging.direct` | Tracked direct messages with ack, reject, defer, and delivery state |
 | `peers.registry` | Peer registration, trust-level transitions, and manifest exchange |
-| `discovery.tools` | Machine-readable tool catalog with MCP JSON-RPC bridge |
+| `discovery.tools` | Machine-readable tool catalog for the bounded MCP 2025-11-25 surface |
 
 **Versioning:** `version` is the schema version, not the app version. It increments only when the response shape changes incompatibly. Adding or removing feature keys does not change the version. Clients must tolerate unknown keys. Summaries are human-readable hints, not machine-parsed contracts.
 
 **Relationship to legacy `GET /capabilities`:** The two endpoints are independent. The legacy endpoint returns a flat string list and is unchanged.
 
-For the MCP bootstrap flow, tool metadata model, and HTTP-to-MCP relationship, see `docs/mcp.md`.
+For the bounded MCP 2025-11-25 bootstrap flow, tool metadata model, and `POST /v1/mcp` posture, see `docs/mcp.md`.
 
 ## Memory, file, and index operations
 

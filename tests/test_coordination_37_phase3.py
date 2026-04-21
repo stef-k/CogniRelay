@@ -11,6 +11,7 @@ from unittest.mock import patch
 from app.auth import AuthContext
 from app.config import Settings
 from app.main import discovery_tools, manifest, mcp_rpc
+from app.mcp.service import reset_bootstrap_state
 from tests.helpers import SimpleGitManagerStub
 
 
@@ -36,6 +37,10 @@ class _RequestStub:
 class TestCoordination37Phase3(unittest.TestCase):
     """Validate discovery and MCP exposure for the shared coordination surface."""
 
+    def setUp(self) -> None:
+        """Reset shared MCP bootstrap state before each test."""
+        reset_bootstrap_state()
+
     def _settings(self, repo_root: Path) -> Settings:
         """Return repo-rooted settings for shared coordination discovery tests."""
         return Settings(
@@ -46,6 +51,26 @@ class TestCoordination37Phase3(unittest.TestCase):
             tokens={},
             audit_log_enabled=False,
         )
+
+    def _bootstrap(self, *, authorization: str | None = None, http_request=None) -> None:
+        """Advance one caller context through the MCP bootstrap flow."""
+        init = mcp_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            },
+            authorization=authorization,
+            http_request=http_request,
+        )
+        self.assertIn("result", init)
+        notify = mcp_rpc(
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            authorization=authorization,
+            http_request=http_request,
+        )
+        self.assertEqual(notify.status_code, 204)
 
     def _artifact(self) -> dict:
         """Return one valid stored shared coordination artifact payload."""
@@ -137,7 +162,9 @@ class TestCoordination37Phase3(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
-                res = mcp_rpc(req, authorization="Bearer token", http_request=_RequestStub("127.0.0.1"))
+                request = _RequestStub("127.0.0.1")
+                self._bootstrap(authorization="Bearer token", http_request=request)
+                res = mcp_rpc(req, authorization="Bearer token", http_request=request)
 
         structured = res["result"]["structuredContent"]
         self.assertTrue(structured["ok"])
@@ -184,7 +211,9 @@ class TestCoordination37Phase3(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
-                res = mcp_rpc(req, authorization="Bearer token", http_request=_RequestStub("127.0.0.1"))
+                request = _RequestStub("127.0.0.1")
+                self._bootstrap(authorization="Bearer token", http_request=request)
+                res = mcp_rpc(req, authorization="Bearer token", http_request=request)
 
         structured = res["result"]["structuredContent"]
         self.assertTrue(structured["ok"])

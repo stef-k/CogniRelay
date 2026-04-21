@@ -8,13 +8,48 @@ from app.main import discovery, discovery_tools, discovery_workflows, manifest
 class TestDiscoveryEndpoints(unittest.TestCase):
     """Validate the public discovery surface exposed by the API."""
 
-    def test_discovery_has_mcp_like_metadata(self) -> None:
-        """Discovery should advertise MCP-compatible metadata fields."""
+    def test_discovery_has_bounded_mcp_metadata(self) -> None:
+        """Discovery should advertise the bounded MCP 2025-11-25 metadata fields."""
         payload = discovery()
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["protocol"]["style"], "mcp-like")
-        self.assertIn("/v1/discovery/tools", payload["entrypoints"]["tools"])
-        self.assertIn("/v1/discovery/workflows", payload["entrypoints"]["workflows"])
+        self.assertEqual(
+            payload["protocol"],
+            {
+                "name": "cognirelay-http",
+                "style": "mcp-2025-11-25",
+                "version": payload["protocol"]["version"],
+                "transport": "streamable-http",
+                "mcp_protocol_version": "2025-11-25",
+                "post_endpoint": {"path": "/v1/mcp", "method": "POST", "posture": "active"},
+                "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST", "posture": "deferred"},
+            },
+        )
+        self.assertEqual(
+            payload["entrypoints"],
+            {
+                "manifest": "/v1/manifest",
+                "contracts": "/v1/contracts",
+                "governance_policy": "/v1/governance/policy",
+                "ops_catalog": "/v1/ops/catalog",
+                "ops_status": "/v1/ops/status",
+                "tools": "/v1/discovery/tools",
+                "workflows": "/v1/discovery/workflows",
+                "mcp_rpc": "/v1/mcp",
+                "mcp_well_known": "/.well-known/mcp.json",
+            },
+        )
+        self.assertEqual(
+            payload["agent_guidance"]["mcp_first_calls"],
+            [
+                "GET /.well-known/mcp.json",
+                (
+                    "POST /v1/mcp "
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+                    "\"params\":{\"protocolVersion\":\"2025-11-25\"}}"
+                ),
+                "POST /v1/mcp {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}",
+            ],
+        )
 
     def test_tool_catalog_includes_core_tools(self) -> None:
         """Tool catalog should list the core public tool entries."""
@@ -106,6 +141,19 @@ class TestDiscoveryEndpoints(unittest.TestCase):
         self.assertIn("GET /v1/discovery/tools", endpoints)
         self.assertIn("GET /v1/discovery/workflows", endpoints)
         self.assertIn("GET /.well-known/cognirelay.json", endpoints)
+        self.assertEqual(
+            endpoints["GET /v1/mcp"],
+            {"scope": None, "status": 405, "allow": "POST", "posture": "deferred"},
+        )
+        self.assertEqual(
+            endpoints["POST /v1/mcp"],
+            {
+                "scope": "mixed (depends on tool)",
+                "transport": "streamable-http",
+                "mcp_protocol_version": "2025-11-25",
+                "posture": "active",
+            },
+        )
         self.assertIn("POST /v1/continuity/upsert", endpoints)
         self.assertIn("POST /v1/continuity/read", endpoints)
         self.assertIn("POST /v1/continuity/compare", endpoints)

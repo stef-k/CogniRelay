@@ -1,4 +1,4 @@
-"""Tests for MCP-compatible RPC handling and tool dispatch behavior."""
+"""Tests for the bounded MCP 2025-11-25 RPC handling and tool dispatch behavior."""
 
 import json
 import tempfile
@@ -6,11 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from starlette.responses import Response
 
 from app.auth import AuthContext
 from app.config import Settings
 from app.main import app, mcp_rpc, well_known_mcp
+from app.mcp.service import reset_bootstrap_state
 from tests.helpers import SimpleGitManagerStub
 
 
@@ -34,7 +36,13 @@ class _RequestStub:
 
 
 class TestMcpRpcCompatibility(unittest.TestCase):
-    """Validate the MCP-compatible JSON-RPC surface and edge cases."""
+    """Validate the bounded MCP 2025-11-25 RPC surface and edge cases."""
+
+    _CALLER_AUTH = "Bearer bootstrap-token"
+
+    def setUp(self) -> None:
+        """Reset shared bootstrap state before each test."""
+        reset_bootstrap_state()
 
     def _settings(self, repo_root: Path) -> Settings:
         """Build a settings object rooted at the temporary repository."""
@@ -47,29 +55,55 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             audit_log_enabled=False,
         )
 
+    def _bootstrap(self, *, authorization: str | None = None, http_request=None) -> None:
+        """Advance one caller context through the MCP bootstrap flow."""
+        init = mcp_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            },
+            authorization=authorization,
+            http_request=http_request,
+        )
+        self.assertIn("result", init)
+        notify = mcp_rpc(
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            authorization=authorization,
+            http_request=http_request,
+        )
+        self.assertIsInstance(notify, Response)
+        self.assertEqual(notify.status_code, 204)
+
     def test_well_known_mcp_descriptor(self) -> None:
         """The well-known descriptor should advertise the MCP endpoint surface."""
         payload = well_known_mcp()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["endpoint"], "/v1/mcp")
+        self.assertEqual(payload["transport"], "streamable-http")
+        self.assertEqual(payload["mcp_protocol_version"], "2025-11-25")
+        self.assertTrue(payload["supplemental"])
+        self.assertEqual(payload["get_endpoint"], {"path": "/v1/mcp", "status": 405, "allow": "POST"})
         self.assertIn("initialize", payload["methods"])
         self.assertIn("notifications/initialized", payload["methods"])
         self.assertIn("tools/list", payload["methods"])
         self.assertIn("tools/call", payload["methods"])
 
     def test_initialize(self) -> None:
-        """Initialize should return capabilities and the requested protocol version."""
+        """Initialize should return the exact slice-2 protocol baseline."""
         req = {
             "jsonrpc": "2.0",
             "id": 99,
             "method": "initialize",
-            "params": {"protocolVersion": "2026-02-25", "clientInfo": {"name": "agent-x"}},
+            "params": {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent-x"}},
         }
         res = mcp_rpc(req)
         self.assertEqual(res["jsonrpc"], "2.0")
         self.assertEqual(res["id"], 99)
-        self.assertEqual(res["result"]["protocolVersion"], "2026-02-25")
-        self.assertIn("tools", res["result"]["capabilities"])
+        self.assertEqual(res["result"]["protocolVersion"], "2025-11-25")
+        self.assertEqual(res["result"]["capabilities"], {"tools": {"listChanged": False}})
+        self.assertNotIn("instructions", res["result"])
 
     def test_http_initialize_accepts_jsonrpc_body(self) -> None:
         """The generated HTTP contract should require a JSON request body for MCP initialize."""
@@ -98,8 +132,9 @@ class TestMcpRpcCompatibility(unittest.TestCase):
 
     def test_tools_list(self) -> None:
         """Tools list should expose the expected public tool catalog."""
+        self._bootstrap(authorization=self._CALLER_AUTH)
         req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-        res = mcp_rpc(req)
+        res = mcp_rpc(req, authorization=self._CALLER_AUTH)
         self.assertEqual(res["jsonrpc"], "2.0")
         self.assertEqual(res["id"], 1)
         tools = res["result"]["tools"]
@@ -196,6 +231,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 res = mcp_rpc(req, authorization="Bearer token")
 
         self.assertIn("result", res)
@@ -266,6 +302,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 res = mcp_rpc(req, authorization="Bearer token")
 
         self.assertIn("result", res)
@@ -300,6 +337,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 res = mcp_rpc(req, authorization="Bearer token")
 
         self.assertIn("result", res)
@@ -367,6 +405,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 res = mcp_rpc(req, authorization="Bearer token")
 
         self.assertIn("result", res)
@@ -441,6 +480,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 res = mcp_rpc(req, authorization="Bearer token")
 
         self.assertIn("result", res)
@@ -449,19 +489,29 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(structured["outcome"], "confirm")
         self.assertEqual(structured["verification_state"]["status"], "peer_confirmed")
 
-    def test_tools_call_system_manifest_without_auth(self) -> None:
-        """Public tools should be invokable without auth when designed that way."""
+    def test_tools_call_system_manifest(self) -> None:
+        """Public tools should keep the exact slice-2 success shape."""
         req = {
             "jsonrpc": "2.0",
             "id": "abc",
             "method": "tools/call",
-            "params": {"name": "system.manifest", "arguments": {}},
+            "params": {"name": "system.discovery", "arguments": {}},
         }
-        res = mcp_rpc(req)
+        auth = AuthContext(
+            token="token",
+            peer_id="peer-host",
+            scopes=set(),
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+        with patch("app.main.require_auth", return_value=auth):
+            self._bootstrap(authorization=self._CALLER_AUTH)
+            res = mcp_rpc(req, authorization=self._CALLER_AUTH)
         self.assertIn("result", res)
-        self.assertEqual(res["result"]["toolName"], "system.manifest")
         structured = res["result"]["structuredContent"]
-        self.assertIn("endpoints", structured)
+        self.assertIn("entrypoints", structured)
+        self.assertEqual(sorted(res["result"].keys()), ["content", "structuredContent"])
 
     def test_tools_call_protected_tool_requires_auth(self) -> None:
         """Protected tools should fail with an auth error when auth is absent."""
@@ -471,7 +521,9 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             "method": "tools/call",
             "params": {"name": "memory.read", "arguments": {"path": "memory/core/identity.md"}},
         }
-        res = mcp_rpc(req)
+        with patch("app.main.require_auth", side_effect=HTTPException(status_code=401)):
+            self._bootstrap(authorization=self._CALLER_AUTH)
+            res = mcp_rpc(req, authorization=self._CALLER_AUTH)
         self.assertIn("error", res)
         self.assertEqual(res["error"]["code"], -32001)
 
@@ -497,6 +549,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 res = mcp_rpc(req, authorization="Bearer token")
 
         self.assertIn("error", res)
@@ -524,6 +577,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", return_value=auth
             ):
+                self._bootstrap(authorization="Bearer token")
                 res = mcp_rpc(req, authorization="Bearer token")
 
         self.assertIn("result", res)
@@ -562,10 +616,10 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             with patch("app.main._services", return_value=(settings, _GitManagerStub())), patch(
                 "app.main.require_auth", side_effect=_fake_require_auth
             ):
+                self._bootstrap(authorization="Bearer token", http_request=_RequestStub("127.0.0.1"))
                 res = mcp_rpc(req, authorization="Bearer token", http_request=_RequestStub("127.0.0.1"))
 
         self.assertIn("result", res)
-        self.assertEqual(res["result"]["toolName"], "metrics.get")
         self.assertEqual(seen["host"], "127.0.0.1")
 
     def test_invalid_method(self) -> None:
@@ -575,7 +629,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["error"]["code"], -32601)
 
     def test_batch_request(self) -> None:
-        """Batch requests should return one response per request entry."""
+        """Batch requests should be rejected in slice 2."""
         req = [
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
             {
@@ -586,20 +640,18 @@ class TestMcpRpcCompatibility(unittest.TestCase):
             },
         ]
         res = mcp_rpc(req)
-        self.assertEqual(len(res), 2)
-        self.assertEqual(res[0]["id"], 1)
-        self.assertEqual(res[1]["id"], 2)
-        self.assertIn("result", res[1])
+        self.assertEqual(res["error"]["code"], -32600)
+        self.assertEqual(res["error"]["data"], {"reason": "batch requests are not supported"})
 
     def test_batch_notifications_only_returns_204(self) -> None:
-        """Notification-only batches should return an empty 204 response."""
+        """Notification-only batches are still invalid in slice 2."""
         req = [
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
         ]
         res = mcp_rpc(req)
-        self.assertIsInstance(res, Response)
-        self.assertEqual(res.status_code, 204)
+        self.assertEqual(res["error"]["code"], -32600)
+        self.assertEqual(res["error"]["data"], {"reason": "batch requests are not supported"})
 
     def test_empty_batch_returns_invalid_request_error(self) -> None:
         """Empty batches should return the JSON-RPC invalid-request error."""
@@ -607,7 +659,8 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["jsonrpc"], "2.0")
         self.assertIsNone(res["id"])
         self.assertEqual(res["error"]["code"], -32600)
-        self.assertIn("empty batch", res["error"]["message"])
+        self.assertEqual(res["error"]["message"], "Invalid Request")
+        self.assertEqual(res["error"]["data"], {"reason": "batch requests are not supported"})
 
 
 if __name__ == "__main__":

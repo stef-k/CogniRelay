@@ -17,7 +17,7 @@ from app.audit import WriteTimeRolloverError, append_audit
 from app.timestamps import format_iso, parse_iso
 from app.segment_history.append import SegmentHistoryAppendError
 from app.config import sha256_token
-from app.discovery import handle_mcp_rpc_request as discovery_handle_mcp_rpc_request
+from app.mcp import handle_mcp_request_payload
 from app.storage import safe_path, write_text_file
 
 _log = logging.getLogger(__name__)
@@ -133,23 +133,25 @@ def resolve_auth_context(
 def handle_mcp_request(
     request_payload: Any,
     *,
+    origin: str | None,
     authorization: str | None,
     x_forwarded_for: str | None,
     x_real_ip: str | None,
     request: Any,
-    contract_version: str,
+    server_version: str,
     tools: list[dict[str, Any]],
     resolve_auth_context_fn: Callable[..., Any | None],
     invoke_tool_by_name: Callable[[str, dict[str, Any], Any | None], dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Delegate MCP request handling to the discovery-layer implementation."""
-    return discovery_handle_mcp_rpc_request(
+) -> Any:
+    """Delegate MCP request handling to the slice-2 MCP runtime."""
+    return handle_mcp_request_payload(
         request_payload,
+        origin=origin,
         authorization=authorization,
         x_forwarded_for=x_forwarded_for,
         x_real_ip=x_real_ip,
         request=request,
-        contract_version=contract_version,
+        server_version=server_version,
         tools=tools,
         resolve_auth_context=resolve_auth_context_fn,
         invoke_tool_by_name=invoke_tool_by_name,

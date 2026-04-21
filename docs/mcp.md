@@ -7,26 +7,38 @@ This document describes CogniRelay's MCP-facing surface and how it relates to th
 CogniRelay exposes two machine-oriented integration styles:
 
 - HTTP-native discovery via `GET /v1/discovery`, `GET /v1/discovery/tools`, and `GET /v1/discovery/workflows`
-- MCP-compatible JSON-RPC via `GET /.well-known/mcp.json` and `POST /v1/mcp`
+- MCP JSON-RPC via `GET /.well-known/mcp.json` and `POST /v1/mcp`
 
-The implementation describes the protocol as `mcp-compatible` and `mcp-like`, not as a claim of full MCP-spec coverage. In practice, the MCP bridge is designed around tool discovery and tool execution for autonomous clients.
+The `#216` slice-2 runtime target is MCP `2025-11-25` Streamable HTTP with a temporary bounded posture:
+
+- `POST /v1/mcp` is the only MCP request endpoint that may succeed
+- `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
+- `GET /.well-known/mcp.json` is supplemental metadata only
+
+Slice 2 is intentionally tools-first. It does not add MCP resources, MCP prompts, SSE, or a broader compatibility transport.
 
 ## Bootstrap Flow
 
-For an MCP-oriented client, the expected startup sequence is:
+For an MCP-oriented client, the canonical slice-2 bootstrap sequence is exactly:
 
 1. `GET /.well-known/mcp.json`
-2. `POST /v1/mcp` with `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+2. `POST /v1/mcp` with `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`
 3. `POST /v1/mcp` with `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
-4. `POST /v1/mcp` with `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
-5. `POST /v1/mcp` with `tools/call` requests as needed
+
+After bootstrap is complete, post-bootstrap usage may call:
+
+- `POST /v1/mcp` with `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
+- `POST /v1/mcp` with `tools/call` requests as needed
 
 The well-known descriptor advertises:
 
 - endpoint: `/v1/mcp`
-- protocol: JSON-RPC 2.0 over HTTP+JSON
+- transport posture: `streamable-http`
+- protocol target: MCP `2025-11-25`
 - methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`
 - auth: bearer token in `Authorization`
+- supplemental metadata only: `true`
+- deferred GET posture: `GET /v1/mcp` remains `405 Method Not Allowed` with `Allow: POST`
 
 ## What MCP Exposes
 
@@ -85,6 +97,12 @@ Those endpoints exist to describe or host the MCP bridge rather than to represen
 
 That metadata lets an agent understand both the MCP entrypoint and the underlying HTTP behavior without scraping the REST docs separately.
 
+Slice 2 supports only the first `tools/list` page:
+
+- omitted `params`, `{}`, `{"cursor": null}`, and `{"cursor": ""}` all return the first page
+- non-empty cursor strings are rejected
+- `nextCursor` is absent in slice 2
+
 ## Tool-to-HTTP Mapping
 
 MCP tools are adapters over the HTTP API. Examples:
@@ -116,15 +134,14 @@ This means MCP is not a separate permission system. It is a protocol wrapper ove
 
 `tools/call` returns:
 
-- `toolName`
-- a simple text `content` entry
-- `structuredContent` containing the underlying tool result
+- `content`
+- `structuredContent`
 
 Clients should treat `structuredContent` as the authoritative machine-readable payload.
 
 ## Error Behavior
 
-The bridge returns JSON-RPC errors for:
+The slice-2 runtime returns JSON-RPC errors for:
 
 - invalid JSON-RPC requests
 - unknown methods
@@ -132,7 +149,12 @@ The bridge returns JSON-RPC errors for:
 - unauthorized and forbidden tool calls
 - execution failures
 
-This is documented at the protocol level by the implementation and should be preferred over inferring behavior from HTTP status codes alone.
+HTTP status handling is intentionally narrow:
+
+- `400` for parse failures and envelope-invalid requests
+- `200` for JSON-RPC success and JSON-RPC error envelopes after envelope acceptance
+- `204` only for successful `notifications/initialized`
+- `403` for denied non-loopback `Origin` values on `POST /v1/mcp`
 
 ## Recommendations
 

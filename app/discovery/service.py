@@ -1,13 +1,10 @@
-"""Discovery catalogs, manifest payloads, and MCP-compatible request handling."""
+"""Discovery catalogs, manifest payloads, and bounded MCP request handling."""
 
 from __future__ import annotations
 
 import hashlib
 from app.timestamps import format_iso, iso_now
 from typing import Any, Callable
-
-from fastapi import HTTPException
-from pydantic import ValidationError
 
 from app.auth import AuthContext
 from app.models import (
@@ -123,7 +120,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "system.discovery",
-            "description": "Return machine guidance and entrypoints (MCP-like metadata).",
+            "description": "Return machine guidance and bounded MCP 2025-11-25 entrypoints.",
             "method": "GET",
             "path": "/v1/discovery",
             "scopes": [],
@@ -982,9 +979,12 @@ def discovery_payload(contract_version: str, *, tools: list[dict[str, Any]], wor
         "ok": True,
         "protocol": {
             "name": "cognirelay-http",
-            "style": "mcp-like",
+            "style": "mcp-2025-11-25",
             "version": contract_version,
-            "transport": "http+json",
+            "transport": "streamable-http",
+            "mcp_protocol_version": "2025-11-25",
+            "post_endpoint": {"path": "/v1/mcp", "method": "POST", "posture": "active"},
+            "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST", "posture": "deferred"},
         },
         "auth": {
             "type": "bearer",
@@ -1011,9 +1011,13 @@ def discovery_payload(contract_version: str, *, tools: list[dict[str, Any]], wor
         "agent_guidance": {
             "first_calls": ["GET /v1/discovery", "GET /v1/manifest", "GET /health"],
             "mcp_first_calls": [
-                "POST /v1/mcp {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+                "GET /.well-known/mcp.json",
+                (
+                    "POST /v1/mcp "
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+                    "\"params\":{\"protocolVersion\":\"2025-11-25\"}}"
+                ),
                 "POST /v1/mcp {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}",
-                "POST /v1/mcp {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
             ],
             "loop_hint": "Prefer /v1/index/rebuild-incremental over full rebuild in frequent loops.",
             "write_hint": "Prefer append-only JSONL for events/messages and frequent commits.",
@@ -1026,7 +1030,7 @@ def discovery_tools_payload(contract_version: str, *, tools: list[dict[str, Any]
     """Build the discovery payload containing only tool definitions."""
     return {
         "ok": True,
-        "protocol": {"name": "cognirelay-http", "style": "mcp-like", "version": contract_version},
+        "protocol": {"name": "cognirelay-http", "style": "mcp-2025-11-25", "version": contract_version},
         "count": len(tools),
         "tools": tools,
     }
@@ -1043,35 +1047,19 @@ def well_known_cognirelay_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def well_known_mcp_payload(contract_version: str) -> dict[str, Any]:
-    """Build the well-known MCP-compatible descriptor for the service."""
+    """Build the bounded slice-2 MCP supplemental metadata descriptor."""
     return {
         "ok": True,
         "protocol": "jsonrpc-2.0",
-        "style": "mcp-compatible",
-        "transport": "http+json",
+        "transport": "streamable-http",
         "endpoint": "/v1/mcp",
         "contract_version": contract_version,
+        "mcp_protocol_version": "2025-11-25",
+        "supplemental": True,
+        "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST"},
         "methods": ["initialize", "notifications/initialized", "ping", "tools/list", "tools/call"],
         "auth": {"type": "bearer", "header": "Authorization: Bearer <token>"},
     }
-
-
-def _rpc_ok(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    """Build a JSON-RPC success response."""
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _rpc_error(request_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any]:
-    """Build a JSON-RPC error response."""
-    err: dict[str, Any] = {"code": code, "message": message}
-    if data is not None:
-        err["data"] = data
-    return {"jsonrpc": "2.0", "id": request_id, "error": err}
-
-
-def rpc_error_payload(request_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any]:
-    """Public wrapper for building a JSON-RPC error response."""
-    return _rpc_error(request_id, code, message, data)
 
 
 def invoke_tool_by_name(
@@ -1350,141 +1338,6 @@ def invoke_tool_by_name(
     raise ValueError(f"Unknown tool: {name}")
 
 
-def _mcp_list_tools_result(tools: list[dict[str, Any]]) -> dict[str, Any]:
-    """Convert the internal tool catalog into the MCP tools/list result shape."""
-    rows = []
-    for t in tools:
-        rows.append(
-            {
-                "name": t["name"],
-                "description": t["description"],
-                "inputSchema": t["input_schema"],
-                "metadata": {
-                    "method": t["method"],
-                    "path": t["path"],
-                    "scopes": t["scopes"],
-                    "idempotent": t["idempotent"],
-                    "local_only": bool(t.get("local_only", False)),
-                },
-            }
-        )
-    return {"tools": rows}
-
-
-def _mcp_initialize_result(contract_version: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Build the MCP initialize result payload."""
-    requested_protocol = params.get("protocolVersion", contract_version)
-    return {
-        "protocolVersion": str(requested_protocol),
-        "capabilities": {
-            "tools": {"listChanged": False},
-            "sampling": {},
-        },
-        "serverInfo": {
-            "name": "cognirelay",
-            "version": contract_version,
-        },
-        "instructions": (
-            "Use tools/list to discover tool schemas, then tools/call for execution. "
-            "Prefer /v1/discovery for supplemental HTTP-native guidance."
-        ),
-    }
-
-
-def tool_schema_lookup(name: str, tools: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Look up one tool definition by name from the catalog."""
-    for t in tools:
-        if t["name"] == name:
-            return t
-    return None
-
-
-def handle_mcp_rpc_request(
-    request_payload: Any,
-    *,
-    authorization: str | None,
-    x_forwarded_for: str | None,
-    x_real_ip: str | None,
-    request: Any,
-    contract_version: str,
-    tools: list[dict[str, Any]],
-    resolve_auth_context: Callable[..., AuthContext | None],
-    invoke_tool_by_name: Callable[[str, dict[str, Any], AuthContext | None], dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Handle one MCP-compatible JSON-RPC request payload."""
-    if not isinstance(request_payload, dict):
-        return _rpc_error(None, -32600, "Invalid Request")
-
-    request_id = request_payload.get("id")
-    is_notification = "id" not in request_payload
-    if request_payload.get("jsonrpc") != "2.0":
-        return _rpc_error(request_id, -32600, "Invalid Request: jsonrpc must be '2.0'")
-
-    method = request_payload.get("method")
-    params = request_payload.get("params", {})
-    if not isinstance(params, dict):
-        return _rpc_error(request_id, -32602, "Invalid params: params must be an object")
-
-    if method == "initialize":
-        return _rpc_ok(request_id, _mcp_initialize_result(contract_version, params))
-
-    if method == "notifications/initialized":
-        if is_notification:
-            return None
-        return _rpc_ok(request_id, {"acknowledged": True})
-
-    if method == "ping":
-        return _rpc_ok(request_id, {"ok": True, "ts": format_iso(iso_now())})
-
-    if method == "tools/list":
-        return _rpc_ok(request_id, _mcp_list_tools_result(tools))
-    if method != "tools/call":
-        return _rpc_error(request_id, -32601, f"Method not found: {method}")
-
-    name = params.get("name")
-    arguments = params.get("arguments", {})
-    if not isinstance(name, str) or not name:
-        return _rpc_error(request_id, -32602, "Invalid params: 'name' is required")
-
-    tool = tool_schema_lookup(name, tools)
-    if tool is None:
-        return _rpc_error(request_id, -32602, f"Unknown tool: {name}")
-
-    auth_required = bool(tool.get("scopes"))
-    try:
-        auth = resolve_auth_context(
-            authorization,
-            required=auth_required,
-            x_forwarded_for=x_forwarded_for,
-            x_real_ip=x_real_ip,
-            request=request,
-        )
-        result = invoke_tool_by_name(name, arguments, auth)
-    except ValidationError as e:
-        return _rpc_error(request_id, -32602, "Invalid params", data=e.errors())
-    except HTTPException as e:
-        if e.status_code == 401:
-            return _rpc_error(request_id, -32001, "Unauthorized", data=e.detail)
-        if e.status_code == 403:
-            return _rpc_error(request_id, -32002, "Forbidden", data=e.detail)
-        if e.status_code == 404:
-            return _rpc_error(request_id, -32004, "Not Found", data=e.detail)
-        return _rpc_error(request_id, -32003, "Tool execution failed", data=e.detail)
-    except (KeyError, TypeError, ValueError) as e:
-        return _rpc_error(request_id, -32602, "Invalid params", data=str(e))
-    except Exception as e:
-        return _rpc_error(request_id, -32003, "Tool execution failed", data=str(e))
-
-    return _rpc_ok(
-        request_id,
-        {
-            "toolName": name,
-            "content": [{"type": "text", "text": f"Executed {name}"}],
-            "structuredContent": result,
-        },
-    )
-
-
 def health_payload(*, app_version: str, contract_version: str, repo_root: str, git_initialized: bool, latest_commit: str | None, signed_ingress_required: bool) -> dict:
     """Build the public health payload for the service."""
     return {
@@ -1598,7 +1451,7 @@ def capabilities_v1_payload() -> dict[str, Any]:
                 "summary": "Peer registration, trust-level transitions, and manifest exchange",
             },
             "discovery.tools": {
-                "summary": "Machine-readable tool catalog with MCP JSON-RPC bridge",
+                "summary": "Machine-readable tool catalog for the bounded MCP 2025-11-25 surface",
             },
         },
     }
@@ -1622,7 +1475,13 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "GET /v1/discovery/workflows": {"scope": None},
             "GET /.well-known/cognirelay.json": {"scope": None},
             "GET /.well-known/mcp.json": {"scope": None},
-            "POST /v1/mcp": {"scope": "mixed (depends on tool)"},
+            "GET /v1/mcp": {"scope": None, "status": 405, "allow": "POST", "posture": "deferred"},
+            "POST /v1/mcp": {
+                "scope": "mixed (depends on tool)",
+                "transport": "streamable-http",
+                "mcp_protocol_version": "2025-11-25",
+                "posture": "active",
+            },
             "POST /v1/write": {"scope": "write:* by write_namespace"},
             "POST /v1/append": {"scope": "write:* by write_namespace"},
             "GET /v1/read": {"scope": "read:files"},
