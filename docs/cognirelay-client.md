@@ -53,16 +53,15 @@ python tools/cognirelay_client.py read \
   --base-url http://localhost:8080 \
   --token-file /run/secrets/agent_token \
   --subject-kind user \
-  --subject-id agent-1 \
-  --format startup
+  --subject-id agent-1
 ```
 
-`--subject-kind` accepts: `user`, `peer`, `thread`, `task`. This calls `POST /v1/continuity/read` with `allow_fallback: true` and prints the response.
+`--subject-kind` accepts: `user`, `peer`, `thread`, `task`. This calls `POST /v1/continuity/read` with `allow_fallback: true` and prints either the raw JSON response or a client-side text rendering.
 
 ### Output formats
 
-- `--format json` (default): pretty-printed JSON response body. Does not send `view` in the request — returns the full server response unchanged.
-- `--format startup`: sends `view="startup"` to the server and renders the `startup_summary` block as compact section-based text. If the server predates `view="startup"` (response lacks `startup_summary`), the client falls back to a legacy renderer that extracts fields from `capsule.continuity` directly.
+- `--format json` (default): pretty-printed JSON response body. Does not send `view` in the request and preserves the server response body unchanged.
+- `--format startup`: sends `view="startup"` to the server and renders the `startup_summary` block as compact section-based text. This is a CLI presentation convenience layered on top of the canonical `continuity.read` response, not a different hook contract. If the server predates `view="startup"` (response lacks `startup_summary`), the client falls back to a legacy renderer that extracts fields from `capsule.continuity` directly.
 
 The client tolerates both continuity schema `1.0` and `1.1` payloads on read surfaces. For issue #194, newly written continuity capsules and continuity archive/fallback/cold artifacts move to schema `1.1`; stabilized-shape legacy `1.0` continuity payloads remain readable and upgrade safely where supported. Truly pre-stabilization payloads missing required modern continuity fields are still outside the automatic migration boundary.
 
@@ -230,13 +229,26 @@ Use this to generate token hashes for `peer_tokens.json` and other config files.
 
 **Canonical `startup` hook** — restore orientation after a context reset:
 
+Send `POST /v1/continuity/read` with `view: "startup"` and `allow_fallback: true`, then forward the response unchanged into the runtime.
+
+Canonical request shape:
+
+```json
+{
+  "subject_kind": "user",
+  "subject_id": "$AGENT_ID",
+  "view": "startup",
+  "allow_fallback": true
+}
+```
+
+If you need an operator-facing local rendering instead of unchanged forwarding, use the CLI convenience mode:
+
 ```bash
 python tools/cognirelay_client.py read \
   --subject-kind user --subject-id "$AGENT_ID" \
   --format startup
 ```
-
-This client read path sends `allow_fallback: true`. Under the canonical `startup` contract, pair it with `--format startup` so the request uses `view: "startup"` and the runtime forwards the response unchanged.
 
 **Canonical `pre_compaction_or_handoff` hook** — persist orientation before context loss:
 

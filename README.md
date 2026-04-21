@@ -65,10 +65,10 @@ This is enough for basic orientation recovery across resets.
 
 - `startup`: restore orientation (same as above)
 - `pre_prompt`: read-only retrieval hook bound to `POST /v1/context/retrieve` / `context.retrieve`
-- `post_prompt`: persist orientation changes with `POST /v1/continuity/upsert` / `continuity.upsert` only when at least one meaning-bearing field changed
+- `post_prompt`: persist orientation changes with `POST /v1/continuity/upsert` / `continuity.upsert` only when at least one closed persisted-orientation field changed
 - `pre_compaction_or_handoff`: satisfy the local continuity step before compaction or a real inter-agent handoff; only after that step completes may a real handoff additionally call `POST /v1/coordination/handoff/create` / `coordination.handoff_create`
 
-The fuller pattern gives tighter continuity without widening the write surface: `startup` and `pre_prompt` stay read-only by default, `post_prompt` skips writes when nothing meaning-bearing changed, and `pre_compaction_or_handoff` remains the primary write-before-context-loss hook. For the authoritative contract, including anti-noise rules and deterministic examples, see [Agent Onboarding](docs/agent-onboarding.md#canonical-hook-contract).
+The fuller pattern gives tighter continuity without widening the write surface: `startup` and `pre_prompt` stay read-only by default, `post_prompt` skips writes when the closed persisted-orientation field set is unchanged, and `pre_compaction_or_handoff` remains the primary write-before-context-loss hook. For the authoritative contract, including anti-noise rules and deterministic examples, see [Agent Onboarding](docs/agent-onboarding.md#canonical-hook-contract).
 
 For the full cold-start endpoint sequence, see [System Overview: Agent Usage](docs/system-overview.md#agent-usage).
 

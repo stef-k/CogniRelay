@@ -217,6 +217,9 @@ Minimal request payload:
 Expected decision:
 
 - Skip writes. `startup` is read-only by default.
+- Forward the `continuity.read` result unchanged into the runtime.
+- If no active capsule exists, degrade to the normal fallback or missing result defined by the `continuity.read` contract.
+- Do not synthesize an HTTP error just because the active capsule is missing.
 
 Persisted fields if a write occurs:
 
@@ -226,11 +229,15 @@ Explicit non-example:
 
 - Do not call `continuity.upsert` at `startup` merely to mark that the agent resumed.
 
-### Example B: `pre_prompt`
+### Example B: `pre_prompt` bounded context retrieval
+
+Hook identifier:
+
+- `pre_prompt`
 
 Trigger condition:
 
-- The agent is about to start a major work step and needs fresh bounded working context.
+- The agent is about to start a major work step and needs bounded retrieval.
 
 Exact operation:
 
@@ -241,29 +248,34 @@ Minimal request payload:
 
 ```json
 {
-  "task_id": "issue-215-slice-1",
-  "query": "canonical hook contract for issue 215",
-  "max_tokens_estimate": 2500
+  "task": "Address determinism findings on issue #215 only.",
+  "subject_kind": "thread",
+  "subject_id": "issue-215",
+  "continuity_mode": "required"
 }
 ```
 
 Expected decision:
 
-- Skip writes. `pre_prompt` is read-only by default.
+- Skip write.
 
-Persisted fields if a write occurs:
+Exact persisted fields:
 
-- None. A canonical `pre_prompt` call does not perform a continuity write.
+- none
 
 Explicit non-example:
 
-- Do not persist the prompt body or retrieved snippets because `pre_prompt` fired.
+- Do **not** persist the task text `"Address determinism findings on issue #215 only."` or any retrieved snippet summary during `pre_prompt`.
 
-### Example C: `post_prompt`
+### Example C: `post_prompt` first eligible write
+
+Hook identifier:
+
+- `post_prompt`
 
 Trigger condition:
 
-- The agent completed a work step and updated durable orientation state in a meaning-bearing way.
+- No persisted capsule exists at all for the subject, and the completed work step produced a meaningful persisted-orientation value that differs from the first-write baseline in this issue.
 
 Exact operation:
 
@@ -288,25 +300,26 @@ Minimal request payload:
       "inputs": []
     },
     "continuity": {
-      "top_priorities": ["publish the canonical hook contract docs"],
-      "active_concerns": ["keep slice 1 documentation-only"],
-      "active_constraints": ["follow issue #215 exactly"],
-      "open_loops": ["verify the examples match HTTP and MCP names"],
-      "stance_summary": "The hook contract is now documented as a closed, deterministic mapping.",
+      "top_priorities": ["land deterministic wording for issue #215"],
+      "active_concerns": ["do not broaden scope into #214/#216/#217"],
+      "active_constraints": ["edit the issue body in place"],
+      "open_loops": ["replace ambiguous examples with normative examples"],
+      "stance_summary": "Issue #215 is being narrowed into a closed hook contract spec.",
       "drift_signals": [],
-      "negative_decisions": [
-        {
-          "decision": "Do not add runtime help surfaces",
-          "rationale": "Issue #214 is out of scope for slice 1."
-        }
-      ],
-      "session_trajectory": ["spec_hardened", "docs_updated"],
-      "rationale_entries": [],
-      "stable_preferences": []
+      "session_trajectory": ["moved from loose guidance to closed write rules"],
+      "negative_decisions": [],
+      "rationale_entries": []
     },
     "confidence": {
-      "continuity": 0.92,
+      "continuity": 0.9,
       "relationship_model": 0.0
+    },
+    "thread_descriptor": {
+      "label": "Issue 215",
+      "keywords": ["determinism"],
+      "scope_anchors": ["CogniRelay"],
+      "identity_anchors": [],
+      "lifecycle": "active"
     }
   }
 }
@@ -314,39 +327,45 @@ Minimal request payload:
 
 Expected decision:
 
-- Write only if at least one closed persisted-orientation field changed compared with the last persisted capsule.
-- Skip if the candidate values are exactly equal to the last persisted values.
+- Write.
 
-Persisted fields if a write occurs:
+Exact persisted fields:
 
 - `top_priorities`
 - `open_loops`
 - `active_constraints`
 - `active_concerns`
-- `drift_signals`
 - `stance_summary`
-- `negative_decisions`
 - `session_trajectory`
-- `rationale_entries`
+- `thread_descriptor.lifecycle`
+
+Why this writes:
+
+- There is no persisted capsule at all for the subject, so comparison uses the first-write baseline in this issue.
+- At least one field in the closed persisted-orientation field list differs from that baseline.
 
 Explicit non-example:
 
-- Do not persist a prompt/response summary such as `"Discussed the docs update and produced a final answer."`
+- Do **not** add a field or note containing a summarized exchange such as `"We discussed six ambiguities and then used gh to patch the issue body."`
 
-### Example D: `pre_compaction_or_handoff`
+### Example D: `pre_compaction_or_handoff` ordering and snapshot closure
+
+Hook identifier:
+
+- `pre_compaction_or_handoff`
 
 Trigger condition:
 
-- The runtime is about to compact local context, lose local working state, or transfer control to a different agent identity that will continue the task.
+- The runtime is about to compact local context or transfer control to a different agent identity that is expected to continue execution after the current agent stops.
 
 Exact operation:
 
 - HTTP: `POST /v1/continuity/upsert`
 - MCP: `continuity.upsert`
-- Optional additional real-handoff-only HTTP call after the local continuity step completes: `POST /v1/coordination/handoff/create`
-- Optional additional real-handoff-only MCP call after the local continuity step completes: `coordination.handoff_create`
+- Optional additional HTTP call for a real inter-agent handoff after the local continuity step completes: `POST /v1/coordination/handoff/create`
+- Optional additional MCP call for a real inter-agent handoff after the local continuity step completes: `coordination.handoff_create`
 
-Minimal request payload:
+Minimal request payload for the snapshot-eligible branch:
 
 ```json
 {
@@ -365,27 +384,34 @@ Minimal request payload:
     },
     "continuity": {
       "top_priorities": ["land deterministic wording for issue #215"],
-      "active_concerns": ["do not broaden scope into #214"],
-      "active_constraints": ["documentation slice only"],
-      "open_loops": ["confirm the hook examples match the issue body"],
-      "stance_summary": "The canonical hook contract is documented and ready for review.",
+      "active_concerns": ["do not broaden scope into #214/#216/#217"],
+      "active_constraints": ["edit the issue body in place"],
+      "open_loops": ["confirm the issue text now binds all four hooks"],
+      "stance_summary": "Issue #215 now defines closed hook behavior before compaction or handoff.",
       "drift_signals": [],
+      "session_trajectory": [],
       "negative_decisions": [],
-      "session_trajectory": ["docs_ready_for_review"],
       "rationale_entries": []
     },
     "confidence": {
       "continuity": 0.9,
       "relationship_model": 0.0
+    },
+    "thread_descriptor": {
+      "label": "Issue 215",
+      "keywords": ["determinism"],
+      "scope_anchors": ["CogniRelay"],
+      "identity_anchors": [],
+      "lifecycle": "active"
     }
   },
   "session_end_snapshot": {
-    "open_loops": ["confirm the hook examples match the issue body"],
+    "open_loops": ["confirm the issue text now binds all four hooks"],
     "top_priorities": ["land deterministic wording for issue #215"],
-    "active_constraints": ["documentation slice only"],
-    "stance_summary": "The canonical hook contract is documented and ready for review.",
+    "active_constraints": ["edit the issue body in place"],
+    "stance_summary": "Issue #215 now defines closed hook behavior before compaction or handoff.",
     "negative_decisions": [],
-    "session_trajectory": ["docs_ready_for_review"],
+    "session_trajectory": [],
     "rationale_entries": []
   }
 }
@@ -394,10 +420,12 @@ Minimal request payload:
 Expected decision:
 
 - Write if one or more snapshot fields changed and no write-eligible field outside the snapshot field set changed.
+- A reorder-only change to any array-valued persisted field counts as a change.
+- Exact comparison uses direct field-by-field equality with no normalization.
 - Skip the local continuity write if no write-eligible field changed.
-- For a real inter-agent handoff, `coordination.handoff_create` may run only after the local continuity step completed as either a write or an explicit skip.
+- For a real inter-agent handoff, `coordination.handoff_create` may run only after the local continuity step completes, whether that step completed as a write or as an explicit skip.
 
-Persisted fields if a write occurs:
+Exact persisted fields for the snapshot-eligible branch:
 
 - `open_loops`
 - `top_priorities`
@@ -407,9 +435,18 @@ Persisted fields if a write occurs:
 - `session_trajectory`
 - `rationale_entries`
 
+Boundary rules illustrated:
+
+- This uses snapshot mode because the request sends both `capsule` and `session_end_snapshot`.
+- `coordination.handoff_create` is in scope only when control transfers to a different agent identity that is expected to continue execution after the current agent stops.
+- Snapshot mode is allowed only when no write-eligible field outside the `session_end_snapshot` field set differs from the last persisted capsule.
+- If `active_concerns`, `drift_signals`, `stable_preferences`, `thread_descriptor.lifecycle`, or `thread_descriptor.superseded_by` changed, the request must omit `session_end_snapshot` and perform a full `continuity.upsert` using `capsule` only.
+- A handoff boundary alone never authorizes inventing a continuity write.
+- Parallel execution of `continuity.upsert` and `coordination.handoff_create` is not allowed.
+
 Explicit non-example:
 
-- Do not treat same-agent resume, local compaction alone, or an internal helper subtask as a real inter-agent handoff.
+- Do **not** persist a compaction note such as `"Summarized the previous 40 messages before handoff"` into continuity.
 
 ## The Responsibility Boundary
 
