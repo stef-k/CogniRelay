@@ -7,7 +7,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from app.context_contract import (
+from app.constants import (
     CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS,
     CONTEXT_RETRIEVE_MAX_MAX_TOKENS,
     CONTEXT_RETRIEVE_MIN_MAX_TOKENS,

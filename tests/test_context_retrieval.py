@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
-from app.context_contract import CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS
+from app.constants import CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS
 from app.context.service import _select_top_raw_scan_candidates
 from app.indexer import rebuild_index
 from app.main import context_retrieve, recent_list, search

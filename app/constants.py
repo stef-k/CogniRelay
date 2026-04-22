@@ -1,4 +1,4 @@
-"""Product-contract constants for context retrieval request budgeting."""
+"""Application-wide product-contract constants."""
 
 CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS = 12_000
 CONTEXT_RETRIEVE_MIN_MAX_TOKENS = 256
