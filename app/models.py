@@ -4,10 +4,48 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 PeerId = Annotated[str, Field(min_length=1, max_length=200)]
+
+_RELATED_DOCUMENTS_RELEVANCE = ("primary", "supporting", "background")
+_RELATED_DOCUMENTS_SCHEMA = {
+    "type": "array",
+    "maxItems": 8,
+    "items": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240,
+                "pattern": r"^[A-Za-z0-9._/-]+$",
+            },
+            "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32,
+                "pattern": r"^[a-z][a-z0-9_]*$",
+            },
+            "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+            },
+            "relevance": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32,
+                "enum": list(_RELATED_DOCUMENTS_RELEVANCE),
+            },
+        },
+        "required": ["path", "kind", "label"],
+        "additionalProperties": False,
+    },
+}
+RelatedDocumentsSchemaField = Annotated[Any, WithJsonSchema(_RELATED_DOCUMENTS_SCHEMA)]
 
 
 class WriteRequest(BaseModel):
@@ -753,7 +791,7 @@ class ContinuityState(BaseModel):
     trailing_notes: List[str] = Field(default_factory=list, max_length=3)
     curiosity_queue: List[str] = Field(default_factory=list, max_length=5)
     rationale_entries: List[RationaleEntry] = Field(default_factory=list, max_length=6)
-    related_documents: Any | None = None
+    related_documents: RelatedDocumentsSchemaField | SkipJsonSchema[None] = None
     relationship_model: Optional[ContinuityRelationshipModel] = None
     retrieval_hints: Optional[ContinuityRetrievalHints] = None
 

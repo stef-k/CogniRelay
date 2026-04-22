@@ -355,6 +355,39 @@ class TestPreserveOptionalListFields(unittest.TestCase):
             self.assertEqual(stored_decision["created_at"], _STORED_TS)
             self.assertEqual(stored_decision["updated_at"], _STORED_TS)
 
+    def test_absent_preserves_stored_related_documents(self) -> None:
+        """When related_documents is absent from raw JSON, preserve mode keeps the stored list."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            stored = _base_capsule()
+            stored["continuity"]["related_documents"] = [
+                {
+                    "path": "docs/stored-spec.md",
+                    "kind": "spec",
+                    "label": "Stored spec",
+                    "relevance": "primary",
+                }
+            ]
+            _seed_capsule(repo, stored)
+            cap = _incoming_capsule()
+            raw_cap = dict(cap)
+            raw_cap["continuity"] = {
+                "top_priorities": [],
+                "active_concerns": [],
+                "active_constraints": [],
+                "open_loops": [],
+                "stance_summary": "New stance summary for the incoming capsule test",
+                "drift_signals": [],
+            }
+            raw = _build_raw_body(raw_cap)
+            out = _do_upsert(repo, cap, merge_mode="preserve", raw_body=raw)
+            self.assertTrue(out["ok"])
+            written = _read_stored(repo)
+            self.assertEqual(
+                written["continuity"]["related_documents"],
+                stored["continuity"]["related_documents"],
+            )
+
     def test_empty_list_overrides_to_empty(self) -> None:
         """Sending [] for an optional list field overrides to empty list."""
         with tempfile.TemporaryDirectory() as td:
