@@ -46,7 +46,7 @@ _ROOT_BODY = {
         "GET /v1/help/hooks",
         "GET /v1/help/errors/{code}",
     ],
-    "mcp_tools": [
+    "mcp_methods": [
         "system.help",
         "system.tool_usage",
         "system.topic_help",

@@ -9,13 +9,13 @@ CogniRelay exposes two machine-oriented integration styles:
 - HTTP-native discovery via `GET /v1/discovery`, `GET /v1/discovery/tools`, and `GET /v1/discovery/workflows`
 - MCP JSON-RPC via `GET /.well-known/mcp.json` and `POST /v1/mcp`
 
-The `#216` slice-2 runtime target is MCP `2025-11-25` Streamable HTTP with a temporary bounded posture:
+The `#216` runtime target is MCP `2025-11-25` Streamable HTTP with a temporary bounded posture:
 
 - `POST /v1/mcp` is the only MCP request endpoint that may succeed
 - `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
 - `GET /.well-known/mcp.json` is supplemental metadata only
 
-Slice 2 is intentionally tools-first. It does not add MCP resources, MCP prompts, SSE, or a broader compatibility transport.
+The base posture remains tools-first. It does not add MCP resources, MCP prompts, SSE, or a broader compatibility transport. Slice 3 adds only five post-bootstrap help/reference request methods alongside the existing base methods.
 
 ## Bootstrap Flow
 
@@ -29,13 +29,14 @@ After bootstrap is complete, post-bootstrap usage may call:
 
 - `POST /v1/mcp` with `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
 - `POST /v1/mcp` with `tools/call` requests as needed
+- `POST /v1/mcp` with request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, and `system.error_guide`
 
 The well-known descriptor advertises:
 
 - endpoint: `/v1/mcp`
 - transport posture: `streamable-http`
 - protocol target: MCP `2025-11-25`
-- methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`
+- methods: base `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, plus post-bootstrap request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, and `system.error_guide`
 - auth: bearer token in `Authorization`
 - supplemental metadata only: `true`
 - deferred GET posture: `GET /v1/mcp` remains `405 Method Not Allowed` with `Allow: POST`
