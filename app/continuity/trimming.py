@@ -181,11 +181,8 @@ def _trim_capsule(capsule: dict[str, Any], max_tokens: int) -> tuple[dict[str, A
 
 def _budget(requested_max_tokens: int) -> dict[str, int]:
     """Compute the continuity token reservation from the requested budget."""
-    token_budget_hint = min(requested_max_tokens, 4000)
-    if token_budget_hint < 1000:
-        reserved = min(150, max(0, int(token_budget_hint * 0.2)))
-    else:
-        reserved = min(800, max(200, int(token_budget_hint * 0.2)))
+    token_budget_hint = requested_max_tokens
+    reserved = requested_max_tokens
     return {
         "requested_max_tokens_estimate": requested_max_tokens,
         "token_budget_hint": token_budget_hint,

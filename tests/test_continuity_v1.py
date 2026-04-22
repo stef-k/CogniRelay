@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.continuity.constants import CAPSULE_SIZE_LIMIT_LABEL
 from app.continuity.trimming import _render_value, _trim_capsule
 from app.main import continuity_upsert, context_retrieve
 from app.models import ContinuityUpsertRequest, ContextRetrieveRequest
@@ -384,12 +385,13 @@ class TestContinuityV1(unittest.TestCase):
             gm = _GitManagerStub()
             settings = self._settings(repo_root)
             payload = self._capsule_payload()
-            payload["metadata"] = {"x": "y" * (13 * 1024)}
+            payload["metadata"] = {"x": "y" * (25 * 1024)}
             req = ContinuityUpsertRequest(subject_kind="user", subject_id="stef", capsule=payload)  # type: ignore[arg-type]
             with patch("app.main._services", return_value=(settings, gm)):
                 with self.assertRaises(HTTPException) as cm:
                     continuity_upsert(req=req, auth=_AuthStub())
             self.assertEqual(cm.exception.status_code, 400)
+            self.assertIn(CAPSULE_SIZE_LIMIT_LABEL, str(cm.exception.detail))
 
     def test_context_retrieve_expired_capsule_not_loaded(self) -> None:
         """Expired capsules should be omitted from retrieval results."""

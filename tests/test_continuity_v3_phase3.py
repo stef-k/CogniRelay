@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.config import Settings
+from app.continuity.constants import CAPSULE_SIZE_LIMIT_LABEL
 from app.continuity.service import continuity_revalidate_service
 from app.main import continuity_revalidate
 from app.models import ContinuityRevalidateRequest
@@ -429,7 +430,7 @@ class TestContinuityV3Phase3(unittest.TestCase):
             self.assertEqual(missing_reason.exception.status_code, 400)
 
     def test_revalidate_rejects_oversized_post_injection_capsule(self) -> None:
-        """Revalidate should enforce the final assembled 12KB size limit."""
+        """Revalidate should enforce the final assembled continuity write cap."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             active = self._capsule_payload()
@@ -442,7 +443,7 @@ class TestContinuityV3Phase3(unittest.TestCase):
             candidate["continuity"]["open_loops"] = ["x" * 160] * 5
             candidate["continuity"]["working_hypotheses"] = ["x" * 160] * 5
             candidate["continuity"]["long_horizon_commitments"] = ["x" * 160] * 5
-            candidate["metadata"] = {f"m{idx}": "x" * 320 for idx in range(12)}
+            candidate["metadata"] = {f"m{idx}": "x" * 2000 for idx in range(12)}
             candidate["canonical_sources"] = [f"memory/core/source-{idx}.md" for idx in range(8)]
             candidate["source"]["inputs"] = [f"memory/core/source-input-{idx}-{'x' * 150}.md"[:200] for idx in range(12)]
 
@@ -462,4 +463,4 @@ class TestContinuityV3Phase3(unittest.TestCase):
                 )
 
             self.assertEqual(cm.exception.status_code, 400)
-            self.assertIn("12 KB", str(cm.exception.detail))
+            self.assertIn(CAPSULE_SIZE_LIMIT_LABEL, str(cm.exception.detail))

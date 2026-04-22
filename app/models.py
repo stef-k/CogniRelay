@@ -7,6 +7,12 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from app.constants import (
+    CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS,
+    CONTEXT_RETRIEVE_MAX_MAX_TOKENS,
+    CONTEXT_RETRIEVE_MIN_MAX_TOKENS,
+)
+
 
 PeerId = Annotated[str, Field(min_length=1, max_length=200)]
 
@@ -91,7 +97,11 @@ class ContextRetrieveRequest(BaseModel):
     continuity_resilience_policy: Literal["allow_fallback", "prefer_active", "require_active"] = "allow_fallback"
     continuity_selectors: List["ContinuitySelector"] = Field(default_factory=list, max_length=4)
     continuity_max_capsules: int = Field(default=1, ge=1, le=4)
-    max_tokens_estimate: int = Field(default=4000, ge=256, le=100000)
+    max_tokens_estimate: int = Field(
+        default=CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS,
+        ge=CONTEXT_RETRIEVE_MIN_MAX_TOKENS,
+        le=CONTEXT_RETRIEVE_MAX_MAX_TOKENS,
+    )
     include_types: List[str] = Field(default_factory=list)
     time_window_days: int = Field(default=30, ge=1, le=3650)
     limit: int = Field(default=10, ge=1, le=100)

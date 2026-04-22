@@ -750,15 +750,19 @@ class TestBuildContinuityStateSalience(unittest.TestCase):
         ]
         self.assertEqual(ranks, list(range(1, len(ranks) + 1)))
 
-    def test_budget_too_tight_omits_capsule_entirely(self) -> None:
-        """At 256 tokens the capsule cannot fit even without salience and is fully omitted."""
+    def test_minimum_budget_keeps_capsule_with_compact_trust_and_no_salience(self) -> None:
+        """At the request minimum, the capsule should degrade in-place instead of being omitted."""
         state = self._build([_capsule()], max_tokens=256)
-        self.assertEqual(state["capsules"], [])
-        self.assertGreater(len(state["omitted_selectors"]), 0)
+        self.assertEqual(len(state["capsules"]), 1)
+        self.assertIsNone(state["capsules"][0].get("salience"))
+        self.assertEqual(state["omitted_selectors"], [])
+        self.assertTrue(
+            any(CONTINUITY_WARNING_SALIENCE_OMITTED in w for w in state.get("recovery_warnings", [])),
+        )
 
     def test_soft_budget_drops_salience_but_keeps_capsule(self) -> None:
         """Acceptance criterion #9: salience is a soft cost — capsule survives without it."""
-        state = self._build([_capsule()], max_tokens=1175)
+        state = self._build([_capsule()], max_tokens=320)
         capsules = state["capsules"]
         self.assertEqual(len(capsules), 1, "capsule must survive at this budget")
         self.assertIsNone(capsules[0].get("salience"))

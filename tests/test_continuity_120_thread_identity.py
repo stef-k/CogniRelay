@@ -8,6 +8,11 @@ from typing import Any
 from unittest.mock import patch
 
 from app.config import Settings
+from app.continuity.constants import (
+    CAPSULE_SIZE_LIMIT_BYTES,
+    CAPSULE_SIZE_LIMIT_ERROR_DETAIL,
+    CAPSULE_SIZE_LIMIT_LABEL,
+)
 from app.main import continuity_list, continuity_read, continuity_upsert
 from app.models import (
     ContinuityCapsule,
@@ -17,9 +22,11 @@ from app.models import (
 )
 from app.continuity.validation import (
     _strip_service_managed_descriptor_fields,
+    _validate_capsule,
     _validate_lifecycle_transition_request,
     _validate_thread_descriptor,
 )
+from app.storage import canonical_json
 
 from fastapi import HTTPException
 
@@ -134,6 +141,26 @@ def _td(
     if superseded_by is not None:
         d["superseded_by"] = superseded_by
     return d
+
+
+def _capsule_with_serialized_size(target_bytes: int) -> dict:
+    """Return a valid capsule whose canonical JSON matches the requested size."""
+    payload = _base_capsule(thread_descriptor=_td())
+    payload["metadata"] = {"padding": ""}
+    current = len(canonical_json(ContinuityCapsule(**payload).model_dump(mode="json", exclude_none=True)).encode("utf-8"))
+    if current > target_bytes:
+        raise AssertionError("Base capsule already exceeds target size")
+    payload["metadata"]["padding"] = "x" * (target_bytes - current)
+    current = len(canonical_json(ContinuityCapsule(**payload).model_dump(mode="json", exclude_none=True)).encode("utf-8"))
+    while current > target_bytes:
+        payload["metadata"]["padding"] = payload["metadata"]["padding"][:-1]
+        current = len(canonical_json(ContinuityCapsule(**payload).model_dump(mode="json", exclude_none=True)).encode("utf-8"))
+    while current < target_bytes:
+        payload["metadata"]["padding"] += "x"
+        current = len(canonical_json(ContinuityCapsule(**payload).model_dump(mode="json", exclude_none=True)).encode("utf-8"))
+    if current != target_bytes:
+        raise AssertionError(f"Unable to reach target size {target_bytes}; got {current}")
+    return payload
 
 
 def _do_upsert(
@@ -796,9 +823,9 @@ class TestBackwardCompatibility(unittest.TestCase):
 
 
 class TestSizeLimit(unittest.TestCase):
-    """Maximally-sized thread_descriptor stays under 12 KB."""
+    """Continuity capsule size-cap boundaries stay aligned with the #227 contract."""
 
-    def test_max_descriptor_under_12kb(self) -> None:
+    def test_max_descriptor_under_write_cap(self) -> None:
         td = _td(
             label="x" * 120,
             keywords=["k" * 40] * 6,
@@ -813,6 +840,38 @@ class TestSizeLimit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = _do_upsert(Path(tmp), _base_capsule(thread_descriptor=td))
         self.assertTrue(out["ok"])
+
+    def test_capsule_one_byte_below_write_cap_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            payload = _capsule_with_serialized_size(CAPSULE_SIZE_LIMIT_BYTES - 1)
+            capsule = ContinuityCapsule(**payload)
+            _, canonical = _validate_capsule(Path(td), capsule)
+
+        self.assertEqual(len(canonical.encode("utf-8")), CAPSULE_SIZE_LIMIT_BYTES - 1)
+
+    def test_capsule_exactly_at_write_cap_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            payload = _capsule_with_serialized_size(CAPSULE_SIZE_LIMIT_BYTES)
+            capsule = ContinuityCapsule(**payload)
+            _, canonical = _validate_capsule(Path(td), capsule)
+
+        self.assertEqual(len(canonical.encode("utf-8")), CAPSULE_SIZE_LIMIT_BYTES)
+
+    def test_capsule_one_byte_above_write_cap_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            payload = _capsule_with_serialized_size(CAPSULE_SIZE_LIMIT_BYTES + 1)
+            capsule = ContinuityCapsule(**payload)
+            with self.assertRaises(HTTPException) as ctx:
+                _validate_capsule(Path(td), capsule)
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail, CAPSULE_SIZE_LIMIT_ERROR_DETAIL)
+
+    def test_payload_reference_mentions_current_write_cap(self) -> None:
+        payload_reference = Path(__file__).resolve().parents[1] / "docs" / "payload-reference.md"
+        text = payload_reference.read_text(encoding="utf-8")
+
+        self.assertIn(f"enforces a {CAPSULE_SIZE_LIMIT_LABEL} serialized-UTF-8 cap", text)
 
 
 # ===========================================================================
@@ -1015,10 +1074,10 @@ class TestTerminalStateErrorMessages(unittest.TestCase):
 
 
 class TestPostMutationSizeCheck(unittest.TestCase):
-    """The authoritative 12 KB size check runs on the final payload including lifecycle fields."""
+    """The authoritative write-cap check runs on the final payload including lifecycle fields."""
 
     def test_boundary_capsule_lifecycle_fields_counted(self) -> None:
-        """A capsule near the 12 KB limit must include lifecycle fields in the size budget."""
+        """A capsule near the write cap must include lifecycle fields in the size budget."""
         # Build a capsule that uses most of the budget via padded metadata
         # so lifecycle fields ("lifecycle":"active") are counted.
         with tempfile.TemporaryDirectory() as td:

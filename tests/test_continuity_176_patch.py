@@ -776,7 +776,7 @@ class TestPatchNormalization(unittest.TestCase):
 
 
 class TestPatchSizeLimit(unittest.TestCase):
-    """AC-15: post-patch validation rejects capsule exceeding 12 KB."""
+    """AC-15: post-patch validation rejects capsules beyond the continuity write cap."""
 
     def test_oversized_capsule_rejected(self) -> None:
         """Post-patch validation catches capsules that exceed field-level or size limits."""
