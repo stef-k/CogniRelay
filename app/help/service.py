@@ -46,7 +46,7 @@ _ROOT_BODY = {
         "GET /v1/help/hooks",
         "GET /v1/help/errors/{code}",
     ],
-    "mcp_tools": [
+    "mcp_methods": [
         "system.help",
         "system.tool_usage",
         "system.topic_help",
@@ -539,243 +539,207 @@ def help_error_payload(code: str) -> dict[str, Any] | JSONResponse:
     )
 
 
-_MCP_HELP_TOOL_DEFINITIONS = [
-    {
-        "name": "system.help",
-        "description": "Return the closed machine-facing help index.",
-        "method": "GET",
-        "path": "/v1/help",
-        "scopes": [],
-        "idempotent": True,
-        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-    },
-    {
-        "name": "system.tool_usage",
-        "description": "Return closed help guidance for one supported tool topic.",
-        "method": "GET",
-        "path": "/v1/help/tools/{name}",
-        "scopes": [],
-        "idempotent": True,
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "required": ["name"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "system.topic_help",
-        "description": "Return closed help guidance for one supported non-tool topic.",
-        "method": "GET",
-        "path": "/v1/help/topics/{id}",
-        "scopes": [],
-        "idempotent": True,
-        "input_schema": {
-            "type": "object",
-            "properties": {"id": {"type": "string"}},
-            "required": ["id"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "system.hook_guide",
-        "description": "Return the closed hook guidance map.",
-        "method": "GET",
-        "path": "/v1/help/hooks",
-        "scopes": [],
-        "idempotent": True,
-        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-    },
-    {
-        "name": "system.error_guide",
-        "description": "Return closed guidance for one supported help-surface error class.",
-        "method": "GET",
-        "path": "/v1/help/errors/{code}",
-        "scopes": [],
-        "idempotent": True,
-        "input_schema": {
-            "type": "object",
-            "properties": {"code": {"type": "string"}},
-            "required": ["code"],
-            "additionalProperties": False,
-        },
-    },
-]
+_MCP_HELP_METHODS = (
+    "system.help",
+    "system.tool_usage",
+    "system.topic_help",
+    "system.hook_guide",
+    "system.error_guide",
+)
 
-_MCP_HELP_ALLOWED_VALUES = {
-    "system.tool_usage": list(_TOOL_IDS),
-    "system.topic_help": list(_TOPIC_IDS),
-    "system.error_guide": list(_ERROR_CODES),
+_MCP_ERROR_GUIDES = {
+    -32700: {
+        "title": "Parse error",
+        "summary": "The request body must contain valid JSON before the server can apply JSON-RPC or MCP validation.",
+    },
+    -32600: {
+        "title": "Invalid Request",
+        "summary": "The JSON-RPC envelope itself is malformed, so fix the top-level request shape before retrying.",
+    },
+    -32601: {
+        "title": "Method not found",
+        "summary": "The method name is outside the recognized `#216` surface; correct the method string instead of retrying bootstrap.",
+    },
+    -32602: {
+        "title": "Invalid params",
+        "summary": "The method name is recognized, but the params shape or target value is invalid for that specific request.",
+    },
+    -32000: {
+        "title": "Server not initialized",
+        "summary": "Bootstrap is incomplete; complete `initialize` and then `notifications/initialized` before calling normal-operation methods.",
+    },
+    -32001: {
+        "title": "Unauthorized",
+        "summary": "The request needs valid bearer authentication before the addressed operation can proceed.",
+    },
+    -32002: {
+        "title": "Forbidden",
+        "summary": "The caller is authenticated or identified, but local policy, scope, or origin rules still block the requested operation.",
+    },
+    -32003: {
+        "title": "Tool execution failed",
+        "summary": "Request validation passed, but the tool failed during execution and should be retried only after correcting the underlying runtime issue.",
+    },
+    -32004: {
+        "title": "Not Found",
+        "summary": "The addressed object was missing only after request validation, auth, and target resolution had already succeeded.",
+    },
 }
 
 
-def mcp_help_tool_definitions() -> list[dict[str, Any]]:
-    """Return the exact MCP help-tool catalog entries."""
-    return _copy({"items": _MCP_HELP_TOOL_DEFINITIONS})["items"]
+def mcp_help_method_names() -> list[str]:
+    """Return the exact slice-3 MCP help/reference request methods."""
+    return list(_MCP_HELP_METHODS)
 
 
-def is_mcp_help_tool(name: str) -> bool:
-    """Return whether *name* is one of the five closed MCP help tools."""
-    return name in {
-        "system.help",
-        "system.tool_usage",
-        "system.topic_help",
-        "system.hook_guide",
-        "system.error_guide",
-    }
+def is_mcp_help_method(name: str) -> bool:
+    """Return whether *name* is one of the five slice-3 MCP help methods."""
+    return name in _MCP_HELP_METHODS
 
 
-def _mcp_validation_hint(
-    *,
-    field: str,
-    reason: str,
-    correction_hint: str,
-    limit: int | None = None,
-    allowed_values: list[str] | None = None,
-) -> dict[str, Any]:
+def _mcp_result(structured_content: dict[str, Any]) -> dict[str, Any]:
+    summary = str(structured_content["summary"])
     return {
-        "field": field,
-        "area": "params.arguments",
-        "reason": reason,
-        "limit": limit,
-        "allowed_values": allowed_values,
-        "correction_hint": correction_hint,
+        "content": [{"type": "text", "text": summary}],
+        "structuredContent": structured_content,
     }
 
 
-def _mcp_validation_error(
-    *,
-    detail: str,
-    field: str,
-    reason: str,
-    correction_hint: str,
-    limit: int | None = None,
-    allowed_values: list[str] | None = None,
-) -> dict[str, Any]:
-    return {
-        "error": {
-            "code": "validation",
-            "detail": detail,
-            "validation_hints": [
-                _mcp_validation_hint(
-                    field=field,
-                    reason=reason,
-                    limit=limit,
-                    allowed_values=allowed_values,
-                    correction_hint=correction_hint,
-                )
-            ],
-        }
-    }
+def _mcp_invalid_params(reason: str, *, field: str | None = None, **extra: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {"reason": reason}
+    if field is not None:
+        data["field"] = field
+    data.update(extra)
+    return data
 
 
-def resolve_mcp_help_tool_call(
+def _ascii_whitespace_only(value: str) -> bool:
+    return bool(value) and all(ch in {" ", "\t", "\n", "\r"} for ch in value)
+
+
+def _validate_zero_param_method(name: str, params_present: bool, params: Any) -> dict[str, Any] | None:
+    if not params_present:
+        return None
+    if not isinstance(params, dict):
+        return _mcp_invalid_params("params must be an object")
+    for key in params:
+        return _mcp_invalid_params(f"unexpected {name} param", field=key)
+    return None
+
+
+def _validate_targeted_string_param(
+    method: str,
+    field_name: str,
+    params_present: bool,
+    params: Any,
+) -> tuple[str | None, dict[str, Any] | None]:
+    if not params_present or not isinstance(params, dict):
+        return None, _mcp_invalid_params("params must be an object")
+    for key in params:
+        if key != field_name:
+            return None, _mcp_invalid_params(f"unexpected {method} param", field=key)
+    if field_name not in params:
+        return None, _mcp_invalid_params(f"{field_name} is required")
+    value = params[field_name]
+    if not isinstance(value, str):
+        return None, _mcp_invalid_params(f"{field_name} must be a non-empty string")
+    if value == "" or _ascii_whitespace_only(value):
+        return None, _mcp_invalid_params(f"{field_name} is required")
+    return value, None
+
+
+def _validate_error_code_param(params_present: bool, params: Any) -> tuple[int | None, dict[str, Any] | None]:
+    if not params_present or not isinstance(params, dict):
+        return None, _mcp_invalid_params("params must be an object")
+    for key in params:
+        if key != "code":
+            return None, _mcp_invalid_params("unexpected system.error_guide param", field=key)
+    if "code" not in params:
+        return None, _mcp_invalid_params("code is required")
+    code = params["code"]
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None, _mcp_invalid_params("code must be an integer")
+    return code, None
+
+
+def resolve_mcp_help_method(
     name: str,
     *,
-    arguments_present: bool,
-    arguments: Any,
+    params_present: bool,
+    params: Any,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Resolve one closed MCP help tool call into either a result or validation error."""
-    if name in {"system.help", "system.hook_guide"}:
-        if not arguments_present:
-            return None, _mcp_validation_error(
-                detail="Arguments object is required.",
-                field="arguments",
-                reason="arguments_required",
-                correction_hint="Provide arguments as an empty JSON object.",
-            )
-        if not isinstance(arguments, dict):
-            return None, _mcp_validation_error(
-                detail="Arguments must be a JSON object.",
-                field="arguments",
-                reason="arguments_must_be_object",
-                correction_hint="Use arguments as a JSON object.",
-            )
-        if arguments:
-            return None, _mcp_validation_error(
-                detail="Arguments must be an empty object.",
-                field="arguments",
-                reason="arguments_must_be_empty_object",
-                limit=0,
-                correction_hint="Use arguments as {} with no keys.",
-            )
-        if name == "system.help":
-            return help_root_payload(), None
-        return help_hooks_payload(), None
+    """Resolve one slice-3 MCP help method into a result or an exact invalid-params body."""
+    if name == "system.help":
+        error = _validate_zero_param_method(name, params_present, params)
+        if error is not None:
+            return None, error
+        return _mcp_result(
+            {
+                "surface": "help_index",
+                "httpEquivalent": "/v1/help",
+                "title": "CogniRelay Help Index",
+                "summary": "Browse the canonical machine-facing help surfaces for tools, topics, hooks, and MCP error guidance.",
+            }
+        ), None
 
-    if not arguments_present:
-        return None, _mcp_validation_error(
-            detail="Arguments object is required.",
-            field="arguments",
-            reason="arguments_required",
-            correction_hint="Provide arguments as an empty JSON object.",
-        )
-    if not isinstance(arguments, dict):
-        return None, _mcp_validation_error(
-            detail="Arguments must be a JSON object.",
-            field="arguments",
-            reason="arguments_must_be_object",
-            correction_hint="Use arguments as a JSON object.",
-        )
-
-    field_name = {"system.tool_usage": "name", "system.topic_help": "id", "system.error_guide": "code"}[name]
-    if field_name not in arguments:
-        return None, _mcp_validation_error(
-            detail=f"Missing required field {field_name}.",
-            field=field_name,
-            reason="required_field_missing",
-            correction_hint=f"Provide the required {field_name} field.",
-        )
-
-    value = arguments[field_name]
-    if not isinstance(value, str):
-        return None, _mcp_validation_error(
-            detail=f"Field {field_name} must be a string.",
-            field=field_name,
-            reason="wrong_type",
-            correction_hint=f"Use {field_name} as a JSON string.",
-        )
-
-    for key in arguments:
-        if key != field_name:
-            return None, _mcp_validation_error(
-                detail=f"Unexpected field {key}.",
-                field=key,
-                reason="unexpected_field",
-                correction_hint=f"Remove the unsupported {key} field.",
-            )
+    if name == "system.hook_guide":
+        error = _validate_zero_param_method(name, params_present, params)
+        if error is not None:
+            return None, error
+        return _mcp_result(
+            {
+                "surface": "hook_guide",
+                "httpEquivalent": "/v1/help/hooks",
+                "title": "CogniRelay Hook Guide",
+                "summary": "Review the canonical startup, prompt, persistence, and handoff hook guidance exposed by the HTTP help surface.",
+            }
+        ), None
 
     if name == "system.tool_usage":
-        payload = help_tool_payload(value)
+        tool_name, error = _validate_targeted_string_param(name, "name", params_present, params)
+        if error is not None:
+            return None, error
+        payload = help_tool_payload(tool_name or "")
         if isinstance(payload, JSONResponse):
-            return None, _mcp_validation_error(
-                detail="Unsupported tool name.",
-                field="name",
-                reason="unsupported_value",
-                allowed_values=list(_TOOL_IDS),
-                correction_hint="Use one of: continuity.read, continuity.upsert, context.retrieve.",
-            )
-        return payload, None
+            return None, _mcp_invalid_params("unknown tool", name=tool_name)
+        return _mcp_result(
+            {
+                "surface": "tool_help",
+                "httpEquivalent": f"/v1/help/tools/{tool_name}",
+                "name": tool_name,
+                "summary": str(payload["purpose"]),
+            }
+        ), None
 
     if name == "system.topic_help":
-        payload = help_topic_payload(value)
+        topic_id, error = _validate_targeted_string_param(name, "id", params_present, params)
+        if error is not None:
+            return None, error
+        payload = help_topic_payload(topic_id or "")
         if isinstance(payload, JSONResponse):
-            return None, _mcp_validation_error(
-                detail="Unsupported topic id.",
-                field="id",
-                reason="unsupported_value",
-                allowed_values=list(_TOPIC_IDS),
-                correction_hint="Use one of: continuity.read.startup_view, continuity.read.trust_signals, continuity.upsert.session_end_snapshot.",
-            )
-        return payload, None
+            return None, _mcp_invalid_params("unknown topic", id=topic_id)
+        return _mcp_result(
+            {
+                "surface": "topic_help",
+                "httpEquivalent": f"/v1/help/topics/{topic_id}",
+                "id": topic_id,
+                "title": topic_id,
+                "summary": str(payload["purpose"]),
+            }
+        ), None
 
-    payload = help_error_payload(value)
-    if isinstance(payload, JSONResponse):
-        return None, _mcp_validation_error(
-            detail="Unsupported error code.",
-            field="code",
-            reason="unsupported_value",
-            allowed_values=list(_ERROR_CODES),
-            correction_hint="Use one of: validation, tool_not_found, unknown_help_topic.",
-        )
-    return payload, None
+    code, error = _validate_error_code_param(params_present, params)
+    if error is not None:
+        return None, error
+    guide = _MCP_ERROR_GUIDES.get(code)
+    if guide is None:
+        return None, _mcp_invalid_params("unknown error code", code=code)
+    return _mcp_result(
+        {
+            "surface": "error_guide",
+            "httpEquivalent": f"/v1/help/errors/{code}",
+            "code": code,
+            "title": guide["title"],
+            "summary": guide["summary"],
+        }
+    ), None

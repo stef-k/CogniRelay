@@ -37,6 +37,8 @@ def _row(
     required_behavior: str,
     temporary_posture: str,
     follow_up: str,
+    tests_required: str = EXPECTED_TEST_FILE,
+    docs_required: str = EXPECTED_DOC_FILE,
 ) -> dict[str, str]:
     """Build one exact expected matrix row."""
     return {
@@ -47,8 +49,8 @@ def _row(
         "Required Behavior": required_behavior,
         "Temporary Posture": temporary_posture,
         "Owner / Follow-up": follow_up,
-        "Tests Required": EXPECTED_TEST_FILE,
-        "Docs Required": EXPECTED_DOC_FILE,
+        "Tests Required": tests_required,
+        "Docs Required": docs_required,
     }
 
 
@@ -326,17 +328,15 @@ EXPECTED_MATRIX = [
         "slice_2",
         "converged",
         (
-            "Successful non-help `tools/call` responses now return only `content` and "
-            "`structuredContent` at top-level JSON-RPC `result`; the `#214` help tools "
-            "remain the explicit exception and return exact HTTP help JSON directly at "
-            "`result`."
+            "Successful `tools/call` responses now return only `content` and "
+            "`structuredContent` at top-level JSON-RPC `result`, and the slice-3 help "
+            "surfaces are no longer exposed through `tools/call`."
         ),
         (
-            "For non-help tools, return only `content` and `structuredContent` at top-level "
+            "For `tools/call`, return only `content` and `structuredContent` at top-level "
             "JSON-RPC `result`, with no wrapper fields such as `toolName`, `ok`, `status`, "
-            "or `isError`; keep `system.help`, `system.tool_usage`, `system.topic_help`, "
-            "`system.hook_guide`, and `system.error_guide` on their exact `#214` "
-            "direct-`result` help-body contract."
+            "or `isError`; the five slice-3 help/reference names belong to their own MCP "
+            "request methods rather than `tools/call` exceptions."
         ),
         "none",
         "implemented",
@@ -353,20 +353,40 @@ EXPECTED_MATRIX = [
     _row(
         "help.mcp_error_actionability",
         "slice_3",
-        "not_yet_converged",
-        "MCP errors expose terse legacy messages only; the slice-3 actionability layer does not exist.",
-        "Limit future help-text improvements to the slice-3 wording and allowed data additions without changing slice-2 codes or method precedence.",
-        "intentionally_deferred",
-        "slice_3",
+        "converged",
+        (
+            "Slice-3 help requests now preserve the slice-2 error codes and method "
+            "precedence while returning exact invalid-params reason tokens plus a "
+            "dedicated MCP error-guide surface for the canonical JSON-RPC and MCP "
+            "error codes."
+        ),
+        (
+            "Keep slice-2 error codes and method-not-found precedence unchanged, and "
+            "confine any MCP help/actionability additions to the five slice-3 "
+            "help/reference request methods."
+        ),
+        "none",
+        "implemented",
+        "tests/test_mcp_216_slice3_help.py",
     ),
     _row(
         "help.mcp_reference_parity",
         "slice_3",
-        "not_yet_converged",
-        "The five MCP help and reference methods are absent; help remains available only through the HTTP surfaces.",
-        "Add only the five slice-3 MCP help and reference methods with the exact params contracts, success shapes, and invalid-target mappings from `#216`.",
-        "intentionally_deferred",
-        "slice_3",
+        "converged",
+        (
+            "After bootstrap, the five slice-3 help/reference names are available as "
+            "MCP request methods, not tools, and each returns one text summary plus "
+            "exact structured content with the canonical HTTP-equivalent path."
+        ),
+        (
+            "Add only `system.help`, `system.tool_usage`, `system.topic_help`, "
+            "`system.hook_guide`, and `system.error_guide` as post-bootstrap MCP "
+            "request methods with the exact params contracts, success shapes, and "
+            "invalid-target mappings from `#216`."
+        ),
+        "none",
+        "implemented",
+        "tests/test_mcp_216_slice3_help.py",
     ),
     _row(
         "features.resources",

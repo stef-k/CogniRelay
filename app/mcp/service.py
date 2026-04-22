@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.auth import AuthContext
-from app.help import is_mcp_help_tool, resolve_mcp_help_tool_call
+from app.help import is_mcp_help_method, resolve_mcp_help_method
 from app.timestamps import format_iso, iso_now
 
 SUPPORTED_PROTOCOL_VERSION = "2025-11-25"
@@ -532,6 +532,16 @@ def handle_mcp_request_payload(
         if phase == _BOOTSTRAP_INITIALIZED:
             return _server_not_initialized(request_id, "notifications/initialized")
 
+    if is_mcp_help_method(method):
+        result, validation_error = resolve_mcp_help_method(
+            method,
+            params_present="params" in request_payload,
+            params=request_payload.get("params"),
+        )
+        if validation_error is not None:
+            return _jsonrpc_error(200, request_id, -32602, "Invalid params", validation_error)
+        return _jsonrpc_success(request_id, result or {})
+
     if method != "tools/list" and method != "tools/call":
         return _method_not_found(request_id, method)
 
@@ -553,16 +563,6 @@ def handle_mcp_request_payload(
     tool = _tool_by_name(tool_name, tools)
     if tool is None:
         return _jsonrpc_error(200, request_id, -32602, "Invalid params", {"reason": "unknown tool", "name": tool_name})
-
-    if is_mcp_help_tool(tool_name):
-        result, validation_error = resolve_mcp_help_tool_call(
-            tool_name,
-            arguments_present=arguments_present,
-            arguments=raw_arguments,
-        )
-        if validation_error is not None:
-            return _jsonrpc_error(200, request_id, -32602, "Invalid params", validation_error)
-        return _jsonrpc_success(request_id, result or {})
 
     arguments = raw_arguments if arguments_present else {}
     if not isinstance(arguments, dict):

@@ -26,7 +26,7 @@ This document covers the machine-facing HTTP contract. The optional `/ui` operat
 - `GET /.well-known/cognirelay.json`: well-known discovery entrypoint
 - `GET /.well-known/mcp.json`: bounded MCP 2025-11-25 supplemental descriptor
 - `GET /v1/mcp`: deferred in slice 2; returns `405` with `Allow: POST`
-- `POST /v1/mcp`: bounded MCP 2025-11-25 Streamable HTTP posture for `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`
+- `POST /v1/mcp`: bounded MCP 2025-11-25 Streamable HTTP posture for the base methods `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`, plus the post-bootstrap help/reference request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, and `system.error_guide`
 
 ### `GET /v1/capabilities` — versioned feature map
 
@@ -69,7 +69,7 @@ Returns a deterministic, machine-readable feature map for the current build. No 
 
 **Relationship to legacy `GET /capabilities`:** The two endpoints are independent. The legacy endpoint returns a flat string list and is unchanged.
 
-For the bounded MCP 2025-11-25 bootstrap flow, tool metadata model, and `POST /v1/mcp` posture, see `docs/mcp.md`.
+For the bounded MCP 2025-11-25 bootstrap flow, the post-bootstrap help/reference request-method additions, the tool metadata model, and the `POST /v1/mcp` posture, see `docs/mcp.md`.
 
 ## Memory, file, and index operations
 

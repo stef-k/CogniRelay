@@ -7,7 +7,7 @@ from app.timestamps import format_iso, iso_now
 from typing import Any, Callable
 
 from app.auth import AuthContext
-from app.help import help_error_payload, help_hooks_payload, help_root_payload, help_tool_payload, help_topic_payload
+from app.help import mcp_help_method_names
 from app.models import (
     AppendRequest,
     BackupCreateRequest,
@@ -118,66 +118,6 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": [],
             "idempotent": True,
             "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-        {
-            "name": "system.help",
-            "description": "Return the closed machine-facing help index.",
-            "method": "GET",
-            "path": "/v1/help",
-            "scopes": [],
-            "idempotent": True,
-            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-        {
-            "name": "system.tool_usage",
-            "description": "Return closed help guidance for one supported tool topic.",
-            "method": "GET",
-            "path": "/v1/help/tools/{name}",
-            "scopes": [],
-            "idempotent": True,
-            "input_schema": {
-                "type": "object",
-                "properties": {"name": {"type": "string"}},
-                "required": ["name"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "system.topic_help",
-            "description": "Return closed help guidance for one supported non-tool topic.",
-            "method": "GET",
-            "path": "/v1/help/topics/{id}",
-            "scopes": [],
-            "idempotent": True,
-            "input_schema": {
-                "type": "object",
-                "properties": {"id": {"type": "string"}},
-                "required": ["id"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "system.hook_guide",
-            "description": "Return the closed hook guidance map.",
-            "method": "GET",
-            "path": "/v1/help/hooks",
-            "scopes": [],
-            "idempotent": True,
-            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-        {
-            "name": "system.error_guide",
-            "description": "Return closed guidance for one supported help-surface error class.",
-            "method": "GET",
-            "path": "/v1/help/errors/{code}",
-            "scopes": [],
-            "idempotent": True,
-            "input_schema": {
-                "type": "object",
-                "properties": {"code": {"type": "string"}},
-                "required": ["code"],
-                "additionalProperties": False,
-            },
         },
         {
             "name": "system.discovery",
@@ -1118,7 +1058,14 @@ def well_known_mcp_payload(contract_version: str) -> dict[str, Any]:
         "mcp_protocol_version": "2025-11-25",
         "supplemental": True,
         "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST"},
-        "methods": ["initialize", "notifications/initialized", "ping", "tools/list", "tools/call"],
+        "methods": [
+            "initialize",
+            "notifications/initialized",
+            "ping",
+            "tools/list",
+            "tools/call",
+            *mcp_help_method_names(),
+        ],
         "auth": {"type": "bearer", "header": "Authorization: Bearer <token>"},
     }
 
@@ -1224,16 +1171,6 @@ def invoke_tool_by_name(
         return contracts()
     if name == "system.governance_policy":
         return governance_policy()
-    if name == "system.help":
-        return help_root_payload()
-    if name == "system.tool_usage":
-        return help_tool_payload(str(args["name"]))
-    if name == "system.topic_help":
-        return help_topic_payload(str(args["id"]))
-    if name == "system.hook_guide":
-        return help_hooks_payload()
-    if name == "system.error_guide":
-        return help_error_payload(str(args["code"]))
     if name == "system.discovery":
         return discovery()
     if name == "system.discovery_tools":
