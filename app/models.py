@@ -753,6 +753,7 @@ class ContinuityState(BaseModel):
     trailing_notes: List[str] = Field(default_factory=list, max_length=3)
     curiosity_queue: List[str] = Field(default_factory=list, max_length=5)
     rationale_entries: List[RationaleEntry] = Field(default_factory=list, max_length=6)
+    related_documents: Any | None = None
     relationship_model: Optional[ContinuityRelationshipModel] = None
     retrieval_hints: Optional[ContinuityRetrievalHints] = None
 

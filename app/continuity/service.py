@@ -113,9 +113,10 @@ from app.continuity.compare import (
 from app.continuity.persistence import (
     _delete_commit_message,
     _load_archive_envelope,
+    _load_capsule_with_warnings,
     _load_capsule,
     _load_fallback_envelope_payload,
-    _load_fallback_snapshot,
+    _load_fallback_snapshot_with_warnings,
     _persist_active_capsule,
     _persist_fallback_snapshot,
     _reject_stale_or_conflicting_write,
@@ -489,6 +490,8 @@ def continuity_upsert_service(
 ) -> dict[str, Any]:
     """Validate and persist one continuity capsule with commit-on-change behavior."""
     auth.require("write:projects")
+    if "related_documents" in req.capsule.continuity.model_fields_set and req.capsule.continuity.related_documents is None:
+        raise HTTPException(status_code=400, detail="Invalid value type in continuity.related_documents[]")
     capsule = _strip_verification_fields_for_upsert(req.capsule)
     if capsule.subject_kind != req.subject_kind or capsule.subject_id != req.subject_id:
         raise HTTPException(status_code=400, detail="Capsule subject does not match request subject")
@@ -1116,7 +1119,12 @@ def continuity_read_service(
     fallback_rel = continuity_fallback_rel_path(req.subject_kind, req.subject_id)
     recovery_warnings: list[str] = []
     try:
-        capsule = _load_capsule(repo_root, rel, expected_subject=(req.subject_kind, req.subject_id))
+        capsule, related_document_warnings = _load_capsule_with_warnings(
+            repo_root,
+            rel,
+            expected_subject=(req.subject_kind, req.subject_id),
+        )
+        recovery_warnings.extend(related_document_warnings)
         out = {
             "ok": True,
             "path": rel,
@@ -1138,8 +1146,13 @@ def continuity_read_service(
             raise
         auth.require_read_path(fallback_rel)
         try:
-            capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(req.subject_kind, req.subject_id))
+            capsule, related_document_warnings = _load_fallback_snapshot_with_warnings(
+                repo_root,
+                fallback_rel,
+                expected_subject=(req.subject_kind, req.subject_id),
+            )
             recovery_warnings.append(CONTINUITY_WARNING_FALLBACK_USED)
+            recovery_warnings.extend(related_document_warnings)
             out = {
                 "ok": True,
                 "path": rel,

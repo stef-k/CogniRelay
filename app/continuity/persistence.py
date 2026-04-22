@@ -23,7 +23,11 @@ from app.continuity.paths import (
     continuity_fallback_rel_path,
     continuity_rel_path,
 )
-from app.continuity.validation import _require_utc_timestamp, _upgrade_legacy_structured_entry_timestamps
+from app.continuity.validation import (
+    _require_utc_timestamp,
+    _sanitize_related_documents_on_read,
+    _upgrade_legacy_structured_entry_timestamps,
+)
 from app.git_locking import repository_mutation_lock
 from app.git_manager import GitManager
 from app.git_safety import try_unstage_paths
@@ -138,6 +142,12 @@ def _restore_failed_retention_state(path: Path, old_bytes: bytes | None, exc: Ex
 
 def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]:
     """Load and validate a fallback snapshot envelope payload."""
+    payload, _warnings = _load_fallback_envelope_payload_with_warnings(repo_root, rel)
+    return payload
+
+
+def _load_fallback_envelope_payload_with_warnings(repo_root: Path, rel: str) -> tuple[dict[str, Any], list[str]]:
+    """Load and validate a fallback snapshot envelope payload plus recovery warnings."""
     path = safe_path(repo_root, rel)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Continuity fallback snapshot not found")
@@ -152,13 +162,12 @@ def _load_fallback_envelope_payload(repo_root: Path, rel: str) -> dict[str, Any]
     nested = payload.get("capsule")
     if not isinstance(nested, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity fallback snapshot capsule")
+    nested, warnings = _sanitize_related_documents_on_read(_upgrade_legacy_structured_entry_timestamps(nested))
     try:
-        payload["capsule"] = ContinuityCapsule.model_validate(
-            _upgrade_legacy_structured_entry_timestamps(nested)
-        ).model_dump(mode="json", exclude_none=True)
+        payload["capsule"] = ContinuityCapsule.model_validate(nested).model_dump(mode="json", exclude_none=True)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity fallback snapshot capsule: {e}") from e
-    return payload
+    return payload, warnings
 
 
 def _persist_fallback_snapshot(
@@ -211,14 +220,25 @@ def _delete_commit_message(subject_kind: str, subject_id: str, reason: str) -> s
 
 def _load_fallback_snapshot(repo_root: Path, rel: str, *, expected_subject: tuple[str, str]) -> dict[str, Any]:
     """Load and validate one fallback snapshot envelope, returning the nested capsule."""
-    payload = _load_fallback_envelope_payload(repo_root, rel)
+    capsule, _warnings = _load_fallback_snapshot_with_warnings(repo_root, rel, expected_subject=expected_subject)
+    return capsule
+
+
+def _load_fallback_snapshot_with_warnings(
+    repo_root: Path,
+    rel: str,
+    *,
+    expected_subject: tuple[str, str],
+) -> tuple[dict[str, Any], list[str]]:
+    """Load a fallback snapshot and return any degraded related_documents warnings."""
+    payload, warnings = _load_fallback_envelope_payload_with_warnings(repo_root, rel)
     capsule = payload["capsule"]
     expected_kind, expected_id = expected_subject
     capsule_kind = str(capsule.get("subject_kind") or "")
     capsule_subject_id = str(capsule.get("subject_id") or "")
     if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
         raise HTTPException(status_code=400, detail="Continuity fallback snapshot subject does not match requested subject")
-    return capsule
+    return capsule, warnings
 
 
 def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
@@ -243,10 +263,9 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     capsule = payload.get("capsule")
     if not isinstance(capsule, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope capsule")
+    capsule, _warnings = _sanitize_related_documents_on_read(_upgrade_legacy_structured_entry_timestamps(capsule))
     try:
-        payload["capsule"] = ContinuityCapsule.model_validate(
-            _upgrade_legacy_structured_entry_timestamps(capsule)
-        ).model_dump(mode="json", exclude_none=True)
+        payload["capsule"] = ContinuityCapsule.model_validate(capsule).model_dump(mode="json", exclude_none=True)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope capsule: {e}") from e
     return payload
@@ -254,21 +273,31 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
 
 def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str] | None = None) -> dict[str, Any]:
     """Load one capsule from disk and enforce optional subject matching."""
+    capsule, _warnings = _load_capsule_with_warnings(repo_root, rel, expected_subject=expected_subject)
+    return capsule
+
+
+def _load_capsule_with_warnings(
+    repo_root: Path,
+    rel: str,
+    *,
+    expected_subject: tuple[str, str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Load one capsule from disk and return any degraded related_documents warnings."""
     path = safe_path(repo_root, rel)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Continuity capsule not found")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        capsule = ContinuityCapsule.model_validate(
-            _upgrade_legacy_structured_entry_timestamps(payload)
-        ).model_dump(mode="json", exclude_none=True)
+        payload, warnings = _sanitize_related_documents_on_read(_upgrade_legacy_structured_entry_timestamps(payload))
+        capsule = ContinuityCapsule.model_validate(payload).model_dump(mode="json", exclude_none=True)
         if expected_subject is not None:
             expected_kind, expected_id = expected_subject
             capsule_kind = str(capsule.get("subject_kind") or "")
             capsule_subject_id = str(capsule.get("subject_id") or "")
             if capsule_kind != expected_kind or _normalize_subject_id(capsule_subject_id) != _normalize_subject_id(expected_id):
                 raise HTTPException(status_code=400, detail="Continuity capsule subject does not match requested subject")
-        return capsule
+        return capsule, warnings
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity capsule JSON: {e}") from e
     except ValidationError as e:
