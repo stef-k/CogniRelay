@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.continuity.constants import (
+    CAPSULE_SIZE_LIMIT_ERROR_DETAIL,
     CAPSULE_SIZE_LIMIT_BYTES,
     CONTINUITY_CAPSULE_SCHEMA_VERSION,
     CONTINUITY_SUPPORTED_CAPSULE_SCHEMA_VERSIONS,
@@ -638,7 +639,7 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
     payload = capsule.model_dump(mode="json", exclude_none=True)
     canonical = canonical_json(payload)
     if len(canonical.encode("utf-8")) > CAPSULE_SIZE_LIMIT_BYTES:
-        raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+        raise HTTPException(status_code=400, detail=CAPSULE_SIZE_LIMIT_ERROR_DETAIL)
     return payload, canonical
 
 

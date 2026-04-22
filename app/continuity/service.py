@@ -50,6 +50,7 @@ from app.models import (
 )
 from app.storage import canonical_json, safe_path, write_bytes_file, write_text_file
 from app.continuity.constants import (
+    CAPSULE_SIZE_LIMIT_ERROR_DETAIL,
     CAPSULE_SIZE_LIMIT_BYTES,
     CONTINUITY_ARCHIVE_SCHEMA_TYPE,
     CONTINUITY_ARCHIVE_SCHEMA_VERSION,
@@ -603,7 +604,7 @@ def continuity_upsert_service(
         # machine above.  This is the binding check — Phase 1 is an early
         # reject on the smaller pre-mutation payload.
         if len(new_bytes) > CAPSULE_SIZE_LIMIT_BYTES:
-            raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+            raise HTTPException(status_code=400, detail=CAPSULE_SIZE_LIMIT_ERROR_DETAIL)
         if old_bytes != new_bytes:
             stripped_req = ContinuityUpsertRequest(
                 subject_kind=req.subject_kind,
@@ -913,7 +914,7 @@ def continuity_patch_service(
         canonical = canonical_json(capsule_snapshot.model_dump(mode="json", exclude_none=True))
         new_bytes = canonical.encode("utf-8")
         if len(new_bytes) > CAPSULE_SIZE_LIMIT_BYTES:
-            raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+            raise HTTPException(status_code=400, detail=CAPSULE_SIZE_LIMIT_ERROR_DETAIL)
 
         capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
         changed = old_bytes != new_bytes
@@ -1038,7 +1039,7 @@ def continuity_lifecycle_service(
         canonical = canonical_json(capsule.model_dump(mode="json", exclude_none=True))
         new_bytes = canonical.encode("utf-8")
         if len(new_bytes) > CAPSULE_SIZE_LIMIT_BYTES:
-            raise HTTPException(status_code=400, detail="Continuity capsule exceeds 12 KB serialized UTF-8")
+            raise HTTPException(status_code=400, detail=CAPSULE_SIZE_LIMIT_ERROR_DETAIL)
 
         capsule_sha256 = hashlib.sha256(new_bytes).hexdigest()
         changed = old_bytes != new_bytes

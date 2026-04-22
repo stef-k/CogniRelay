@@ -317,5 +317,8 @@ PATCH_TARGET_MAX_LENGTH: dict[str, int] = {
     "thread_descriptor.identity_anchors": 4,
 }
 
-# Capsule size limit in bytes (12 KB).
-CAPSULE_SIZE_LIMIT_BYTES = 12 * 1024
+# Product-contract continuity capsule write cap (#227).
+CAPSULE_SIZE_LIMIT_KB = 20
+CAPSULE_SIZE_LIMIT_BYTES = CAPSULE_SIZE_LIMIT_KB * 1024
+CAPSULE_SIZE_LIMIT_LABEL = f"{CAPSULE_SIZE_LIMIT_KB} KB"
+CAPSULE_SIZE_LIMIT_ERROR_DETAIL = f"Continuity capsule exceeds {CAPSULE_SIZE_LIMIT_LABEL} serialized UTF-8"
