@@ -253,7 +253,7 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
             ],
         )
 
-    def test_context_retrieve_keeps_mixed_retrieval_internal_only(self) -> None:
+    def test_context_retrieve_uses_internal_mixed_retrieval_for_thread_subjects(self) -> None:
         req = ContextRetrieveRequest(task="unused", subject_kind="thread", subject_id="thread-abc")
         continuity_state = {
             "present": False,
@@ -272,9 +272,18 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
         with (
             patch("app.context.service._load_core_memory", return_value=[]),
             patch("app.context.service.build_continuity_state", return_value=continuity_state),
-            patch("app.context.service._index_health", return_value="healthy"),
-            patch("app.context.service.search_index", return_value=[]),
-            patch("app.context.service._assemble_mixed_retrieval_bundle") as mixed_retrieval_mock,
+            patch(
+                "app.context.service._assemble_mixed_retrieval_bundle",
+                return_value={
+                    "continuity": [{"subject_kind": "thread", "subject_id": "thread-abc"}],
+                    "supporting_documents": [
+                        {"ok": True, "path": "docs/specs/thread-abc.md", "content": "Spec body? yes."},
+                    ],
+                    "search_hits": [
+                        {"path": "docs/notes/thread-abc.md", "type": "note", "snippet": "Search follow-on.", "score": 2.0},
+                    ],
+                },
+            ) as mixed_retrieval_mock,
         ):
             now = datetime.now(timezone.utc)
             auth = _AuthStub()
@@ -286,7 +295,12 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
                 audit=lambda *_args, **_kwargs: None,
             )
 
-        mixed_retrieval_mock.assert_not_called()
+        mixed_retrieval_mock.assert_called_once_with(
+            repo_root=Path("."),
+            auth=auth,
+            req=req,
+            now=now,
+        )
         self.assertEqual(
             set(result["bundle"].keys()),
             {
@@ -301,8 +315,78 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
                 "continuity_state",
             },
         )
+        self.assertEqual(
+            result["bundle"]["recent_relevant"],
+            [
+                {
+                    "path": "docs/specs/thread-abc.md",
+                    "type": "docs",
+                    "snippet": "Spec body? yes.",
+                    "score": 0.0,
+                },
+                {
+                    "path": "docs/notes/thread-abc.md",
+                    "type": "note",
+                    "snippet": "Search follow-on.",
+                    "score": 2.0,
+                },
+            ],
+        )
+        self.assertEqual(result["bundle"]["open_questions"], ["Spec body? yes."])
         self.assertNotIn("mixed_retrieval", result["bundle"])
         self.assertNotIn("continuity", result["bundle"])
+        self.assertNotIn("supporting_documents", result["bundle"])
+        self.assertNotIn("search_hits", result["bundle"])
+
+    def test_context_retrieve_preserves_cross_class_duplicates_without_exposing_internal_bundle(self) -> None:
+        req = ContextRetrieveRequest(task="unused", subject_kind="task", subject_id="task-42", limit=3)
+        continuity_state = {
+            "present": True,
+            "requested_selectors": [],
+            "omitted_selectors": [],
+            "capsules": [{"subject_kind": "task", "subject_id": "task-42"}],
+            "selection_order": [],
+            "budget": {"token_budget_hint": "normal"},
+            "warnings": [],
+            "fallback_used": False,
+            "recovery_warnings": [],
+            "trust_signals": None,
+            "salience_metadata": None,
+        }
+
+        with (
+            patch("app.context.service._load_core_memory", return_value=[]),
+            patch("app.context.service.build_continuity_state", return_value=continuity_state),
+            patch(
+                "app.context.service._assemble_mixed_retrieval_bundle",
+                return_value={
+                    "continuity": [{"subject_kind": "task", "subject_id": "task-42"}],
+                    "supporting_documents": [
+                        {"ok": True, "path": "docs/tasks/task-42.md", "content": "Task support"},
+                    ],
+                    "search_hits": [
+                        {"path": "docs/tasks/task-42.md", "type": "task_note", "snippet": "Fallback hit", "score": 1.0},
+                        {"path": "docs/other.md", "type": "note", "snippet": "Second hit", "score": 0.5},
+                    ],
+                },
+            ),
+        ):
+            result = context_retrieve_service(
+                repo_root=Path("."),
+                auth=_AuthStub(),
+                req=req,
+                now=datetime.now(timezone.utc),
+                audit=lambda *_args, **_kwargs: None,
+            )
+
+        self.assertEqual(
+            [item["path"] for item in result["bundle"]["recent_relevant"]],
+            [
+                "docs/tasks/task-42.md",
+                "docs/tasks/task-42.md",
+                "docs/other.md",
+            ],
+        )
         self.assertNotIn("supporting_documents", result["bundle"])
         self.assertNotIn("search_hits", result["bundle"])
 
