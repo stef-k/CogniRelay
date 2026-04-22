@@ -333,6 +333,7 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
 
         result = execute_pre_compaction_or_handoff_hook(
             capsule=capsule,
+            session_end_snapshot=_snapshot(),
             auth=self.auth,
             deps=self.deps,
         )
@@ -402,20 +403,70 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
 
         self.assertEqual(changed_fields, ["stance_summary"])
 
-    def test_pre_compaction_ignores_direct_lifecycle_delta_on_hook_surface(self) -> None:
+    def test_post_prompt_treats_lifecycle_delta_as_write_eligible(self) -> None:
         capsule = _capsule(thread_descriptor={"lifecycle": "suspended"})
 
-        result = execute_pre_compaction_or_handoff_hook(
+        result = execute_post_prompt_hook(
             capsule=capsule,
             auth=self.auth,
             deps=self.deps,
         )
 
-        self.assertEqual(result.changed_fields, [])
-        self.assertEqual(result.local_step, HookLocalStep.SKIPPED)
-        self.assertEqual([name for name, _ in self.recorder.calls], ["continuity_read"])
+        self.assertEqual(result.local_step, HookLocalStep.WROTE)
+        self.assertEqual(result.changed_fields, ["thread_descriptor.lifecycle"])
+        _, upsert_req = self.recorder.calls[-1]
+        assert isinstance(upsert_req, ContinuityUpsertRequest)
+        self.assertEqual(upsert_req.lifecycle_transition, "suspend")
+        self.assertIsNone(upsert_req.superseded_by)
 
-    def test_pre_compaction_real_upsert_path_does_not_persist_direct_lifecycle_delta(self) -> None:
+    def test_pre_compaction_treats_superseded_by_delta_as_write_eligible_and_rejects_snapshot(self) -> None:
+        capsule = _capsule(thread_descriptor={"lifecycle": "superseded", "superseded_by": "thread-next"})
+
+        result = execute_pre_compaction_or_handoff_hook(
+            capsule=capsule,
+            session_end_snapshot=_snapshot(),
+            auth=self.auth,
+            deps=self.deps,
+        )
+
+        self.assertEqual(result.local_step, HookLocalStep.WROTE)
+        self.assertEqual(
+            result.changed_fields,
+            [
+                "open_loops",
+                "stance_summary",
+                "session_trajectory",
+                "thread_descriptor.lifecycle",
+                "thread_descriptor.superseded_by",
+            ],
+        )
+        self.assertFalse(result.used_session_end_snapshot)
+        _, upsert_req = self.recorder.calls[-1]
+        assert isinstance(upsert_req, ContinuityUpsertRequest)
+        self.assertIsNone(upsert_req.session_end_snapshot)
+        self.assertEqual(upsert_req.lifecycle_transition, "supersede")
+        self.assertEqual(upsert_req.superseded_by, "thread-next")
+
+    def test_first_write_baseline_includes_lifecycle_and_superseded_by_null_semantics(self) -> None:
+        changed_fields = _changed_eligible_fields(
+            _capsule(thread_descriptor={"lifecycle": "superseded", "superseded_by": "thread-next"}),
+            None,
+        )
+
+        self.assertEqual(
+            changed_fields,
+            [
+                "top_priorities",
+                "open_loops",
+                "active_constraints",
+                "active_concerns",
+                "stance_summary",
+                "thread_descriptor.lifecycle",
+                "thread_descriptor.superseded_by",
+            ],
+        )
+
+    def test_pre_compaction_real_upsert_path_persists_lifecycle_transition(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _make_dirs(root)
@@ -430,6 +481,74 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
             candidate_payload["verified_at"] = "2026-04-22T12:05:00Z"
             candidate_payload["thread_descriptor"]["scope_anchors"] = ["thread:issue-215"]
             candidate_payload["thread_descriptor"]["lifecycle"] = "suspended"
+
+            continuity_upsert_service(
+                repo_root=root,
+                gm=gm,
+                auth=auth,
+                req=ContinuityUpsertRequest(
+                    subject_kind="thread",
+                    subject_id="issue-215",
+                    capsule=_capsule_from_payload(seed_payload),
+                ),
+                audit=_noop_audit,
+            )
+
+            deps = HookExecutionDependencies(
+                continuity_read=lambda req, auth_ctx: continuity_read_service(
+                    repo_root=root,
+                    auth=auth_ctx,
+                    req=req,
+                    now=datetime.now(timezone.utc),
+                    audit=_noop_audit,
+                ),
+                context_retrieve=self.recorder.context_retrieve,
+                continuity_upsert=lambda req, auth_ctx: continuity_upsert_service(
+                    repo_root=root,
+                    gm=gm,
+                    auth=auth_ctx,
+                    req=req,
+                    audit=_noop_audit,
+                ),
+                handoff_create=self.recorder.handoff_create,
+            )
+
+            result = execute_pre_compaction_or_handoff_hook(
+                capsule=_capsule_from_payload(candidate_payload),
+                auth=auth,
+                deps=deps,
+            )
+
+            self.assertEqual(result.local_step, HookLocalStep.WROTE)
+            stored = continuity_read_service(
+                repo_root=root,
+                auth=auth,
+                req=ContinuityReadRequest(
+                    subject_kind="thread",
+                    subject_id="issue-215",
+                    allow_fallback=True,
+                ),
+                now=datetime.now(timezone.utc),
+                audit=_noop_audit,
+            )
+            self.assertEqual(stored["capsule"]["thread_descriptor"]["lifecycle"], "suspended")
+            self.assertNotIn("superseded_by", stored["capsule"]["thread_descriptor"])
+
+    def test_pre_compaction_real_upsert_path_persists_superseded_by_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _make_dirs(root)
+            auth = _AuthStub()
+            gm = _GitManagerStub(root)
+            seed_payload = _capsule_payload()
+            seed_payload["source"]["update_reason"] = "manual"
+            seed_payload["thread_descriptor"]["scope_anchors"] = ["thread:issue-215"]
+            candidate_payload = _capsule_payload()
+            candidate_payload["source"]["update_reason"] = "manual"
+            candidate_payload["updated_at"] = "2026-04-22T12:05:00Z"
+            candidate_payload["verified_at"] = "2026-04-22T12:05:00Z"
+            candidate_payload["thread_descriptor"]["scope_anchors"] = ["thread:issue-215"]
+            candidate_payload["thread_descriptor"]["lifecycle"] = "superseded"
             candidate_payload["thread_descriptor"]["superseded_by"] = "thread-next"
 
             continuity_upsert_service(
@@ -469,7 +588,7 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
                 deps=deps,
             )
 
-            self.assertEqual(result.local_step, HookLocalStep.SKIPPED)
+            self.assertEqual(result.local_step, HookLocalStep.WROTE)
             stored = continuity_read_service(
                 repo_root=root,
                 auth=auth,
@@ -481,8 +600,8 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
                 now=datetime.now(timezone.utc),
                 audit=_noop_audit,
             )
-            self.assertEqual(stored["capsule"]["thread_descriptor"]["lifecycle"], "active")
-            self.assertNotIn("superseded_by", stored["capsule"]["thread_descriptor"])
+            self.assertEqual(stored["capsule"]["thread_descriptor"]["lifecycle"], "superseded")
+            self.assertEqual(stored["capsule"]["thread_descriptor"]["superseded_by"], "thread-next")
 
     def test_real_handoff_runs_after_explicit_local_skip(self) -> None:
         capsule = _capsule(continuity={"working_hypotheses": ["non-eligible only"]})

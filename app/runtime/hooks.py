@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable
 
+from fastapi import HTTPException
+
 from app.models import (
     ContextRetrieveRequest,
     ContinuityCapsule,
@@ -26,6 +28,8 @@ _ELIGIBLE_FIELD_ORDER = (
     "session_trajectory",
     "rationale_entries",
     "stable_preferences",
+    "thread_descriptor.lifecycle",
+    "thread_descriptor.superseded_by",
 )
 _ELIGIBLE_FIELD_PATHS: dict[str, tuple[str, ...]] = {
     "top_priorities": ("continuity", "top_priorities"),
@@ -38,6 +42,8 @@ _ELIGIBLE_FIELD_PATHS: dict[str, tuple[str, ...]] = {
     "session_trajectory": ("continuity", "session_trajectory"),
     "rationale_entries": ("continuity", "rationale_entries"),
     "stable_preferences": ("stable_preferences",),
+    "thread_descriptor.lifecycle": ("thread_descriptor", "lifecycle"),
+    "thread_descriptor.superseded_by": ("thread_descriptor", "superseded_by"),
 }
 
 _SNAPSHOT_FIELD_SET = frozenset(
@@ -94,6 +100,8 @@ _FIRST_WRITE_BASELINE: dict[str, Any] = {
     "session_trajectory": [],
     "rationale_entries": [],
     "stable_preferences": [],
+    "thread_descriptor.lifecycle": None,
+    "thread_descriptor.superseded_by": None,
 }
 
 
@@ -175,6 +183,80 @@ def _changed_eligible_fields(
     return changed_fields
 
 
+def _persisted_thread_descriptor_values(persisted_capsule: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    if persisted_capsule is None:
+        return None, None
+    thread_descriptor = persisted_capsule.get("thread_descriptor")
+    if not isinstance(thread_descriptor, dict):
+        return None, None
+    lifecycle = thread_descriptor.get("lifecycle")
+    superseded_by = thread_descriptor.get("superseded_by")
+    return lifecycle if isinstance(lifecycle, str) else None, superseded_by if isinstance(superseded_by, str) else None
+
+
+def _candidate_thread_descriptor_values(candidate: ContinuityCapsule) -> tuple[str | None, str | None]:
+    if candidate.thread_descriptor is None:
+        return None, None
+    return candidate.thread_descriptor.lifecycle, candidate.thread_descriptor.superseded_by
+
+
+def _hook_upsert_request(
+    *,
+    capsule: ContinuityCapsule,
+    persisted_capsule: dict[str, Any] | None,
+    changed_fields: list[str],
+    session_end_snapshot: SessionEndSnapshot | None = None,
+) -> ContinuityUpsertRequest:
+    lifecycle_changed = "thread_descriptor.lifecycle" in changed_fields
+    superseded_by_changed = "thread_descriptor.superseded_by" in changed_fields
+    lifecycle_transition: str | None = None
+    superseded_by: str | None = None
+
+    if lifecycle_changed or superseded_by_changed:
+        stored_lifecycle, stored_superseded_by = _persisted_thread_descriptor_values(persisted_capsule)
+        candidate_lifecycle, candidate_superseded_by = _candidate_thread_descriptor_values(capsule)
+
+        if persisted_capsule is None:
+            if candidate_lifecycle == "suspended":
+                lifecycle_transition = "suspend"
+            elif candidate_lifecycle == "concluded":
+                lifecycle_transition = "conclude"
+            elif candidate_lifecycle == "superseded":
+                lifecycle_transition = "supersede"
+                superseded_by = candidate_superseded_by
+            elif candidate_lifecycle not in (None, "active"):
+                raise HTTPException(status_code=400, detail="hook lifecycle delta is not persistable through continuity.upsert")
+        else:
+            effective_stored_lifecycle = stored_lifecycle or "active"
+            effective_candidate_lifecycle = candidate_lifecycle or "active"
+
+            if effective_stored_lifecycle != effective_candidate_lifecycle:
+                transition_map = {
+                    ("active", "suspended"): "suspend",
+                    ("active", "concluded"): "conclude",
+                    ("active", "superseded"): "supersede",
+                    ("suspended", "active"): "resume",
+                    ("suspended", "concluded"): "conclude",
+                    ("suspended", "superseded"): "supersede",
+                }
+                lifecycle_transition = transition_map.get((effective_stored_lifecycle, effective_candidate_lifecycle))
+                if lifecycle_transition is None:
+                    raise HTTPException(status_code=400, detail="hook lifecycle delta is not persistable through continuity.upsert")
+                if lifecycle_transition == "supersede":
+                    superseded_by = candidate_superseded_by
+            elif superseded_by_changed and candidate_superseded_by != stored_superseded_by:
+                raise HTTPException(status_code=400, detail="hook superseded_by delta requires a lifecycle transition")
+
+    return ContinuityUpsertRequest(
+        subject_kind=capsule.subject_kind,
+        subject_id=capsule.subject_id,
+        capsule=capsule,
+        session_end_snapshot=session_end_snapshot,
+        lifecycle_transition=lifecycle_transition,
+        superseded_by=superseded_by,
+    )
+
+
 def _last_persisted_capsule(candidate: ContinuityCapsule, auth: Any, deps: HookExecutionDependencies) -> dict[str, Any] | None:
     result = deps.continuity_read(
         ContinuityReadRequest(
@@ -229,10 +311,10 @@ def execute_post_prompt_hook(
     if not changed_fields:
         return HookWriteResult(local_step=HookLocalStep.SKIPPED, changed_fields=[])
     result = deps.continuity_upsert(
-        ContinuityUpsertRequest(
-            subject_kind=capsule.subject_kind,
-            subject_id=capsule.subject_id,
+        _hook_upsert_request(
             capsule=capsule,
+            persisted_capsule=persisted_capsule,
+            changed_fields=changed_fields,
         ),
         auth,
     )
@@ -263,10 +345,10 @@ def execute_pre_compaction_or_handoff_hook(
             outside_snapshot = [field_name for field_name in changed_fields if field_name not in _SNAPSHOT_FIELD_SET]
             use_snapshot = not outside_snapshot
         continuity_result = deps.continuity_upsert(
-            ContinuityUpsertRequest(
-                subject_kind=capsule.subject_kind,
-                subject_id=capsule.subject_id,
+            _hook_upsert_request(
                 capsule=capsule,
+                persisted_capsule=persisted_capsule,
+                changed_fields=changed_fields,
                 session_end_snapshot=session_end_snapshot if use_snapshot else None,
             ),
             auth,
