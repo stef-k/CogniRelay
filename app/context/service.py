@@ -16,9 +16,9 @@ from fastapi import HTTPException
 
 from app.auth import AuthContext
 from app.timestamps import format_compact, format_iso, parse_iso
-from app.continuity import build_continuity_state
+from app.continuity import build_continuity_state, continuity_read_service
 from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
-from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, RecentRequest, SearchRequest, WriteRequest
+from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, ContinuityReadRequest, RecentRequest, SearchRequest, WriteRequest
 from app.git_safety import safe_commit_new_file, safe_commit_updated_file, try_commit_file
 from app.storage import StorageError, read_text_file, safe_path, write_text_file
 
@@ -70,6 +70,102 @@ def _filter_search_results_for_auth(results: list[dict[str, Any]], auth: AuthCon
 def _exclude_continuity_cold_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop continuity cold-tier artifacts from context retrieval evidence."""
     return [row for row in results if not _is_continuity_cold_path(str(row.get("path", "")))]
+
+
+def _deduplicate_by_path(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first same-class occurrence of each exact path value."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        path = row.get("path")
+        if not isinstance(path, str):
+            out.append(row)
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(row)
+    return out
+
+
+def _assemble_mixed_retrieval_bundle(
+    *,
+    repo_root: Path,
+    auth: AuthContext,
+    req: ContextRetrieveRequest,
+    now: datetime,
+) -> dict[str, list[dict[str, Any]]]:
+    """Assemble the bounded #213 mixed-retrieval bundle."""
+    bundle: dict[str, list[dict[str, Any]]] = {
+        "continuity": [],
+        "supporting_documents": [],
+        "search_hits": [],
+    }
+    if req.subject_kind not in {"thread", "task"} or not req.subject_id:
+        return bundle
+
+    capsule: dict[str, Any] | None = None
+    try:
+        continuity_result = continuity_read_service(
+            repo_root=repo_root,
+            auth=auth,
+            req=ContinuityReadRequest(
+                subject_kind=req.subject_kind,
+                subject_id=req.subject_id,
+                allow_fallback=False,
+            ),
+            now=now,
+            audit=lambda *_args, **_kwargs: None,
+        )
+        loaded_capsule = continuity_result.get("capsule")
+        if isinstance(loaded_capsule, dict):
+            capsule = loaded_capsule
+            bundle["continuity"] = [loaded_capsule]
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+
+    if capsule is not None:
+        related_documents = capsule.get("continuity", {}).get("related_documents", [])
+        if isinstance(related_documents, list):
+            supporting_documents: list[dict[str, Any]] = []
+            for entry in related_documents:
+                if not isinstance(entry, dict):
+                    continue
+                path = entry.get("path")
+                if not isinstance(path, str):
+                    continue
+                try:
+                    supporting_document = read_file_service(
+                        repo_root=repo_root,
+                        auth=auth,
+                        path=path,
+                        audit=lambda *_args, **_kwargs: None,
+                    )
+                except Exception:
+                    continue
+                if isinstance(supporting_document, dict):
+                    supporting_documents.append(supporting_document)
+            bundle["supporting_documents"] = _deduplicate_by_path(supporting_documents)
+
+    try:
+        search_result = search_service(
+            repo_root=repo_root,
+            auth=auth,
+            req=SearchRequest(
+                query=req.subject_id,
+                limit=req.limit,
+                sort_by="relevance",
+            ),
+            audit=lambda *_args, **_kwargs: None,
+        )
+        results = search_result.get("results", [])
+        if isinstance(results, list):
+            bundle["search_hits"] = _deduplicate_by_path([row for row in results if isinstance(row, dict)])
+    except Exception:
+        bundle["search_hits"] = []
+
+    return bundle
 
 
 def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
