@@ -99,6 +99,7 @@ CONTINUITY_COMPARE_NESTED_ORDERS: dict[str, list[str]] = {
         "trailing_notes",
         "curiosity_queue",
         "rationale_entries",
+        "related_documents",
         "relationship_model",
         "retrieval_hints",
     ],
@@ -209,6 +210,7 @@ PRESERVE_OPTIONAL_LIST_CONTINUITY_FIELDS: frozenset[str] = frozenset({
     "curiosity_queue",
     "negative_decisions",
     "rationale_entries",
+    "related_documents",
 })
 # Optional object fields: absent → preserve; null → clear to None.
 PRESERVE_OPTIONAL_OBJECT_CONTINUITY_FIELDS: frozenset[str] = frozenset({

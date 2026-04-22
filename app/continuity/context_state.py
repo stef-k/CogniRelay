@@ -44,8 +44,8 @@ from app.continuity.paths import (
     continuity_rel_path,
 )
 from app.continuity.persistence import (
-    _load_capsule,
-    _load_fallback_snapshot,
+    _load_capsule_with_warnings,
+    _load_fallback_snapshot_with_warnings,
 )
 from app.continuity.retrieval import (
     _format_selector,
@@ -108,7 +108,12 @@ def _load_selectors_with_fallback(
             raise
         source_state = "active"
         try:
-            capsule = _load_capsule(repo_root, rel, expected_subject=(kind, subject_id))
+            capsule, related_document_warnings = _load_capsule_with_warnings(
+                repo_root,
+                rel,
+                expected_subject=(kind, subject_id),
+            )
+            recovery_warnings.extend(related_document_warnings)
         except HTTPException as exc:
             selector_label = _format_selector(kind, subject_id)
             if exc.status_code == 404:
@@ -135,8 +140,13 @@ def _load_selectors_with_fallback(
                     continue
                 raise
             try:
-                capsule = _load_fallback_snapshot(repo_root, fallback_rel, expected_subject=(kind, subject_id))
+                capsule, related_document_warnings = _load_fallback_snapshot_with_warnings(
+                    repo_root,
+                    fallback_rel,
+                    expected_subject=(kind, subject_id),
+                )
                 recovery_warnings.append(_qualify_warning(CONTINUITY_WARNING_FALLBACK_USED, kind, subject_id, multi_mode=multi_warning_mode))
+                recovery_warnings.extend(related_document_warnings)
                 fallback_used = True
                 source_state = "fallback"
             except HTTPException as fallback_exc:

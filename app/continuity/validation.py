@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import posixpath
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,19 @@ from app.timestamps import format_iso, parse_iso as _parse_iso
 
 
 _LEGACY_TIMESTAMP_FLOOR = "1970-01-01T00:00:00Z"
+_RELATED_DOCUMENTS_ALLOWED_KEYS = frozenset({"path", "kind", "label", "relevance"})
+_RELATED_DOCUMENTS_REQUIRED_KEYS = ("path", "kind", "label")
+_RELATED_DOCUMENTS_KEY_ORDER = ("path", "kind", "label", "relevance")
+_RELATED_DOCUMENTS_RESERVED_KEYS = frozenset({"content", "body", "text", "excerpt", "markdown", "html", "payload"})
+_RELATED_DOCUMENTS_RELEVANCE = frozenset({"primary", "supporting", "background"})
+_RELATED_DOCUMENTS_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_RELATED_DOCUMENTS_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_RELATED_DOCUMENTS_PATH_MAX = 240
+_RELATED_DOCUMENTS_KIND_MAX = 32
+_RELATED_DOCUMENTS_LABEL_MAX = 120
+_RELATED_DOCUMENTS_RELEVANCE_MAX = 32
+_RELATED_DOCUMENTS_MAX_ENTRIES = 8
+_MISSING = object()
 
 
 def _upgrade_legacy_structured_entry_timestamps(payload: dict[str, Any]) -> dict[str, Any]:
@@ -122,6 +137,256 @@ def _validate_repo_relative_paths(repo_root: Path, paths: list[str], field_name:
             safe_path(repo_root, rel)
         except StorageError as e:
             raise HTTPException(status_code=400, detail=f"Invalid repo-relative path in {field_name}: {e}") from e
+
+
+def _contains_reserved_related_documents_key(value: Any) -> bool:
+    """Return True when any reserved embedded-content key exists recursively."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in _RELATED_DOCUMENTS_RESERVED_KEYS:
+                return True
+            if _contains_reserved_related_documents_key(nested):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_contains_reserved_related_documents_key(item) for item in value)
+    return False
+
+
+def _is_valid_related_document_path(value: str) -> bool:
+    """Apply the lexical-only #217 path rules for related_documents[].path."""
+    if not _RELATED_DOCUMENTS_PATH_RE.match(value):
+        return False
+    if value.startswith("/") or ".." in value:
+        return False
+    normalized = posixpath.normpath(value)
+    if normalized == ".." or normalized.startswith("../") or normalized.startswith("/"):
+        return False
+    return True
+
+
+def _related_documents_failure_key(category: int, *parts: int) -> tuple[int, ...]:
+    """Build a sortable precedence key for one related_documents failure."""
+    return (category, *parts)
+
+
+def _iter_related_documents_failures(value: Any) -> list[tuple[tuple[int, ...], str]]:
+    """Return all deterministic write-time validation failures for related_documents."""
+    failures: list[tuple[tuple[int, ...], str]] = []
+
+    if _contains_reserved_related_documents_key(value):
+        failures.append(
+            (
+                _related_documents_failure_key(1),
+                "Embedded content is not allowed in continuity.related_documents[]",
+            )
+        )
+
+    if not isinstance(value, list):
+        failures.append(
+            (
+                _related_documents_failure_key(3, -1),
+                "Invalid value type in continuity.related_documents[]",
+            )
+        )
+        return failures
+
+    if len(value) > _RELATED_DOCUMENTS_MAX_ENTRIES:
+        failures.append(
+            (
+                _related_documents_failure_key(11),
+                "Too many entries in continuity.related_documents",
+            )
+        )
+
+    seen_duplicates: dict[tuple[str, str, str, object], int] = {}
+
+    for entry_index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            failures.append(
+                (
+                    _related_documents_failure_key(3, entry_index, len(_RELATED_DOCUMENTS_KEY_ORDER)),
+                    "Invalid value type in continuity.related_documents[]",
+                )
+            )
+            continue
+
+        unknown_keys = sorted(key for key in entry if key not in _RELATED_DOCUMENTS_ALLOWED_KEYS and key not in _RELATED_DOCUMENTS_RESERVED_KEYS)
+        if unknown_keys:
+            failures.append(
+                (
+                    _related_documents_failure_key(2, entry_index, 0),
+                    "Unknown key in continuity.related_documents[]",
+                )
+            )
+
+        for key_rank, key_name in enumerate(_RELATED_DOCUMENTS_REQUIRED_KEYS):
+            if key_name not in entry:
+                failures.append(
+                    (
+                        _related_documents_failure_key(4, entry_index, key_rank),
+                        "Missing required key in continuity.related_documents[]",
+                    )
+                )
+
+        candidate_for_duplicate = True
+        duplicate_parts: list[str] = []
+
+        for key_rank, key_name in enumerate(_RELATED_DOCUMENTS_KEY_ORDER):
+            raw = entry.get(key_name, _MISSING)
+            if raw is _MISSING:
+                if key_name == "relevance":
+                    duplicate_parts.append("")
+                else:
+                    candidate_for_duplicate = False
+                continue
+
+            if not isinstance(raw, str):
+                failures.append(
+                    (
+                        _related_documents_failure_key(3, entry_index, key_rank),
+                        "Invalid value type in continuity.related_documents[]",
+                    )
+                )
+                candidate_for_duplicate = False
+                continue
+
+            if raw == "":
+                failures.append(
+                    (
+                        _related_documents_failure_key(7, entry_index, key_rank),
+                        "Value too short in continuity.related_documents[]",
+                    )
+                )
+                candidate_for_duplicate = False
+                continue
+
+            if raw != raw.strip() or raw.strip() == "":
+                failures.append(
+                    (
+                        _related_documents_failure_key(8, entry_index, key_rank),
+                        "Leading or trailing whitespace is not allowed in continuity.related_documents[]",
+                    )
+                )
+                candidate_for_duplicate = False
+                continue
+
+            if key_name == "path":
+                if len(raw) > _RELATED_DOCUMENTS_PATH_MAX:
+                    failures.append(
+                        (
+                            _related_documents_failure_key(9, entry_index, key_rank),
+                            "Value too long in continuity.related_documents[].path",
+                        )
+                    )
+                    candidate_for_duplicate = False
+                elif not _is_valid_related_document_path(raw):
+                    failures.append(
+                        (
+                            _related_documents_failure_key(5, entry_index, key_rank),
+                            "Invalid path in continuity.related_documents[].path",
+                        )
+                    )
+                    candidate_for_duplicate = False
+            elif key_name == "kind":
+                if len(raw) > _RELATED_DOCUMENTS_KIND_MAX:
+                    failures.append(
+                        (
+                            _related_documents_failure_key(9, entry_index, key_rank),
+                            "Value too long in continuity.related_documents[].kind",
+                        )
+                    )
+                    candidate_for_duplicate = False
+                elif not _RELATED_DOCUMENTS_KIND_RE.match(raw):
+                    failures.append(
+                        (
+                            _related_documents_failure_key(6, entry_index, key_rank),
+                            "Invalid kind format in continuity.related_documents[]",
+                        )
+                    )
+                    candidate_for_duplicate = False
+            elif key_name == "label":
+                if len(raw) > _RELATED_DOCUMENTS_LABEL_MAX:
+                    failures.append(
+                        (
+                            _related_documents_failure_key(9, entry_index, key_rank),
+                            "Value too long in continuity.related_documents[].label",
+                        )
+                    )
+                    candidate_for_duplicate = False
+            elif key_name == "relevance":
+                if len(raw) > _RELATED_DOCUMENTS_RELEVANCE_MAX:
+                    failures.append(
+                        (
+                            _related_documents_failure_key(9, entry_index, key_rank),
+                            "Value too long in continuity.related_documents[].relevance",
+                        )
+                    )
+                    candidate_for_duplicate = False
+                elif raw not in _RELATED_DOCUMENTS_RELEVANCE:
+                    failures.append(
+                        (
+                            _related_documents_failure_key(6, entry_index, key_rank),
+                            "Invalid relevance in continuity.related_documents[]",
+                        )
+                    )
+                    candidate_for_duplicate = False
+
+            duplicate_parts.append(raw)
+
+        if candidate_for_duplicate:
+            duplicate_key = (
+                duplicate_parts[0],
+                duplicate_parts[1],
+                duplicate_parts[2],
+                _MISSING if "relevance" not in entry else duplicate_parts[3],
+            )
+            first_index = seen_duplicates.get(duplicate_key)
+            if first_index is None:
+                seen_duplicates[duplicate_key] = entry_index
+            else:
+                failures.append(
+                    (
+                        _related_documents_failure_key(10, entry_index, first_index),
+                        "Duplicate related_documents entry",
+                    )
+                )
+
+    return failures
+
+
+def _validate_related_documents_on_write(value: Any, *, field_present: bool) -> Any:
+    """Validate raw related_documents input and return the original value on success."""
+    if not field_present:
+        return None
+    failures = _iter_related_documents_failures(value)
+    if failures:
+        _sort_key, detail = min(failures, key=lambda item: item[0])
+        raise HTTPException(status_code=400, detail=detail)
+    if value is None:
+        raise HTTPException(status_code=400, detail="Invalid value type in continuity.related_documents[]")
+    return value
+
+
+def _sanitize_related_documents_on_read(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Omit malformed stored related_documents and return any degraded-read warnings."""
+    continuity = payload.get("continuity")
+    if not isinstance(continuity, dict) or "related_documents" not in continuity:
+        return payload, []
+    value = continuity.get("related_documents")
+    if not _iter_related_documents_failures(value):
+        return payload, []
+
+    warning = (
+        "related_documents_omitted_non_metadata"
+        if _contains_reserved_related_documents_key(value)
+        else "related_documents_omitted_invalid"
+    )
+    sanitized = copy.deepcopy(payload)
+    sanitized_continuity = sanitized.get("continuity")
+    if isinstance(sanitized_continuity, dict):
+        sanitized_continuity.pop("related_documents", None)
+    return sanitized, [warning]
 
 
 def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
@@ -364,6 +629,11 @@ def _validate_capsule(repo_root: Path, capsule: ContinuityCapsule) -> tuple[dict
                         status_code=400,
                         detail=f"rationale_entries[].supersedes references tag '{entry.supersedes}' which does not exist with status 'superseded'",
                     )
+    if capsule.continuity.related_documents is not None:
+        capsule.continuity.related_documents = _validate_related_documents_on_write(
+            capsule.continuity.related_documents,
+            field_present=True,
+        )
     _validate_thread_descriptor(capsule)
     payload = capsule.model_dump(mode="json", exclude_none=True)
     canonical = canonical_json(payload)
