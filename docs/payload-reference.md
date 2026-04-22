@@ -100,7 +100,7 @@ The system is designed so that a fully-populated capsule with practical content 
 
 ### Per-item string constraints
 
-Most list item strings in `ContinuityState` do not have a per-item character limit enforced in the model — the system relies on list count limits (max 3–5 items per field) and the deterministic trim mechanism to control total size. The exceptions with explicit character limits are:
+Most list item strings in `ContinuityState` do not have a per-item character limit enforced in the model. The system relies on per-field list-count limits, which vary by field as documented in the field table below, plus the deterministic trim mechanism to control total size. The exceptions with explicit character limits are:
 
 | Field | Max length |
 |-------|-----------|
@@ -330,7 +330,7 @@ When `session_end_snapshot` is omitted or null, behavior and response are identi
 When `merge_mode` is `"preserve"`, the service inspects the raw JSON body to determine per-field intent:
 
 - **Required list fields** (`top_priorities`, `active_concerns`, `active_constraints`, `open_loops`, `drift_signals`): `[]` in JSON → preserve stored value; non-empty → override.
-- **Optional list fields** (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `trailing_notes`, `curiosity_queue`, `negative_decisions`, `rationale_entries`): absent → preserve; `[]` → override to empty; `null` → clear; non-empty → override.
+- **Optional list fields** (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `trailing_notes`, `curiosity_queue`, `negative_decisions`, `rationale_entries`, `related_documents`): absent → preserve; `[]` → override to empty; `null` → clear; non-empty → override.
 - **Optional object fields** (`relationship_model`, `retrieval_hints`): absent → preserve; `null` → clear; present → override.
 - **Capsule-level fields** (`attention_policy`, `freshness`, `canonical_sources`, `metadata`, `stable_preferences`): absent → preserve; `null` → clear to type-appropriate empty; present → override.
 - **`thread_descriptor`**: absent → preserve entire stored descriptor; `null` → clear; present → merge sub-fields (`keywords`, `scope_anchors`, `identity_anchors` are individually merge-eligible).
