@@ -340,10 +340,18 @@ def _ensure_metadata_minimums(tools: list[dict[str, Any]]) -> None:
             raise ValueError(f"tool input schema must be an object for {name}")
         if schema.get("type") != "object":
             raise ValueError(f"tool input schema must declare type=object for {name}")
-        if not isinstance(schema.get("properties", {}), dict):
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
             raise ValueError(f"tool input schema must define properties for {name}")
-        if "required" in schema and not isinstance(schema.get("required"), list):
+        required = schema.get("required", [])
+        if "required" in schema and not isinstance(required, list):
             raise ValueError(f"tool input schema required must be a list for {name}")
+        if isinstance(required, list):
+            for field_name in required:
+                if not isinstance(field_name, str):
+                    raise ValueError(f"tool input schema required entries must be strings for {name}")
+                if field_name not in properties:
+                    raise ValueError(f"tool input schema required field must exist in properties for {name}: {field_name}")
 
 
 def _tools_list_result(tools: list[dict[str, Any]]) -> dict[str, Any]:

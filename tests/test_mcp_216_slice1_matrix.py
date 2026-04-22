@@ -58,38 +58,40 @@ EXPECTED_MATRIX = [
     _row(
         "transport.jsonrpc_envelope",
         "slice_1",
-        "partially_converged",
+        "converged",
         (
-            "Single-request JSON-RPC exists, but FastAPI returns 422 on parse failure, "
-            "batches are accepted, request-id validation is loose, and error payload "
-            "shapes and messages diverge. The hardened `#216` body also leaves an "
-            "internal tension because this is the only `slice_1` row while slice 1 "
-            "remains audit-only."
+            "`POST /v1/mcp` now enforces the hardened JSON-RPC envelope exactly: "
+            "parse failures use `400/-32700`, top-level non-object and batch bodies "
+            "reject with the exact invalid-request reasons, request ids are limited "
+            "to strings or integers, `notifications/initialized` is notification-only "
+            "with `204` success, and unknown methods use method-not-found before "
+            "bootstrap gating. The hardened `#216` body still leaves an internal "
+            "tension because this is the only `slice_1` row while slice 1 remains "
+            "audit-only."
         ),
         (
             "Match the hardened `#216` body exactly: this row remains `slice_1` even "
             "though slice 1 is audit-only, and exact envelope closure is still a "
             "`#216` completion requirement. The audit records that tension explicitly "
             "instead of rewriting follow-up semantics; the exact envelope rules remain "
-            "one JSON object only, no batches, exact 400 or 200 or 204 mapping, exact "
-            "id validation, exact error data, and method-not-found precedence."
+            "one JSON object only, no batches, exact `400` or `200` or `204` mapping, "
+            "exact id validation, exact error data, and method-not-found precedence."
         ),
-        "intentionally_deferred",
+        "none",
         "implemented",
     ),
     _row(
         "transport.post_v1_mcp_endpoint",
         "slice_2",
-        "partially_converged",
+        "converged",
         (
             "`POST /v1/mcp` is the only MCP request endpoint that can succeed, and "
-            "the slice-2 runtime now applies the hardened bootstrap, auth, origin, "
-            "and method/error mapping rules. Exact JSON-RPC envelope closure still "
-            "remains tracked separately in `transport.jsonrpc_envelope`."
+            "the current runtime now applies the exact hardened `#216` envelope, "
+            "bootstrap, auth, origin, and method/error handling rules on that endpoint."
         ),
         "`POST /v1/mcp` is the only MCP request endpoint that may succeed, and it must apply the exact `#216` envelope, bootstrap, auth, and error rules.",
-        "intentionally_deferred",
-        "transport.jsonrpc_envelope",
+        "none",
+        "implemented",
     ),
     _row(
         "transport.get_v1_mcp_behavior",
@@ -290,11 +292,17 @@ EXPECTED_MATRIX = [
     _row(
         "tools.list.metadata_minimum",
         "slice_2",
-        "partially_converged",
-        "Tool objects already carry `name`, `description`, `inputSchema`, and `metadata`, but slice-2 acceptance has not been tightened against every callable argument contract.",
+        "converged",
+        (
+            "Every returned tool now has a unique callable name, a specific "
+            "non-placeholder description, and an object `inputSchema` mirrored "
+            "from the callable runtime contract; required fields are declared in "
+            "`required`, and the MCP `tools/list` response exposes the same "
+            "schemas used for request validation."
+        ),
         "Every returned tool must have a unique callable name, a non-placeholder description, and an `inputSchema` that represents all accepted arguments and required fields.",
-        "intentionally_deferred",
-        "slice_2",
+        "none",
+        "implemented",
     ),
     _row(
         "tools.list.pagination",
