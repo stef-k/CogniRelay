@@ -97,6 +97,7 @@ from app.continuity.validation import (
     _normalize_capsule_fields,
     _normalize_compare_payload,
     _require_utc_timestamp,
+    _sanitize_related_documents_on_read,
     _strip_service_managed_descriptor_fields,
     _strip_verification_fields_for_upsert,
     _upgrade_legacy_structured_entry_timestamps,
@@ -113,6 +114,7 @@ from app.continuity.compare import (
 from app.continuity.persistence import (
     _delete_commit_message,
     _load_archive_envelope,
+    _load_archive_envelope_with_warnings,
     _load_capsule_with_warnings,
     _load_capsule,
     _load_fallback_envelope_payload,
@@ -2150,7 +2152,7 @@ def continuity_cold_store_service(
 
     if not archive_path.exists() or not archive_path.is_file():
         raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
-    envelope = _load_archive_envelope(repo_root, source_archive_path)
+    envelope, related_document_warnings = _load_archive_envelope_with_warnings(repo_root, source_archive_path)
     capsule = envelope["capsule"]
     with _continuity_subject_lock(
         repo_root=repo_root,
@@ -2167,7 +2169,7 @@ def continuity_cold_store_service(
             raise HTTPException(status_code=409, detail=f"Continuity archive envelope changed during cold-store: {exc.filename or exc}") from exc
 
         try:
-            envelope = _load_archive_envelope(repo_root, source_archive_path)
+            envelope, related_document_warnings = _load_archive_envelope_with_warnings(repo_root, source_archive_path)
             if _archive_rel_path_from_envelope(envelope) != source_archive_path:
                 raise HTTPException(status_code=400, detail="Continuity archive envelope identity does not match source_archive_path")
             # Crash recovery: if both archive and cold artifacts exist,
@@ -2246,7 +2248,7 @@ def continuity_cold_store_service(
         "durable": True,
         "latest_commit": gm.latest_commit(),
         "warnings": [],
-        "recovery_warnings": [],
+        "recovery_warnings": related_document_warnings,
     }
 
 
@@ -2294,7 +2296,9 @@ def continuity_cold_rehydrate_service(
                 # before deleting cold files and committing. ---
                 if cold_payload_file.exists() or cold_stub_file.exists():
                     try:
-                        _check_envelope = _load_archive_envelope(repo_root, source_archive_path)
+                        _check_envelope, _related_document_warnings = _load_archive_envelope_with_warnings(
+                            repo_root, source_archive_path
+                        )
                         if _archive_rel_path_from_envelope(_check_envelope) == source_archive_path:
                             cold_payload_file.unlink(missing_ok=True)
                             cold_stub_file.unlink(missing_ok=True)
@@ -2328,6 +2332,9 @@ def continuity_cold_rehydrate_service(
                                         "Crash recovery completed on disk but git commit failed; state is not yet durable",
                                     ),
                                 )
+                            _rh_recovery_warning_codes = [
+                                warning["code"] for warning in _rh_warnings if isinstance(warning.get("code"), str)
+                            ]
                             return {
                                 "ok": True,
                                 "artifact_state": "archived",
@@ -2340,7 +2347,7 @@ def continuity_cold_rehydrate_service(
                                 "durable": _rh_recovery_committed,
                                 "latest_commit": gm.latest_commit(),
                                 "warnings": _rh_warnings,
-                                "recovery_warnings": _rh_warnings,
+                                "recovery_warnings": [*_rh_recovery_warning_codes, *_related_document_warnings],
                             }
                     except Exception:
                         _logger.warning(
@@ -2359,7 +2366,9 @@ def continuity_cold_rehydrate_service(
             if payload.get("schema_version") not in CONTINUITY_SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
                 raise ValueError("wrong schema_version")
             raw_capsule = payload.get("capsule") or {}
-            upgraded_capsule = _upgrade_legacy_structured_entry_timestamps(raw_capsule)
+            upgraded_capsule, related_document_warnings = _sanitize_related_documents_on_read(
+                _upgrade_legacy_structured_entry_timestamps(raw_capsule)
+            )
             capsule = ContinuityCapsule.model_validate(
                 upgraded_capsule
             ).model_dump(mode="json", exclude_none=True)
@@ -2445,7 +2454,7 @@ def continuity_cold_rehydrate_service(
         "durable": True,
         "latest_commit": gm.latest_commit(),
         "warnings": [],
-        "recovery_warnings": [],
+        "recovery_warnings": related_document_warnings,
     }
 
 
