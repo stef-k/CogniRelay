@@ -544,7 +544,7 @@ def context_retrieve_service(
     auth.require("search")
     core_memory = _load_core_memory(repo_root, auth)
     continuity_state = build_continuity_state(repo_root=repo_root, auth=auth, req=req, now=now)
-    mixed_retrieval = _assemble_mixed_retrieval_bundle(repo_root=repo_root, auth=auth, req=req, now=now)
+    _assemble_mixed_retrieval_bundle(repo_root=repo_root, auth=auth, req=req, now=now)
     index_health = _index_health(repo_root, now)
     if index_health == "missing":
         recent = _raw_scan_recent_relevant(repo_root, auth, req)
@@ -575,7 +575,6 @@ def context_retrieve_service(
         "open_questions": open_questions[:5],
         "token_budget_hint": continuity_state["budget"]["token_budget_hint"],
         "time_window_days": req.time_window_days,
-        "mixed_retrieval": mixed_retrieval,
         "notes": [
             "For best continuity, run /v1/index/rebuild before retrieve if many files changed.",
             "Use include_types to reduce noise (e.g. ['journal_entry','messages']).",

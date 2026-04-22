@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,48 +179,120 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
         )
         self.assertEqual(result["search_hits"], [])
 
-    def test_context_retrieve_surfaces_mixed_retrieval_bundle(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            repo_root = Path(td)
-            req = ContextRetrieveRequest(task="unused", subject_kind="thread", subject_id="thread-abc")
+    def test_phase_2_continues_after_early_read_exception(self) -> None:
+        req = ContextRetrieveRequest(task="unused", subject_kind="thread", subject_id="thread-abc")
+        capsule = {
+            "subject_kind": "thread",
+            "subject_id": "thread-abc",
+            "continuity": {
+                "related_documents": [
+                    {"path": "docs/specs/thread-abc.md", "kind": "spec", "label": "Spec"},
+                    {"path": "docs/notes/thread-abc.md", "kind": "note", "label": "Notes"},
+                ]
+            },
+        }
 
-            with (
-                patch("app.context.service._load_core_memory", return_value=[]),
-                patch(
-                    "app.context.service.build_continuity_state",
-                    return_value={
-                        "present": False,
-                        "requested_selectors": [],
-                        "omitted_selectors": [],
-                        "capsules": [],
-                        "selection_order": [],
-                        "budget": {"token_budget_hint": "normal"},
-                        "warnings": [],
-                        "fallback_used": False,
-                        "recovery_warnings": [],
-                        "trust_signals": None,
-                        "salience_metadata": None,
-                    },
-                ),
-                patch("app.context.service._index_health", return_value="healthy"),
-                patch("app.context.service.search_index", return_value=[]),
-                patch(
-                    "app.context.service._assemble_mixed_retrieval_bundle",
-                    return_value={"continuity": [], "supporting_documents": [], "search_hits": []},
-                ),
-            ):
-                result = context_retrieve_service(
-                    repo_root=repo_root,
-                    auth=_AuthStub(),
-                    req=req,
-                    now=datetime.now(timezone.utc),
-                    audit=lambda *_args, **_kwargs: None,
-                )
+        def _fake_read_file_service(**kwargs: object) -> dict[str, object]:
+            path = kwargs["path"]
+            if path == "docs/specs/thread-abc.md":
+                raise RuntimeError("transient read failure")
+            return {"ok": True, "path": path, "content": f"content for {path}"}
+
+        with (
+            patch("app.context.service.continuity_read_service", return_value={"ok": True, "capsule": capsule}),
+            patch("app.context.service.read_file_service", side_effect=_fake_read_file_service),
+            patch("app.context.service.search_service", return_value={"ok": True, "results": []}),
+        ):
+            result = _assemble_mixed_retrieval_bundle(
+                repo_root=Path("."),
+                auth=_AuthStub(),
+                req=req,
+                now=datetime.now(timezone.utc),
+            )
 
         self.assertEqual(
-            result["bundle"]["mixed_retrieval"],
-            {"continuity": [], "supporting_documents": [], "search_hits": []},
+            result["supporting_documents"],
+            [
+                {
+                    "ok": True,
+                    "path": "docs/notes/thread-abc.md",
+                    "content": "content for docs/notes/thread-abc.md",
+                }
+            ],
         )
+
+    def test_phase_3_uses_degraded_normal_search_results_without_gating_on_ok(self) -> None:
+        req = ContextRetrieveRequest(task="unused", subject_kind="thread", subject_id="thread-abc")
+
+        with (
+            patch("app.context.service.continuity_read_service", side_effect=HTTPException(status_code=404, detail="File not found")),
+            patch(
+                "app.context.service.search_service",
+                return_value={
+                    "ok": False,
+                    "warning": "index temporarily stale",
+                    "results": [
+                        {"path": "docs/specs/thread-abc.md", "score": 2.0, "warning": "stale"},
+                        {"path": "docs/notes/thread-abc.md", "score": 1.0},
+                    ],
+                },
+            ),
+        ):
+            result = _assemble_mixed_retrieval_bundle(
+                repo_root=Path("."),
+                auth=_AuthStub(),
+                req=req,
+                now=datetime.now(timezone.utc),
+            )
+
+        self.assertEqual(
+            result["search_hits"],
+            [
+                {"path": "docs/specs/thread-abc.md", "score": 2.0, "warning": "stale"},
+                {"path": "docs/notes/thread-abc.md", "score": 1.0},
+            ],
+        )
+
+    def test_context_retrieve_keeps_mixed_retrieval_internal_only(self) -> None:
+        req = ContextRetrieveRequest(task="unused", subject_kind="thread", subject_id="thread-abc")
+        continuity_state = {
+            "present": False,
+            "requested_selectors": [],
+            "omitted_selectors": [],
+            "capsules": [],
+            "selection_order": [],
+            "budget": {"token_budget_hint": "normal"},
+            "warnings": [],
+            "fallback_used": False,
+            "recovery_warnings": [],
+            "trust_signals": None,
+            "salience_metadata": None,
+        }
+
+        with (
+            patch("app.context.service._load_core_memory", return_value=[]),
+            patch("app.context.service.build_continuity_state", return_value=continuity_state),
+            patch("app.context.service._index_health", return_value="healthy"),
+            patch("app.context.service.search_index", return_value=[]),
+            patch("app.context.service._assemble_mixed_retrieval_bundle") as mixed_retrieval_mock,
+        ):
+            now = datetime.now(timezone.utc)
+            auth = _AuthStub()
+            result = context_retrieve_service(
+                repo_root=Path("."),
+                auth=auth,
+                req=req,
+                now=now,
+                audit=lambda *_args, **_kwargs: None,
+            )
+
+        mixed_retrieval_mock.assert_called_once_with(
+            repo_root=Path("."),
+            auth=auth,
+            req=req,
+            now=now,
+        )
+        self.assertNotIn("mixed_retrieval", result["bundle"])
 
 
 if __name__ == "__main__":
