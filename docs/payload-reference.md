@@ -31,10 +31,11 @@ Total: **~94 distinct fields** across all nested objects.
 
 | Area | Items | Max chars per item |
 |------|-------|--------------------|
-| ContinuityState lists (6 required) | 5 each = 30 strings | no per-item limit |
+| ContinuityState required lists | `top_priorities` 8, `active_concerns` 5, `active_constraints` 8, `open_loops` 8, `drift_signals` 5 = 34 strings | no per-item limit |
 | ContinuityState optional lists (5) | 3–5 each = 23 strings | no per-item limit |
 | `negative_decisions` | 4 × (160 + 240) = 1,600 chars | structured |
-| `rationale_entries` | 6 × (80 + 240 + 400 + 3×160 + 3×120 + 80) = ~7,680 chars | structured |
+| `rationale_entries` | 6 × (80 + 320 + 560 + 3×160 + 3×120 + 80) = ~10,800 chars | structured |
+| `related_documents` | 8 × (240 + 32 + 120 + 32) = ~3,392 chars | structured metadata |
 | `stable_preferences` | 12 × (80 + 240) = 3,840 chars | structured |
 | `stance_summary` | 1 string | 240 chars |
 | `relationship_model` lists (2) | 5 each = 10 strings | no per-item limit |
@@ -64,8 +65,8 @@ The system is designed so that a fully-populated capsule with practical content 
 
 | Section | ~Tokens | Fields | Notes |
 |---------|---------|--------|-------|
-| Core orientation (6 required lists + `stance_summary`) | ~670 | 31 strings + 1 scalar | Always present — the essential orientation |
-| Optional lists (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `negative_decisions`, `trailing_notes`, `curiosity_queue`, `rationale_entries`) | ~1,400–2,800 | 27 strings + 4+6 objects | Trimmed first under token pressure; upper bound assumes all `rationale_entries` slots fully populated |
+| Core orientation (5 required lists + `stance_summary`) | ~760 | 34 strings + 1 scalar | Always present — the essential orientation |
+| Optional lists (`working_hypotheses`, `long_horizon_commitments`, `session_trajectory`, `negative_decisions`, `trailing_notes`, `curiosity_queue`, `rationale_entries`, `related_documents`) | ~1,500–3,300 | 27 strings + 4+6+8 objects | Trimmed first under token pressure; upper bound assumes all `rationale_entries` and `related_documents` slots fully populated |
 | `retrieval_hints` (`must_include`, `avoid`, `load_next`) | ~270 | up to 24 strings | Dropped early in trim order |
 | `relationship_model` (`trust_level`, `preferred_style`, `sensitivity_notes`) | ~200 | up to 11 fields | Dropped early in trim order |
 | `attention_policy` (`early_load`, `presence_bias_overrides`) | ~175 | up to 13 strings | |
@@ -107,8 +108,8 @@ Most list item strings in `ContinuityState` do not have a per-item character lim
 | `negative_decisions[].decision` | 160 chars |
 | `negative_decisions[].rationale` | 240 chars |
 | `rationale_entries[].tag` | 80 chars |
-| `rationale_entries[].summary` | 240 chars |
-| `rationale_entries[].reasoning` | 400 chars |
+| `rationale_entries[].summary` | 320 chars |
+| `rationale_entries[].reasoning` | 560 chars |
 | `rationale_entries[].alternatives_considered[]` | 160 chars |
 | `rationale_entries[].depends_on[]` | 120 chars |
 | `conflict_summary` (in `verification_state`) | 240 chars |
@@ -187,10 +188,10 @@ These are the core orientation fields that an agent writes to preserve working s
 
 | Field | Type | Required | Constraints | Purpose |
 |-------|------|----------|-------------|---------|
-| `top_priorities` | list of strings | yes | max 5 | What matters most right now |
+| `top_priorities` | list of strings | yes | max 8 | What matters most right now |
 | `active_concerns` | list of strings | yes | max 5 | Active worries or risks |
-| `active_constraints` | list of strings | yes | max 5 | Hard boundaries on action |
-| `open_loops` | list of strings | yes | max 5 | Unresolved questions or pending items |
+| `active_constraints` | list of strings | yes | max 8 | Hard boundaries on action |
+| `open_loops` | list of strings | yes | max 8 | Unresolved questions or pending items |
 | `stance_summary` | string | yes | max 240 chars | Current direction in one sentence |
 | `drift_signals` | list of strings | yes | max 5 | Signs that orientation may be shifting |
 | `working_hypotheses` | list of strings | no | max 5, default `[]` | Current best-guess assumptions |
@@ -200,6 +201,7 @@ These are the core orientation fields that an agent writes to preserve working s
 | `trailing_notes` | list of strings | no | max 3, default `[]` | Low-priority context worth preserving |
 | `curiosity_queue` | list of strings | no | max 5, default `[]` | Questions to revisit later |
 | `rationale_entries` | list of RationaleEntry | no | max 6, default `[]` | Decision rationale, assumptions, and unresolved tensions |
+| `related_documents` | list of structured metadata objects | no | max 8, default omitted | Bounded repo-relative document references; see discovery schema for the exact entry shape |
 | `relationship_model` | ContinuityRelationshipModel | no | | Relationship-specific hints |
 | `retrieval_hints` | ContinuityRetrievalHints | no | | Preferences for what to load next |
 
@@ -214,8 +216,8 @@ One bounded, agent-authored decision rationale or unresolved tension. Tags must 
 | `tag` | string | yes | 1–80 chars, unique within the list |
 | `kind` | `"decision"` \| `"assumption"` \| `"tension"` | yes | |
 | `status` | `"active"` \| `"superseded"` \| `"retired"` | yes | |
-| `summary` | string | yes | 1–240 chars |
-| `reasoning` | string | yes | 1–400 chars |
+| `summary` | string | yes | 1–320 chars |
+| `reasoning` | string | yes | 1–560 chars |
 | `alternatives_considered` | list of strings | no | max 3 items, each 1–160 chars |
 | `depends_on` | list of strings | no | max 3 items, each 1–120 chars |
 | `supersedes` | string | no | max 80 chars. Must reference a tag in the same list with `status: "superseded"` |
@@ -300,9 +302,9 @@ When `session_end_snapshot` is provided, the server merges its fields into `caps
 
 | Field | Type | Required | Maps to | Override behavior |
 |-------|------|----------|---------|-------------------|
-| `open_loops` | list of strings (max 5, each ≤ 160 chars) | yes | `capsule.continuity.open_loops` | Always overrides |
-| `top_priorities` | list of strings (max 5, each ≤ 160 chars) | yes | `capsule.continuity.top_priorities` | Always overrides |
-| `active_constraints` | list of strings (max 5, each ≤ 160 chars) | yes | `capsule.continuity.active_constraints` | Always overrides |
+| `open_loops` | list of strings (max 8, each ≤ 160 chars) | yes | `capsule.continuity.open_loops` | Always overrides |
+| `top_priorities` | list of strings (max 8, each ≤ 160 chars) | yes | `capsule.continuity.top_priorities` | Always overrides |
+| `active_constraints` | list of strings (max 8, each ≤ 160 chars) | yes | `capsule.continuity.active_constraints` | Always overrides |
 | `stance_summary` | string (≤ 240 chars) | yes | `capsule.continuity.stance_summary` | Always overrides |
 | `negative_decisions` | list of NegativeDecision (max 4) | no | `capsule.continuity.negative_decisions` | `null` = preserve capsule value; explicit value = override |
 | `session_trajectory` | list of strings (max 5, each ≤ 80 chars) | no | `capsule.continuity.session_trajectory` | `null` = preserve capsule value; explicit value = override |

@@ -432,11 +432,11 @@ def _validate_low_commitment_fields(capsule: ContinuityCapsule) -> None:
             raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].tag")
         if len(entry.summary) < 1:
             raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].summary")
-        if len(entry.summary) > 240:
+        if len(entry.summary) > 320:
             raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].summary")
         if len(entry.reasoning) < 1:
             raise HTTPException(status_code=400, detail="Value too short in continuity.rationale_entries[].reasoning")
-        if len(entry.reasoning) > 400:
+        if len(entry.reasoning) > 560:
             raise HTTPException(status_code=400, detail="Value too long in continuity.rationale_entries[].reasoning")
         for alt in list(entry.alternatives_considered):
             if len(alt) < 1:

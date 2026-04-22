@@ -416,15 +416,11 @@ class TestValidateRationaleEntries(unittest.TestCase):
             self.assertIn("Duplicate", str(ctx.exception.detail))
 
     def test_summary_too_long_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            payload = _base_capsule_payload(rationale_entries=[
-                _sample_entry(summary="x" * 241),
-            ])
-            capsule = ContinuityCapsule(**payload)
-            with self.assertRaises(HTTPException) as ctx:
-                _validate_capsule(Path(td), capsule)
-            self.assertEqual(ctx.exception.status_code, 400)
-            self.assertIn("too long", str(ctx.exception.detail).lower())
+        payload = _base_capsule_payload(rationale_entries=[
+            _sample_entry(summary="x" * 321),
+        ])
+        with self.assertRaises(ValidationError):
+            ContinuityCapsule(**payload)
 
     def test_summary_empty_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -438,15 +434,11 @@ class TestValidateRationaleEntries(unittest.TestCase):
             self.assertIn("too short", str(ctx.exception.detail).lower())
 
     def test_reasoning_too_long_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            payload = _base_capsule_payload(rationale_entries=[
-                _sample_entry(reasoning="x" * 401),
-            ])
-            capsule = ContinuityCapsule(**payload)
-            with self.assertRaises(HTTPException) as ctx:
-                _validate_capsule(Path(td), capsule)
-            self.assertEqual(ctx.exception.status_code, 400)
-            self.assertIn("too long", str(ctx.exception.detail).lower())
+        payload = _base_capsule_payload(rationale_entries=[
+            _sample_entry(reasoning="x" * 561),
+        ])
+        with self.assertRaises(ValidationError):
+            ContinuityCapsule(**payload)
 
     def test_reasoning_empty_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -606,20 +598,20 @@ class TestValidateRationaleEntries(unittest.TestCase):
     def test_max_length_summary_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             payload = _base_capsule_payload(rationale_entries=[
-                _sample_entry(summary="s" * 240),
+                _sample_entry(summary="s" * 320),
             ])
             capsule = ContinuityCapsule(**payload)
             result, _ = _validate_capsule(Path(td), capsule)
-            self.assertEqual(len(result["continuity"]["rationale_entries"][0]["summary"]), 240)
+            self.assertEqual(len(result["continuity"]["rationale_entries"][0]["summary"]), 320)
 
     def test_max_length_reasoning_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             payload = _base_capsule_payload(rationale_entries=[
-                _sample_entry(reasoning="r" * 400),
+                _sample_entry(reasoning="r" * 560),
             ])
             capsule = ContinuityCapsule(**payload)
             result, _ = _validate_capsule(Path(td), capsule)
-            self.assertEqual(len(result["continuity"]["rationale_entries"][0]["reasoning"]), 400)
+            self.assertEqual(len(result["continuity"]["rationale_entries"][0]["reasoning"]), 560)
 
     def test_max_length_alternative_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as td:
