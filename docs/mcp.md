@@ -132,14 +132,14 @@ This means MCP is not a separate permission system. It is a protocol wrapper ove
 
 ## Response Shape
 
-For most tools, `tools/call` returns:
+Successful `tools/call` requests return:
 
 - `content`
 - `structuredContent`
 
-Clients should treat `structuredContent` as the authoritative machine-readable payload for those non-help tools.
+Clients should treat `structuredContent` as the authoritative machine-readable payload for those tool results.
 
-The five `#214` slice-2 MCP help tools are the explicit exception:
+The five slice-3 MCP help/reference surfaces are separate request methods, not tools:
 
 - `system.help`
 - `system.tool_usage`
@@ -147,7 +147,12 @@ The five `#214` slice-2 MCP help tools are the explicit exception:
 - `system.hook_guide`
 - `system.error_guide`
 
-Successful calls to those help tools return the exact corresponding HTTP help JSON body directly at top-level JSON-RPC `result`, with no `structuredContent`, no nested content wrapper, and no extra success wrapper fields inside `result`.
+Successful calls to those methods return top-level JSON-RPC `result` objects containing exactly:
+
+- `content`
+- `structuredContent`
+
+Each `structuredContent` payload includes the canonical `httpEquivalent` help path plus the method-specific fields required by `#216`.
 
 ## Error Behavior
 

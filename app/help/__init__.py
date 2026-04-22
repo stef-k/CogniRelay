@@ -7,9 +7,9 @@ from .service import (
     help_tool_payload,
     help_topic_payload,
     is_forbidden_help_alias_path,
-    is_mcp_help_tool,
-    mcp_help_tool_definitions,
-    resolve_mcp_help_tool_call,
+    is_mcp_help_method,
+    mcp_help_method_names,
+    resolve_mcp_help_method,
 )
 
 __all__ = [
@@ -19,7 +19,7 @@ __all__ = [
     "help_tool_payload",
     "help_topic_payload",
     "is_forbidden_help_alias_path",
-    "is_mcp_help_tool",
-    "mcp_help_tool_definitions",
-    "resolve_mcp_help_tool_call",
+    "is_mcp_help_method",
+    "mcp_help_method_names",
+    "resolve_mcp_help_method",
 ]
