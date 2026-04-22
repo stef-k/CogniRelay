@@ -1,7 +1,6 @@
 """Normative runtime tests for #216 slice 2 MCP behavior."""
 
 from __future__ import annotations
-
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import AuthContext
 from app.config import Settings
+from app.discovery.service import tool_catalog
 from app.main import app
 from app.mcp.service import reset_bootstrap_state
 from tests.helpers import SimpleGitManagerStub
@@ -48,6 +48,10 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
             audit_log_enabled=False,
         )
 
+    def _schema_for_model(self, model_cls):
+        """Mirror the app's tool-schema generation for exact catalog comparisons."""
+        return model_cls.model_json_schema()
+
     def _bootstrap(self, *, headers: dict[str, str] | None = None) -> None:
         """Advance the MCP bootstrap flow to the ready state."""
         headers = dict(headers or {})
@@ -79,7 +83,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         """Invalid JSON must return the exact parse-error mapping."""
         response = self.client.post(
             "/v1/mcp",
-            data="{",
+            content="{",
             headers={"content-type": "application/json"},
         )
         self.assertEqual(response.status_code, 400)
@@ -112,6 +116,123 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 },
             },
         )
+
+    def test_post_envelope_invalid_shapes_use_exact_invalid_request_mapping(self) -> None:
+        """Envelope-invalid top-level, jsonrpc, method, and id branches must stay exact."""
+        cases = [
+            (
+                {"jsonrpc": "2.0"},
+                {"reason": "method must be a string"},
+            ),
+            (
+                {"jsonrpc": "2.0", "method": "ping"},
+                {"reason": "id is required for this method"},
+            ),
+            (
+                {"jsonrpc": "2.0", "id": None, "method": "ping"},
+                {"reason": "id must be a string or integer"},
+            ),
+            (
+                {"jsonrpc": "2.0", "id": False, "method": "ping"},
+                {"reason": "id must be a string or integer"},
+            ),
+            (
+                {"jsonrpc": "2.0", "id": 1.5, "method": "ping"},
+                {"reason": "id must be a string or integer"},
+            ),
+            (
+                {"jsonrpc": "1.0", "id": 1, "method": "ping"},
+                {"reason": 'jsonrpc must be exactly "2.0"'},
+            ),
+            (
+                {"id": 1, "method": "ping"},
+                {"reason": 'jsonrpc must be exactly "2.0"'},
+            ),
+            (
+                {"jsonrpc": "2.0", "id": 1, "method": 7},
+                {"reason": "method must be a string"},
+            ),
+            (
+                {"jsonrpc": "2.0", "id": 1, "method": "notifications/initialized"},
+                {"reason": "notifications/initialized is notification-only"},
+            ),
+        ]
+
+        scalar_body = self.client.post("/v1/mcp", content="5", headers={"content-type": "application/json"})
+        self.assertEqual(scalar_body.status_code, 400)
+        self.assertEqual(
+            scalar_body.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32600,
+                    "message": "Invalid Request",
+                    "data": {"reason": "request body must be a JSON object"},
+                },
+            },
+        )
+
+        for request_id, (payload, error_data) in enumerate(cases, start=120):
+            with self.subTest(payload=payload):
+                response = self.client.post("/v1/mcp", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32600,
+                            "message": "Invalid Request",
+                            "data": error_data,
+                        },
+                    },
+                )
+
+    def test_unknown_method_uses_method_not_found_before_bootstrap_gating(self) -> None:
+        """Unknown methods must preserve method-not-found precedence in every bootstrap phase."""
+        headers = {"authorization": self._CALLER_A_AUTH}
+
+        pre_initialize = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 130, "method": "tools/missing", "params": {}},
+            headers=headers,
+        )
+        self.assertEqual(pre_initialize.status_code, 200)
+        self.assertEqual(
+            pre_initialize.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 130,
+                "error": {
+                    "code": -32601,
+                    "message": "Method not found",
+                    "data": {"method": "tools/missing"},
+                },
+            },
+        )
+
+        initialize = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 131,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            },
+            headers=headers,
+        )
+        self.assertEqual(initialize.status_code, 200)
+
+        post_initialize = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 132, "method": "tools/missing", "params": {}},
+            headers=headers,
+        )
+        self.assertEqual(post_initialize.status_code, 200)
+        self.assertEqual(post_initialize.json()["error"]["code"], -32601)
+        self.assertEqual(post_initialize.json()["error"]["data"], {"method": "tools/missing"})
 
     def test_post_origin_validation_rejects_non_loopback_origin(self) -> None:
         """A present non-loopback Origin must be denied before method dispatch."""
@@ -300,6 +421,43 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         self.assertEqual(payload["id"], 13)
         self.assertEqual(list(payload["result"].keys()), ["tools"])
         self.assertNotIn("nextCursor", payload["result"])
+
+    def test_tools_list_metadata_matches_callable_runtime_contract(self) -> None:
+        """tools/list metadata must mirror the exact callable MCP tool contract."""
+        headers = {"authorization": self._CALLER_A_AUTH}
+        self._bootstrap(headers=headers)
+
+        response = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 14, "method": "tools/list", "params": {}},
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        tools = response.json()["result"]["tools"]
+        expected_catalog = tool_catalog(self._schema_for_model)
+        expected_by_name = {tool["name"]: tool for tool in expected_catalog}
+
+        seen_names: set[str] = set()
+        placeholder_descriptions = {"", "tbd", "todo", "coming soon"}
+
+        for tool in tools:
+            name = tool["name"]
+            self.assertNotIn(name, seen_names)
+            seen_names.add(name)
+            self.assertIn(name, expected_by_name)
+            self.assertIsInstance(tool["description"], str)
+            self.assertTrue(tool["description"].strip())
+            self.assertNotIn(tool["description"].strip().lower(), placeholder_descriptions)
+            self.assertIsInstance(tool["inputSchema"], dict)
+            self.assertEqual(tool["inputSchema"].get("type"), "object")
+            self.assertIsInstance(tool["inputSchema"].get("properties", {}), dict)
+            required = tool["inputSchema"].get("required", [])
+            self.assertIsInstance(required, list)
+            self.assertTrue(all(isinstance(field, str) for field in required))
+            self.assertTrue(set(required).issubset(tool["inputSchema"].get("properties", {})))
+            self.assertEqual(tool["inputSchema"], expected_by_name[name]["input_schema"])
+
+        self.assertEqual(set(seen_names), set(expected_by_name))
 
     def test_tools_call_uses_exact_success_shape(self) -> None:
         """Successful non-help tools/call responses must expose only content and structuredContent."""
