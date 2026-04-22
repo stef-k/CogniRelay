@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import copy
+import tempfile
 import unittest
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
+from app.continuity.service import continuity_read_service, continuity_upsert_service
 from app.models import (
     ContextRetrieveRequest,
     ContinuityCapsule,
@@ -17,6 +21,7 @@ from app.models import (
 from app.runtime.hooks import (
     HookExecutionDependencies,
     HookLocalStep,
+    _changed_eligible_fields,
     execute_post_prompt_hook,
     execute_pre_compaction_or_handoff_hook,
     execute_pre_prompt_hook,
@@ -26,6 +31,15 @@ from app.runtime.hooks import (
 
 class _AuthStub:
     peer_id = "agent-alpha"
+
+    def require(self, _scope: str) -> None:
+        return None
+
+    def require_read_path(self, _path: str) -> None:
+        return None
+
+    def require_write_path(self, _path: str) -> None:
+        return None
 
 
 def _capsule_payload() -> dict:
@@ -86,6 +100,10 @@ def _capsule(**updates: object) -> ContinuityCapsule:
     return ContinuityCapsule.model_validate(payload)
 
 
+def _capsule_from_payload(payload: dict) -> ContinuityCapsule:
+    return ContinuityCapsule.model_validate(payload)
+
+
 def _snapshot() -> SessionEndSnapshot:
     return SessionEndSnapshot(
         open_loops=["verify handoff ordering"],
@@ -128,6 +146,29 @@ class _Recorder:
     def handoff_create(self, req: CoordinationHandoffCreateRequest, auth: object) -> dict:
         self.calls.append(("handoff_create", req))
         return {"ok": True, "handoff": {"recipient_peer": req.recipient_peer}}
+
+
+class _GitManagerStub:
+    def __init__(self, repo_root: Path | None = None) -> None:
+        self.repo_root = repo_root or Path(".")
+        self.commits: list[tuple[str, str]] = []
+
+    def latest_commit(self) -> str:
+        return "test-sha"
+
+    def commit_file(self, path: Path, message: str) -> bool:
+        self.commits.append((str(path), message))
+        return True
+
+
+def _noop_audit(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+def _make_dirs(root: Path) -> None:
+    (root / "memory" / "continuity").mkdir(parents=True, exist_ok=True)
+    (root / "memory" / "continuity" / "fallback").mkdir(parents=True, exist_ok=True)
+    (root / ".locks").mkdir(parents=True, exist_ok=True)
 
 
 class TestRuntime215Slice2Hooks(unittest.TestCase):
@@ -262,6 +303,26 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
         assert isinstance(upsert_req, ContinuityUpsertRequest)
         self.assertIsNotNone(upsert_req.session_end_snapshot)
 
+    def test_pre_compaction_uses_snapshot_when_only_snapshot_overlay_changed(self) -> None:
+        capsule = _capsule()
+
+        result = execute_pre_compaction_or_handoff_hook(
+            capsule=capsule,
+            session_end_snapshot=_snapshot(),
+            auth=self.auth,
+            deps=self.deps,
+        )
+
+        self.assertEqual(result.local_step, HookLocalStep.WROTE)
+        self.assertEqual(
+            result.changed_fields,
+            ["open_loops", "stance_summary", "session_trajectory"],
+        )
+        self.assertTrue(result.used_session_end_snapshot)
+        _, upsert_req = self.recorder.calls[-1]
+        assert isinstance(upsert_req, ContinuityUpsertRequest)
+        self.assertIsNotNone(upsert_req.session_end_snapshot)
+
     def test_pre_compaction_omits_snapshot_when_non_snapshot_eligible_field_changed(self) -> None:
         capsule = _capsule(
             continuity={
@@ -272,7 +333,6 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
 
         result = execute_pre_compaction_or_handoff_hook(
             capsule=capsule,
-            session_end_snapshot=_snapshot(),
             auth=self.auth,
             deps=self.deps,
         )
@@ -283,18 +343,146 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
         assert isinstance(upsert_req, ContinuityUpsertRequest)
         self.assertIsNone(upsert_req.session_end_snapshot)
 
-    def test_pre_compaction_omits_snapshot_when_lifecycle_changed(self) -> None:
-        capsule = _capsule(thread_descriptor={"lifecycle": "suspended"})
+    def test_post_prompt_exact_compare_distinguishes_omitted_from_null_after_first_write(self) -> None:
+        def read_with_null(req: ContinuityReadRequest, auth: object) -> dict:
+            self.recorder.calls.append(("continuity_read", req))
+            payload = copy.deepcopy(_capsule_payload())
+            payload["continuity"]["negative_decisions"] = None
+            return {
+                "ok": True,
+                "path": "memory/continuity/thread-issue-215.json",
+                "capsule": payload,
+                "archived": False,
+                "source_state": "active",
+                "recovery_warnings": [],
+                "trust_signals": {"status": "healthy"},
+            }
 
-        result = execute_pre_compaction_or_handoff_hook(
-            capsule=capsule,
-            session_end_snapshot=_snapshot(),
+        deps = HookExecutionDependencies(
+            continuity_read=read_with_null,
+            context_retrieve=self.recorder.context_retrieve,
+            continuity_upsert=self.recorder.continuity_upsert,
+            handoff_create=self.recorder.handoff_create,
+        )
+        payload = _capsule_payload()
+        payload["continuity"].pop("negative_decisions", None)
+
+        result = execute_post_prompt_hook(
+            capsule=_capsule_from_payload(payload),
+            auth=self.auth,
+            deps=deps,
+        )
+
+        self.assertEqual(result.local_step, HookLocalStep.WROTE)
+        self.assertEqual(result.changed_fields, ["negative_decisions"])
+
+    def test_post_prompt_exact_compare_distinguishes_omitted_from_empty_list_after_first_write(self) -> None:
+        payload = _capsule_payload()
+        payload.pop("stable_preferences", None)
+
+        result = execute_post_prompt_hook(
+            capsule=_capsule_from_payload(payload),
             auth=self.auth,
             deps=self.deps,
         )
 
-        self.assertEqual(result.changed_fields, ["thread_descriptor.lifecycle"])
-        self.assertFalse(result.used_session_end_snapshot)
+        self.assertEqual(result.local_step, HookLocalStep.WROTE)
+        self.assertEqual(result.changed_fields, ["stable_preferences"])
+
+    def test_exact_compare_distinguishes_empty_string_from_omitted_when_persisted_exists(self) -> None:
+        payload = _capsule_payload()
+        payload["continuity"]["stance_summary"] = ""
+        persisted = copy.deepcopy(_capsule_payload())
+        persisted["continuity"].pop("stance_summary", None)
+
+        changed_fields = _changed_eligible_fields(
+            _capsule_from_payload(payload),
+            persisted,
+        )
+
+        self.assertEqual(changed_fields, ["stance_summary"])
+
+    def test_pre_compaction_ignores_direct_lifecycle_delta_on_hook_surface(self) -> None:
+        capsule = _capsule(thread_descriptor={"lifecycle": "suspended"})
+
+        result = execute_pre_compaction_or_handoff_hook(
+            capsule=capsule,
+            auth=self.auth,
+            deps=self.deps,
+        )
+
+        self.assertEqual(result.changed_fields, [])
+        self.assertEqual(result.local_step, HookLocalStep.SKIPPED)
+        self.assertEqual([name for name, _ in self.recorder.calls], ["continuity_read"])
+
+    def test_pre_compaction_real_upsert_path_does_not_persist_direct_lifecycle_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _make_dirs(root)
+            auth = _AuthStub()
+            gm = _GitManagerStub(root)
+            seed_payload = _capsule_payload()
+            seed_payload["source"]["update_reason"] = "manual"
+            seed_payload["thread_descriptor"]["scope_anchors"] = ["thread:issue-215"]
+            candidate_payload = _capsule_payload()
+            candidate_payload["source"]["update_reason"] = "manual"
+            candidate_payload["updated_at"] = "2026-04-22T12:05:00Z"
+            candidate_payload["verified_at"] = "2026-04-22T12:05:00Z"
+            candidate_payload["thread_descriptor"]["scope_anchors"] = ["thread:issue-215"]
+            candidate_payload["thread_descriptor"]["lifecycle"] = "suspended"
+            candidate_payload["thread_descriptor"]["superseded_by"] = "thread-next"
+
+            continuity_upsert_service(
+                repo_root=root,
+                gm=gm,
+                auth=auth,
+                req=ContinuityUpsertRequest(
+                    subject_kind="thread",
+                    subject_id="issue-215",
+                    capsule=_capsule_from_payload(seed_payload),
+                ),
+                audit=_noop_audit,
+            )
+
+            deps = HookExecutionDependencies(
+                continuity_read=lambda req, auth_ctx: continuity_read_service(
+                    repo_root=root,
+                    auth=auth_ctx,
+                    req=req,
+                    now=datetime.now(timezone.utc),
+                    audit=_noop_audit,
+                ),
+                context_retrieve=self.recorder.context_retrieve,
+                continuity_upsert=lambda req, auth_ctx: continuity_upsert_service(
+                    repo_root=root,
+                    gm=gm,
+                    auth=auth_ctx,
+                    req=req,
+                    audit=_noop_audit,
+                ),
+                handoff_create=self.recorder.handoff_create,
+            )
+
+            result = execute_pre_compaction_or_handoff_hook(
+                capsule=_capsule_from_payload(candidate_payload),
+                auth=auth,
+                deps=deps,
+            )
+
+            self.assertEqual(result.local_step, HookLocalStep.SKIPPED)
+            stored = continuity_read_service(
+                repo_root=root,
+                auth=auth,
+                req=ContinuityReadRequest(
+                    subject_kind="thread",
+                    subject_id="issue-215",
+                    allow_fallback=True,
+                ),
+                now=datetime.now(timezone.utc),
+                audit=_noop_audit,
+            )
+            self.assertEqual(stored["capsule"]["thread_descriptor"]["lifecycle"], "active")
+            self.assertNotIn("superseded_by", stored["capsule"]["thread_descriptor"])
 
     def test_real_handoff_runs_after_explicit_local_skip(self) -> None:
         capsule = _capsule(continuity={"working_hypotheses": ["non-eligible only"]})
@@ -307,7 +495,6 @@ class TestRuntime215Slice2Hooks(unittest.TestCase):
 
         result = execute_pre_compaction_or_handoff_hook(
             capsule=capsule,
-            session_end_snapshot=_snapshot(),
             real_handoff=handoff,
             auth=self.auth,
             deps=self.deps,

@@ -26,9 +26,19 @@ _ELIGIBLE_FIELD_ORDER = (
     "session_trajectory",
     "rationale_entries",
     "stable_preferences",
-    "thread_descriptor.lifecycle",
-    "thread_descriptor.superseded_by",
 )
+_ELIGIBLE_FIELD_PATHS: dict[str, tuple[str, ...]] = {
+    "top_priorities": ("continuity", "top_priorities"),
+    "open_loops": ("continuity", "open_loops"),
+    "active_constraints": ("continuity", "active_constraints"),
+    "active_concerns": ("continuity", "active_concerns"),
+    "drift_signals": ("continuity", "drift_signals"),
+    "stance_summary": ("continuity", "stance_summary"),
+    "negative_decisions": ("continuity", "negative_decisions"),
+    "session_trajectory": ("continuity", "session_trajectory"),
+    "rationale_entries": ("continuity", "rationale_entries"),
+    "stable_preferences": ("stable_preferences",),
+}
 
 _SNAPSHOT_FIELD_SET = frozenset(
     {
@@ -72,63 +82,95 @@ class HookWriteResult:
     handoff_result: dict[str, Any] | None = None
 
 
-def _capsule_dict(capsule: ContinuityCapsule | dict[str, Any] | None) -> dict[str, Any] | None:
-    if capsule is None:
-        return None
-    if isinstance(capsule, dict):
-        return capsule
-    return capsule.model_dump(mode="json")
+_MISSING = object()
+_FIRST_WRITE_BASELINE: dict[str, Any] = {
+    "top_priorities": [],
+    "open_loops": [],
+    "active_constraints": [],
+    "active_concerns": [],
+    "drift_signals": [],
+    "stance_summary": "",
+    "negative_decisions": [],
+    "session_trajectory": [],
+    "rationale_entries": [],
+    "stable_preferences": [],
+}
 
 
-def _eligible_field_values(capsule: ContinuityCapsule | dict[str, Any] | None) -> dict[str, Any]:
-    payload = _capsule_dict(capsule)
-    if payload is None:
-        return {
-            "top_priorities": [],
-            "open_loops": [],
-            "active_constraints": [],
-            "active_concerns": [],
-            "drift_signals": [],
-            "stance_summary": "",
-            "negative_decisions": [],
-            "session_trajectory": [],
-            "rationale_entries": [],
-            "stable_preferences": [],
-            "thread_descriptor.lifecycle": None,
-            "thread_descriptor.superseded_by": None,
-        }
+def _compare_value(value: Any) -> Any:
+    if value is _MISSING or value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_compare_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _compare_value(item) for key, item in value.items()}
+    fields_set = getattr(value, "model_fields_set", None)
+    if isinstance(fields_set, set):
+        return {field_name: _compare_value(getattr(value, field_name)) for field_name in fields_set}
+    return value
 
-    continuity = payload.get("continuity")
-    if not isinstance(continuity, dict):
-        continuity = {}
-    thread_descriptor = payload.get("thread_descriptor")
-    if not isinstance(thread_descriptor, dict):
-        thread_descriptor = {}
-    return {
-        "top_priorities": list(continuity.get("top_priorities") or []),
-        "open_loops": list(continuity.get("open_loops") or []),
-        "active_constraints": list(continuity.get("active_constraints") or []),
-        "active_concerns": list(continuity.get("active_concerns") or []),
-        "drift_signals": list(continuity.get("drift_signals") or []),
-        "stance_summary": continuity.get("stance_summary", ""),
-        "negative_decisions": list(continuity.get("negative_decisions") or []),
-        "session_trajectory": list(continuity.get("session_trajectory") or []),
-        "rationale_entries": list(continuity.get("rationale_entries") or []),
-        "stable_preferences": list(payload.get("stable_preferences") or []),
-        "thread_descriptor.lifecycle": thread_descriptor.get("lifecycle"),
-        "thread_descriptor.superseded_by": thread_descriptor.get("superseded_by"),
-    }
+
+def _raw_field_value(payload: Any, field_name: str) -> Any:
+    current = payload
+    for part in _ELIGIBLE_FIELD_PATHS[field_name]:
+        if current is None:
+            return _MISSING
+        if isinstance(current, dict):
+            if part not in current:
+                return _MISSING
+            current = current[part]
+            continue
+        fields_set = getattr(current, "model_fields_set", None)
+        if isinstance(fields_set, set) and part not in fields_set:
+            return _MISSING
+        if not hasattr(current, part):
+            return _MISSING
+        current = getattr(current, part)
+    return _compare_value(current)
+
+
+def _baseline_normalized_value(field_name: str, raw_value: Any) -> Any:
+    baseline = _FIRST_WRITE_BASELINE[field_name]
+    if raw_value is _MISSING or raw_value is None:
+        return baseline
+    return raw_value
+
+
+def _effective_candidate(
+    capsule: ContinuityCapsule,
+    session_end_snapshot: SessionEndSnapshot | None,
+) -> ContinuityCapsule:
+    candidate = capsule.model_copy(deep=True)
+    if session_end_snapshot is None:
+        return candidate
+    candidate.continuity.open_loops = list(session_end_snapshot.open_loops)
+    candidate.continuity.top_priorities = list(session_end_snapshot.top_priorities)
+    candidate.continuity.active_constraints = list(session_end_snapshot.active_constraints)
+    candidate.continuity.stance_summary = session_end_snapshot.stance_summary
+    if session_end_snapshot.negative_decisions is not None:
+        candidate.continuity.negative_decisions = list(session_end_snapshot.negative_decisions)
+    if session_end_snapshot.session_trajectory is not None:
+        candidate.continuity.session_trajectory = list(session_end_snapshot.session_trajectory)
+    if session_end_snapshot.rationale_entries is not None:
+        candidate.continuity.rationale_entries = list(session_end_snapshot.rationale_entries)
+    return candidate
 
 
 def _changed_eligible_fields(
     candidate: ContinuityCapsule,
     persisted_capsule: dict[str, Any] | None,
+    session_end_snapshot: SessionEndSnapshot | None = None,
 ) -> list[str]:
-    candidate_values = _eligible_field_values(candidate)
-    persisted_values = _eligible_field_values(persisted_capsule)
+    effective_candidate = _effective_candidate(candidate, session_end_snapshot)
     changed_fields: list[str] = []
     for field_name in _ELIGIBLE_FIELD_ORDER:
-        if candidate_values[field_name] != persisted_values[field_name]:
+        candidate_value = _raw_field_value(effective_candidate, field_name)
+        if persisted_capsule is None:
+            if _baseline_normalized_value(field_name, candidate_value) != _FIRST_WRITE_BASELINE[field_name]:
+                changed_fields.append(field_name)
+            continue
+        persisted_value = _raw_field_value(persisted_capsule, field_name)
+        if candidate_value != persisted_value:
             changed_fields.append(field_name)
     return changed_fields
 
@@ -211,7 +253,7 @@ def execute_pre_compaction_or_handoff_hook(
 ) -> HookWriteResult:
     """Execute the canonical pre_compaction_or_handoff hook in closed order."""
     persisted_capsule = _last_persisted_capsule(capsule, auth, deps)
-    changed_fields = _changed_eligible_fields(capsule, persisted_capsule)
+    changed_fields = _changed_eligible_fields(capsule, persisted_capsule, session_end_snapshot)
     continuity_result: dict[str, Any] | None = None
     used_snapshot = False
 

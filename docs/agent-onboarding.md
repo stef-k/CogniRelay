@@ -122,8 +122,6 @@ Only these persisted-orientation fields are allowed to make `post_prompt` or `pr
 - `session_trajectory`
 - `rationale_entries`
 - `stable_preferences`
-- `thread_descriptor.lifecycle`
-- `thread_descriptor.superseded_by`
 
 Write-decision anchor:
 
@@ -132,7 +130,7 @@ Write-decision anchor:
 First-write baseline:
 
 - Use the first-write baseline only when no persisted capsule exists at all for the subject.
-- Compare against `[]` for list fields, `""` for `stance_summary`, and `null` for `thread_descriptor.lifecycle` and `thread_descriptor.superseded_by`.
+- Compare against `[]` for list fields and `""` for `stance_summary`.
 
 Exact change-comparison semantics:
 
@@ -439,8 +437,9 @@ Boundary rules illustrated:
 
 - This uses snapshot mode because the request sends both `capsule` and `session_end_snapshot`.
 - `coordination.handoff_create` is in scope only when control transfers to a different agent identity that is expected to continue execution after the current agent stops.
-- Snapshot mode is allowed only when no write-eligible field outside the `session_end_snapshot` field set differs from the last persisted capsule.
-- If `active_concerns`, `drift_signals`, `stable_preferences`, `thread_descriptor.lifecycle`, or `thread_descriptor.superseded_by` changed, the request must omit `session_end_snapshot` and perform a full `continuity.upsert` using `capsule` only.
+- Snapshot mode is allowed only when no write-eligible field outside the `session_end_snapshot` field set differs from the last persisted capsule after the snapshot overlay is applied to the candidate state.
+- If `active_concerns`, `drift_signals`, `stable_preferences`, or another write-eligible non-snapshot field changed, the request must omit `session_end_snapshot` and perform a full `continuity.upsert` using `capsule` only.
+- Direct `thread_descriptor.lifecycle` and `thread_descriptor.superseded_by` changes are outside the slice-2 hook-persistable surface. Use `lifecycle_transition` on `continuity.upsert` or `POST /v1/continuity/lifecycle` when those fields must change.
 - A handoff boundary alone never authorizes inventing a continuity write.
 - Parallel execution of `continuity.upsert` and `coordination.handoff_create` is not allowed.
 
