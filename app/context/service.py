@@ -544,7 +544,6 @@ def context_retrieve_service(
     auth.require("search")
     core_memory = _load_core_memory(repo_root, auth)
     continuity_state = build_continuity_state(repo_root=repo_root, auth=auth, req=req, now=now)
-    _assemble_mixed_retrieval_bundle(repo_root=repo_root, auth=auth, req=req, now=now)
     index_health = _index_health(repo_root, now)
     if index_health == "missing":
         recent = _raw_scan_recent_relevant(repo_root, auth, req)

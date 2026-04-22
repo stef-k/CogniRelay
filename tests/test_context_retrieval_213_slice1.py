@@ -286,13 +286,25 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
                 audit=lambda *_args, **_kwargs: None,
             )
 
-        mixed_retrieval_mock.assert_called_once_with(
-            repo_root=Path("."),
-            auth=auth,
-            req=req,
-            now=now,
+        mixed_retrieval_mock.assert_not_called()
+        self.assertEqual(
+            set(result["bundle"].keys()),
+            {
+                "task",
+                "generated_at",
+                "core_memory",
+                "recent_relevant",
+                "open_questions",
+                "token_budget_hint",
+                "time_window_days",
+                "notes",
+                "continuity_state",
+            },
         )
         self.assertNotIn("mixed_retrieval", result["bundle"])
+        self.assertNotIn("continuity", result["bundle"])
+        self.assertNotIn("supporting_documents", result["bundle"])
+        self.assertNotIn("search_hits", result["bundle"])
 
 
 if __name__ == "__main__":

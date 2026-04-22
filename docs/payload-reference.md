@@ -644,6 +644,8 @@ Response:
 
 When derived search indexes are stale, `continuity_state.warnings` includes `"continuity_index_stale"`. When indexes are missing, retrieval falls back to a bounded raw scan and adds `"continuity_index_missing"`.
 
+The bounded `#213` mixed-retrieval bundle remains internal-only in slice 1 and is not part of the external `POST /v1/context/retrieve` response shape.
+
 ## Salience Ranking
 
 When `sort="salience"` is set on `POST /v1/continuity/list`, or when capsules are returned through `POST /v1/context/retrieve`, the system applies a deterministic multi-signal sort that surfaces the most decision-relevant capsules first. Nothing is stored — salience is computed at retrieval time from in-memory capsule state.
