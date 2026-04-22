@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.continuity.persistence import _load_archive_envelope_with_warnings
 from app.continuity.service import (
     continuity_cold_rehydrate_service,
     continuity_cold_store_service,
@@ -154,6 +155,62 @@ class TestRelatedDocuments217Slice2(unittest.TestCase):
         self.assertEqual(result["recovery_warnings"], ["related_documents_omitted_invalid"])
         self.assertNotIn("related_documents", restored["capsule"]["continuity"])
         self.assertIn("related_documents", cold_payload["capsule"]["continuity"])
+
+    def test_cold_rehydrate_crash_recovery_surfaces_related_documents_warning_once(self) -> None:
+        archive_rel = _write_archive(
+            self.repo_root,
+            subject_id="gamma",
+            related_documents=[
+                {
+                    "path": "docs/spec.md",
+                    "kind": "Spec",
+                    "label": "Spec",
+                }
+            ],
+        )
+
+        store_result = continuity_cold_store_service(
+            repo_root=self.repo_root,
+            gm=self.gm,
+            auth=self.auth,
+            req=ContinuityColdStoreRequest(source_archive_path=archive_rel),
+            audit=lambda *_args, **_kwargs: None,
+        )
+        _write_archive(
+            self.repo_root,
+            subject_id="gamma",
+            related_documents=[
+                {
+                    "path": "docs/spec.md",
+                    "kind": "Spec",
+                    "label": "Spec",
+                }
+            ],
+        )
+
+        result = continuity_cold_rehydrate_service(
+            repo_root=self.repo_root,
+            gm=self.gm,
+            auth=self.auth,
+            req=ContinuityColdRehydrateRequest(source_archive_path=archive_rel),
+            audit=lambda *_args, **_kwargs: None,
+        )
+
+        restored, restored_warnings = _load_archive_envelope_with_warnings(self.repo_root, archive_rel)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["artifact_state"], "archived")
+        self.assertFalse((self.repo_root / store_result["cold_storage_path"]).exists())
+        self.assertFalse((self.repo_root / store_result["cold_stub_path"]).exists())
+        self.assertEqual(
+            result["recovery_warnings"],
+            [
+                "continuity_cold_rehydrate_crash_recovery",
+                "related_documents_omitted_invalid",
+            ],
+        )
+        self.assertEqual(restored_warnings, ["related_documents_omitted_invalid"])
+        self.assertNotIn("related_documents", restored["capsule"]["continuity"])
 
 
 if __name__ == "__main__":

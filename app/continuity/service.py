@@ -2296,7 +2296,9 @@ def continuity_cold_rehydrate_service(
                 # before deleting cold files and committing. ---
                 if cold_payload_file.exists() or cold_stub_file.exists():
                     try:
-                        _check_envelope = _load_archive_envelope(repo_root, source_archive_path)
+                        _check_envelope, _related_document_warnings = _load_archive_envelope_with_warnings(
+                            repo_root, source_archive_path
+                        )
                         if _archive_rel_path_from_envelope(_check_envelope) == source_archive_path:
                             cold_payload_file.unlink(missing_ok=True)
                             cold_stub_file.unlink(missing_ok=True)
@@ -2330,6 +2332,9 @@ def continuity_cold_rehydrate_service(
                                         "Crash recovery completed on disk but git commit failed; state is not yet durable",
                                     ),
                                 )
+                            _rh_recovery_warning_codes = [
+                                warning["code"] for warning in _rh_warnings if isinstance(warning.get("code"), str)
+                            ]
                             return {
                                 "ok": True,
                                 "artifact_state": "archived",
@@ -2342,7 +2347,7 @@ def continuity_cold_rehydrate_service(
                                 "durable": _rh_recovery_committed,
                                 "latest_commit": gm.latest_commit(),
                                 "warnings": _rh_warnings,
-                                "recovery_warnings": _rh_warnings,
+                                "recovery_warnings": [*_rh_recovery_warning_codes, *_related_document_warnings],
                             }
                     except Exception:
                         _logger.warning(
