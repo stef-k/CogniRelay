@@ -243,6 +243,12 @@ def _load_fallback_snapshot_with_warnings(
 
 def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     """Load and validate an archive envelope."""
+    payload, _warnings = _load_archive_envelope_with_warnings(repo_root, rel)
+    return payload
+
+
+def _load_archive_envelope_with_warnings(repo_root: Path, rel: str) -> tuple[dict[str, Any], list[str]]:
+    """Load and validate an archive envelope plus degraded related_documents warnings."""
     path = safe_path(repo_root, rel)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Continuity archive envelope not found")
@@ -263,12 +269,12 @@ def _load_archive_envelope(repo_root: Path, rel: str) -> dict[str, Any]:
     capsule = payload.get("capsule")
     if not isinstance(capsule, dict):
         raise HTTPException(status_code=400, detail="Invalid continuity archive envelope capsule")
-    capsule, _warnings = _sanitize_related_documents_on_read(_upgrade_legacy_structured_entry_timestamps(capsule))
+    capsule, warnings = _sanitize_related_documents_on_read(_upgrade_legacy_structured_entry_timestamps(capsule))
     try:
         payload["capsule"] = ContinuityCapsule.model_validate(capsule).model_dump(mode="json", exclude_none=True)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=f"Invalid continuity archive envelope capsule: {e}") from e
-    return payload
+    return payload, warnings
 
 
 def _load_capsule(repo_root: Path, rel: str, *, expected_subject: tuple[str, str] | None = None) -> dict[str, Any]:
