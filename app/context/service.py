@@ -168,6 +168,59 @@ def _assemble_mixed_retrieval_bundle(
     return bundle
 
 
+def _supports_internal_mixed_retrieval(req: ContextRetrieveRequest) -> bool:
+    """Return whether the request should use the bounded #213 mixed retrieval path."""
+    return req.subject_kind in {"thread", "task"} and bool(req.subject_id)
+
+
+def _mixed_retrieval_recent_relevant(bundle: dict[str, list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
+    """Flatten the internal mixed-retrieval bundle into the external recent_relevant list.
+
+    The external response shape stays unchanged, so the internal three-class
+    retrieval is projected into one deterministic evidence list:
+    supporting documents first, then search fallback hits. Cross-class
+    duplicates are preserved because #213 forbids cross-class deduplication.
+    """
+    if limit <= 0:
+        return []
+
+    recent: list[dict[str, Any]] = []
+
+    for row in bundle.get("supporting_documents", []):
+        if not isinstance(row, dict):
+            continue
+        path = row.get("path")
+        if not isinstance(path, str):
+            continue
+        content = row.get("content")
+        snippet = _snippet_text(content) if isinstance(content, str) else ""
+        if isinstance(content, str):
+            item_type, _ = _record_type_importance(path, content)
+        else:
+            item_type = str(Path(path).suffix.lstrip(".") or (Path(path).parts[0] if Path(path).parts else "unknown"))
+        projected = {
+            "path": path,
+            "type": item_type,
+            "snippet": snippet,
+            "score": 0.0,
+        }
+        warning = row.get("warning")
+        if isinstance(warning, str) and warning:
+            projected["warning"] = warning
+        recent.append(projected)
+        if len(recent) >= limit:
+            return recent
+
+    for row in bundle.get("search_hits", []):
+        if not isinstance(row, dict):
+            continue
+        recent.append(row)
+        if len(recent) >= limit:
+            return recent
+
+    return recent
+
+
 def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run a git command inside the repository without raising on failure.
 
@@ -544,27 +597,36 @@ def context_retrieve_service(
     auth.require("search")
     core_memory = _load_core_memory(repo_root, auth)
     continuity_state = build_continuity_state(repo_root=repo_root, auth=auth, req=req, now=now)
-    index_health = _index_health(repo_root, now)
-    if index_health == "missing":
-        recent = _raw_scan_recent_relevant(repo_root, auth, req)
-        continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + ["continuity_index_missing"]
+    if _supports_internal_mixed_retrieval(req):
+        mixed_retrieval = _assemble_mixed_retrieval_bundle(
+            repo_root=repo_root,
+            auth=auth,
+            req=req,
+            now=now,
+        )
+        recent = _mixed_retrieval_recent_relevant(mixed_retrieval, req.limit)
     else:
-        try:
-            recent = search_index(
-                repo_root,
-                req.task,
-                req.limit,
-                include_types=req.include_types or None,
-                time_window_days=req.time_window_days,
-            )
-            recent = _filter_search_results_for_auth(recent, auth)
-            recent = _exclude_continuity_cold_results(recent)
-        except Exception:
+        index_health = _index_health(repo_root, now)
+        if index_health == "missing":
             recent = _raw_scan_recent_relevant(repo_root, auth, req)
-            index_health = "stale"
-        if index_health == "stale":
-            continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + ["continuity_index_stale"]
-    recent = _pack_recent_relevant(recent, req.limit)
+            continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + ["continuity_index_missing"]
+        else:
+            try:
+                recent = search_index(
+                    repo_root,
+                    req.task,
+                    req.limit,
+                    include_types=req.include_types or None,
+                    time_window_days=req.time_window_days,
+                )
+                recent = _filter_search_results_for_auth(recent, auth)
+                recent = _exclude_continuity_cold_results(recent)
+            except Exception:
+                recent = _raw_scan_recent_relevant(repo_root, auth, req)
+                index_health = "stale"
+            if index_health == "stale":
+                continuity_state["recovery_warnings"] = list(continuity_state.get("recovery_warnings", [])) + ["continuity_index_stale"]
+        recent = _pack_recent_relevant(recent, req.limit)
     open_questions = [row["snippet"] for row in recent[:10] if "?" in row.get("snippet", "")]
     bundle = {
         "task": req.task,

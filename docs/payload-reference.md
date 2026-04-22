@@ -642,7 +642,7 @@ Response:
 }
 ```
 
-When derived search indexes are stale, `continuity_state.warnings` includes `"continuity_index_stale"`. When indexes are missing, retrieval falls back to a bounded raw scan and adds `"continuity_index_missing"`.
+When derived search indexes are stale, `continuity_state.recovery_warnings` includes `"continuity_index_stale"`. When indexes are missing, retrieval falls back to a bounded raw scan and adds `"continuity_index_missing"` to `continuity_state.recovery_warnings`.
 
 The bounded `#213` mixed-retrieval bundle remains internal-only in slice 1 and is not part of the external `POST /v1/context/retrieve` response shape.
 
