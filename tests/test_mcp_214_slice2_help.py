@@ -429,3 +429,122 @@ class TestMcp214Slice2Help(unittest.TestCase):
                         },
                     },
                 )
+
+    def test_help_validation_hints_follow_exact_single_entry_precedence(self) -> None:
+        """Overlapping invalid MCP help requests must resolve to the one winning hint."""
+        cases = [
+            (
+                "system.help",
+                {"verbose": True, "trace": True},
+                {
+                    "detail": "Arguments must be an empty object.",
+                    "validation_hints": [
+                        {
+                            "field": "arguments",
+                            "area": "params.arguments",
+                            "reason": "arguments_must_be_empty_object",
+                            "limit": 0,
+                            "allowed_values": None,
+                            "correction_hint": "Use arguments as {} with no keys.",
+                        }
+                    ],
+                },
+            ),
+            (
+                "system.tool_usage",
+                {"verbose": True},
+                {
+                    "detail": "Missing required field name.",
+                    "validation_hints": [
+                        {
+                            "field": "name",
+                            "area": "params.arguments",
+                            "reason": "required_field_missing",
+                            "limit": None,
+                            "allowed_values": None,
+                            "correction_hint": "Provide the required name field.",
+                        }
+                    ],
+                },
+            ),
+            (
+                "system.tool_usage",
+                {"name": 7, "verbose": True},
+                {
+                    "detail": "Field name must be a string.",
+                    "validation_hints": [
+                        {
+                            "field": "name",
+                            "area": "params.arguments",
+                            "reason": "wrong_type",
+                            "limit": None,
+                            "allowed_values": None,
+                            "correction_hint": "Use name as a JSON string.",
+                        }
+                    ],
+                },
+            ),
+            (
+                "system.tool_usage",
+                {"name": "memory.write", "verbose": True},
+                {
+                    "detail": "Unexpected field verbose.",
+                    "validation_hints": [
+                        {
+                            "field": "verbose",
+                            "area": "params.arguments",
+                            "reason": "unexpected_field",
+                            "limit": None,
+                            "allowed_values": None,
+                            "correction_hint": "Remove the unsupported verbose field.",
+                        }
+                    ],
+                },
+            ),
+        ]
+
+        for index, (name, arguments, expected_error) in enumerate(cases, start=300):
+            with self.subTest(name=name, arguments=arguments):
+                response = self._tools_call(name, arguments_marker=arguments, request_id=index)
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["error"]["code"], -32602)
+                self.assertEqual(payload["error"]["message"], "Invalid params")
+                self.assertEqual(payload["error"]["data"]["error"], {"code": "validation", **expected_error})
+                self.assertEqual(len(payload["error"]["data"]["error"]["validation_hints"]), 1)
+
+    def test_help_validation_hints_use_first_unexpected_key_in_source_order(self) -> None:
+        """The first unexpected key must win consistently when several are present."""
+        response = self._tools_call(
+            "system.topic_help",
+            arguments_marker={"id": "continuity.read.invalid", "trace": True, "verbose": True},
+            request_id=350,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 350,
+                "error": {
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": {
+                        "error": {
+                            "code": "validation",
+                            "detail": "Unexpected field trace.",
+                            "validation_hints": [
+                                {
+                                    "field": "trace",
+                                    "area": "params.arguments",
+                                    "reason": "unexpected_field",
+                                    "limit": None,
+                                    "allowed_values": None,
+                                    "correction_hint": "Remove the unsupported trace field.",
+                                }
+                            ],
+                        }
+                    },
+                },
+            },
+        )
