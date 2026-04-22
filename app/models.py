@@ -22,6 +22,12 @@ _RELATED_DOCUMENTS_SCHEMA = {
                 "minLength": 1,
                 "maxLength": 240,
                 "pattern": r"^[A-Za-z0-9._/-]+$",
+                "description": (
+                    "Repo-relative lexical path only. Must not start with '/'; "
+                    "must not contain '..'; '/' is the only allowed separator; "
+                    "normalization is lexical-only; and the lexically normalized "
+                    "path must remain under the repo root."
+                ),
             },
             "kind": {
                 "type": "string",

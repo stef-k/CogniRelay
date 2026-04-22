@@ -18,6 +18,8 @@ from app.continuity.service import continuity_read_service, continuity_upsert_se
 from app.models import ContinuityReadRequest, ContinuityUpsertRequest, ContextRetrieveRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
+_MISSING = object()
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -34,7 +36,7 @@ def _settings(repo_root: Path) -> Settings:
     )
 
 
-def _base_capsule_payload(*, related_documents: object | None = None) -> dict:
+def _base_capsule_payload(*, related_documents: object = _MISSING) -> dict:
     now = _now_iso()
     continuity: dict[str, object] = {
         "top_priorities": ["ship #217 slice"],
@@ -44,7 +46,7 @@ def _base_capsule_payload(*, related_documents: object | None = None) -> dict:
         "stance_summary": "Implement the bounded runtime slice without changing unrelated semantics.",
         "drift_signals": [],
     }
-    if related_documents is not None:
+    if related_documents is not _MISSING:
         continuity["related_documents"] = related_documents
     return {
         "schema_version": "1.0",
@@ -229,6 +231,11 @@ class TestRelatedDocuments217Slice1(unittest.TestCase):
             (
                 "wrong top-level type",
                 {"path": "docs/payload-reference.md"},
+                "Invalid value type in continuity.related_documents[]",
+            ),
+            (
+                "explicit null",
+                None,
                 "Invalid value type in continuity.related_documents[]",
             ),
             (
@@ -497,6 +504,12 @@ class TestRelatedDocuments217Slice1(unittest.TestCase):
                     "minLength": 1,
                     "maxLength": 240,
                     "pattern": r"^[A-Za-z0-9._/-]+$",
+                    "description": (
+                        "Repo-relative lexical path only. Must not start with '/'; "
+                        "must not contain '..'; '/' is the only allowed separator; "
+                        "normalization is lexical-only; and the lexically normalized "
+                        "path must remain under the repo root."
+                    ),
                 },
                 "kind": {
                     "type": "string",
