@@ -299,10 +299,10 @@ PATCH_STRUCTURED_MATCH_KEYS: dict[str, str] = {
 
 # Max-length bounds per patch target (mirrors Pydantic model constraints).
 PATCH_TARGET_MAX_LENGTH: dict[str, int] = {
-    "continuity.top_priorities": 5,
+    "continuity.top_priorities": 8,
     "continuity.active_concerns": 5,
-    "continuity.active_constraints": 5,
-    "continuity.open_loops": 5,
+    "continuity.active_constraints": 8,
+    "continuity.open_loops": 8,
     "continuity.drift_signals": 5,
     "continuity.working_hypotheses": 5,
     "continuity.long_horizon_commitments": 5,

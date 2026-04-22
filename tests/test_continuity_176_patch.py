@@ -293,9 +293,9 @@ class TestPatchAppendMaxLength(unittest.TestCase):
             _setup_dirs(root)
             gm = _GitManagerStub(root)
             auth = _AuthStub()
-            # Seed with 5 open_loops (max)
+            # Seed with 8 open_loops (max)
             _seed_capsule(root, gm, auth, extra_continuity={
-                "open_loops": ["a", "b", "c", "d", "e"],
+                "open_loops": [f"loop-{index}" for index in range(8)],
             })
 
             with self.assertRaises(HTTPException) as ctx:
@@ -303,7 +303,10 @@ class TestPatchAppendMaxLength(unittest.TestCase):
                     {"target": "continuity.open_loops", "action": "append", "value": "overflow"},
                 ])
             self.assertEqual(ctx.exception.status_code, 400)
-            self.assertIn("max length", ctx.exception.detail)
+            self.assertEqual(
+                ctx.exception.detail,
+                "append would exceed max length (8) for continuity.open_loops",
+            )
 
     def test_append_exceeds_negative_decisions_max(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,6 +332,102 @@ class TestPatchAppendMaxLength(unittest.TestCase):
                 ])
             self.assertEqual(ctx.exception.status_code, 400)
             self.assertIn("max length", ctx.exception.detail)
+
+
+class TestPatch217RebalancedCoreListLimits(unittest.TestCase):
+    """Lock the widened #217 patch-path bounds for the three rebalanced core lists."""
+
+    def test_append_allows_growth_from_five_to_six(self) -> None:
+        fields = (
+            ("top_priorities", "continuity.top_priorities", "priority"),
+            ("open_loops", "continuity.open_loops", "loop"),
+            ("active_constraints", "continuity.active_constraints", "constraint"),
+        )
+
+        for field_name, target, prefix in fields:
+            with self.subTest(field=field_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    _setup_dirs(root)
+                    gm = _GitManagerStub(root)
+                    auth = _AuthStub()
+                    _seed_capsule(
+                        root,
+                        gm,
+                        auth,
+                        extra_continuity={field_name: [f"{prefix}-{index}" for index in range(5)]},
+                    )
+
+                    result = _patch(root, gm, auth, [
+                        {"target": target, "action": "append", "value": f"{prefix}-5"},
+                    ])
+
+                    self.assertTrue(result["ok"])
+                    capsule = _read_persisted_capsule(root)
+                    self.assertEqual(len(capsule["continuity"][field_name]), 6)
+                    self.assertEqual(capsule["continuity"][field_name][-1], f"{prefix}-5")
+
+    def test_append_allows_growth_up_to_eight(self) -> None:
+        fields = (
+            ("top_priorities", "continuity.top_priorities", "priority"),
+            ("open_loops", "continuity.open_loops", "loop"),
+            ("active_constraints", "continuity.active_constraints", "constraint"),
+        )
+
+        for field_name, target, prefix in fields:
+            with self.subTest(field=field_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    _setup_dirs(root)
+                    gm = _GitManagerStub(root)
+                    auth = _AuthStub()
+                    _seed_capsule(
+                        root,
+                        gm,
+                        auth,
+                        extra_continuity={field_name: [f"{prefix}-{index}" for index in range(7)]},
+                    )
+
+                    result = _patch(root, gm, auth, [
+                        {"target": target, "action": "append", "value": f"{prefix}-7"},
+                    ])
+
+                    self.assertTrue(result["ok"])
+                    capsule = _read_persisted_capsule(root)
+                    self.assertEqual(len(capsule["continuity"][field_name]), 8)
+                    self.assertEqual(capsule["continuity"][field_name][-1], f"{prefix}-7")
+
+    def test_append_rejects_growth_from_eight_to_nine(self) -> None:
+        fields = (
+            ("top_priorities", "continuity.top_priorities", "priority"),
+            ("open_loops", "continuity.open_loops", "loop"),
+            ("active_constraints", "continuity.active_constraints", "constraint"),
+        )
+
+        for field_name, target, prefix in fields:
+            with self.subTest(field=field_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    _setup_dirs(root)
+                    gm = _GitManagerStub(root)
+                    auth = _AuthStub()
+                    _seed_capsule(
+                        root,
+                        gm,
+                        auth,
+                        extra_continuity={field_name: [f"{prefix}-{index}" for index in range(8)]},
+                    )
+
+                    with self.assertRaises(HTTPException) as ctx:
+                        _patch(root, gm, auth, [
+                            {"target": target, "action": "append", "value": f"{prefix}-8"},
+                        ])
+
+                    self.assertEqual(ctx.exception.status_code, 400)
+                    self.assertEqual(
+                        ctx.exception.detail,
+                        f"append would exceed max length (8) for {target}",
+                    )
 
 
 class TestPatchRemoveStringList(unittest.TestCase):

@@ -771,8 +771,8 @@ class RationaleEntry(BaseModel):
     tag: str = Field(min_length=1, max_length=80)
     kind: Literal["decision", "assumption", "tension"]
     status: Literal["active", "superseded", "retired"]
-    summary: str
-    reasoning: str
+    summary: str = Field(max_length=320)
+    reasoning: str = Field(max_length=560)
     alternatives_considered: List[str] = Field(default_factory=list, max_length=3)
     depends_on: List[str] = Field(default_factory=list, max_length=3)
     supersedes: Optional[str] = Field(default=None, max_length=80)
@@ -784,10 +784,10 @@ class RationaleEntry(BaseModel):
 class ContinuityState(BaseModel):
     """Operational orientation state preserved across resets and compaction."""
 
-    top_priorities: List[str] = Field(max_length=5)
+    top_priorities: List[str] = Field(max_length=8)
     active_concerns: List[str] = Field(max_length=5)
-    active_constraints: List[str] = Field(max_length=5)
-    open_loops: List[str] = Field(max_length=5)
+    active_constraints: List[str] = Field(max_length=8)
+    open_loops: List[str] = Field(max_length=8)
     stance_summary: str = Field(max_length=240)
     drift_signals: List[str] = Field(max_length=5)
     working_hypotheses: List[str] = Field(default_factory=list, max_length=5)
@@ -868,9 +868,9 @@ class SessionEndSnapshot(BaseModel):
     """
 
     # P0 — required, always override capsule.continuity counterparts
-    open_loops: List[str] = Field(max_length=5)
-    top_priorities: List[str] = Field(max_length=5)
-    active_constraints: List[str] = Field(max_length=5)
+    open_loops: List[str] = Field(max_length=8)
+    top_priorities: List[str] = Field(max_length=8)
+    active_constraints: List[str] = Field(max_length=8)
     stance_summary: str = Field(max_length=240)
 
     # P1 — optional; None = preserve capsule value, explicit value = override
