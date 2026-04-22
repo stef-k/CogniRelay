@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
+from app.context_contract import CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS
 from app.context.service import _select_top_raw_scan_candidates
 from app.indexer import rebuild_index
 from app.main import context_retrieve, recent_list, search
@@ -240,6 +241,53 @@ class TestContextRetrieval(unittest.TestCase):
             bundle = result["bundle"]
             self.assertEqual(len(bundle["recent_relevant"]), 1)
             self.assertEqual(bundle["recent_relevant"][0]["path"], "journal/2026/2026-03-20.md")
+
+    def test_context_retrieve_uses_contract_default_budget_when_omitted(self) -> None:
+        """Omitted max_tokens_estimate should use the contract default without hidden down-clamping."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory" / "core" / "identity.md").write_text(
+                "---\ntype: core_memory\n---\nAgent identity.",
+                encoding="utf-8",
+            )
+
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                result = context_retrieve(ContextRetrieveRequest(task="startup"), auth=_AuthStub())
+
+            self.assertTrue(result["ok"])
+            bundle = result["bundle"]
+            budget = bundle["continuity_state"]["budget"]
+            self.assertEqual(bundle["token_budget_hint"], CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS)
+            self.assertEqual(budget["requested_max_tokens_estimate"], CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS)
+            self.assertEqual(budget["token_budget_hint"], CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS)
+            self.assertEqual(budget["continuity_tokens_reserved"], CONTEXT_RETRIEVE_DEFAULT_MAX_TOKENS)
+
+    def test_context_retrieve_preserves_explicit_budget_override(self) -> None:
+        """Explicit max_tokens_estimate should remain the effective continuity budget."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            (repo_root / "memory" / "core").mkdir(parents=True, exist_ok=True)
+            (repo_root / "memory" / "core" / "identity.md").write_text(
+                "---\ntype: core_memory\n---\nAgent identity.",
+                encoding="utf-8",
+            )
+
+            settings = self._settings(repo_root)
+            with patch("app.main._services", return_value=(settings, _GitManagerStub())):
+                result = context_retrieve(
+                    ContextRetrieveRequest(task="startup", max_tokens_estimate=2048),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(result["ok"])
+            bundle = result["bundle"]
+            budget = bundle["continuity_state"]["budget"]
+            self.assertEqual(bundle["token_budget_hint"], 2048)
+            self.assertEqual(budget["requested_max_tokens_estimate"], 2048)
+            self.assertEqual(budget["token_budget_hint"], 2048)
+            self.assertEqual(budget["continuity_tokens_reserved"], 2048)
 
 
 if __name__ == "__main__":

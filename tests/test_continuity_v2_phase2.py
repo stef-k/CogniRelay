@@ -170,7 +170,7 @@ class TestContinuityV2Phase2(unittest.TestCase):
             self.assertEqual(state["omitted_selectors"], ["user:c"])
 
     def test_budget_sharing_uses_even_split_without_redistribution(self) -> None:
-        """Loaded capsules should share the V1 reserve evenly in selector order."""
+        """Loaded capsules should share the explicit request budget evenly in selector order."""
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             self._write_capsule(repo_root, subject_kind="user", subject_id="a")
@@ -193,10 +193,11 @@ class TestContinuityV2Phase2(unittest.TestCase):
             with patch("app.continuity.context_state._trim_capsule", side_effect=_record_trim):
                 state = build_continuity_state(repo_root=repo_root, auth=_AuthStub(), req=req, now=datetime.now(timezone.utc))
 
-            # Both capsules get equal allocation after subtracting trust_signals overhead
+            # Both capsules get equal allocation after subtracting trust/salience overhead.
             self.assertEqual(len(allocations), 2)
             self.assertEqual(allocations[0], allocations[1], "even split expected")
-            self.assertLess(allocations[0], 400, "trust_signals overhead reduces capsule allocation")
+            self.assertLess(allocations[0], 2000, "trust/signals overhead reduces capsule allocation")
+            self.assertGreater(allocations[0], 1500, "allocation should reflect the explicit 4000-token request budget")
             self.assertGreater(allocations[0], 0, "capsule still gets positive allocation")
             self.assertTrue(state["present"])
 

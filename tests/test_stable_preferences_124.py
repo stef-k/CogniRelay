@@ -1043,9 +1043,9 @@ class TestBuildContinuityStateStablePreferences(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             # Build a capsule heavy enough that a tight budget forces trimming
-            # of stable_preferences specifically.  At mte=1500 the reserved
-            # continuity budget is ~300 tokens; the ~1,050-token capsule must
-            # trim deep into phase 1, dropping stable_preferences.
+            # of stable_preferences specifically.  At mte=700 the capsule still
+            # survives, but the explicit continuity budget is tight enough to
+            # drop stable_preferences as a whole unit.
             payload = _base_capsule_payload(stable_preferences=_sample_prefs(12))
             payload["continuity"]["working_hypotheses"] = ["wh " * 40] * 5
             payload["continuity"]["trailing_notes"] = ["tn " * 40] * 3
@@ -1058,19 +1058,19 @@ class TestBuildContinuityStateStablePreferences(unittest.TestCase):
             req = ContextRetrieveRequest(
                 task="resume",
                 continuity_selectors=[{"subject_kind": "user", "subject_id": "test-agent"}],
-                max_tokens_estimate=1500,
+                max_tokens_estimate=700,
             )
             state = build_continuity_state(
                 repo_root=repo_root, auth=_AuthStub(), req=req,
                 now=datetime.now(timezone.utc),
             )
-            self.assertTrue(state["present"], "capsule must survive trimming at mte=1500")
+            self.assertTrue(state["present"], "capsule must survive trimming at mte=700")
             capsule = state["capsules"][0]
             # stable_preferences must have been trimmed away.
             self.assertNotIn("stable_preferences", capsule,
-                             "stable_preferences should be trimmed at mte=1500")
+                             "stable_preferences should be trimmed at mte=700")
             ts = capsule.get("trust_signals")
-            self.assertIsNotNone(ts, "trust_signals must be present at mte=1500")
+            self.assertIsNotNone(ts, "trust_signals must be present at mte=700")
             completeness = ts.get("completeness", {})
             trimmed_fields = completeness.get("trimmed_fields", [])
             self.assertIn("stable_preferences", trimmed_fields)

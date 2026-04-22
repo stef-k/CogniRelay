@@ -96,7 +96,7 @@ The system is designed so that a fully-populated capsule with practical content 
 
 **Under token pressure** — the system trims optional fields in two phases. Phase 1 drops whole optional sections in deterministic order: `metadata`, `canonical_sources`, `freshness`, `attention_policy.presence_bias_overrides`, `relationship_model` sub-fields (`sensitivity_notes`, `preferred_style`), `retrieval_hints` sub-fields (`avoid`, `load_next`), `trailing_notes`, `curiosity_queue`, `rationale_entries`, `negative_decisions`, `working_hypotheses`, then `stable_preferences` (dropped as a whole unit — all-or-nothing). Phase 2, if still over budget, progressively trims `retrieval_hints.must_include`, the remaining `relationship_model`, `long_horizon_commitments`, `stance_summary`, `drift_signals`, and finally the core lists. The 6 required core lists and `stance_summary` are trimmed only as a last resort. When `stable_preferences` is trimmed, `"stable_preferences"` appears in `trimmed_fields`; when `rationale_entries` is trimmed, `"continuity.rationale_entries"` appears in `trimmed_fields`.
 
-**Multi-capsule retrieval** — `POST /v1/context/retrieve` supports loading up to 4 capsules via `continuity_selectors` and `continuity_max_capsules`. At full population, 4 capsules would cost ~10,000–11,000 tokens. The `max_tokens_estimate` parameter (default 4,000) controls the total continuity token budget, and the system trims each capsule to fit.
+**Multi-capsule retrieval** — `POST /v1/context/retrieve` supports loading up to 4 capsules via `continuity_selectors` and `continuity_max_capsules`. At full population, 4 capsules would cost ~10,000–11,000 tokens. The `max_tokens_estimate` parameter controls the total continuity token budget directly. Its product-contract default is `12,000`, and an explicit request value overrides that default for the current call.
 
 ### Per-item string constraints
 
@@ -611,7 +611,7 @@ At least one delete flag must be `true`.
 | `continuity_resilience_policy` | `"allow_fallback"` \| `"prefer_active"` \| `"require_active"` | no | default `"allow_fallback"` |
 | `continuity_selectors` | list of ContinuitySelector | no | max 4 items |
 | `continuity_max_capsules` | integer | no | 1–4, default 1 |
-| `max_tokens_estimate` | integer | no | 256–100,000, default 4000 |
+| `max_tokens_estimate` | integer | no | 256–100,000, default 12000 |
 | `include_types` | list of strings | no | default `[]` |
 | `time_window_days` | integer | no | 1–3650, default 30 |
 | `limit` | integer | no | 1–100, default 10 |
@@ -627,7 +627,7 @@ Response:
     "core_memory": [{"path": "...", "snippet": "..."}],
     "recent_relevant": [{"path": "...", "type": "...", "snippet": "...", "score": 1.0}],
     "open_questions": ["..."],
-    "token_budget_hint": "4000",
+    "token_budget_hint": "12000",
     "time_window_days": 30,
     "notes": ["..."],
     "continuity_state": {
