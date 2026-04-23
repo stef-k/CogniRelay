@@ -93,10 +93,10 @@ def _enumerate_task_candidates(repo_root: Path) -> list[Path]:
     candidates: list[Path] = []
     for rel in _TASK_ROOTS:
         root = repo_root / rel
+        if not root.exists():
+            raise OSError(f"Task root is missing: {rel}")
         if root.exists() and not root.is_dir():
             raise OSError(f"Task root is not a directory: {rel}")
-        if not root.exists():
-            continue
         for path in root.iterdir():
             if path.is_symlink():
                 continue
@@ -112,11 +112,8 @@ def _load_continuity_candidate(repo_root: Path, rel: str) -> dict[str, Any] | No
     """Load one continuity candidate and skip per-artifact failures."""
     try:
         if rel.startswith("memory/continuity/cold/index/"):
-            frontmatter = _load_cold_stub(repo_root, rel)
-            return {
-                "subject_kind": frontmatter.get("subject_kind"),
-                "subject_id": frontmatter.get("subject_id"),
-            }
+            _load_cold_stub(repo_root, rel)
+            return None
         if rel.startswith("memory/continuity/fallback/"):
             payload, _warnings = _load_fallback_envelope_payload_with_warnings(repo_root, rel)
             capsule = payload.get("capsule")
@@ -136,11 +133,13 @@ def _enumerate_continuity_candidates(repo_root: Path) -> list[str]:
     candidates: list[str] = []
     for rel in _CONTINUITY_ROOTS:
         root = repo_root / rel
+        if not root.exists():
+            raise OSError(f"Continuity root is missing: {rel}")
         if root.exists() and not root.is_dir():
             raise OSError(f"Continuity root is not a directory: {rel}")
-        if not root.exists():
-            continue
         for path in root.rglob("*"):
+            if path.is_symlink():
+                continue
             if not path.is_file():
                 continue
             candidates.append(str(path.relative_to(repo_root)).replace("\\", "/"))
@@ -196,7 +195,7 @@ def _derive_supersedes_edges(
         )
 
 
-def derive_internal_graph_slice1(*, repo_root: Path, subject_kind: Any, subject_id: Any) -> dict[str, Any]:
+def derive_internal_graph_slice1(*, repo_root: Path, subject_kind: Any = None, subject_id: Any = None) -> dict[str, Any]:
     """Derive the internal-only #219 slice-1 one-hop explicit-link graph."""
     if not isinstance(subject_kind, str) or subject_kind not in _VALID_SUBJECT_KINDS:
         return _empty_graph_result("invalid_subject_kind")

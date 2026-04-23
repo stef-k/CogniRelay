@@ -140,48 +140,116 @@ def _write_text(repo_root: Path, rel: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _create_required_graph_roots(repo_root: Path) -> None:
+    """Create every required slice-1 discovery root."""
+    for rel in (
+        "tasks/open",
+        "tasks/done",
+        "memory/continuity",
+        "memory/continuity/fallback",
+        "memory/continuity/archive",
+        "memory/continuity/cold/index",
+    ):
+        (repo_root / rel).mkdir(parents=True, exist_ok=True)
+
+
 class TestContextGraph219Slice1(unittest.TestCase):
     """Validate the exact internal-only graph helper contract for #219 slice 1."""
 
+    def test_invalid_subject_kind_returns_exact_empty_shape_for_full_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            invalid_cases = [
+                {},
+                {"subject_kind": None},
+                {"subject_kind": 123},
+                {"subject_kind": ""},
+                {"subject_kind": "   "},
+                {"subject_kind": "Thread"},
+                {"subject_kind": "TASK"},
+                {"subject_kind": " task "},
+            ]
+
+            for kwargs in invalid_cases:
+                with self.subTest(kwargs=kwargs):
+                    result = derive_internal_graph_slice1(
+                        repo_root=repo_root,
+                        subject_id="task-1",
+                        **kwargs,
+                    )
+                    self.assertEqual(
+                        result,
+                        {
+                            "anchor": None,
+                            "nodes": [],
+                            "edges": [],
+                            "warnings": ["invalid_subject_kind"],
+                        },
+                    )
+
+    def test_invalid_subject_id_returns_anchor_not_found_for_full_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            invalid_cases = [
+                {},
+                {"subject_id": None},
+                {"subject_id": 123},
+                {"subject_id": ""},
+                {"subject_id": "   "},
+            ]
+
+            for kwargs in invalid_cases:
+                with self.subTest(kwargs=kwargs):
+                    result = derive_internal_graph_slice1(
+                        repo_root=repo_root,
+                        subject_kind="thread",
+                        **kwargs,
+                    )
+                    self.assertEqual(
+                        result,
+                        {
+                            "anchor": None,
+                            "nodes": [],
+                            "edges": [],
+                            "warnings": ["anchor_not_found"],
+                        },
+                    )
+
     def test_invalid_subject_kind_wins_validation_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            result = derive_internal_graph_slice1(
-                repo_root=Path(td),
-                subject_kind=" task ",
-                subject_id="   ",
-            )
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            invalid_pairs = [
+                {},
+                {"subject_kind": None},
+                {"subject_kind": 123, "subject_id": None},
+                {"subject_kind": "", "subject_id": ""},
+                {"subject_kind": "   ", "subject_id": "   "},
+                {"subject_kind": " task ", "subject_id": "   "},
+            ]
 
-        self.assertEqual(
-            result,
-            {
-                "anchor": None,
-                "nodes": [],
-                "edges": [],
-                "warnings": ["invalid_subject_kind"],
-            },
-        )
-
-    def test_invalid_subject_id_returns_anchor_not_found(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            result = derive_internal_graph_slice1(
-                repo_root=Path(td),
-                subject_kind="thread",
-                subject_id="   ",
-            )
-
-        self.assertEqual(
-            result,
-            {
-                "anchor": None,
-                "nodes": [],
-                "edges": [],
-                "warnings": ["anchor_not_found"],
-            },
-        )
+            for kwargs in invalid_pairs:
+                with self.subTest(kwargs=kwargs):
+                    result = derive_internal_graph_slice1(
+                        repo_root=repo_root,
+                        **kwargs,
+                    )
+                    self.assertEqual(
+                        result,
+                        {
+                            "anchor": None,
+                            "nodes": [],
+                            "edges": [],
+                            "warnings": ["invalid_subject_kind"],
+                        },
+                    )
 
     def test_task_anchor_unions_corroborating_artifacts_and_orders_nodes_and_edges(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
             task_open = {
                 "task_id": "task-1",
                 "thread_id": "thread-z",
@@ -266,6 +334,7 @@ class TestContextGraph219Slice1(unittest.TestCase):
     def test_thread_anchor_uses_exact_task_globs_and_one_hop_only(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
             capsule = _base_capsule(subject_kind="thread", subject_id="thread-1")
             capsule["continuity"]["related_documents"] = [
                 {"path": "docs/thread.md", "kind": "spec", "label": "Thread spec"},
@@ -308,9 +377,41 @@ class TestContextGraph219Slice1(unittest.TestCase):
             ],
         )
 
+    def test_continuity_symlinked_file_is_ignored_before_capsule_load(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            capsule = _base_capsule(subject_kind="thread", subject_id="thread-1")
+            regular_rel = "memory/continuity/thread-thread-1.json"
+            symlink_rel = "memory/continuity/thread-link.json"
+            _write_json(repo_root, regular_rel, capsule)
+            (repo_root / symlink_rel).symlink_to(repo_root / regular_rel)
+            regular_payload = json.loads((repo_root / regular_rel).read_text(encoding="utf-8"))
+            load_calls: list[str] = []
+
+            def _load_capsule(repo_root_arg: Path, rel: str) -> tuple[dict[str, object], list[str]]:
+                self.assertEqual(repo_root_arg, repo_root)
+                load_calls.append(rel)
+                self.assertNotEqual(rel, symlink_rel)
+                return regular_payload, []
+
+            with patch("app.context.graph._load_capsule_with_warnings", side_effect=_load_capsule):
+                result = derive_internal_graph_slice1(
+                    repo_root=repo_root,
+                    subject_kind="thread",
+                    subject_id="thread-1",
+                )
+
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(result["anchor"], {"id": "thread:thread-1", "family": "thread"})
+        self.assertEqual(result["nodes"], [])
+        self.assertEqual(result["edges"], [])
+        self.assertEqual(load_calls, [regular_rel])
+
     def test_missing_anchor_returns_exact_empty_shape(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
             _write_json(repo_root, "tasks/open/task-1.json", {"task_id": "task-1", "thread_id": "thread-1"})
 
             result = derive_internal_graph_slice1(
@@ -332,6 +433,7 @@ class TestContextGraph219Slice1(unittest.TestCase):
     def test_invalid_candidates_are_silently_skipped_after_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
             _write_text(repo_root, "tasks/open/task-1.json", "{not-json")
             _write_text(repo_root, "memory/continuity/weird.txt", "{not-json")
 
@@ -354,6 +456,7 @@ class TestContextGraph219Slice1(unittest.TestCase):
     def test_continuity_candidate_enumeration_is_recursive_and_not_extension_filtered(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
             capsule = _base_capsule(subject_kind="thread", subject_id="thread-1")
             _write_text(repo_root, "memory/continuity/deep/anchor.data", json.dumps(capsule))
 
@@ -371,6 +474,7 @@ class TestContextGraph219Slice1(unittest.TestCase):
     def test_related_document_sanitation_exception_is_silent_skip_for_that_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
             capsule = _base_capsule(subject_kind="thread", subject_id="thread-1")
             _write_json(repo_root, "memory/continuity/thread-thread-1.json", capsule)
 
@@ -388,12 +492,179 @@ class TestContextGraph219Slice1(unittest.TestCase):
 
     def test_required_source_discovery_failure_returns_graph_derivation_failed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
+            _create_required_graph_roots(Path(td))
             with patch("app.context.graph._enumerate_task_candidates", side_effect=OSError("nope")):
                 result = derive_internal_graph_slice1(
                     repo_root=Path(td),
                     subject_kind="thread",
                     subject_id="thread-1",
                 )
+
+        self.assertEqual(
+            result,
+            {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "warnings": ["graph_derivation_failed"],
+            },
+        )
+
+    def test_cold_stub_only_does_not_produce_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            _write_text(
+                repo_root,
+                "memory/continuity/cold/index/thread-thread-1-20260423T000000Z.md",
+                _cold_stub_text(
+                    subject_kind="thread",
+                    subject_id="thread-1",
+                    archive_rel="memory/continuity/archive/thread-thread-1-20260423T000000Z.json",
+                ),
+            )
+
+            result = derive_internal_graph_slice1(
+                repo_root=repo_root,
+                subject_kind="thread",
+                subject_id="thread-1",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "warnings": ["anchor_not_found"],
+            },
+        )
+
+    def test_missing_tasks_open_root_returns_graph_derivation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            (repo_root / "tasks" / "open").rmdir()
+
+            result = derive_internal_graph_slice1(
+                repo_root=repo_root,
+                subject_kind="thread",
+                subject_id="thread-1",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "warnings": ["graph_derivation_failed"],
+            },
+        )
+
+    def test_missing_tasks_done_root_returns_graph_derivation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            (repo_root / "tasks" / "done").rmdir()
+
+            result = derive_internal_graph_slice1(
+                repo_root=repo_root,
+                subject_kind="thread",
+                subject_id="thread-1",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "warnings": ["graph_derivation_failed"],
+            },
+        )
+
+    def test_missing_memory_continuity_root_returns_graph_derivation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            (repo_root / "memory" / "continuity" / "fallback").rmdir()
+            (repo_root / "memory" / "continuity" / "archive").rmdir()
+            (repo_root / "memory" / "continuity" / "cold" / "index").rmdir()
+            (repo_root / "memory" / "continuity" / "cold").rmdir()
+            (repo_root / "memory" / "continuity").rmdir()
+
+            result = derive_internal_graph_slice1(
+                repo_root=repo_root,
+                subject_kind="thread",
+                subject_id="thread-1",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "warnings": ["graph_derivation_failed"],
+            },
+        )
+
+    def test_missing_memory_continuity_fallback_root_returns_graph_derivation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            (repo_root / "memory" / "continuity" / "fallback").rmdir()
+
+            result = derive_internal_graph_slice1(
+                repo_root=repo_root,
+                subject_kind="thread",
+                subject_id="thread-1",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "warnings": ["graph_derivation_failed"],
+            },
+        )
+
+    def test_missing_memory_continuity_archive_root_returns_graph_derivation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            (repo_root / "memory" / "continuity" / "archive").rmdir()
+
+            result = derive_internal_graph_slice1(
+                repo_root=repo_root,
+                subject_kind="thread",
+                subject_id="thread-1",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "warnings": ["graph_derivation_failed"],
+            },
+        )
+
+    def test_missing_memory_continuity_cold_index_root_returns_graph_derivation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_required_graph_roots(repo_root)
+            (repo_root / "memory" / "continuity" / "cold" / "index").rmdir()
+
+            result = derive_internal_graph_slice1(
+                repo_root=repo_root,
+                subject_kind="thread",
+                subject_id="thread-1",
+            )
 
         self.assertEqual(
             result,
