@@ -496,7 +496,14 @@ def _sse_event(event: str, data: dict[str, Any], event_id: int) -> str:
 
 def _render_graph_response(*, settings: Settings, subject_kind: str | None, subject_id: str | None) -> HTMLResponse:
     """Call the graph helper and render the graph inspector page."""
-    graph = _ui_live_graph_summary(settings=settings, subject_kind=subject_kind, subject_id=subject_id)
+    try:
+        graph = _ui_live_graph_summary(settings=settings, subject_kind=subject_kind, subject_id=subject_id)
+    except Exception:
+        graph = _empty_ui_graph_summary(
+            subject_kind=subject_kind,
+            subject_id=subject_id,
+            warning="graph_derivation_failed",
+        )
     live_stream_path = None
     if subject_kind is not None and subject_id is not None:
         live_stream_path = _ui_events_href(graph_subject_kind=subject_kind, graph_subject_id=subject_id)
@@ -632,7 +639,12 @@ def _ui_live_snapshot(
                 warning="ui_detail_snapshot_failed",
             )
 
-    if graph_subject_kind is not None and graph_subject_id is not None:
+    if (
+        graph_subject_kind is not None
+        and graph_subject_id is not None
+        and graph_subject_kind != ""
+        and graph_subject_id != ""
+    ):
         try:
             graph = _ui_live_graph_summary(
                 settings=settings,

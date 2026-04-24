@@ -1337,6 +1337,24 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(failed.status_code, 200)
         self.assertIn("graph_derivation_failed", failed.text)
 
+    def test_ui_graph_helper_exception_degrades_without_leaking_exception_text(self) -> None:
+        """Graph page helper exceptions should render a deterministic warning in band."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(repo_root, COGNIRELAY_UI_ENABLED="true", COGNIRELAY_UI_REQUIRE_LOCALHOST="false")
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/graph/{subject_kind}/{subject_id}")
+            request = _request_with_transport_host("127.0.0.1", path="/ui/graph/thread/some-id")
+            with patch("app.ui.router._ui_live_graph_summary", side_effect=RuntimeError("raw secret")):
+                response = endpoint(request, subject_kind="thread", subject_id="some-id")
+
+        text = response.body.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("graph_derivation_failed", text)
+        self.assertNotIn("raw secret", text)
+
     def test_ui_graph_escapes_values_and_keeps_page_read_only(self) -> None:
         """Graph output and selector redisplay should escape HTML and avoid mutation controls."""
         with tempfile.TemporaryDirectory() as td:
@@ -1425,6 +1443,39 @@ class TestOperatorUiSlice1(unittest.TestCase):
                 )
             )
             event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertIsNone(payload["graph"])
+
+    def test_ui_events_graph_scope_null_for_empty_subject_id_without_helper_call(self) -> None:
+        """Empty graph SSE params are incomplete and should not call the graph helper."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(repo_root, COGNIRELAY_UI_ENABLED="true", COGNIRELAY_UI_REQUIRE_LOCALHOST="false")
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host(
+                "127.0.0.1",
+                path="/ui/events",
+                query_string=b"graph_subject_kind=thread&graph_subject_id=",
+            )
+            with patch("app.ui.router._ui_live_graph_summary", side_effect=AssertionError("helper called")):
+                response = asyncio.run(
+                    endpoint(
+                        request,
+                        q=None,
+                        subject_kind=None,
+                        artifact_state=None,
+                        health_status=None,
+                        detail_subject_kind=None,
+                        detail_subject_id=None,
+                        graph_subject_kind="thread",
+                        graph_subject_id="",
+                    )
+                )
+                event = asyncio.run(_read_first_sse_event_chunk(response))
 
         payload = json.loads(event["data"])
         self.assertIsNone(payload["graph"])
