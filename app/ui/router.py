@@ -23,6 +23,7 @@ from app.continuity.listing import (
     _scan_cold_summaries,
     _scan_fallback_summaries,
 )
+from app.context.graph import derive_internal_graph_slice1
 from app.discovery import capabilities_payload, health_payload
 from app.git_manager import GitManager
 from app.models import ContinuityReadRequest
@@ -274,6 +275,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                 ]
             ),
             related_artifact_rows=rendered_sections["related_artifact_rows"],
+            graph_link_section=_continuity_graph_link_section(subject_kind, subject_id),
             startup_summary_html=rendered_sections["startup_summary_html"],
             trust_signals_html=rendered_sections["trust_signals_html"],
             top_priorities_html=rendered_sections["top_priorities_html"],
@@ -295,6 +297,42 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             content=body,
         )
 
+    @router.get("/graph", response_class=HTMLResponse)
+    def ui_graph(
+        request: Request,
+        subject_kind: str | None = Query(default=None),
+        subject_id: str | None = Query(default=None),
+    ) -> HTMLResponse:
+        """Render the read-only derived graph selector or query-addressed graph."""
+        settings = get_settings()
+        _enforce_ui_access(request, settings)
+        has_subject_kind = "subject_kind" in request.query_params
+        has_subject_id = "subject_id" in request.query_params
+        if not has_subject_kind and not has_subject_id:
+            return _graph_page(
+                current_path="/ui/graph",
+                subject_kind=None,
+                subject_id=None,
+                graph=None,
+                live_stream_path=None,
+            )
+        return _render_graph_response(
+            settings=settings,
+            subject_kind=subject_kind if has_subject_kind else None,
+            subject_id=subject_id if has_subject_id else None,
+        )
+
+    @router.get("/graph/{subject_kind}/{subject_id}", response_class=HTMLResponse)
+    def ui_graph_detail(
+        request: Request,
+        subject_kind: str,
+        subject_id: str,
+    ) -> HTMLResponse:
+        """Render one read-only derived graph detail page."""
+        settings = get_settings()
+        _enforce_ui_access(request, settings)
+        return _render_graph_response(settings=settings, subject_kind=subject_kind, subject_id=subject_id)
+
     @router.get("/events")
     async def ui_events(
         request: Request,
@@ -304,6 +342,8 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         health_status: str | None = Query(default=None),
         detail_subject_kind: str | None = Query(default=None),
         detail_subject_id: str | None = Query(default=None),
+        graph_subject_kind: str | None = Query(default=None),
+        graph_subject_id: str | None = Query(default=None),
     ) -> StreamingResponse:
         """Stream bounded read-only UI snapshots for progressive enhancement."""
         settings = get_settings()
@@ -313,6 +353,8 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         artifact_state = _normalize_ui_filter(artifact_state, UI_ARTIFACT_STATES)
         health_status = _normalize_ui_filter(health_status, UI_HEALTH_STATUSES)
         detail_subject_kind = _normalize_ui_filter(detail_subject_kind, UI_SUBJECT_KINDS)
+        graph_subject_kind = _coerce_optional_query_value(graph_subject_kind)
+        graph_subject_id = _coerce_optional_query_value(graph_subject_id)
 
         async def event_stream() -> Any:
             event_id = 0
@@ -329,6 +371,8 @@ def build_ui_router(*, app_version: str) -> APIRouter:
                     health_status=health_status,
                     detail_subject_kind=detail_subject_kind,
                     detail_subject_id=detail_subject_id,
+                    graph_subject_kind=graph_subject_kind,
+                    graph_subject_id=graph_subject_id,
                 )
                 event_id += 1
                 yield _sse_event("ui-snapshot", snapshot, event_id)
@@ -409,6 +453,7 @@ def _page(*, title: str, current_path: str, content: str) -> HTMLResponse:
         title=html.escape(title),
         overview_nav_class=_nav_class(current_path == "/ui/"),
         continuity_nav_class=_nav_class(current_path.startswith("/ui/continuity")),
+        graph_nav_class=_nav_class(current_path.startswith("/ui/graph")),
         content=content,
     )
     return HTMLResponse(html_doc)
@@ -431,6 +476,13 @@ def _normalize_ui_filter(value: str | None, allowed: tuple[str, ...]) -> str | N
     return None
 
 
+def _coerce_optional_query_value(value: Any) -> str | None:
+    """Coerce direct endpoint-call defaults to the same shape as FastAPI query values."""
+    if value is None or isinstance(value, str):
+        return value
+    return None
+
+
 def _bool_label(value: bool) -> str:
     """Return a lowercase boolean label for human-readable tables."""
     return "true" if value else "false"
@@ -440,6 +492,75 @@ def _sse_event(event: str, data: dict[str, Any], event_id: int) -> str:
     """Encode one deterministic SSE event frame."""
     payload = json.dumps(data, sort_keys=True, separators=(",", ":"))
     return f"id: {event_id}\nevent: {event}\ndata: {payload}\n\n"
+
+
+def _render_graph_response(*, settings: Settings, subject_kind: str | None, subject_id: str | None) -> HTMLResponse:
+    """Call the graph helper and render the graph inspector page."""
+    try:
+        graph = _ui_live_graph_summary(settings=settings, subject_kind=subject_kind, subject_id=subject_id)
+    except Exception:
+        graph = _empty_ui_graph_summary(
+            subject_kind=subject_kind,
+            subject_id=subject_id,
+            warning="graph_derivation_failed",
+        )
+    live_stream_path = None
+    if subject_kind is not None and subject_id is not None:
+        live_stream_path = _ui_events_href(graph_subject_kind=subject_kind, graph_subject_id=subject_id)
+    return _graph_page(
+        current_path="/ui/graph",
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+        graph=graph,
+        live_stream_path=live_stream_path,
+    )
+
+
+def _graph_page(
+    *,
+    current_path: str,
+    subject_kind: str | None,
+    subject_id: str | None,
+    graph: dict[str, Any] | None,
+    live_stream_path: str | None,
+) -> HTMLResponse:
+    """Render the graph inspector around optional helper-backed sections."""
+    graph_sections = ""
+    if graph is None:
+        empty_state = '<section class="panel"><p class="muted">No graph anchor selected.</p></section>'
+        graph_sections = empty_state
+    else:
+        sections = graph.get("sections") if isinstance(graph.get("sections"), dict) else _graph_sections(graph)
+        live_panel = ""
+        if live_stream_path is not None:
+            live_panel = (
+                f'<section class="panel" data-live-page="graph" data-live-stream="{html.escape(live_stream_path)}">'
+                "<h2>Live Updates</h2>"
+                '<p class="muted" data-live-connection>Live updates waiting for connection.</p>'
+                '<p class="muted">Data refreshed: <span data-live-generated-at>Not connected</span></p>'
+                "<noscript><p class=\"muted\">JavaScript disabled; live updates are unavailable.</p></noscript>"
+                "</section>"
+            )
+        graph_sections = (
+            '<section class="panel"><h2>Anchor</h2><div data-live-graph-anchor>'
+            f'{sections["anchor_html"]}</div></section>'
+            '<section class="panel"><h2>Source / Status</h2><div data-live-graph-source-status>'
+            f'{sections["source_status_html"]}</div></section>'
+            '<section class="panel"><h2>Warnings</h2><div data-live-graph-warnings>'
+            f'{sections["warnings_html"]}</div></section>'
+            '<section class="panel"><h2>Nodes</h2><div data-live-graph-nodes>'
+            f'{sections["nodes_html"]}</div></section>'
+            '<section class="panel"><h2>Edges</h2><div data-live-graph-edges>'
+            f'{sections["edges_html"]}</div></section>'
+            f"{live_panel}"
+        )
+    body = render_template(
+        "graph.html",
+        subject_kind_value=html.escape(subject_kind or ""),
+        subject_id_value=html.escape(subject_id or ""),
+        graph_sections=graph_sections,
+    )
+    return _page(title="Derived Graph", current_path=current_path, content=body)
 
 
 def _ui_live_snapshot(
@@ -454,6 +575,8 @@ def _ui_live_snapshot(
     health_status: str | None,
     detail_subject_kind: str | None,
     detail_subject_id: str | None,
+    graph_subject_kind: str | None,
+    graph_subject_id: str | None,
 ) -> dict[str, Any]:
     """Build one bounded live-update snapshot for the operator UI."""
     warnings: list[str] = []
@@ -466,6 +589,7 @@ def _ui_live_snapshot(
         warning=None,
     )
     detail: dict[str, Any] | None = None
+    graph: dict[str, Any] | None = None
 
     try:
         overview = _ui_live_overview_summary(
@@ -515,6 +639,26 @@ def _ui_live_snapshot(
                 warning="ui_detail_snapshot_failed",
             )
 
+    if (
+        graph_subject_kind is not None
+        and graph_subject_id is not None
+        and graph_subject_kind != ""
+        and graph_subject_id != ""
+    ):
+        try:
+            graph = _ui_live_graph_summary(
+                settings=settings,
+                subject_kind=graph_subject_kind,
+                subject_id=graph_subject_id,
+            )
+        except Exception as exc:
+            warnings.append(f"ui_graph_snapshot_failed:{exc.__class__.__name__}")
+            graph = _empty_ui_graph_summary(
+                subject_kind=graph_subject_kind,
+                subject_id=graph_subject_id,
+                warning="ui_graph_snapshot_failed",
+            )
+
     return {
         "schema_version": "1.0",
         "ok": not warnings,
@@ -523,6 +667,7 @@ def _ui_live_snapshot(
         "overview": overview,
         "continuity": continuity,
         "detail": detail,
+        "graph": graph,
     }
 
 
@@ -674,6 +819,126 @@ def _ui_live_detail_summary(
     }
 
 
+def _ui_live_graph_summary(*, settings: Settings, subject_kind: str | None, subject_id: str | None) -> dict[str, Any]:
+    """Build the bounded graph summary used by the page and SSE stream."""
+    result = derive_internal_graph_slice1(
+        repo_root=settings.repo_root,
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+    )
+    anchor = result.get("anchor") if isinstance(result.get("anchor"), dict) else None
+    nodes = [node for node in list(result.get("nodes") or []) if isinstance(node, dict)]
+    edges = [edge for edge in list(result.get("edges") or []) if isinstance(edge, dict)]
+    warnings = [str(item) for item in list(result.get("warnings") or [])]
+    graph = {
+        "available": True,
+        "warning": None,
+        "subject_kind": _graph_display_value(subject_kind),
+        "subject_id": _graph_display_value(subject_id),
+        "source": "derived_on_demand",
+        "helper": "derive_internal_graph_slice1",
+        "read_only": True,
+        "public_api_expanded": False,
+        "anchor": anchor,
+        "nodes": nodes,
+        "edges": edges,
+        "warnings": warnings,
+        "summary": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "warning_count": len(warnings),
+        },
+    }
+    graph["sections"] = _graph_sections(graph)
+    return graph
+
+
+def _empty_ui_graph_summary(*, subject_kind: str | None, subject_id: str | None, warning: str | None) -> dict[str, Any]:
+    """Return a deterministic degraded graph summary."""
+    graph = {
+        "available": False,
+        "warning": warning,
+        "subject_kind": _graph_display_value(subject_kind),
+        "subject_id": _graph_display_value(subject_id),
+        "source": "derived_on_demand",
+        "helper": "derive_internal_graph_slice1",
+        "read_only": True,
+        "public_api_expanded": False,
+        "anchor": None,
+        "nodes": [],
+        "edges": [],
+        "warnings": ["graph_derivation_failed"],
+        "summary": {"node_count": 0, "edge_count": 0, "warning_count": 1},
+    }
+    graph["sections"] = _graph_sections(graph)
+    return graph
+
+
+def _graph_display_value(value: str | None) -> str:
+    """Return the graph input display value required by #247."""
+    if value is None:
+        return "n/a"
+    return str(value)
+
+
+def _graph_sections(graph: dict[str, Any]) -> dict[str, str]:
+    """Render escaped graph HTML fragments for page and SSE reuse."""
+    anchor = graph.get("anchor") if isinstance(graph.get("anchor"), dict) else None
+    nodes = [node for node in list(graph.get("nodes") or []) if isinstance(node, dict)]
+    edges = [edge for edge in list(graph.get("edges") or []) if isinstance(edge, dict)]
+    warnings = [str(item) for item in list(graph.get("warnings") or [])]
+    summary = graph.get("summary") if isinstance(graph.get("summary"), dict) else {}
+    if anchor is None:
+        anchor_html = '<p class="muted">No graph anchor resolved.</p>'
+    else:
+        anchor_html = _definition_rows(
+            [
+                ("ID", str(anchor.get("id", ""))),
+                ("Family", str(anchor.get("family", ""))),
+            ]
+        )
+    return {
+        "anchor_html": anchor_html,
+        "source_status_html": _definition_rows(
+            [
+                ("Subject kind", str(graph.get("subject_kind") or "n/a")),
+                ("Subject ID", str(graph.get("subject_id") or "n/a")),
+                ("Source", "derived_on_demand"),
+                ("Helper", "derive_internal_graph_slice1"),
+                ("Read only", "true"),
+                ("Public API expanded", "false"),
+                ("Node count", str(summary.get("node_count", len(nodes)))),
+                ("Edge count", str(summary.get("edge_count", len(edges)))),
+                ("Warning count", str(summary.get("warning_count", len(warnings)))),
+            ]
+        ),
+        "warnings_html": _html_list(warnings),
+        "nodes_html": _html_table(
+            headers=["ID", "Family"],
+            rows=[
+                [
+                    html.escape(str(node.get("id", ""))),
+                    html.escape(str(node.get("family", ""))),
+                ]
+                for node in nodes
+            ],
+            empty_message="No graph neighbor nodes were derived for this anchor.",
+        ),
+        "edges_html": _html_table(
+            headers=["Family", "Source", "Target"],
+            rows=[
+                [
+                    html.escape(str(edge.get("family", ""))),
+                    html.escape(str(edge.get("source_id", ""))),
+                    html.escape(str(edge.get("target_id", ""))),
+                ]
+                for edge in edges
+            ],
+            empty_message="No graph edges were derived for this anchor.",
+        ),
+    }
+
+
 def _empty_ui_overview_summary(*, warning: str | None) -> dict[str, Any]:
     """Return a deterministic degraded overview summary."""
     return {
@@ -764,6 +1029,8 @@ def _ui_events_href(
     health_status: str | None = None,
     detail_subject_kind: str | None = None,
     detail_subject_id: str | None = None,
+    graph_subject_kind: str | None = None,
+    graph_subject_id: str | None = None,
 ) -> str:
     """Build a deterministic SSE URL for one page scope."""
     pairs: list[tuple[str, str]] = []
@@ -779,6 +1046,10 @@ def _ui_events_href(
         pairs.append(("detail_subject_kind", detail_subject_kind))
     if detail_subject_id is not None:
         pairs.append(("detail_subject_id", detail_subject_id))
+    if graph_subject_kind is not None:
+        pairs.append(("graph_subject_kind", graph_subject_kind))
+    if graph_subject_id is not None:
+        pairs.append(("graph_subject_id", graph_subject_id))
     if not pairs:
         return "/ui/events"
     return "/ui/events?" + urlencode(pairs)
@@ -1070,6 +1341,19 @@ def _subject_link(subject_kind: str, subject_id: str) -> str:
     """Render the continuity detail link for one subject."""
     href = f"/ui/continuity/{quote(subject_kind, safe='')}/{quote(subject_id, safe='')}"
     return f'<a href="{href}">{html.escape(subject_id)}</a>'
+
+
+def _continuity_graph_link_section(subject_kind: str, subject_id: str) -> str:
+    """Render the continuity-detail graph link for graph-supported subjects only."""
+    if subject_kind not in {"thread", "task"}:
+        return ""
+    href = f"/ui/graph/{quote(subject_kind, safe='')}/{quote(subject_id, safe='')}"
+    return (
+        '<section class="panel">'
+        "<h2>Derived Graph</h2>"
+        f'<p><a href="{href}">Open derived graph for {html.escape(subject_kind)}/{html.escape(subject_id)}</a></p>'
+        "</section>"
+    )
 
 
 def _option_row(*, value: str, selected: bool) -> str:

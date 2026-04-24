@@ -1,0 +1,17 @@
+<section class="panel">
+  <h2>Selector</h2>
+  <form method="get" action="/ui/graph" class="filter-form">
+    <label class="filter-field" for="subject_kind">
+      <span>Subject kind</span>
+      <input id="subject_kind" name="subject_kind" type="text" value="${subject_kind_value}" placeholder="thread or task" />
+    </label>
+    <label class="filter-field" for="subject_id">
+      <span>Subject ID</span>
+      <input id="subject_id" name="subject_id" type="text" value="${subject_id_value}" placeholder="anchor id" />
+    </label>
+    <div class="filter-actions">
+      <button type="submit">Apply</button>
+    </div>
+  </form>
+</section>
+${graph_sections}

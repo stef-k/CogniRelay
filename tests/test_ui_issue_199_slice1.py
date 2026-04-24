@@ -314,6 +314,64 @@ def _write_cold(repo_root: Path, *, subject_kind: str, subject_id: str) -> str:
     return cold_stub_path
 
 
+def _create_graph_roots(repo_root: Path) -> None:
+    """Create graph helper discovery roots for UI graph tests."""
+    for rel in (
+        "tasks/open",
+        "tasks/done",
+        "memory/continuity",
+        "memory/continuity/fallback",
+        "memory/continuity/archive",
+        "memory/continuity/cold/index",
+    ):
+        (repo_root / rel).mkdir(parents=True, exist_ok=True)
+
+
+def _write_task(repo_root: Path, *, task_id: str, thread_id: str, blocked_by: list[Any] | None = None) -> None:
+    """Write one task fixture for graph UI tests."""
+    task_dir = repo_root / "tasks" / "open"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    normalized = task_id.strip().lower().replace(" ", "-").replace("/", "-")
+    (task_dir / f"{normalized}.json").write_text(
+        json.dumps({"task_id": task_id, "thread_id": thread_id, "blocked_by": blocked_by or []}),
+        encoding="utf-8",
+    )
+
+
+def _write_graph_capsule(
+    repo_root: Path,
+    *,
+    subject_kind: str,
+    subject_id: str,
+    related_documents: list[dict[str, Any]] | None = None,
+) -> None:
+    """Write a schema-1.1 continuity capsule fixture for graph helper reads."""
+    now = datetime(2026, 4, 15, 9, 30, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "schema_version": "1.1",
+        "subject_kind": subject_kind,
+        "subject_id": subject_id,
+        "updated_at": now,
+        "verified_at": now,
+        "verification_kind": "self_review",
+        "source": {"producer": "test", "update_reason": "manual", "inputs": []},
+        "continuity": {
+            "top_priorities": [],
+            "active_concerns": [],
+            "active_constraints": [],
+            "open_loops": [],
+            "stance_summary": "",
+            "drift_signals": [],
+            "related_documents": related_documents or [],
+        },
+        "confidence": {"continuity": 0.9, "relationship_model": 0.8},
+    }
+    normalized = subject_id.strip().lower().replace(" ", "-").replace("/", "-")
+    path = repo_root / "memory" / "continuity" / f"{subject_kind}-{normalized}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 class TestOperatorUiSlice1(unittest.TestCase):
     """Validate the first bounded operator UI slice."""
 
@@ -1114,6 +1172,390 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertEqual(detail.status_code, 200)
         self.assertIn('data-live-detail-warning-count', detail.text)
         self.assertIn("Recovery warnings: <span data-live-detail-warning-count>2</span>", detail.text)
+
+    def test_ui_graph_selector_empty_state_has_no_live_controls(self) -> None:
+        """The graph selector route should render a deterministic empty state before helper selection."""
+        with tempfile.TemporaryDirectory() as td:
+            response = _ui_html_response(
+                Path(td),
+                route_path="/ui/graph",
+                request_path="/ui/graph",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": None, "subject_id": None},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Derived Graph", response.text)
+        self.assertIn('<form method="get" action="/ui/graph"', response.text)
+        self.assertIn("No graph anchor selected.", response.text)
+        self.assertNotIn('data-live-page="graph"', response.text)
+        self.assertNotIn("invalid_subject_kind", response.text)
+        self.assertNotIn("anchor_not_found", response.text)
+
+    def test_ui_graph_detail_renders_thread_anchor_graph(self) -> None:
+        """A thread graph should render anchor, task neighbors, document nodes, and linked edges."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_graph_capsule(
+                repo_root,
+                subject_kind="thread",
+                subject_id="thread-247",
+                related_documents=[{"path": "docs/issue-247.md", "kind": "issue", "label": "Issue 247"}],
+            )
+            _write_task(repo_root, task_id="task-247", thread_id="thread-247")
+            response = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph/{subject_kind}/{subject_id}",
+                request_path="/ui/graph/thread/thread-247",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-247"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        for label in ("Anchor", "Source / Status", "Warnings", "Nodes", "Edges"):
+            self.assertIn(f"<h2>{label}</h2>", response.text)
+        self.assertIn("thread:thread-247", response.text)
+        self.assertIn("task:task-247", response.text)
+        self.assertIn("document:docs/issue-247.md", response.text)
+        self.assertIn("linked_to_thread", response.text)
+        self.assertIn("references_document", response.text)
+        self.assertIn("<p class=\"muted\">None</p>", response.text)
+        self.assertIn('data-live-page="graph"', response.text)
+
+    def test_ui_graph_detail_renders_task_anchor_graph(self) -> None:
+        """A task graph should render linked-thread and dependency neighbors."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_task(repo_root, task_id="task-247", thread_id="thread-247", blocked_by=["task-prereq"])
+            response = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph/{subject_kind}/{subject_id}",
+                request_path="/ui/graph/task/task-247",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "task", "subject_id": "task-247"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("task:task-247", response.text)
+        self.assertIn("thread:thread-247", response.text)
+        self.assertIn("task:task-prereq", response.text)
+        self.assertIn("depends_on", response.text)
+        self.assertIn("linked_to_thread", response.text)
+
+    def test_ui_graph_query_route_matches_canonical_route(self) -> None:
+        """The complete query route should render the same helper-backed graph sections as the canonical route."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_task(repo_root, task_id="task-query", thread_id="thread-query")
+            canonical = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph/{subject_kind}/{subject_id}",
+                request_path="/ui/graph/thread/thread-query",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-query"},
+            )
+            query = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph",
+                request_path="/ui/graph",
+                query_string=b"subject_kind=thread&subject_id=thread-query",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-query"},
+            )
+
+        self.assertEqual(canonical.status_code, 200)
+        self.assertEqual(query.status_code, 200)
+        for expected in ("thread:thread-query", "task:task-query", "linked_to_thread", "Node count"):
+            self.assertIn(expected, canonical.text)
+            self.assertIn(expected, query.text)
+
+    def test_ui_graph_partial_query_inputs_render_warning_states(self) -> None:
+        """Partial graph query inputs should call the helper path and return HTTP 200 warning pages."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            missing_id = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph",
+                request_path="/ui/graph",
+                query_string=b"subject_kind=thread",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": None},
+            )
+            missing_kind = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph",
+                request_path="/ui/graph",
+                query_string=b"subject_id=thread-247",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": None, "subject_id": "thread-247"},
+            )
+
+        self.assertEqual(missing_id.status_code, 200)
+        self.assertIn("anchor_not_found", missing_id.text)
+        self.assertNotIn('data-live-page="graph"', missing_id.text)
+        self.assertEqual(missing_kind.status_code, 200)
+        self.assertIn("invalid_subject_kind", missing_kind.text)
+        self.assertNotIn('data-live-page="graph"', missing_kind.text)
+
+    def test_ui_graph_warning_states_are_visible_with_http_200(self) -> None:
+        """Helper warning states should render in-page without framework 4xx responses."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            not_found = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph/{subject_kind}/{subject_id}",
+                request_path="/ui/graph/thread/missing",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "missing"},
+            )
+            invalid_kind = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph/{subject_kind}/{subject_id}",
+                request_path="/ui/graph/Thread/missing",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "Thread", "subject_id": "missing"},
+            )
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            failed = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph/{subject_kind}/{subject_id}",
+                request_path="/ui/graph/thread/missing",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "missing"},
+            )
+
+        self.assertEqual(not_found.status_code, 200)
+        self.assertIn("anchor_not_found", not_found.text)
+        self.assertEqual(invalid_kind.status_code, 200)
+        self.assertIn("invalid_subject_kind", invalid_kind.text)
+        self.assertEqual(failed.status_code, 200)
+        self.assertIn("graph_derivation_failed", failed.text)
+
+    def test_ui_graph_helper_exception_degrades_without_leaking_exception_text(self) -> None:
+        """Graph page helper exceptions should render a deterministic warning in band."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(repo_root, COGNIRELAY_UI_ENABLED="true", COGNIRELAY_UI_REQUIRE_LOCALHOST="false")
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/graph/{subject_kind}/{subject_id}")
+            request = _request_with_transport_host("127.0.0.1", path="/ui/graph/thread/some-id")
+            with patch("app.ui.router._ui_live_graph_summary", side_effect=RuntimeError("raw secret")):
+                response = endpoint(request, subject_kind="thread", subject_id="some-id")
+
+        text = response.body.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("graph_derivation_failed", text)
+        self.assertNotIn("raw secret", text)
+
+    def test_ui_graph_escapes_values_and_keeps_page_read_only(self) -> None:
+        """Graph output and selector redisplay should escape HTML and avoid mutation controls."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_task(
+                repo_root,
+                task_id='task-<script>alert("x")</script>',
+                thread_id='thread-<b>unsafe</b>',
+                blocked_by=['dep-<img src=x onerror=alert(1)>'],
+            )
+            response = _ui_html_response(
+                repo_root,
+                route_path="/ui/graph",
+                request_path="/ui/graph",
+                query_string=b"subject_kind=task&subject_id=task-%3Cscript%3Ealert%28%22x%22%29%3C%2Fscript%3E",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "task", "subject_id": 'task-<script>alert("x")</script>'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("task-&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;", response.text)
+        self.assertIn("thread:thread-&lt;b&gt;unsafe&lt;/b&gt;", response.text)
+        self.assertIn("dep-&lt;img src=x onerror=alert(1)&gt;", response.text)
+        self.assertNotIn("<script>alert", response.text)
+        self.assertNotIn("<b>unsafe</b>", response.text)
+        self.assertEqual(response.text.count("<form "), 1)
+        for forbidden in ("create", "edit", "delete", "mutate", "schedule", "complete", "archive", "save graph"):
+            self.assertNotIn(f'name="{forbidden}"', response.text.lower())
+            self.assertNotIn(f'action="/ui/{forbidden}', response.text.lower())
+
+    def test_ui_continuity_detail_links_to_encoded_graph_routes_for_threads_and_tasks_only(self) -> None:
+        """Continuity detail should link graph-supported subjects with encoded path segments only."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="thread", subject_id="Thread 247?")
+            _write_capsule(repo_root, subject_kind="task", subject_id="Task 247?")
+            _write_capsule(repo_root, subject_kind="user", subject_id="User 247?")
+            thread_detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/thread/Thread%20247%3F",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "Thread 247?"},
+            )
+            task_detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/task/Task%20247%3F",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "task", "subject_id": "Task 247?"},
+            )
+            user_detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/user/User%20247%3F",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "user", "subject_id": "User 247?"},
+            )
+
+        self.assertIn('/ui/graph/thread/Thread%20247%3F', thread_detail.text)
+        self.assertIn('/ui/graph/task/Task%20247%3F', task_detail.text)
+        self.assertNotIn("/ui/graph/user", user_detail.text)
+
+    def test_ui_events_graph_scope_null_for_missing_or_incomplete_params(self) -> None:
+        """Graph SSE should remain null when no complete graph scope is requested."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(repo_root, COGNIRELAY_UI_ENABLED="true", COGNIRELAY_UI_REQUIRE_LOCALHOST="false")
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host("127.0.0.1", path="/ui/events")
+            response = asyncio.run(
+                endpoint(
+                    request,
+                    q=None,
+                    subject_kind=None,
+                    artifact_state=None,
+                    health_status=None,
+                    detail_subject_kind=None,
+                    detail_subject_id=None,
+                    graph_subject_kind="thread",
+                    graph_subject_id=None,
+                )
+            )
+            event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertIsNone(payload["graph"])
+
+    def test_ui_events_graph_scope_null_for_empty_subject_id_without_helper_call(self) -> None:
+        """Empty graph SSE params are incomplete and should not call the graph helper."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(repo_root, COGNIRELAY_UI_ENABLED="true", COGNIRELAY_UI_REQUIRE_LOCALHOST="false")
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host(
+                "127.0.0.1",
+                path="/ui/events",
+                query_string=b"graph_subject_kind=thread&graph_subject_id=",
+            )
+            with patch("app.ui.router._ui_live_graph_summary", side_effect=AssertionError("helper called")):
+                response = asyncio.run(
+                    endpoint(
+                        request,
+                        q=None,
+                        subject_kind=None,
+                        artifact_state=None,
+                        health_status=None,
+                        detail_subject_kind=None,
+                        detail_subject_id=None,
+                        graph_subject_kind="thread",
+                        graph_subject_id="",
+                    )
+                )
+                event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertIsNone(payload["graph"])
+
+    def test_ui_events_includes_helper_backed_graph_payload(self) -> None:
+        """Complete graph SSE scope should include summary fields and escaped section fragments."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_task(repo_root, task_id="task-sse", thread_id="thread-sse")
+            self._client(repo_root, COGNIRELAY_UI_ENABLED="true", COGNIRELAY_UI_REQUIRE_LOCALHOST="false")
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host("127.0.0.1", path="/ui/events")
+            response = asyncio.run(
+                endpoint(
+                    request,
+                    q=None,
+                    subject_kind=None,
+                    artifact_state=None,
+                    health_status=None,
+                    detail_subject_kind=None,
+                    detail_subject_id=None,
+                    graph_subject_kind="thread",
+                    graph_subject_id="thread-sse",
+                )
+            )
+            event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertTrue(payload["ok"])
+        graph = payload["graph"]
+        self.assertTrue(graph["available"])
+        self.assertEqual(graph["subject_kind"], "thread")
+        self.assertEqual(graph["subject_id"], "thread-sse")
+        self.assertEqual(graph["source"], "derived_on_demand")
+        self.assertEqual(graph["helper"], "derive_internal_graph_slice1")
+        self.assertTrue(graph["read_only"])
+        self.assertFalse(graph["public_api_expanded"])
+        self.assertEqual(graph["summary"]["node_count"], 1)
+        self.assertEqual(graph["summary"]["edge_count"], 1)
+        self.assertIn("task:task-sse", graph["sections"]["nodes_html"])
+        self.assertIn("linked_to_thread", graph["sections"]["edges_html"])
+
+    def test_ui_events_graph_degradation_stays_in_band(self) -> None:
+        """Unexpected graph live failures should return the deterministic degraded graph object."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(repo_root, COGNIRELAY_UI_ENABLED="true", COGNIRELAY_UI_REQUIRE_LOCALHOST="false")
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host("127.0.0.1", path="/ui/events")
+            with patch("app.ui.router._ui_live_graph_summary", side_effect=RuntimeError("boom")):
+                response = asyncio.run(
+                    endpoint(
+                        request,
+                        q=None,
+                        subject_kind=None,
+                        artifact_state=None,
+                        health_status=None,
+                        detail_subject_kind=None,
+                        detail_subject_id=None,
+                        graph_subject_kind="thread",
+                        graph_subject_id="thread-sse",
+                    )
+                )
+                event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertFalse(payload["ok"])
+        self.assertIn("ui_graph_snapshot_failed:RuntimeError", payload["warnings"])
+        graph = payload["graph"]
+        self.assertFalse(graph["available"])
+        self.assertEqual(graph["warning"], "ui_graph_snapshot_failed")
+        self.assertEqual(graph["warnings"], ["graph_derivation_failed"])
+        self.assertEqual(graph["summary"], {"node_count": 0, "edge_count": 0, "warning_count": 1})
 
 
 if __name__ == "__main__":

@@ -121,6 +121,17 @@
     }
   }
 
+  function applyGraph(root, payload) {
+    if (!payload.graph || !payload.graph.sections) {
+      return;
+    }
+    setHTML(root.ownerDocument, "[data-live-graph-anchor]", payload.graph.sections.anchor_html || "");
+    setHTML(root.ownerDocument, "[data-live-graph-source-status]", payload.graph.sections.source_status_html || "");
+    setHTML(root.ownerDocument, "[data-live-graph-warnings]", payload.graph.sections.warnings_html || "");
+    setHTML(root.ownerDocument, "[data-live-graph-nodes]", payload.graph.sections.nodes_html || "");
+    setHTML(root.ownerDocument, "[data-live-graph-edges]", payload.graph.sections.edges_html || "");
+  }
+
   function applySnapshot(root, payload) {
     setText(root, "[data-live-generated-at]", payload.generated_at || "unavailable");
     var page = root.getAttribute("data-live-page");
@@ -130,6 +141,8 @@
       applyContinuity(root, payload);
     } else if (page === "detail") {
       applyDetail(root, payload);
+    } else if (page === "graph") {
+      applyGraph(root, payload);
     }
   }
 
