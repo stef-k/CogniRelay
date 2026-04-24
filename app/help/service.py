@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, get_args
+from typing import Any, Literal, get_args, get_origin
 
 from fastapi.responses import JSONResponse
 
@@ -16,9 +16,28 @@ from app.continuity.constants import (
     CAPSULE_SIZE_LIMIT_BYTES,
     CAPSULE_SIZE_LIMIT_LABEL,
     CONTINUITY_INTERACTION_BOUNDARY_KINDS,
+    PATCH_ALL_TARGETS,
     PATCH_MAX_OPERATIONS,
+    PATCH_STRUCTURED_MATCH_KEYS,
+    PATCH_TARGET_MAX_LENGTH,
 )
-from app.models import ContinuityCapsule
+from app.models import (
+    ContextRetrieveRequest,
+    ContinuityAttentionPolicy,
+    ContinuityCapsule,
+    ContinuityConfidence,
+    ContinuityFreshness,
+    ContinuityPatchRequest,
+    ContinuityRelationshipModel,
+    ContinuityRetrievalHints,
+    ContinuitySelector,
+    ContinuitySource,
+    ContinuityState,
+    ContinuityUpsertRequest,
+    SessionEndSnapshot,
+    StablePreference,
+    ThreadDescriptor,
+)
 
 _TOOL_IDS = [
     "continuity.read",
@@ -803,7 +822,74 @@ _SCOPE_ANCHOR_LIMITS = {
 _IDENTITY_ANCHOR_LIMITS = {"kind": {"max_length": 40, "pattern": "^[a-z][a-z0-9_-]{0,39}$"}, "value": {"max_length": 200}, "match_key": "kind:value"}
 _INTERACTION_BOUNDARY_KIND_ORDER = ["person_switch", "thread_switch", "task_switch", "public_reply", "manual_checkpoint"]
 _INTERACTION_BOUNDARY_KIND_VALUES = [kind for kind in _INTERACTION_BOUNDARY_KIND_ORDER if kind in CONTINUITY_INTERACTION_BOUNDARY_KINDS]
-_VERIFICATION_KIND_VALUES = list(get_args(get_args(ContinuityCapsule.model_fields["verification_kind"].annotation)[0]))
+
+
+def _field_constraint(model: type, field_name: str, attr: str) -> Any:
+    for metadata in model.model_fields[field_name].metadata:
+        if hasattr(metadata, attr):
+            return getattr(metadata, attr)
+    return None
+
+
+def _literal_values(model: type, field_name: str) -> list[Any]:
+    def collect(annotation: Any) -> list[Any]:
+        if get_origin(annotation) is None and not get_args(annotation):
+            return []
+        if get_origin(annotation) is Literal:
+            return list(get_args(annotation))
+        values: list[Any] = []
+        for arg in get_args(annotation):
+            values.extend(collect(arg))
+        return values
+
+    return collect(model.model_fields[field_name].annotation)
+
+
+def _field_limit(
+    field_path: str,
+    category: str,
+    value_type: str,
+    model: type,
+    field_name: str,
+    *,
+    per_item_max_length: int | None = None,
+    subfield_limits: dict[str, Any] | None = None,
+    applies_to: list[str] | None = None,
+    reference: str | None = None,
+) -> dict[str, Any]:
+    subfields = dict(subfield_limits or {})
+    max_items = _field_constraint(model, field_name, "max_length") if value_type in {"string_list", "object_list"} else None
+    max_length = _field_constraint(model, field_name, "max_length") if value_type in {"string", "serialized_bytes"} else None
+    if value_type in {"number", "integer_budget"}:
+        minimum = _field_constraint(model, field_name, "ge")
+        maximum = _field_constraint(model, field_name, "le")
+        if minimum is not None:
+            subfields["minimum"] = minimum
+        if maximum is not None:
+            subfields["maximum"] = maximum
+    if value_type == "enum":
+        subfields["allowed_values"] = _literal_values(model, field_name)
+    return _limit(
+        field_path,
+        category,
+        value_type,
+        max_items=max_items,
+        max_length=max_length,
+        per_item_max_length=per_item_max_length,
+        subfield_limits=subfields,
+        applies_to=applies_to,
+        reference=reference,
+    )
+
+
+def _utc_timestamp_limit(field_path: str, *, applies_to: list[str] | None = None) -> dict[str, Any]:
+    return _limit(
+        field_path,
+        "continuity_payload",
+        "string",
+        subfield_limits={"require_utc_timestamp": True, "deterministic": True, "timezone": "UTC"},
+        applies_to=applies_to,
+    )
 
 
 def _limit(
@@ -895,12 +981,12 @@ def _correction_guidance(
 
 def _validation_limits_table() -> dict[str, dict[str, Any]]:
     limits: list[dict[str, Any]] = [
-        _limit("continuity.top_priorities", "continuity_orientation", "string_list", max_items=8, per_item_max_length=160),
-        _limit("continuity.open_loops", "continuity_orientation", "string_list", max_items=8, per_item_max_length=160),
-        _limit("continuity.active_constraints", "continuity_orientation", "string_list", max_items=8, per_item_max_length=160),
-        _limit("continuity.session_trajectory", "continuity_orientation", "string_list", max_items=5, per_item_max_length=80),
-        _limit("continuity.negative_decisions", "continuity_orientation", "object_list", max_items=4, subfield_limits=_NEGATIVE_DECISION_LIMITS),
-        _limit("continuity.rationale_entries", "continuity_orientation", "object_list", max_items=6, subfield_limits=_RATIONALE_ENTRY_LIMITS),
+        _field_limit("continuity.top_priorities", "continuity_orientation", "string_list", ContinuityState, "top_priorities", per_item_max_length=160),
+        _field_limit("continuity.open_loops", "continuity_orientation", "string_list", ContinuityState, "open_loops", per_item_max_length=160),
+        _field_limit("continuity.active_constraints", "continuity_orientation", "string_list", ContinuityState, "active_constraints", per_item_max_length=160),
+        _field_limit("continuity.session_trajectory", "continuity_orientation", "string_list", ContinuityState, "session_trajectory", per_item_max_length=80),
+        _field_limit("continuity.negative_decisions", "continuity_orientation", "object_list", ContinuityState, "negative_decisions", subfield_limits=_NEGATIVE_DECISION_LIMITS),
+        _field_limit("continuity.rationale_entries", "continuity_orientation", "object_list", ContinuityState, "rationale_entries", subfield_limits=_RATIONALE_ENTRY_LIMITS),
         _limit(
             "continuity.related_documents",
             "continuity_orientation",
@@ -909,49 +995,77 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
             subfield_limits=_RELATED_DOCUMENT_LIMITS,
             reference="docs/payload-reference.md#continuityrelated_documents",
         ),
-        _limit("continuity.stance_summary", "continuity_orientation", "string", max_length=240),
-        _limit("session_end_snapshot.open_loops", "session_end_snapshot", "string_list", max_items=8, per_item_max_length=160),
-        _limit("session_end_snapshot.top_priorities", "session_end_snapshot", "string_list", max_items=8, per_item_max_length=160),
-        _limit("session_end_snapshot.active_constraints", "session_end_snapshot", "string_list", max_items=8, per_item_max_length=160),
-        _limit("session_end_snapshot.stance_summary", "session_end_snapshot", "string", max_length=240),
-        _limit("session_end_snapshot.negative_decisions", "session_end_snapshot", "object_list", max_items=4, subfield_limits=_NEGATIVE_DECISION_LIMITS),
-        _limit("session_end_snapshot.session_trajectory", "session_end_snapshot", "string_list", max_items=5, per_item_max_length=80),
-        _limit("session_end_snapshot.rationale_entries", "session_end_snapshot", "object_list", max_items=6, subfield_limits=_RATIONALE_ENTRY_LIMITS),
+        _field_limit("continuity.stance_summary", "continuity_orientation", "string", ContinuityState, "stance_summary"),
+        _field_limit("session_end_snapshot.open_loops", "session_end_snapshot", "string_list", SessionEndSnapshot, "open_loops", per_item_max_length=160),
+        _field_limit("session_end_snapshot.top_priorities", "session_end_snapshot", "string_list", SessionEndSnapshot, "top_priorities", per_item_max_length=160),
+        _field_limit("session_end_snapshot.active_constraints", "session_end_snapshot", "string_list", SessionEndSnapshot, "active_constraints", per_item_max_length=160),
+        _field_limit("session_end_snapshot.stance_summary", "session_end_snapshot", "string", SessionEndSnapshot, "stance_summary"),
+        _field_limit("session_end_snapshot.negative_decisions", "session_end_snapshot", "object_list", SessionEndSnapshot, "negative_decisions", subfield_limits=_NEGATIVE_DECISION_LIMITS),
+        _field_limit("session_end_snapshot.session_trajectory", "session_end_snapshot", "string_list", SessionEndSnapshot, "session_trajectory", per_item_max_length=80),
+        _field_limit("session_end_snapshot.rationale_entries", "session_end_snapshot", "object_list", SessionEndSnapshot, "rationale_entries", subfield_limits=_RATIONALE_ENTRY_LIMITS),
         _limit(
             "patch.operations",
             "patch_targets",
             "operation_list",
-            max_items=PATCH_MAX_OPERATIONS,
-            subfield_limits={"min_items": 1, "max_items": PATCH_MAX_OPERATIONS, "actions": ["append", "remove", "replace_at"]},
+            max_items=_field_constraint(ContinuityPatchRequest, "operations", "max_length"),
+            subfield_limits={
+                "min_items": _field_constraint(ContinuityPatchRequest, "operations", "min_length"),
+                "max_items": PATCH_MAX_OPERATIONS,
+                "actions": ["append", "remove", "replace_at"],
+            },
         ),
-        _limit("patch.target.continuity.open_loops", "patch_targets", "string_list", max_items=8, per_item_max_length=160),
-        _limit("patch.target.continuity.top_priorities", "patch_targets", "string_list", max_items=8, per_item_max_length=160),
-        _limit("patch.target.continuity.active_constraints", "patch_targets", "string_list", max_items=8, per_item_max_length=160),
-        _limit("patch.target.continuity.active_concerns", "patch_targets", "string_list", max_items=5, per_item_max_length=160),
-        _limit("patch.target.continuity.drift_signals", "patch_targets", "string_list", max_items=5, per_item_max_length=160),
-        _limit("patch.target.continuity.working_hypotheses", "patch_targets", "string_list", max_items=5, per_item_max_length=160),
-        _limit("patch.target.continuity.long_horizon_commitments", "patch_targets", "string_list", max_items=5, per_item_max_length=160),
-        _limit("patch.target.continuity.session_trajectory", "patch_targets", "string_list", max_items=5, per_item_max_length=80),
-        _limit("patch.target.continuity.trailing_notes", "patch_targets", "string_list", max_items=3, per_item_max_length=160),
-        _limit("patch.target.continuity.curiosity_queue", "patch_targets", "string_list", max_items=5, per_item_max_length=120),
-        _limit("patch.target.continuity.negative_decisions", "patch_targets", "object_list", max_items=4, subfield_limits=_NEGATIVE_DECISION_LIMITS | {"match_key": "decision"}),
-        _limit("patch.target.continuity.rationale_entries", "patch_targets", "object_list", max_items=6, subfield_limits=_RATIONALE_ENTRY_LIMITS | {"match_key": "tag"}),
+        _limit("patch.target.continuity.open_loops", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.open_loops"], per_item_max_length=160),
+        _limit("patch.target.continuity.top_priorities", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.top_priorities"], per_item_max_length=160),
+        _limit("patch.target.continuity.active_constraints", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.active_constraints"], per_item_max_length=160),
+        _limit("patch.target.continuity.active_concerns", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.active_concerns"], per_item_max_length=160),
+        _limit("patch.target.continuity.drift_signals", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.drift_signals"], per_item_max_length=160),
+        _limit("patch.target.continuity.working_hypotheses", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.working_hypotheses"], per_item_max_length=160),
+        _limit("patch.target.continuity.long_horizon_commitments", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.long_horizon_commitments"], per_item_max_length=160),
+        _limit("patch.target.continuity.session_trajectory", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.session_trajectory"], per_item_max_length=80),
+        _limit("patch.target.continuity.trailing_notes", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.trailing_notes"], per_item_max_length=160),
+        _limit("patch.target.continuity.curiosity_queue", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["continuity.curiosity_queue"], per_item_max_length=120),
+        _limit(
+            "patch.target.continuity.negative_decisions",
+            "patch_targets",
+            "object_list",
+            max_items=PATCH_TARGET_MAX_LENGTH["continuity.negative_decisions"],
+            subfield_limits=_NEGATIVE_DECISION_LIMITS | {"match_key": PATCH_STRUCTURED_MATCH_KEYS["continuity.negative_decisions"]},
+        ),
+        _limit(
+            "patch.target.continuity.rationale_entries",
+            "patch_targets",
+            "object_list",
+            max_items=PATCH_TARGET_MAX_LENGTH["continuity.rationale_entries"],
+            subfield_limits=_RATIONALE_ENTRY_LIMITS | {"match_key": PATCH_STRUCTURED_MATCH_KEYS["continuity.rationale_entries"]},
+        ),
         _limit(
             "patch.target.stable_preferences",
             "patch_targets",
             "object_list",
-            max_items=12,
+            max_items=PATCH_TARGET_MAX_LENGTH["stable_preferences"],
             subfield_limits={
-                "tag": {"max_length": 80},
-                "content": {"max_length": 240},
-                "match_key": "tag",
+                "tag": {"max_length": _field_constraint(StablePreference, "tag", "max_length")},
+                "content": {"max_length": _field_constraint(StablePreference, "content", "max_length")},
+                "match_key": PATCH_STRUCTURED_MATCH_KEYS["stable_preferences"],
                 "timestamps": {"require_utc_when_present": True},
                 "subject_kind": {"allowed_values": ["user", "peer"]},
             },
         ),
-        _limit("patch.target.thread_descriptor.keywords", "patch_targets", "string_list", max_items=6, per_item_max_length=40),
-        _limit("patch.target.thread_descriptor.scope_anchors", "patch_targets", "string_list", max_items=4, subfield_limits=_SCOPE_ANCHOR_LIMITS),
-        _limit("patch.target.thread_descriptor.identity_anchors", "patch_targets", "object_list", max_items=4, subfield_limits=_IDENTITY_ANCHOR_LIMITS),
+        _limit("patch.target.thread_descriptor.keywords", "patch_targets", "string_list", max_items=PATCH_TARGET_MAX_LENGTH["thread_descriptor.keywords"], per_item_max_length=40),
+        _limit(
+            "patch.target.thread_descriptor.scope_anchors",
+            "patch_targets",
+            "string_list",
+            max_items=PATCH_TARGET_MAX_LENGTH["thread_descriptor.scope_anchors"],
+            subfield_limits=_SCOPE_ANCHOR_LIMITS,
+        ),
+        _limit(
+            "patch.target.thread_descriptor.identity_anchors",
+            "patch_targets",
+            "object_list",
+            max_items=PATCH_TARGET_MAX_LENGTH["thread_descriptor.identity_anchors"],
+            subfield_limits=_IDENTITY_ANCHOR_LIMITS,
+        ),
         _limit(
             "context.retrieve.max_tokens_estimate",
             "retrieval_budget",
@@ -972,35 +1086,40 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
         ),
     ]
     additional = [
-        _limit("context.retrieve.continuity_mode", "continuity_payload", "enum", subfield_limits={"allowed_values": ["auto", "required", "off"]}),
-        _limit("context.retrieve.continuity_resilience_policy", "continuity_payload", "enum", subfield_limits={"allowed_values": ["allow_fallback", "prefer_active", "require_active"]}),
+        _field_limit("context.retrieve.continuity_mode", "continuity_payload", "enum", ContextRetrieveRequest, "continuity_mode"),
+        _field_limit("context.retrieve.continuity_resilience_policy", "continuity_payload", "enum", ContextRetrieveRequest, "continuity_resilience_policy"),
         _limit(
             "context.retrieve.continuity_selectors",
             "continuity_payload",
             "object_list",
-            max_items=4,
+            max_items=_field_constraint(ContextRetrieveRequest, "continuity_selectors", "max_length"),
             subfield_limits={
-                "subject_kind": {"allowed_values": ["user", "peer", "thread", "task"]},
-                "subject_id": {"min_length": 1, "max_length": 200},
+                "subject_kind": {"allowed_values": _literal_values(ContinuitySelector, "subject_kind")},
+                "subject_id": {
+                    "min_length": _field_constraint(ContinuitySelector, "subject_id", "min_length"),
+                    "max_length": _field_constraint(ContinuitySelector, "subject_id", "max_length"),
+                },
             },
         ),
-        _limit("context.retrieve.continuity_selectors.subject_id", "continuity_payload", "string", max_length=200),
-        _limit("context.retrieve.continuity_verification_policy", "continuity_payload", "enum", subfield_limits={"allowed_values": ["allow_degraded", "prefer_healthy", "require_healthy"]}),
-        _limit("context.retrieve.limit", "continuity_payload", "number", subfield_limits={"minimum": 1, "maximum": 100}),
-        _limit("context.retrieve.subject_id", "continuity_payload", "string", max_length=200),
-        _limit("context.retrieve.subject_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": ["user", "peer", "thread", "task"]}),
-        _limit("context.retrieve.time_window_days", "continuity_payload", "number", subfield_limits={"minimum": 1, "maximum": 3650}),
-        _limit("continuity.active_concerns", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
-        _limit("continuity.attention_policy.early_load", "continuity_payload", "string_list", max_items=8),
-        _limit("continuity.attention_policy.presence_bias_overrides", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
-        _limit("continuity.canonical_sources", "continuity_payload", "string_list", max_items=8, subfield_limits={"pattern": "repo_relative_path"}),
-        _limit("continuity.confidence.continuity", "continuity_payload", "number", subfield_limits={"minimum": 0.0, "maximum": 1.0}),
-        _limit("continuity.confidence.relationship_model", "continuity_payload", "number", subfield_limits={"minimum": 0.0, "maximum": 1.0}),
-        _limit("continuity.curiosity_queue", "continuity_payload", "string_list", max_items=5, per_item_max_length=120),
-        _limit("continuity.drift_signals", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
-        _limit("continuity.freshness.freshness_class", "continuity_payload", "enum", subfield_limits={"allowed_values": ["persistent", "durable", "situational", "ephemeral"]}),
-        _limit("continuity.freshness.stale_after_seconds", "continuity_payload", "number", subfield_limits={"minimum": 300, "maximum": 31536000}),
-        _limit("continuity.long_horizon_commitments", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
+        _field_limit("context.retrieve.continuity_selectors.subject_id", "continuity_payload", "string", ContinuitySelector, "subject_id"),
+        _field_limit("context.retrieve.continuity_selectors.subject_kind", "continuity_payload", "enum", ContinuitySelector, "subject_kind"),
+        _field_limit("context.retrieve.continuity_verification_policy", "continuity_payload", "enum", ContextRetrieveRequest, "continuity_verification_policy"),
+        _field_limit("context.retrieve.limit", "continuity_payload", "number", ContextRetrieveRequest, "limit"),
+        _field_limit("context.retrieve.subject_id", "continuity_payload", "string", ContextRetrieveRequest, "subject_id"),
+        _field_limit("context.retrieve.subject_kind", "continuity_payload", "enum", ContextRetrieveRequest, "subject_kind"),
+        _field_limit("context.retrieve.time_window_days", "continuity_payload", "number", ContextRetrieveRequest, "time_window_days"),
+        _field_limit("continuity.active_concerns", "continuity_payload", "string_list", ContinuityState, "active_concerns", per_item_max_length=160),
+        _field_limit("continuity.attention_policy.early_load", "continuity_payload", "string_list", ContinuityAttentionPolicy, "early_load"),
+        _field_limit("continuity.attention_policy.presence_bias_overrides", "continuity_payload", "string_list", ContinuityAttentionPolicy, "presence_bias_overrides", per_item_max_length=160),
+        _field_limit("continuity.canonical_sources", "continuity_payload", "string_list", ContinuityCapsule, "canonical_sources", subfield_limits={"pattern": "repo_relative_path"}),
+        _field_limit("continuity.confidence.continuity", "continuity_payload", "number", ContinuityConfidence, "continuity"),
+        _field_limit("continuity.confidence.relationship_model", "continuity_payload", "number", ContinuityConfidence, "relationship_model"),
+        _field_limit("continuity.curiosity_queue", "continuity_payload", "string_list", ContinuityState, "curiosity_queue", per_item_max_length=120),
+        _field_limit("continuity.drift_signals", "continuity_payload", "string_list", ContinuityState, "drift_signals", per_item_max_length=160),
+        _utc_timestamp_limit("continuity.freshness.expires_at"),
+        _field_limit("continuity.freshness.freshness_class", "continuity_payload", "enum", ContinuityFreshness, "freshness_class"),
+        _field_limit("continuity.freshness.stale_after_seconds", "continuity_payload", "number", ContinuityFreshness, "stale_after_seconds"),
+        _field_limit("continuity.long_horizon_commitments", "continuity_payload", "string_list", ContinuityState, "long_horizon_commitments", per_item_max_length=160),
         _limit(
             "continuity.metadata",
             "continuity_payload",
@@ -1012,62 +1131,63 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
                 "interaction_boundary_kind": {"allowed_values": _INTERACTION_BOUNDARY_KIND_VALUES},
             },
         ),
-        _limit("continuity.relationship_model.preferred_style", "continuity_payload", "string_list", max_items=5, per_item_max_length=80),
-        _limit("continuity.relationship_model.sensitivity_notes", "continuity_payload", "string_list", max_items=5, per_item_max_length=120),
-        _limit("continuity.relationship_model.trust_level", "continuity_payload", "enum", subfield_limits={"allowed_values": ["low", "guarded", "normal", "high"]}),
-        _limit("continuity.retrieval_hints.avoid", "continuity_payload", "string_list", max_items=8, per_item_max_length=160),
-        _limit("continuity.retrieval_hints.load_next", "continuity_payload", "string_list", max_items=8, subfield_limits={"pattern": "repo_relative_path"}),
-        _limit("continuity.retrieval_hints.must_include", "continuity_payload", "string_list", max_items=8, per_item_max_length=160),
-        _limit("continuity.schema_version", "continuity_payload", "enum", subfield_limits={"allowed_values": ["1.0", "1.1"]}),
-        _limit("continuity.source.inputs", "continuity_payload", "string_list", max_items=12, per_item_max_length=200),
-        _limit("continuity.source.producer", "continuity_payload", "string", max_length=100),
-        _limit(
-            "continuity.source.update_reason",
-            "continuity_payload",
-            "enum",
-            subfield_limits={"allowed_values": ["startup_refresh", "pre_compaction", "interaction_boundary", "manual", "migration"]},
-        ),
+        _field_limit("continuity.relationship_model.preferred_style", "continuity_payload", "string_list", ContinuityRelationshipModel, "preferred_style", per_item_max_length=80),
+        _field_limit("continuity.relationship_model.sensitivity_notes", "continuity_payload", "string_list", ContinuityRelationshipModel, "sensitivity_notes", per_item_max_length=120),
+        _field_limit("continuity.relationship_model.trust_level", "continuity_payload", "enum", ContinuityRelationshipModel, "trust_level"),
+        _field_limit("continuity.retrieval_hints.avoid", "continuity_payload", "string_list", ContinuityRetrievalHints, "avoid", per_item_max_length=160),
+        _field_limit("continuity.retrieval_hints.load_next", "continuity_payload", "string_list", ContinuityRetrievalHints, "load_next", subfield_limits={"pattern": "repo_relative_path"}),
+        _field_limit("continuity.retrieval_hints.must_include", "continuity_payload", "string_list", ContinuityRetrievalHints, "must_include", per_item_max_length=160),
+        _field_limit("continuity.schema_version", "continuity_payload", "enum", ContinuityCapsule, "schema_version"),
+        _field_limit("continuity.source.inputs", "continuity_payload", "string_list", ContinuitySource, "inputs", per_item_max_length=200),
+        _field_limit("continuity.source.producer", "continuity_payload", "string", ContinuitySource, "producer"),
+        _field_limit("continuity.source.update_reason", "continuity_payload", "enum", ContinuitySource, "update_reason"),
         _limit(
             "continuity.stable_preferences",
             "continuity_payload",
             "object_list",
-            max_items=12,
+            max_items=_field_constraint(ContinuityCapsule, "stable_preferences", "max_length"),
             subfield_limits={
-                "tag": {"min_length": 1, "max_length": 80},
-                "content": {"min_length": 1, "max_length": 240},
+                "tag": {
+                    "min_length": _field_constraint(StablePreference, "tag", "min_length"),
+                    "max_length": _field_constraint(StablePreference, "tag", "max_length"),
+                },
+                "content": {
+                    "min_length": _field_constraint(StablePreference, "content", "min_length"),
+                    "max_length": _field_constraint(StablePreference, "content", "max_length"),
+                },
                 "timestamps": {"require_utc_when_present": True},
                 "subject_kind": {"allowed_values": ["user", "peer"]},
             },
         ),
-        _limit("continuity.subject_id", "continuity_payload", "string", max_length=200),
-        _limit("continuity.subject_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": ["user", "peer", "thread", "task"]}),
-        _limit("continuity.thread_descriptor.identity_anchors", "continuity_payload", "object_list", max_items=4, subfield_limits=_IDENTITY_ANCHOR_LIMITS),
-        _limit("continuity.thread_descriptor.keywords", "continuity_payload", "string_list", max_items=6, per_item_max_length=40),
-        _limit("continuity.thread_descriptor.label", "continuity_payload", "string", max_length=120),
-        _limit("continuity.thread_descriptor.scope_anchors", "continuity_payload", "string_list", max_items=4, subfield_limits=_SCOPE_ANCHOR_LIMITS),
-        _limit("continuity.trailing_notes", "continuity_payload", "string_list", max_items=3, per_item_max_length=160),
-        _limit("continuity.upsert.commit_message", "continuity_payload", "string", max_length=240),
-        _limit("continuity.upsert.idempotency_key", "continuity_payload", "string", max_length=200),
-        _limit("continuity.upsert.lifecycle_transition", "continuity_payload", "enum", subfield_limits={"allowed_values": ["suspend", "resume", "conclude", "supersede"]}),
-        _limit("continuity.upsert.merge_mode", "continuity_payload", "enum", subfield_limits={"allowed_values": ["replace", "preserve"]}),
-        _limit("continuity.upsert.subject_id", "continuity_payload", "string", max_length=200),
-        _limit("continuity.upsert.subject_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": ["user", "peer", "thread", "task"]}),
-        _limit("continuity.upsert.superseded_by", "continuity_payload", "string", max_length=200),
-        _limit("continuity.verification_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": _VERIFICATION_KIND_VALUES}),
-        _limit("continuity.working_hypotheses", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
-        _limit("continuity.patch.commit_message", "continuity_payload", "string", max_length=240),
-        _limit("continuity.patch.subject_id", "continuity_payload", "string", max_length=200),
-        _limit("continuity.patch.subject_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": ["user", "peer", "thread", "task"]}),
-        _limit(
-            "continuity.patch.updated_at",
-            "continuity_payload",
-            "string",
-            subfield_limits={"require_utc_timestamp": True, "deterministic": True, "timezone": "UTC"},
-        ),
+        _field_limit("continuity.subject_id", "continuity_payload", "string", ContinuityCapsule, "subject_id"),
+        _field_limit("continuity.subject_kind", "continuity_payload", "enum", ContinuityCapsule, "subject_kind"),
+        _field_limit("continuity.thread_descriptor.identity_anchors", "continuity_payload", "object_list", ThreadDescriptor, "identity_anchors", subfield_limits=_IDENTITY_ANCHOR_LIMITS),
+        _field_limit("continuity.thread_descriptor.keywords", "continuity_payload", "string_list", ThreadDescriptor, "keywords", per_item_max_length=40),
+        _field_limit("continuity.thread_descriptor.label", "continuity_payload", "string", ThreadDescriptor, "label"),
+        _field_limit("continuity.thread_descriptor.scope_anchors", "continuity_payload", "string_list", ThreadDescriptor, "scope_anchors", subfield_limits=_SCOPE_ANCHOR_LIMITS),
+        _field_limit("continuity.trailing_notes", "continuity_payload", "string_list", ContinuityState, "trailing_notes", per_item_max_length=160),
+        _utc_timestamp_limit("continuity.updated_at"),
+        _field_limit("continuity.upsert.commit_message", "continuity_payload", "string", ContinuityUpsertRequest, "commit_message"),
+        _field_limit("continuity.upsert.idempotency_key", "continuity_payload", "string", ContinuityUpsertRequest, "idempotency_key"),
+        _field_limit("continuity.upsert.lifecycle_transition", "continuity_payload", "enum", ContinuityUpsertRequest, "lifecycle_transition"),
+        _field_limit("continuity.upsert.merge_mode", "continuity_payload", "enum", ContinuityUpsertRequest, "merge_mode"),
+        _field_limit("continuity.upsert.subject_id", "continuity_payload", "string", ContinuityUpsertRequest, "subject_id"),
+        _field_limit("continuity.upsert.subject_kind", "continuity_payload", "enum", ContinuityUpsertRequest, "subject_kind"),
+        _field_limit("continuity.upsert.superseded_by", "continuity_payload", "string", ContinuityUpsertRequest, "superseded_by"),
+        _utc_timestamp_limit("continuity.verified_at"),
+        _field_limit("continuity.verification_kind", "continuity_payload", "enum", ContinuityCapsule, "verification_kind"),
+        _field_limit("continuity.working_hypotheses", "continuity_payload", "string_list", ContinuityState, "working_hypotheses", per_item_max_length=160),
+        _field_limit("continuity.patch.commit_message", "continuity_payload", "string", ContinuityPatchRequest, "commit_message"),
+        _field_limit("continuity.patch.subject_id", "continuity_payload", "string", ContinuityPatchRequest, "subject_id"),
+        _field_limit("continuity.patch.subject_kind", "continuity_payload", "enum", ContinuityPatchRequest, "subject_kind"),
+        _utc_timestamp_limit("continuity.patch.updated_at", applies_to=["POST /v1/continuity/patch", "continuity.patch"]),
     ]
     table = {item["field_path"]: item for item in limits}
     for item in sorted(additional, key=lambda limit: limit["field_path"]):
         table[item["field_path"]] = item
+    emitted_patch_targets = {path.removeprefix("patch.target.") for path in table if path.startswith("patch.target.")}
+    if emitted_patch_targets != PATCH_ALL_TARGETS:
+        raise RuntimeError("validation limit patch target coverage drifted from PATCH_ALL_TARGETS")
     return table
 
 

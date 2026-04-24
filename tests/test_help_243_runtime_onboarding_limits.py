@@ -20,10 +20,28 @@ from app.continuity.constants import (
     CONTINUITY_INTERACTION_BOUNDARY_KINDS,
     PATCH_ALL_TARGETS,
     PATCH_MAX_OPERATIONS,
+    PATCH_STRUCTURED_MATCH_KEYS,
+    PATCH_TARGET_MAX_LENGTH,
 )
 from app.help.service import onboarding_section_ids, validation_limit_field_paths
 from app.main import app
-from app.models import ContextRetrieveRequest, ContinuityCapsule, ContinuityPatchRequest, ContinuityUpsertRequest, SessionEndSnapshot
+from app.models import (
+    ContextRetrieveRequest,
+    ContinuityAttentionPolicy,
+    ContinuityCapsule,
+    ContinuityConfidence,
+    ContinuityFreshness,
+    ContinuityPatchRequest,
+    ContinuityRelationshipModel,
+    ContinuityRetrievalHints,
+    ContinuitySelector,
+    ContinuitySource,
+    ContinuityState,
+    ContinuityUpsertRequest,
+    SessionEndSnapshot,
+    StablePreference,
+    ThreadDescriptor,
+)
 
 
 SECTION_IDS = [
@@ -86,6 +104,13 @@ def _literal_values(model: type, field_name: str) -> list[str]:
         if get_origin(arg) is Literal:
             return list(get_args(arg))
     raise AssertionError(f"{model.__name__}.{field_name} is not a Literal field")
+
+
+def _field_constraint(model: type, field_name: str, attr: str) -> object:
+    for metadata in model.model_fields[field_name].metadata:
+        if hasattr(metadata, attr):
+            return getattr(metadata, attr)
+    raise AssertionError(f"{model.__name__}.{field_name} has no {attr} constraint")
 
 
 class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
@@ -308,60 +333,66 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
             with self.subTest(model=model.__name__):
                 self.assertLessEqual(fields, set(model.model_fields))
 
-        expected_additional = {
-            "context.retrieve.continuity_mode",
-            "context.retrieve.continuity_resilience_policy",
-            "context.retrieve.continuity_selectors",
-            "context.retrieve.continuity_selectors.subject_id",
-            "context.retrieve.continuity_verification_policy",
-            "context.retrieve.limit",
-            "context.retrieve.subject_id",
-            "context.retrieve.subject_kind",
-            "context.retrieve.time_window_days",
-            "continuity.active_concerns",
-            "continuity.attention_policy.early_load",
-            "continuity.attention_policy.presence_bias_overrides",
-            "continuity.canonical_sources",
-            "continuity.confidence.continuity",
-            "continuity.confidence.relationship_model",
-            "continuity.curiosity_queue",
-            "continuity.drift_signals",
-            "continuity.freshness.freshness_class",
-            "continuity.freshness.stale_after_seconds",
-            "continuity.long_horizon_commitments",
-            "continuity.metadata",
-            "continuity.patch.commit_message",
-            "continuity.patch.subject_id",
-            "continuity.patch.subject_kind",
-            "continuity.patch.updated_at",
-            "continuity.relationship_model.preferred_style",
-            "continuity.relationship_model.sensitivity_notes",
-            "continuity.relationship_model.trust_level",
-            "continuity.retrieval_hints.avoid",
-            "continuity.retrieval_hints.load_next",
-            "continuity.retrieval_hints.must_include",
-            "continuity.schema_version",
-            "continuity.source.inputs",
-            "continuity.source.producer",
-            "continuity.source.update_reason",
-            "continuity.stable_preferences",
-            "continuity.subject_id",
-            "continuity.subject_kind",
-            "continuity.thread_descriptor.identity_anchors",
-            "continuity.thread_descriptor.keywords",
-            "continuity.thread_descriptor.label",
-            "continuity.thread_descriptor.scope_anchors",
-            "continuity.trailing_notes",
-            "continuity.upsert.commit_message",
-            "continuity.upsert.idempotency_key",
-            "continuity.upsert.lifecycle_transition",
-            "continuity.upsert.merge_mode",
-            "continuity.upsert.subject_id",
-            "continuity.upsert.subject_kind",
-            "continuity.upsert.superseded_by",
-            "continuity.verification_kind",
-            "continuity.working_hypotheses",
+        request_field_paths = {
+            f"continuity.upsert.{field}"
+            for field in (
+                "subject_id",
+                "subject_kind",
+                "commit_message",
+                "idempotency_key",
+                "lifecycle_transition",
+                "merge_mode",
+                "superseded_by",
+            )
+        } | {
+            f"continuity.patch.{field}"
+            for field in ("subject_id", "subject_kind", "updated_at", "commit_message")
+        } | {
+            f"context.retrieve.{field}"
+            for field in (
+                "subject_id",
+                "subject_kind",
+                "continuity_mode",
+                "continuity_verification_policy",
+                "continuity_resilience_policy",
+                "continuity_selectors",
+                "time_window_days",
+                "limit",
+            )
+        } | {
+            f"context.retrieve.continuity_selectors.{field}" for field in ContinuitySelector.model_fields
         }
+        priority_capsule_fields = {
+            "top_priorities",
+            "open_loops",
+            "active_constraints",
+            "session_trajectory",
+            "negative_decisions",
+            "rationale_entries",
+            "related_documents",
+            "stance_summary",
+        }
+        continuity_state_field_paths = {
+            f"continuity.{field}"
+            for field in ContinuityState.model_fields
+            if field not in priority_capsule_fields | {"relationship_model", "retrieval_hints"}
+        }
+        capsule_model_field_paths = {
+            f"continuity.{field}"
+            for field in ("schema_version", "subject_id", "subject_kind", "updated_at", "verified_at", "canonical_sources", "verification_kind")
+        }
+        nested_model_field_paths = (
+            {f"continuity.source.{field}" for field in ContinuitySource.model_fields}
+            | {f"continuity.confidence.{field}" for field in ContinuityConfidence.model_fields}
+            | {f"continuity.attention_policy.{field}" for field in ContinuityAttentionPolicy.model_fields}
+            | {f"continuity.freshness.{field}" for field in ContinuityFreshness.model_fields}
+            | {f"continuity.relationship_model.{field}" for field in ContinuityRelationshipModel.model_fields}
+            | {f"continuity.retrieval_hints.{field}" for field in ContinuityRetrievalHints.model_fields}
+            | {f"continuity.thread_descriptor.{field}" for field in ThreadDescriptor.model_fields if field not in {"lifecycle", "superseded_by"}}
+        )
+        service_fixture_paths = {"continuity.metadata", "continuity.stable_preferences"}
+        self.assertIn("tag", StablePreference.model_fields)
+        expected_additional = request_field_paths | continuity_state_field_paths | capsule_model_field_paths | nested_model_field_paths | service_fixture_paths
         paths = validation_limit_field_paths()
         self.assertEqual(paths[: len(PRIORITY_FIELD_PATHS)], PRIORITY_FIELD_PATHS)
         self.assertEqual(paths[len(PRIORITY_FIELD_PATHS) :], sorted(expected_additional))
@@ -385,8 +416,24 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
         self.assertEqual(set(expected_boundary_kinds), CONTINUITY_INTERACTION_BOUNDARY_KINDS)
 
         early_load = self.client.get("/v1/help/limits/continuity.attention_policy.early_load").json()["limit"]
-        self.assertEqual(early_load["max_items"], ContinuityCapsule.model_fields["attention_policy"].annotation.__args__[0].model_fields["early_load"].metadata[0].max_length)
+        self.assertEqual(early_load["max_items"], _field_constraint(ContinuityAttentionPolicy, "early_load", "max_length"))
         self.assertIsNone(early_load["per_item_max_length"])
+
+        selector_subject_kind = self.client.get("/v1/help/limits/context.retrieve.continuity_selectors.subject_kind").json()["limit"]
+        self.assertEqual(selector_subject_kind["subfield_limits"]["allowed_values"], _literal_values(ContinuitySelector, "subject_kind"))
+
+        for timestamp_path in ("continuity.updated_at", "continuity.verified_at", "continuity.freshness.expires_at"):
+            with self.subTest(timestamp_path=timestamp_path):
+                timestamp_limit = self.client.get(f"/v1/help/limits/{timestamp_path}").json()["limit"]
+                self.assertEqual(
+                    timestamp_limit["subfield_limits"],
+                    {"require_utc_timestamp": True, "deterministic": True, "timezone": "UTC"},
+                )
+
+        top_priorities = self.client.get("/v1/help/limits/continuity.top_priorities").json()["limit"]
+        self.assertEqual(top_priorities["max_items"], _field_constraint(ContinuityState, "top_priorities", "max_length"))
+        patch_top_priorities = self.client.get("/v1/help/limits/patch.target.continuity.top_priorities").json()["limit"]
+        self.assertEqual(patch_top_priorities["max_items"], PATCH_TARGET_MAX_LENGTH["continuity.top_priorities"])
 
         patch_updated_at = self.client.get("/v1/help/limits/continuity.patch.updated_at").json()["limit"]
         self.assertIn("updated_at", ContinuityPatchRequest.model_fields)
@@ -399,6 +446,8 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
 
         verification_kind = self.client.get("/v1/help/limits/continuity.verification_kind").json()["limit"]
         self.assertEqual(verification_kind["subfield_limits"]["allowed_values"], _literal_values(ContinuityCapsule, "verification_kind"))
+        stable_preferences = self.client.get("/v1/help/limits/patch.target.stable_preferences").json()["limit"]
+        self.assertEqual(stable_preferences["subfield_limits"]["match_key"], PATCH_STRUCTURED_MATCH_KEYS["stable_preferences"])
 
     def test_invalid_limit_lookup_and_aliases_are_rejected(self) -> None:
         response = self.client.get("/v1/help/limits/bad.path", follow_redirects=False)
