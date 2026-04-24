@@ -210,6 +210,11 @@ from .tasks import (
 from .help import (
     help_error_payload,
     help_hooks_payload,
+    help_limit_payload,
+    help_limits_index_payload,
+    help_onboarding_bootstrap_payload,
+    help_onboarding_index_payload,
+    help_onboarding_section_payload,
     help_root_payload,
     help_tool_payload,
     help_topic_payload,
@@ -647,6 +652,36 @@ def help_hooks() -> dict:
 def help_error(code: str) -> Any:
     """Return the exact supported error-help body or the exact slice-1 validation error."""
     return help_error_payload(code)
+
+
+@app.get("/v1/help/onboarding")
+def help_onboarding_index() -> dict:
+    """Return the bounded onboarding section index."""
+    return help_onboarding_index_payload()
+
+
+@app.get("/v1/help/onboarding/bootstrap")
+def help_onboarding_bootstrap() -> dict:
+    """Return the compact onboarding bootstrap payload."""
+    return help_onboarding_bootstrap_payload()
+
+
+@app.get("/v1/help/onboarding/sections/{id}")
+def help_onboarding_section(id: str) -> Any:
+    """Return one supported onboarding section or the exact validation error."""
+    return help_onboarding_section_payload(id)
+
+
+@app.get("/v1/help/limits")
+def help_limits_index() -> dict:
+    """Return the bounded validation-limits index."""
+    return help_limits_index_payload()
+
+
+@app.get("/v1/help/limits/{field_path:path}")
+def help_limit(field_path: str) -> Any:
+    """Return one supported validation-limit item or the exact validation error."""
+    return help_limit_payload(field_path)
 
 
 @app.get("/v1/governance/policy")

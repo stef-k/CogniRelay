@@ -28,6 +28,11 @@ _RECOGNIZED_METHODS = {
     "system.topic_help",
     "system.hook_guide",
     "system.error_guide",
+    "system.onboarding_index",
+    "system.onboarding_bootstrap",
+    "system.onboarding_section",
+    "system.validation_limits",
+    "system.validation_limit",
 }
 _REQUEST_METHODS = _RECOGNIZED_METHODS - {"notifications/initialized"}
 _NORMAL_OPERATION_METHODS = {
@@ -38,6 +43,11 @@ _NORMAL_OPERATION_METHODS = {
     "system.topic_help",
     "system.hook_guide",
     "system.error_guide",
+    "system.onboarding_index",
+    "system.onboarding_bootstrap",
+    "system.onboarding_section",
+    "system.validation_limits",
+    "system.validation_limit",
 }
 _PLACEHOLDER_DESCRIPTIONS = {"", "tbd", "todo", "coming soon"}
 
