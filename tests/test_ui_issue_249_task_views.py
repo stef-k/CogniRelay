@@ -195,6 +195,40 @@ class TaskViewsIssue249Tests(unittest.TestCase):
         self.assertIn("blocked", filtered.text)
         self.assertNotIn("Open canonical", filtered.text)
 
+    def test_task_list_surfaces_inferred_task_id_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "tasks/done").mkdir(parents=True)
+            _write_json(repo / "tasks/open/inferred.json", _task_payload(None, title="Inferred list task"))
+
+            response = _ui_html_response(Path(tmp), route_path="/ui/tasks", request_path="/ui/tasks")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Inferred list task", response.text)
+        self.assertIn("task_id_inferred:tasks/open/inferred.json", response.text)
+        self.assertIn("Warning count</dt><dd>1</dd>", response.text)
+
+    def test_task_list_reports_display_truncation_after_matching_all_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "tasks/done").mkdir(parents=True)
+            for idx in range(205):
+                _write_json(
+                    repo / "tasks/open" / f"task-{idx:03d}.json",
+                    _task_payload(
+                        f"task-{idx:03d}",
+                        title=f"Truncated task {idx:03d}",
+                        updated_at=f"2026-04-21T00:{idx % 60:02d}:00Z",
+                    ),
+                )
+
+            response = _ui_html_response(Path(tmp), route_path="/ui/tasks", request_path="/ui/tasks")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Displayed count</dt><dd>200</dd>", response.text)
+        self.assertIn("Matched count</dt><dd>205</dd>", response.text)
+        self.assertIn("Display truncated</dt><dd>true</dd>", response.text)
+
     def test_search_ignores_non_string_scalars_and_non_string_collaborators(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -369,9 +403,21 @@ class TaskViewsIssue249Tests(unittest.TestCase):
                 with patch.object(ui_router, "continuity_read_service", side_effect=RuntimeError("boom")):
                     response = endpoint(_request("/ui/tasks/fail-task"), task_id="fail-task")
                     failure = SimpleNamespace(status_code=response.status_code, text=response.body.decode("utf-8"))
+                _write_json(repo / "tasks/open/invalid-continuity.json", _task_payload("invalid-continuity"))
+                degraded_detail = {
+                    "ok": True,
+                    "capsule": None,
+                    "source_state": "missing",
+                    "recovery_warnings": ["continuity_active_invalid", "continuity_fallback_missing"],
+                }
+                with patch.object(ui_router, "continuity_read_service", return_value=degraded_detail):
+                    response = endpoint(_request("/ui/tasks/invalid-continuity"), task_id="invalid-continuity")
+                    invalid = SimpleNamespace(status_code=response.status_code, text=response.body.decode("utf-8"))
 
         self.assertNotIn("task_continuity:", missing.text)
         self.assertNotIn("task_continuity_unavailable:missing-continuity", missing.text)
+        self.assertIn("task_continuity:continuity_active_invalid", invalid.text)
+        self.assertIn("task_continuity:continuity_fallback_missing", invalid.text)
         self.assertIn("task_continuity_unavailable:fail-task", failure.text)
 
     def test_not_found_warning_relevance_excludes_unrelated_artifact_warnings(self) -> None:

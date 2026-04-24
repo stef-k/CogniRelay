@@ -566,8 +566,15 @@ def _task_list_page(*, settings: Settings, auth: AuthContext, status: str | None
         related = _task_related_documents(settings=settings, auth=auth, artifact=artifact)
         related_by_task[artifact.task_id] = related
         related_warnings.extend(related.warnings)
+    matched_artifact_warnings = [warning for artifact in filtered_rows for warning in artifact.warnings]
     warnings = _dedupe_preserve_order(
-        [*source.root_warnings, *source.artifact_warnings, *source.duplicate_warnings.values(), *related_warnings]
+        [
+            *source.root_warnings,
+            *source.artifact_warnings,
+            *matched_artifact_warnings,
+            *source.duplicate_warnings.values(),
+            *related_warnings,
+        ]
     )
     status_options = "".join(_option_row(value=value, selected=(value == status_filter)) for value in UI_TASK_STATUSES)
     body = render_template(
@@ -792,6 +799,7 @@ def _task_related_documents(*, settings: Settings, auth: AuthContext, artifact: 
         warnings.append(f"task_continuity_unavailable:{artifact.task_id}")
         return _RelatedDocumentResult(rows=rows, warnings=_dedupe_preserve_order(warnings))
     capsule = detail.get("capsule") if isinstance(detail, dict) else None
+    recovery_warnings = _task_continuity_recovery_warnings(detail=detail, capsule=capsule)
     if isinstance(capsule, dict):
         continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
         continuity_related_documents = _task_continuity_related_documents_value(
@@ -807,8 +815,21 @@ def _task_related_documents(*, settings: Settings, auth: AuthContext, artifact: 
             source="task_continuity",
             value=continuity_related_documents,
         )
-        warnings.extend(f"task_continuity:{warning}" for warning in list(detail.get("recovery_warnings") or []))
+    warnings.extend(f"task_continuity:{warning}" for warning in recovery_warnings)
     return _RelatedDocumentResult(rows=rows, warnings=_dedupe_preserve_order(warnings))
+
+
+def _task_continuity_recovery_warnings(*, detail: Any, capsule: Any) -> list[str]:
+    """Return task-continuity recovery warnings, excluding pure missing continuity."""
+    if not isinstance(detail, dict):
+        return []
+    recovery_warnings = [str(warning) for warning in list(detail.get("recovery_warnings") or [])]
+    if isinstance(capsule, dict):
+        return recovery_warnings
+    source_state = str(detail.get("source_state") or "")
+    if source_state == "missing" and set(recovery_warnings).issubset({"continuity_active_missing", "continuity_fallback_missing"}):
+        return []
+    return recovery_warnings
 
 
 def _task_continuity_related_documents_value(
