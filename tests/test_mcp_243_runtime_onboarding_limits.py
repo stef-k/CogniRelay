@@ -61,7 +61,12 @@ class TestMcp243RuntimeOnboardingLimits(unittest.TestCase):
         self.assertEqual(descriptor.status_code, 200)
         for method in NEW_METHODS:
             self.assertIn(method, descriptor.json()["methods"])
-            response = self._request(10, method, params={"id": "bootstrap"} if method == "system.onboarding_section" else {"field_path": "continuity.top_priorities"} if method == "system.validation_limit" else {})
+            params = {}
+            if method == "system.onboarding_section":
+                params = {"id": "bootstrap"}
+            elif method == "system.validation_limit":
+                params = {"field_path": "continuity.top_priorities"}
+            response = self._request(10, method, params=params)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["error"]["data"], {"required_step": "initialize"})
 
@@ -79,7 +84,13 @@ class TestMcp243RuntimeOnboardingLimits(unittest.TestCase):
             ("system.onboarding_bootstrap", {}, "Read the compact CogniRelay onboarding bootstrap.", "/v1/help/onboarding/bootstrap", "onboarding_bootstrap"),
             ("system.onboarding_section", {"id": "bootstrap"}, "Read CogniRelay onboarding section: Minimum Startup Path.", "/v1/help/onboarding/sections/bootstrap", "onboarding_section"),
             ("system.validation_limits", {}, "Browse bounded validation limits for agent-authored fields.", "/v1/help/limits", "validation_limits_index"),
-            ("system.validation_limit", {"field_path": "continuity.top_priorities"}, "Read validation limits for continuity.top_priorities.", "/v1/help/limits/continuity.top_priorities", "validation_limit"),
+            (
+                "system.validation_limit",
+                {"field_path": "continuity.top_priorities"},
+                "Read validation limits for continuity.top_priorities.",
+                "/v1/help/limits/continuity.top_priorities",
+                "validation_limit",
+            ),
         ]
         for request_id, (method, params, summary, http_equivalent, kind) in enumerate(cases, start=30):
             with self.subTest(method=method):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -260,7 +261,7 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
                 self.assertNotIn("location", response.headers)
 
     def test_docs_agent_onboarding_mentions_runtime_lookup_without_duplication(self) -> None:
-        text = open("docs/agent-onboarding.md", encoding="utf-8").read()
+        text = Path("docs/agent-onboarding.md").read_text(encoding="utf-8")
         self.assertIn("GET /v1/help/onboarding", text)
         self.assertIn("system.onboarding_index", text)
         self.assertIn("GET /v1/help/limits/{field_path}", text)
@@ -272,12 +273,22 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
         self.assertLessEqual(len(field_path_mentions), 20)
 
     def test_onboarding_runtime_constants_align_with_doc_anchors(self) -> None:
-        text = open("docs/agent-onboarding.md", encoding="utf-8").read()
+        text = Path("docs/agent-onboarding.md").read_text(encoding="utf-8")
         self.assertEqual(onboarding_section_ids(), SECTION_IDS)
         anchors = {
             "bootstrap": ["POST /v1/continuity/read", 'view="startup"', "allow_fallback=true"],
             "hooks": ["startup", "pre_prompt", "post_prompt", "pre_compaction_or_handoff"],
-            "help_lookup": ["GET /v1/help", "GET /v1/help/tools/{name}", "GET /v1/help/topics/{id}", "GET /v1/help/hooks", "GET /v1/help/errors/{code}", "system.tool_usage", "system.topic_help", "system.hook_guide", "system.error_guide"],
+            "help_lookup": [
+                "GET /v1/help",
+                "GET /v1/help/tools/{name}",
+                "GET /v1/help/topics/{id}",
+                "GET /v1/help/hooks",
+                "GET /v1/help/errors/{code}",
+                "system.tool_usage",
+                "system.topic_help",
+                "system.hook_guide",
+                "system.error_guide",
+            ],
             "limits_and_routing": ["continuity.top_priorities", "continuity.open_loops", "continuity.active_constraints", "GET /v1/help/limits/{field_path}"],
             "retrieval": ["POST /v1/context/retrieve", "max_tokens_estimate", "continuity_max_capsules"],
             "trust_and_degradation": ["warnings", "allow_fallback", "degraded"],
