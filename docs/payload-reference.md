@@ -31,20 +31,20 @@ Total: **~94 distinct fields** across all nested objects.
 
 | Area | Items | Max chars per item |
 |------|-------|--------------------|
-| ContinuityState required lists | `top_priorities` 8, `active_concerns` 5, `active_constraints` 8, `open_loops` 8, `drift_signals` 5 = 34 strings | no per-item limit |
-| ContinuityState optional lists (5) | 3–5 each = 23 strings | no per-item limit |
+| ContinuityState required lists | `top_priorities` 8, `active_concerns` 5, `active_constraints` 8, `open_loops` 8, `drift_signals` 5 = 34 strings | 160 chars |
+| ContinuityState optional string lists (5) | `working_hypotheses` 5, `long_horizon_commitments` 5, `session_trajectory` 5, `trailing_notes` 3, `curiosity_queue` 5 = 23 strings | 160 chars except `session_trajectory` 80 chars and `curiosity_queue` 120 chars |
 | `negative_decisions` | 4 × (160 + 240) = 1,600 chars | structured |
 | `rationale_entries` | 6 × (80 + 320 + 560 + 3×160 + 3×120 + 80) = ~10,800 chars | structured |
 | `related_documents` | 8 × (240 + 32 + 120 + 32) = ~3,392 chars | structured metadata |
 | `stable_preferences` | 12 × (80 + 240) = 3,840 chars | structured |
 | `stance_summary` | 1 string | 240 chars |
-| `relationship_model` lists (2) | 5 each = 10 strings | no per-item limit |
-| `retrieval_hints` lists (3) | 8 each = 24 strings | no per-item limit |
-| `attention_policy` lists (2) | 5 + 8 = 13 strings | no per-item limit |
-| `canonical_sources` | 8 strings | no per-item limit |
-| `source.inputs` | 12 strings | no per-item limit |
-| `evidence_refs` | 4 strings | no per-item limit |
-| `capsule_health.reasons` | 5 strings | no per-item limit |
+| `relationship_model` lists (2) | 5 each = 10 strings | `preferred_style` 80 chars; `sensitivity_notes` 120 chars |
+| `retrieval_hints` lists (3) | 8 each = 24 strings | `must_include`/`avoid` 160 chars; `load_next` repo-relative path validation |
+| `attention_policy` lists (2) | 5 + 8 = 13 strings | `presence_bias_overrides` 160 chars; `early_load` count-bounded |
+| `canonical_sources` | 8 strings | repo-relative path validation |
+| `source.inputs` | 12 strings | 200 chars |
+| `evidence_refs` | 4 strings | 200 chars |
+| `capsule_health.reasons` | 5 strings | 120 chars |
 | `conflict_summary` | 1 string | 240 chars |
 | `subject_id` | 1 string | 200 chars |
 | `producer` | 1 string | 100 chars |
@@ -53,11 +53,11 @@ Total: **~130 strings + 4 negative decision objects + ~10 scalar fields**.
 
 ### Estimated JSON size
 
-The string list items don't have per-item length limits in the model (only `stance_summary`, `conflict_summary`, `decision`, `rationale`, `producer`, `subject_id` are bounded). In practice, if each unbounded string averages 80–120 chars:
+The Pydantic schema exposes the list-count caps and several scalar string bounds, while service-layer validation enforces additional per-item bounds on authored continuity strings. In practice, if each bounded string stays near the recommended 80–120 chars:
 
 - **Typical full capsule**: ~4–8 KB JSON
 - **Maximum realistic capsule** (all lists full, verbose strings): ~12–18 KB JSON
-- **Theoretical extreme** (very long strings in every slot): could approach the `COGNIRELAY_MAX_PAYLOAD_BYTES` limit (default 262 KB), but this would be pathological
+- **Theoretical upper bound** (all fields at their runtime caps): still subject to the 20 KB serialized-UTF-8 capsule write cap
 
 The system is designed so that a fully-populated capsule with practical content fits comfortably in a few KB — well within context-window budgets and storage constraints.
 
@@ -74,9 +74,9 @@ The system is designed so that a fully-populated capsule with practical content 
 | `stable_preferences` (max 12 entries) | ~960 | up to 36 fields | Trimmed as whole unit under token pressure |
 | `verification_state` + `capsule_health` + `confidence` | ~185 | ~10 fields | |
 | Top-level metadata (`subject_kind`, `subject_id`, timestamps, etc.) | ~60 | ~6 fields | |
-| **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON (theoretical; see note below)** |
+| **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON (rich practical estimate; see note below)** |
 
-> **Note on write-time size limit:** The server enforces a 20 KB serialized-UTF-8 cap on each capsule at write time. The ~14 KB figure above is the theoretical maximum when *every* optional field is populated at its maximum length simultaneously. In practice a fully-featured capsule with realistic content fits within the 20 KB cap with bounded headroom, including rich `stable_preferences`.
+> **Note on write-time size limit:** The server enforces a hard 20 KB serialized-UTF-8 cap on each capsule at write time. The ~14 KB figure above is a rich practical capsule estimate with broad optional-section coverage, not an all-fields-at-maximum ceiling. Real writes must still fit under the 20 KB cap after serialization.
 
 ### Context window impact
 
@@ -100,10 +100,20 @@ The system is designed so that a fully-populated capsule with practical content 
 
 ### Per-item string constraints
 
-Most list item strings in `ContinuityState` do not have a per-item character limit enforced in the model. The system relies on per-field list-count limits, which vary by field as documented in the field table below, plus the deterministic trim mechanism to control total size. The exceptions with explicit character limits are:
+`ContinuityState` list counts are enforced by the model. Additional write-path validation enforces per-item character limits for agent-authored continuity strings, including the startup-critical core fields used by onboarding. The current explicit character limits are:
 
 | Field | Max length |
 |-------|-----------|
+| `top_priorities[]` | 160 chars |
+| `active_concerns[]` | 160 chars |
+| `active_constraints[]` | 160 chars |
+| `open_loops[]` | 160 chars |
+| `drift_signals[]` | 160 chars |
+| `working_hypotheses[]` | 160 chars |
+| `long_horizon_commitments[]` | 160 chars |
+| `session_trajectory[]` | 80 chars |
+| `trailing_notes[]` | 160 chars |
+| `curiosity_queue[]` | 120 chars |
 | `stance_summary` | 240 chars |
 | `negative_decisions[].decision` | 160 chars |
 | `negative_decisions[].rationale` | 240 chars |
@@ -112,13 +122,22 @@ Most list item strings in `ContinuityState` do not have a per-item character lim
 | `rationale_entries[].reasoning` | 560 chars |
 | `rationale_entries[].alternatives_considered[]` | 160 chars |
 | `rationale_entries[].depends_on[]` | 120 chars |
+| `rationale_entries[].supersedes` | 80 chars |
 | `conflict_summary` (in `verification_state`) | 240 chars |
 | `subject_id` | 200 chars |
 | `source.producer` | 100 chars |
+| `source.inputs[]` | 200 chars |
+| `relationship_model.preferred_style[]` | 80 chars |
+| `relationship_model.sensitivity_notes[]` | 120 chars |
+| `retrieval_hints.must_include[]` | 160 chars |
+| `retrieval_hints.avoid[]` | 160 chars |
+| `attention_policy.presence_bias_overrides[]` | 160 chars |
+| `verification_state.evidence_refs[]` | 200 chars |
+| `capsule_health.reasons[]` | 120 chars |
 | `stable_preferences[].tag` | 80 chars |
 | `stable_preferences[].content` | 240 chars |
 
-Agents should keep individual list item strings concise (roughly 80–120 chars) to stay within practical token budgets. Very long strings in many fields simultaneously would be legal but would consume disproportionate token budget for diminishing orientation value.
+Agents should keep individual list item strings concise (roughly 80–120 chars, or less for `session_trajectory`) to stay within practical token budgets and the 20 KB serialized capsule write cap.
 
 ## Continuity Capsule Structure
 
@@ -188,18 +207,18 @@ These are the core orientation fields that an agent writes to preserve working s
 
 | Field | Type | Required | Constraints | Purpose |
 |-------|------|----------|-------------|---------|
-| `top_priorities` | list of strings | yes | max 8 | What matters most right now |
-| `active_concerns` | list of strings | yes | max 5 | Active worries or risks |
-| `active_constraints` | list of strings | yes | max 8 | Hard boundaries on action |
-| `open_loops` | list of strings | yes | max 8 | Unresolved questions or pending items |
+| `top_priorities` | list of strings | yes | max 8, each ≤ 160 chars | What matters most right now |
+| `active_concerns` | list of strings | yes | max 5, each ≤ 160 chars | Active worries or risks |
+| `active_constraints` | list of strings | yes | max 8, each ≤ 160 chars | Hard boundaries on action |
+| `open_loops` | list of strings | yes | max 8, each ≤ 160 chars | Unresolved questions or pending items |
 | `stance_summary` | string | yes | max 240 chars | Current direction in one sentence |
-| `drift_signals` | list of strings | yes | max 5 | Signs that orientation may be shifting |
-| `working_hypotheses` | list of strings | no | max 5, default `[]` | Current best-guess assumptions |
-| `long_horizon_commitments` | list of strings | no | max 5, default `[]` | Commitments that outlast this session |
-| `session_trajectory` | list of strings | no | max 5, default `[]` | Key direction changes within this session |
+| `drift_signals` | list of strings | yes | max 5, each ≤ 160 chars | Signs that orientation may be shifting |
+| `working_hypotheses` | list of strings | no | max 5, each ≤ 160 chars, default `[]` | Current best-guess assumptions |
+| `long_horizon_commitments` | list of strings | no | max 5, each ≤ 160 chars, default `[]` | Commitments that outlast this session |
+| `session_trajectory` | list of strings | no | max 5, each ≤ 80 chars, default `[]` | Key direction changes within this session |
 | `negative_decisions` | list of NegativeDecision | no | max 4, default `[]` | Decisions not to act |
-| `trailing_notes` | list of strings | no | max 3, default `[]` | Low-priority context worth preserving |
-| `curiosity_queue` | list of strings | no | max 5, default `[]` | Questions to revisit later |
+| `trailing_notes` | list of strings | no | max 3, each 1–160 chars, default `[]` | Low-priority context worth preserving |
+| `curiosity_queue` | list of strings | no | max 5, each 1–120 chars, default `[]` | Questions to revisit later |
 | `rationale_entries` | list of RationaleEntry | no | max 6, default `[]` | Decision rationale, assumptions, and unresolved tensions |
 | `related_documents` | list of structured metadata objects | no | max 8, default omitted | Bounded repo-relative document references; see discovery schema for the exact entry shape |
 | `relationship_model` | ContinuityRelationshipModel | no | | Relationship-specific hints |
