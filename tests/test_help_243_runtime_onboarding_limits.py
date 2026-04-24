@@ -597,6 +597,62 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
         stable_preferences = self.client.get("/v1/help/limits/patch.target.stable_preferences").json()["limit"]
         self.assertEqual(stable_preferences["subfield_limits"]["match_key"], PATCH_STRUCTURED_MATCH_KEYS["stable_preferences"])
 
+    def test_correction_guidance_matches_exact_templates_by_value_type(self) -> None:
+        cases = {
+            "continuity.stance_summary": (
+                'Shorten this value to at most 240 characters and retry with field_path "continuity.stance_summary".'
+            ),
+            "continuity.top_priorities": (
+                "Keep at most 8 items, shorten each item to at most 160 characters, "
+                'and retry with field_path "continuity.top_priorities".'
+            ),
+            "patch.target.thread_descriptor.scope_anchors": (
+                "Keep at most 4 items, make each item match the documented pattern and subfield metadata, "
+                'and retry with field_path "patch.target.thread_descriptor.scope_anchors".'
+            ),
+            "continuity.related_documents": (
+                "Keep at most 8 items, apply the documented subfield limits, "
+                'and retry with field_path "continuity.related_documents".'
+            ),
+            "patch.operations": (
+                'Send between 1 and 10 patch operations and retry with field_path "patch.operations".'
+            ),
+            "context.retrieve.max_tokens_estimate": (
+                'Use a value between 256 and 100000 and retry with field_path "context.retrieve.max_tokens_estimate".'
+            ),
+            "continuity.capsule_serialized_utf8": (
+                "Reduce the serialized capsule below 20 KB (20480 bytes) "
+                'and retry with field_path "continuity.capsule_serialized_utf8".'
+            ),
+            "continuity.verification_kind": (
+                'Use one of the allowed values in subfield_limits and retry with field_path "continuity.verification_kind".'
+            ),
+            "continuity.confidence.continuity": (
+                'Use a value within the documented numeric bounds and retry with field_path "continuity.confidence.continuity".'
+            ),
+            "continuity.metadata": (
+                'Apply the documented nested field limits and retry with field_path "continuity.metadata".'
+            ),
+        }
+        for field_path, expected_guidance in cases.items():
+            with self.subTest(field_path=field_path):
+                item = self.client.get(f"/v1/help/limits/{field_path}").json()["limit"]
+                self.assertEqual(item["correction_guidance"], expected_guidance)
+
+    def test_timestamp_correction_guidance_matches_exact_template_for_every_timestamp_field(self) -> None:
+        for field_path in (
+            "continuity.updated_at",
+            "continuity.verified_at",
+            "continuity.freshness.expires_at",
+            "continuity.patch.updated_at",
+        ):
+            with self.subTest(field_path=field_path):
+                item = self.client.get(f"/v1/help/limits/{field_path}").json()["limit"]
+                self.assertEqual(
+                    item["correction_guidance"],
+                    f'Use an explicit deterministic UTC timestamp and retry with field_path "{field_path}".',
+                )
+
     def test_invalid_limit_lookup_and_aliases_are_rejected(self) -> None:
         response = self.client.get("/v1/help/limits/bad.path", follow_redirects=False)
         self.assertEqual(response.status_code, 400)
