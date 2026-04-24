@@ -3,6 +3,11 @@
 from .service import (
     help_error_payload,
     help_hooks_payload,
+    help_limit_payload,
+    help_limits_index_payload,
+    help_onboarding_bootstrap_payload,
+    help_onboarding_index_payload,
+    help_onboarding_section_payload,
     help_root_payload,
     help_tool_payload,
     help_topic_payload,
@@ -15,6 +20,11 @@ from .service import (
 __all__ = [
     "help_error_payload",
     "help_hooks_payload",
+    "help_limit_payload",
+    "help_limits_index_payload",
+    "help_onboarding_bootstrap_payload",
+    "help_onboarding_index_payload",
+    "help_onboarding_section_payload",
     "help_root_payload",
     "help_tool_payload",
     "help_topic_payload",

@@ -1,6 +1,6 @@
 # Agent Onboarding
 
-This is the single concentrated bootstrap and operating manual for agents using CogniRelay. Read this first to operate the shipped system correctly without preloading the full docs corpus; use the linked references and built-in help surfaces only for exact lookup after this manual tells you which route or field family applies.
+This is the single concentrated bootstrap and operating manual for agents using CogniRelay. Read this first to operate the shipped system correctly without preloading the full docs corpus; when runtime help is available, use `GET /v1/help/onboarding`, `GET /v1/help/onboarding/bootstrap`, `GET /v1/help/onboarding/sections/{id}`, `system.onboarding_index`, `system.onboarding_bootstrap`, and `system.onboarding_section` as the repo-doc-free bounded onboarding path.
 
 ## What CogniRelay Is For
 
@@ -47,11 +47,14 @@ Use built-in help/reference lookup for exact route, tool, topic, hook, and error
 - `GET /v1/help/topics/{id}`: use this to get exact bounded guidance for one named onboarding or continuity topic.
 - `GET /v1/help/hooks`: use this to review the canonical startup, prompt, persistence, and handoff hook guidance.
 - `GET /v1/help/errors/{code}`: use this to look up exact remediation guidance for one shipped MCP error code.
+- `GET /v1/help/onboarding`, `GET /v1/help/onboarding/bootstrap`, `GET /v1/help/onboarding/sections/{id}`: use these for bounded runtime onboarding lookup instead of loading this full manual when the runtime surface is available.
+- `GET /v1/help/limits`, `GET /v1/help/limits/{field_path}`: use these after ordinary continuity write, patch, session-snapshot, or retrieval validation-limit failures instead of loading `docs/payload-reference.md` for routine limit recovery.
 - `system.help`: use this as the MCP/JSON-RPC help index equivalent of `GET /v1/help`.
 - `system.tool_usage`: use this as the MCP/JSON-RPC exact-usage lookup for one shipped tool.
 - `system.topic_help`: use this as the MCP/JSON-RPC exact-topic lookup for one named onboarding or continuity topic.
 - `system.hook_guide`: use this as the MCP/JSON-RPC hook-guidance lookup for startup, prompt, persistence, and handoff rules.
 - `system.error_guide`: use this as the MCP/JSON-RPC exact remediation lookup for one shipped MCP error code.
+- `system.onboarding_index`, `system.onboarding_bootstrap`, `system.onboarding_section`, `system.validation_limits`, `system.validation_limit`: use these as the MCP/JSON-RPC equivalents of the bounded onboarding and validation-limit help routes.
 
 ## Bootstrap-Critical Limits and Routing Rules
 
@@ -67,6 +70,8 @@ Use this closed routing list for ordinary operation. Prefer HTTP identifiers at 
 
 Task creation and task updates are described at onboarding level only through the continuity write/update path: `POST /v1/continuity/upsert` on HTTP and `continuity.upsert` on MCP. Any specialized task-write behavior belongs in deeper reference/help lookup, not in bootstrap routing.
 
+For exact limits beyond the compact bootstrap-critical names below, query `GET /v1/help/limits/{field_path}` or `system.validation_limit` with one of the field paths from the runtime limits index.
+
 Field-selection rules:
 
 - Use `stable_preferences` only for explicit, durable standing instructions or preferences worth carrying across sessions and work threads.
@@ -76,13 +81,13 @@ Field-selection rules:
 
 Current shipped bootstrap-critical limits/caps agents routinely author against:
 
-- `top_priorities = 8` entries; each `top_priorities[]` entry is bounded to `160` chars.
-- `open_loops = 8` entries; each `open_loops[]` entry is bounded to `160` chars.
-- `active_constraints = 8` entries; each `active_constraints[]` entry is bounded to `160` chars.
-- `related_documents = 8` entries.
-- `negative_decisions = 4` entries; `negative_decisions[].decision = 160` chars; `negative_decisions[].rationale = 240` chars.
-- `rationale_entries = 6` entries; `rationale_entries[].tag = 80` chars; `rationale_entries[].summary = 320` chars; `rationale_entries[].reasoning = 560` chars.
-- `stance_summary = 240` chars.
+- `continuity.top_priorities = 8` entries; each item is bounded to `160` chars.
+- `continuity.open_loops = 8` entries; each item is bounded to `160` chars.
+- `continuity.active_constraints = 8` entries; each item is bounded to `160` chars.
+- `continuity.related_documents = 8` entries.
+- `continuity.negative_decisions = 4` entries; decision and rationale fields are bounded.
+- `continuity.rationale_entries = 6` entries; tag, summary, reasoning, alternatives, and dependency fields are bounded.
+- `continuity.stance_summary = 240` chars.
 - Native retrieval default budget (`max_tokens_estimate`) = `12000`.
 - Multi-capsule continuity retrieval cap (`continuity_max_capsules`) = `4`.
 - Continuity capsule serialized write cap = `20 KB`.
@@ -181,6 +186,7 @@ These are operational errors. Apply the correction directly instead of broadenin
 - Dumping broad `related_documents`: keep only bounded repo-relative documents that repeatedly shape the current thread or task.
 - Encoding vague caution in `blocked_by[]`: use explicit task dependencies only.
 - Repurposing an old `subject_id`: supersede when the old subject remains historically true but a successor now carries the active meaning.
+- Do not request the full onboarding document or full payload schema by default; use section and field-specific runtime lookup.
 
 ## References / Where To Look Next
 
@@ -191,6 +197,6 @@ Use these references for exact lookup after this manual determines the right ope
 - `docs/mcp.md`: exact MCP/JSON-RPC method contracts.
 - `docs/system-overview.md`: system-level orientation after the bootstrap path is understood.
 - `GET /v1/help`, `GET /v1/help/tools/{name}`, `GET /v1/help/topics/{id}`, `GET /v1/help/hooks`, `GET /v1/help/errors/{code}`: built-in runtime help lookup aids.
+- `GET /v1/help/onboarding`, `GET /v1/help/onboarding/bootstrap`, `GET /v1/help/onboarding/sections/{id}`, `GET /v1/help/limits`, `GET /v1/help/limits/{field_path}`: bounded runtime onboarding and validation-limit lookup aids.
 - `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, `system.error_guide`: built-in MCP/request help lookup aids.
-
-The future machine-facing onboarding/help surface is out of scope for this manual; this document describes only current shipped behavior and points to shipped lookup surfaces for exact detail.
+- `system.onboarding_index`, `system.onboarding_bootstrap`, `system.onboarding_section`, `system.validation_limits`, `system.validation_limit`: built-in MCP/request onboarding and validation-limit lookup aids.

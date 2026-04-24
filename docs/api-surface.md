@@ -26,7 +26,20 @@ This document covers the machine-facing HTTP contract. The optional `/ui` operat
 - `GET /.well-known/cognirelay.json`: well-known discovery entrypoint
 - `GET /.well-known/mcp.json`: bounded MCP 2025-11-25 supplemental descriptor
 - `GET /v1/mcp`: deferred in slice 2; returns `405` with `Allow: POST`
-- `POST /v1/mcp`: bounded MCP 2025-11-25 Streamable HTTP posture for the base methods `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`, plus the post-bootstrap help/reference request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, and `system.error_guide`
+- `POST /v1/mcp`: bounded MCP 2025-11-25 Streamable HTTP posture for the base methods `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`, plus post-bootstrap help/reference request methods including onboarding and validation-limit lookup
+
+## Runtime help
+
+- `GET /v1/help`: top-level machine-facing help index
+- `GET /v1/help/tools/{name}`: bounded usage guidance for one supported tool
+- `GET /v1/help/topics/{id}`: bounded guidance for one supported topic
+- `GET /v1/help/hooks`: canonical hook guidance
+- `GET /v1/help/errors/{code}`: MCP error remediation guidance
+- `GET /v1/help/onboarding`: bounded onboarding section index
+- `GET /v1/help/onboarding/bootstrap`: compact startup bootstrap payload
+- `GET /v1/help/onboarding/sections/{id}`: one bounded onboarding section
+- `GET /v1/help/limits`: validation-limit field-path index
+- `GET /v1/help/limits/{field_path}`: one validation-limit item for an exact field path
 
 ### `GET /v1/capabilities` — versioned feature map
 

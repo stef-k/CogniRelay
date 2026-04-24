@@ -74,6 +74,11 @@ class TestMcp216Slice3Help(unittest.TestCase):
                 "system.topic_help",
                 "system.hook_guide",
                 "system.error_guide",
+                "system.onboarding_index",
+                "system.onboarding_bootstrap",
+                "system.onboarding_section",
+                "system.validation_limits",
+                "system.validation_limit",
             ],
         )
 
@@ -147,6 +152,11 @@ class TestMcp216Slice3Help(unittest.TestCase):
                 "system.topic_help",
                 "system.hook_guide",
                 "system.error_guide",
+                "system.onboarding_index",
+                "system.onboarding_bootstrap",
+                "system.onboarding_section",
+                "system.validation_limits",
+                "system.validation_limit",
             }
             & tool_names
         )
