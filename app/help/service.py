@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, get_args
 
 from fastapi.responses import JSONResponse
 
@@ -12,7 +12,13 @@ from app.constants import (
     CONTEXT_RETRIEVE_MAX_MAX_TOKENS,
     CONTEXT_RETRIEVE_MIN_MAX_TOKENS,
 )
-from app.continuity.constants import CAPSULE_SIZE_LIMIT_BYTES, CAPSULE_SIZE_LIMIT_LABEL, PATCH_MAX_OPERATIONS
+from app.continuity.constants import (
+    CAPSULE_SIZE_LIMIT_BYTES,
+    CAPSULE_SIZE_LIMIT_LABEL,
+    CONTINUITY_INTERACTION_BOUNDARY_KINDS,
+    PATCH_MAX_OPERATIONS,
+)
+from app.models import ContinuityCapsule
 
 _TOOL_IDS = [
     "continuity.read",
@@ -795,6 +801,9 @@ _SCOPE_ANCHOR_LIMITS = {
     "anchor_value": {"min_length": 1, "max_length": 120, "pattern": "^[a-z0-9._-]{1,120}$"},
 }
 _IDENTITY_ANCHOR_LIMITS = {"kind": {"max_length": 40, "pattern": "^[a-z][a-z0-9_-]{0,39}$"}, "value": {"max_length": 200}, "match_key": "kind:value"}
+_INTERACTION_BOUNDARY_KIND_ORDER = ["person_switch", "thread_switch", "task_switch", "public_reply", "manual_checkpoint"]
+_INTERACTION_BOUNDARY_KIND_VALUES = [kind for kind in _INTERACTION_BOUNDARY_KIND_ORDER if kind in CONTINUITY_INTERACTION_BOUNDARY_KINDS]
+_VERIFICATION_KIND_VALUES = list(get_args(get_args(ContinuityCapsule.model_fields["verification_kind"].annotation)[0]))
 
 
 def _limit(
@@ -812,7 +821,7 @@ def _limit(
     if applies_to is None:
         if field_path.startswith("session_end_snapshot."):
             applies_to = ["POST /v1/continuity/upsert", "continuity.upsert"]
-        elif field_path.startswith("patch."):
+        elif field_path.startswith("patch.") or field_path.startswith("continuity.patch."):
             applies_to = ["POST /v1/continuity/patch", "continuity.patch"]
         elif field_path.startswith("context.retrieve."):
             applies_to = ["POST /v1/context/retrieve", "context.retrieve"]
@@ -823,7 +832,7 @@ def _limit(
     if reference is None:
         if field_path.startswith("session_end_snapshot."):
             reference = "docs/payload-reference.md#session-end-snapshot-helper"
-        elif field_path.startswith("patch."):
+        elif field_path.startswith("patch.") or field_path.startswith("continuity.patch."):
             reference = "docs/payload-reference.md#patch--post-v1continuitypatch"
         elif field_path.startswith("context.retrieve."):
             reference = "docs/payload-reference.md#retrieve--post-v1contextretrieve"
@@ -862,6 +871,8 @@ def _correction_guidance(
     subfield_limits: dict[str, Any],
 ) -> str:
     if value_type == "string":
+        if subfield_limits.get("require_utc_timestamp"):
+            return f"Use an explicit deterministic UTC timestamp and retry with field_path \"{field_path}\"."
         return f"Shorten this value to at most {max_length} characters and retry with field_path \"{field_path}\"."
     if value_type == "string_list" and per_item_max_length is not None:
         return f"Keep at most {max_items} items, shorten each item to at most {per_item_max_length} characters, and retry with field_path \"{field_path}\"."
@@ -980,7 +991,7 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
         _limit("context.retrieve.subject_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": ["user", "peer", "thread", "task"]}),
         _limit("context.retrieve.time_window_days", "continuity_payload", "number", subfield_limits={"minimum": 1, "maximum": 3650}),
         _limit("continuity.active_concerns", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
-        _limit("continuity.attention_policy.early_load", "continuity_payload", "string_list", max_items=8, per_item_max_length=160),
+        _limit("continuity.attention_policy.early_load", "continuity_payload", "string_list", max_items=8),
         _limit("continuity.attention_policy.presence_bias_overrides", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
         _limit("continuity.canonical_sources", "continuity_payload", "string_list", max_items=8, subfield_limits={"pattern": "repo_relative_path"}),
         _limit("continuity.confidence.continuity", "continuity_payload", "number", subfield_limits={"minimum": 0.0, "maximum": 1.0}),
@@ -998,7 +1009,7 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
             subfield_limits={
                 "max_items": 12,
                 "values": {"scalar_only": True},
-                "interaction_boundary_kind": {"allowed_values": ["post_prompt", "pre_compaction_or_handoff", "handoff"]},
+                "interaction_boundary_kind": {"allowed_values": _INTERACTION_BOUNDARY_KIND_VALUES},
             },
         ),
         _limit("continuity.relationship_model.preferred_style", "continuity_payload", "string_list", max_items=5, per_item_max_length=80),
@@ -1033,9 +1044,7 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
         _limit("continuity.thread_descriptor.identity_anchors", "continuity_payload", "object_list", max_items=4, subfield_limits=_IDENTITY_ANCHOR_LIMITS),
         _limit("continuity.thread_descriptor.keywords", "continuity_payload", "string_list", max_items=6, per_item_max_length=40),
         _limit("continuity.thread_descriptor.label", "continuity_payload", "string", max_length=120),
-        _limit("continuity.thread_descriptor.lifecycle", "continuity_payload", "enum", subfield_limits={"allowed_values": ["active", "suspended", "concluded", "superseded"]}),
         _limit("continuity.thread_descriptor.scope_anchors", "continuity_payload", "string_list", max_items=4, subfield_limits=_SCOPE_ANCHOR_LIMITS),
-        _limit("continuity.thread_descriptor.superseded_by", "continuity_payload", "string", max_length=200),
         _limit("continuity.trailing_notes", "continuity_payload", "string_list", max_items=3, per_item_max_length=160),
         _limit("continuity.upsert.commit_message", "continuity_payload", "string", max_length=240),
         _limit("continuity.upsert.idempotency_key", "continuity_payload", "string", max_length=200),
@@ -1044,10 +1053,17 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
         _limit("continuity.upsert.subject_id", "continuity_payload", "string", max_length=200),
         _limit("continuity.upsert.subject_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": ["user", "peer", "thread", "task"]}),
         _limit("continuity.upsert.superseded_by", "continuity_payload", "string", max_length=200),
+        _limit("continuity.verification_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": _VERIFICATION_KIND_VALUES}),
         _limit("continuity.working_hypotheses", "continuity_payload", "string_list", max_items=5, per_item_max_length=160),
         _limit("continuity.patch.commit_message", "continuity_payload", "string", max_length=240),
         _limit("continuity.patch.subject_id", "continuity_payload", "string", max_length=200),
         _limit("continuity.patch.subject_kind", "continuity_payload", "enum", subfield_limits={"allowed_values": ["user", "peer", "thread", "task"]}),
+        _limit(
+            "continuity.patch.updated_at",
+            "continuity_payload",
+            "string",
+            subfield_limits={"require_utc_timestamp": True, "deterministic": True, "timezone": "UTC"},
+        ),
     ]
     table = {item["field_path"]: item for item in limits}
     for item in sorted(additional, key=lambda limit: limit["field_path"]):
