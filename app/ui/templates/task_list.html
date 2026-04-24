@@ -1,0 +1,32 @@
+<section class="panel">
+  <form method="get" action="/ui/tasks" class="filter-form">
+    <label class="filter-field" for="q">
+      <span>q</span>
+      <input id="q" name="q" type="text" value="${query_value}" />
+    </label>
+    <label class="filter-field" for="status">
+      <span>status</span>
+      <select id="status" name="status">
+        <option value="">all</option>
+        ${status_options}
+      </select>
+    </label>
+    <button type="submit">Filter</button>
+  </form>
+</section>
+<section class="panel">
+  <h2>Summary</h2>
+  <dl class="kv-list">
+    <dt>Displayed count</dt><dd>${displayed_count}</dd>
+    <dt>Matched count</dt><dd>${matched_count}</dd>
+    <dt>Warning count</dt><dd>${warning_count}</dd>
+    <dt>Status filter</dt><dd>${selected_status}</dd>
+    <dt>Query tokens</dt><dd>${normalized_query}</dd>
+    <dt>Display truncated</dt><dd>${result_truncated}</dd>
+  </dl>
+</section>
+${warnings_html}
+<section class="panel">
+  <h2>Task table</h2>
+  ${task_table}
+</section>
