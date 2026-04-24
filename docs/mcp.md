@@ -15,7 +15,7 @@ The `#216` runtime target is MCP `2025-11-25` Streamable HTTP with a temporary b
 - `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
 - `GET /.well-known/mcp.json` is supplemental metadata only
 
-The base posture remains tools-first. It does not add MCP resources, MCP prompts, SSE, or a broader compatibility transport. Slice 3 adds only five post-bootstrap help/reference request methods alongside the existing base methods.
+The base posture remains tools-first. It does not add MCP resources, MCP prompts, SSE, or a broader compatibility transport. Runtime help/reference surfaces are post-bootstrap request methods, not tools.
 
 ## Bootstrap Flow
 
@@ -29,14 +29,14 @@ After bootstrap is complete, post-bootstrap usage may call:
 
 - `POST /v1/mcp` with `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
 - `POST /v1/mcp` with `tools/call` requests as needed
-- `POST /v1/mcp` with request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, and `system.error_guide`
+- `POST /v1/mcp` with request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, `system.error_guide`, `system.onboarding_index`, `system.onboarding_bootstrap`, `system.onboarding_section`, `system.validation_limits`, and `system.validation_limit`
 
 The well-known descriptor advertises:
 
 - endpoint: `/v1/mcp`
 - transport posture: `streamable-http`
 - protocol target: MCP `2025-11-25`
-- methods: base `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, plus post-bootstrap request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, and `system.error_guide`
+- methods: base `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, plus post-bootstrap help/reference request methods
 - auth: bearer token in `Authorization`
 - supplemental metadata only: `true`
 - deferred GET posture: `GET /v1/mcp` remains `405 Method Not Allowed` with `Allow: POST`
@@ -140,20 +140,25 @@ Successful `tools/call` requests return:
 
 Clients should treat `structuredContent` as the authoritative machine-readable payload for those tool results.
 
-The five slice-3 MCP help/reference surfaces are separate request methods, not tools:
+The MCP help/reference surfaces are separate request methods, not tools:
 
 - `system.help`
 - `system.tool_usage`
 - `system.topic_help`
 - `system.hook_guide`
 - `system.error_guide`
+- `system.onboarding_index`
+- `system.onboarding_bootstrap`
+- `system.onboarding_section`
+- `system.validation_limits`
+- `system.validation_limit`
 
 Successful calls to those methods return top-level JSON-RPC `result` objects containing exactly:
 
 - `content`
 - `structuredContent`
 
-Each `structuredContent` payload includes the canonical `httpEquivalent` help path plus the method-specific fields required by `#216`.
+Each `structuredContent` payload includes the canonical `httpEquivalent` help path plus the method-specific fields required by the runtime help contract. The onboarding and validation-limit methods mirror `GET /v1/help/onboarding`, `GET /v1/help/onboarding/bootstrap`, `GET /v1/help/onboarding/sections/{id}`, `GET /v1/help/limits`, and `GET /v1/help/limits/{field_path}`.
 
 ## Error Behavior
 

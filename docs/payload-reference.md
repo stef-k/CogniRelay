@@ -76,7 +76,7 @@ The system is designed so that a fully-populated capsule with practical content 
 | Top-level metadata (`subject_kind`, `subject_id`, timestamps, etc.) | ~60 | ~6 fields | |
 | **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON (rich practical estimate; see note below)** |
 
-> **Note on write-time size limit:** The server enforces a hard 20 KB serialized-UTF-8 cap on each capsule at write time. The ~14 KB figure above is a rich practical capsule estimate with broad optional-section coverage, not an all-fields-at-maximum ceiling. Real writes must still fit under the 20 KB cap after serialization.
+> **Note on write-time size limit:** The server enforces a 20 KB serialized-UTF-8 cap on each capsule at write time. This hard 20 KB serialized-UTF-8 cap is the write-time ceiling; the ~14 KB figure above is a rich practical capsule estimate with broad optional-section coverage, not an all-fields-at-maximum ceiling. Real writes must still fit under the 20 KB cap after serialization.
 
 ### Context window impact
 

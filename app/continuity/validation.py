@@ -37,7 +37,8 @@ _RELATED_DOCUMENTS_ALLOWED_KEYS = frozenset({"path", "kind", "label", "relevance
 _RELATED_DOCUMENTS_REQUIRED_KEYS = ("path", "kind", "label")
 _RELATED_DOCUMENTS_KEY_ORDER = ("path", "kind", "label", "relevance")
 _RELATED_DOCUMENTS_RESERVED_KEYS = frozenset({"content", "body", "text", "excerpt", "markdown", "html", "payload"})
-_RELATED_DOCUMENTS_RELEVANCE = frozenset({"primary", "supporting", "background"})
+_RELATED_DOCUMENTS_RELEVANCE_ORDER = ("primary", "supporting", "background")
+_RELATED_DOCUMENTS_RELEVANCE = frozenset(_RELATED_DOCUMENTS_RELEVANCE_ORDER)
 _RELATED_DOCUMENTS_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RELATED_DOCUMENTS_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _RELATED_DOCUMENTS_PATH_MAX = 240
@@ -46,6 +47,25 @@ _RELATED_DOCUMENTS_LABEL_MAX = 120
 _RELATED_DOCUMENTS_RELEVANCE_MAX = 32
 _RELATED_DOCUMENTS_MAX_ENTRIES = 8
 _MISSING = object()
+
+
+def related_documents_limit_fixture() -> dict[str, Any]:
+    """Return runtime validation limits for continuity.related_documents help."""
+    return {
+        "max_items": _RELATED_DOCUMENTS_MAX_ENTRIES,
+        "subfield_limits": {
+            "path": {"max_length": _RELATED_DOCUMENTS_PATH_MAX, "pattern": "repo_relative_lexical_path"},
+            "kind": {"max_length": _RELATED_DOCUMENTS_KIND_MAX, "pattern": _RELATED_DOCUMENTS_KIND_RE.pattern},
+            "label": {"max_length": _RELATED_DOCUMENTS_LABEL_MAX},
+            "relevance": {
+                "max_length": _RELATED_DOCUMENTS_RELEVANCE_MAX,
+                "allowed_values": list(_RELATED_DOCUMENTS_RELEVANCE_ORDER),
+            },
+            "required": list(_RELATED_DOCUMENTS_REQUIRED_KEYS),
+            "additional_properties": False,
+            "reserved_embedded_content_keys": sorted(_RELATED_DOCUMENTS_RESERVED_KEYS),
+        },
+    }
 
 
 def _upgrade_legacy_structured_entry_timestamps(payload: dict[str, Any]) -> dict[str, Any]:

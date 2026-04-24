@@ -15,6 +15,11 @@ EXPECTED_ROOT = {
         "GET /v1/help/topics/{id}",
         "GET /v1/help/hooks",
         "GET /v1/help/errors/{code}",
+        "GET /v1/help/onboarding",
+        "GET /v1/help/onboarding/bootstrap",
+        "GET /v1/help/onboarding/sections/{id}",
+        "GET /v1/help/limits",
+        "GET /v1/help/limits/{field_path}",
     ],
     "mcp_methods": [
         "system.help",
@@ -22,6 +27,11 @@ EXPECTED_ROOT = {
         "system.topic_help",
         "system.hook_guide",
         "system.error_guide",
+        "system.onboarding_index",
+        "system.onboarding_bootstrap",
+        "system.onboarding_section",
+        "system.validation_limits",
+        "system.validation_limit",
     ],
     "tool_topics": [
         "continuity.read",
@@ -507,6 +517,11 @@ class TestHelp214Slice1Routes(HelpHttpTestCase):
                 (frozenset({"GET"}), "/v1/help/topics/{id}"),
                 (frozenset({"GET"}), "/v1/help/hooks"),
                 (frozenset({"GET"}), "/v1/help/errors/{code}"),
+                (frozenset({"GET"}), "/v1/help/onboarding"),
+                (frozenset({"GET"}), "/v1/help/onboarding/bootstrap"),
+                (frozenset({"GET"}), "/v1/help/onboarding/sections/{id}"),
+                (frozenset({"GET"}), "/v1/help/limits"),
+                (frozenset({"GET"}), "/v1/help/limits/{field_path:path}"),
             },
         )
 
@@ -583,6 +598,11 @@ class TestHelp214Slice1SuccessBodies(HelpHttpTestCase):
             "/v1/help/topics/continuity.read.startup_view/",
             "/v1/help/hooks/",
             "/v1/help/errors/validation/",
+            "/v1/help/onboarding/",
+            "/v1/help/onboarding/bootstrap/",
+            "/v1/help/onboarding/sections/bootstrap/",
+            "/v1/help/limits/",
+            "/v1/help/limits/continuity.top_priorities/",
         ):
             with self.subTest(path=path):
                 response = self.client.get(path, follow_redirects=False)
