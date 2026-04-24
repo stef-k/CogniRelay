@@ -26,10 +26,11 @@ from app.continuity.listing import (
     _scan_fallback_summaries,
 )
 from app.continuity.paths import continuity_fallback_rel_path
+from app.context import context_retrieve_service
 from app.context.graph import derive_internal_graph_slice1
 from app.discovery import capabilities_payload, health_payload
 from app.git_manager import GitManager
-from app.models import ContinuityReadRequest
+from app.models import ContextRetrieveRequest, ContinuityReadRequest
 
 from .render import render_template
 
@@ -361,6 +362,13 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         auth = _ui_auth(client_ip)
         return _task_detail_page(settings=settings, auth=auth, task_id=task_id)
 
+    @router.get("/context", response_class=HTMLResponse)
+    def ui_context(request: Request) -> HTMLResponse:
+        """Render the read-only context retrieval inspector."""
+        settings = get_settings()
+        client_ip = _enforce_ui_access(request, settings)
+        return _context_retrieval_page(settings=settings, client_ip=client_ip, request=request)
+
     @router.get("/graph", response_class=HTMLResponse)
     def ui_graph(
         request: Request,
@@ -478,6 +486,18 @@ def _ui_auth(client_ip: str | None) -> AuthContext:
     )
 
 
+def _ui_context_auth(client_ip: str | None) -> AuthContext:
+    """Build the read-only auth context required for UI retrieval inspection."""
+    return AuthContext(
+        token="ui-operator",
+        peer_id="ui-operator",
+        scopes={"read:files", "search"},
+        read_namespaces={"*"},
+        write_namespaces=set(),
+        client_ip=client_ip,
+    )
+
+
 def _enforce_ui_access(request: Request, settings: Settings) -> str | None:
     """Enforce the optional local-only UI policy."""
     client_ip = _ui_transport_client_ip(request)
@@ -518,6 +538,7 @@ def _page(*, title: str, current_path: str, content: str) -> HTMLResponse:
         overview_nav_class=_nav_class(current_path == "/ui/"),
         continuity_nav_class=_nav_class(current_path.startswith("/ui/continuity")),
         tasks_nav_class=_nav_class(current_path.startswith("/ui/tasks")),
+        retrieval_nav_class=_nav_class(current_path.startswith("/ui/context")),
         graph_nav_class=_nav_class(current_path.startswith("/ui/graph")),
         content=content,
     )
@@ -1104,6 +1125,360 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _context_retrieval_page(*, settings: Settings, client_ip: str | None, request: Request) -> HTMLResponse:
+    """Render the #251 read-only context retrieval inspector."""
+    params = request.query_params
+    has_any_param = any(name in params for name in ("task", "subject_kind", "subject_id"))
+    raw_task = params.get("task") if "task" in params else None
+    raw_subject_kind = params.get("subject_kind") if "subject_kind" in params else None
+    raw_subject_id = params.get("subject_id") if "subject_id" in params else None
+    trimmed_task = (raw_task or "").strip()
+    trimmed_subject_kind = (raw_subject_kind or "").strip()
+    trimmed_subject_id = (raw_subject_id or "").strip()
+
+    validation_warnings = _context_validation_warnings(
+        has_any_param=has_any_param,
+        trimmed_task=trimmed_task,
+        trimmed_subject_kind=trimmed_subject_kind,
+        trimmed_subject_id=trimmed_subject_id,
+    )
+    if not has_any_param:
+        state = _context_ui_state(
+            raw_task=raw_task,
+            raw_subject_kind=raw_subject_kind,
+            raw_subject_id=raw_subject_id,
+            request_run=False,
+            request_params=None,
+            bundle=None,
+            ui_warnings=[],
+            empty_message="No retrieval request has been run.",
+        )
+        return _context_response(state)
+    if validation_warnings:
+        state = _context_ui_state(
+            raw_task=raw_task,
+            raw_subject_kind=raw_subject_kind,
+            raw_subject_id=raw_subject_id,
+            request_run=False,
+            request_params=None,
+            bundle=None,
+            ui_warnings=validation_warnings,
+            empty_message=None,
+        )
+        return _context_response(state)
+
+    req = ContextRetrieveRequest(
+        task=raw_task or "",
+        subject_kind=trimmed_subject_kind or None,
+        subject_id=raw_subject_id if trimmed_subject_kind else None,
+        continuity_mode="auto",
+        continuity_verification_policy="allow_degraded",
+        continuity_resilience_policy="allow_fallback",
+        continuity_selectors=[],
+        continuity_max_capsules=1,
+        max_tokens_estimate=12000,
+        include_types=[],
+        time_window_days=30,
+        limit=10,
+    )
+    request_params = _context_request_param_rows(req)
+    try:
+        result = context_retrieve_service(
+            repo_root=settings.repo_root,
+            auth=_ui_context_auth(client_ip),
+            req=req,
+            now=datetime.now(timezone.utc),
+            audit=_noop_audit,
+        )
+        bundle = result.get("bundle") if isinstance(result, dict) and isinstance(result.get("bundle"), dict) else None
+        ui_warnings: list[str] = []
+    except Exception:
+        bundle = None
+        ui_warnings = ["ui_context_retrieve_failed"]
+    state = _context_ui_state(
+        raw_task=raw_task,
+        raw_subject_kind=raw_subject_kind,
+        raw_subject_id=raw_subject_id,
+        request_run=True,
+        request_params=request_params,
+        bundle=bundle,
+        ui_warnings=ui_warnings,
+        empty_message=None,
+    )
+    return _context_response(state)
+
+
+def _context_validation_warnings(
+    *,
+    has_any_param: bool,
+    trimmed_task: str,
+    trimmed_subject_kind: str,
+    trimmed_subject_id: str,
+) -> list[str]:
+    """Return #251 validation warnings in the required deterministic order."""
+    if not has_any_param:
+        return []
+    warnings: list[str] = []
+    valid_subject_kind = trimmed_subject_kind in UI_SUBJECT_KINDS
+    if trimmed_subject_kind and not valid_subject_kind:
+        warnings.append("ui_context_invalid_subject_kind")
+    if valid_subject_kind and not trimmed_subject_id:
+        warnings.append("ui_context_subject_id_required")
+    if trimmed_subject_id and not trimmed_subject_kind:
+        warnings.append("ui_context_subject_kind_required")
+    if not trimmed_task and not warnings:
+        warnings.append("ui_context_task_required")
+    return warnings
+
+
+def _context_request_param_rows(req: ContextRetrieveRequest) -> list[tuple[str, str]]:
+    """Return effective retrieval request params in the #251 display order."""
+    return [
+        ("task", req.task),
+        ("subject_kind", req.subject_kind or "n/a"),
+        ("subject_id", req.subject_id or "n/a"),
+        ("continuity_mode", req.continuity_mode),
+        ("continuity_verification_policy", req.continuity_verification_policy),
+        ("continuity_resilience_policy", req.continuity_resilience_policy),
+        ("continuity_selectors", _context_json(req.continuity_selectors)),
+        ("continuity_max_capsules", str(req.continuity_max_capsules)),
+        ("max_tokens_estimate", str(req.max_tokens_estimate)),
+        ("include_types", _context_json(req.include_types)),
+        ("time_window_days", str(req.time_window_days)),
+        ("limit", str(req.limit)),
+    ]
+
+
+def _context_ui_state(
+    *,
+    raw_task: str | None,
+    raw_subject_kind: str | None,
+    raw_subject_id: str | None,
+    request_run: bool,
+    request_params: list[tuple[str, str]] | None,
+    bundle: dict[str, Any] | None,
+    ui_warnings: list[str],
+    empty_message: str | None,
+) -> dict[str, Any]:
+    """Collect already-normalized context UI render state."""
+    continuity_state = bundle.get("continuity_state") if isinstance(bundle, dict) and isinstance(bundle.get("continuity_state"), dict) else {}
+    service_warnings = _coerce_str_list(continuity_state.get("warnings"))
+    return {
+        "raw_task": raw_task or "",
+        "raw_subject_kind": raw_subject_kind or "",
+        "raw_subject_id": raw_subject_id or "",
+        "request_run": request_run,
+        "request_params": request_params,
+        "bundle": bundle,
+        "continuity_state": continuity_state,
+        "warnings": service_warnings + ui_warnings,
+        "recovery_warnings": _coerce_str_list(continuity_state.get("recovery_warnings")),
+        "empty_message": empty_message,
+    }
+
+
+def _context_response(state: dict[str, Any]) -> HTMLResponse:
+    """Render the full context inspector page."""
+    bundle = state["bundle"]
+    continuity_state = state["continuity_state"]
+    status_rows = [
+        ("Retrieval run", _bool_label(bool(state["request_run"]))),
+        ("Bundle available", _bool_label(isinstance(bundle, dict))),
+        ("Generated at", str(bundle.get("generated_at") or "n/a") if isinstance(bundle, dict) else "n/a"),
+        ("Read only", "true"),
+    ]
+    body = (
+        '<section class="panel"><h2>Selector</h2>'
+        f"{_context_selector_form(state)}</section>"
+        '<section class="panel"><h2>Request Parameters</h2>'
+        f"{_context_request_params_html(state['request_params'])}</section>"
+        '<section class="panel"><h2>Retrieval Status</h2>'
+        f"{_definition_rows(status_rows)}{_context_empty_message(state)}</section>"
+        '<section class="panel"><h2>Warnings</h2>'
+        f"{_html_list(state['warnings'])}</section>"
+        '<section class="panel"><h2>Recovery Warnings</h2>'
+        f"{_html_list(state['recovery_warnings'])}</section>"
+        '<section class="panel"><h2>Token Budget</h2>'
+        f"{_context_token_budget_html(bundle, continuity_state)}</section>"
+        '<section class="panel"><h2>Continuity State</h2>'
+        f"{_context_continuity_state_html(continuity_state)}</section>"
+        '<section class="panel"><h2>Recent Relevant</h2>'
+        f"{_context_recent_relevant_html(bundle)}</section>"
+        '<section class="panel"><h2>Open Questions</h2>'
+        f"{_html_list(_coerce_str_list(bundle.get('open_questions') if isinstance(bundle, dict) else None))}</section>"
+        '<section class="panel"><h2>Notes</h2>'
+        f"{_html_list(_coerce_str_list(bundle.get('notes') if isinstance(bundle, dict) else None))}</section>"
+    )
+    return _page(title="Context Retrieval", current_path="/ui/context", content=body)
+
+
+def _context_selector_form(state: dict[str, Any]) -> str:
+    """Render the read-only GET selector form, preserving raw values."""
+    return (
+        '<form method="get" action="/ui/context" class="filter-form">'
+        '<label>Task'
+        f'<input type="text" name="task" value="{html.escape(state["raw_task"])}">'
+        "</label>"
+        '<label>Subject Kind'
+        f'<input type="text" name="subject_kind" value="{html.escape(state["raw_subject_kind"])}">'
+        "</label>"
+        '<label>Subject ID'
+        f'<input type="text" name="subject_id" value="{html.escape(state["raw_subject_id"])}">'
+        "</label>"
+        '<button type="submit">Run Retrieval</button>'
+        "</form>"
+    )
+
+
+def _context_empty_message(state: dict[str, Any]) -> str:
+    """Render the default empty-state message when no request has run."""
+    message = state.get("empty_message")
+    if not message:
+        return ""
+    return f'<p class="muted">{html.escape(str(message))}</p>'
+
+
+def _context_request_params_html(rows: list[tuple[str, str]] | None) -> str:
+    """Render attempted/effective context request params or n/a for no run."""
+    if rows is None:
+        return '<p class="muted">n/a</p>'
+    return _definition_rows(rows)
+
+
+def _context_token_budget_html(bundle: dict[str, Any] | None, continuity_state: dict[str, Any]) -> str:
+    """Render top-level and continuity budget posture."""
+    budget = continuity_state.get("budget") if isinstance(continuity_state.get("budget"), dict) else {}
+    rows = [
+        ("token_budget_hint", str(bundle.get("token_budget_hint") or "n/a") if isinstance(bundle, dict) else "n/a"),
+        ("continuity_state.budget", _context_json(budget) if budget else "n/a"),
+    ]
+    if isinstance(budget, dict):
+        for key in sorted(budget):
+            rows.append((f"budget.{key}", _context_render_value(budget.get(key))))
+    return _definition_rows(rows)
+
+
+def _context_continuity_state_html(continuity_state: dict[str, Any]) -> str:
+    """Render continuity state aggregate fields and capsule rows."""
+    capsules = continuity_state.get("capsules") if isinstance(continuity_state.get("capsules"), list) else []
+    rows = [
+        ("present", _context_render_value(continuity_state.get("present"))),
+        ("fallback_used", _context_render_value(continuity_state.get("fallback_used"))),
+        ("requested_selector_count", _context_render_value(continuity_state.get("requested_selector_count"))),
+        ("omitted_selector_count", _context_render_value(continuity_state.get("omitted_selector_count"))),
+        ("capsule_count", str(len(capsules))),
+        ("trust_signals", _context_render_value(continuity_state.get("trust_signals"))),
+        ("salience_metadata", _context_render_value(continuity_state.get("salience_metadata"))),
+    ]
+    return (
+        f"{_definition_rows(rows)}"
+        f"{_html_table(
+            headers=['Subject Kind', 'Subject ID', 'Source State', 'Path', 'Health / Status / Trust / Degraded', 'Recovery Warnings', 'Warnings'],
+            rows=_context_capsule_rows(capsules),
+            empty_message='No continuity capsules returned.',
+        )}"
+    )
+
+
+def _context_capsule_rows(capsules: list[Any]) -> list[list[str]]:
+    """Render capsule rows with graceful per-row degradation."""
+    rows: list[list[str]] = []
+    for capsule in capsules:
+        if not isinstance(capsule, dict):
+            rows.append(["n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a"])
+            continue
+        signal_fields = {
+            key: capsule.get(key)
+            for key in ("health_status", "status", "verification_status", "trust_signals", "degraded", "degraded_reason")
+            if key in capsule
+        }
+        rows.append(
+            [
+                html.escape(str(capsule.get("subject_kind") or "n/a")),
+                html.escape(str(capsule.get("subject_id") or "n/a")),
+                html.escape(str(capsule.get("source_state") or "n/a")),
+                html.escape(str(capsule.get("path") or "n/a")),
+                html.escape(_context_render_value(signal_fields) if signal_fields else "n/a"),
+                html.escape(_context_count_or_na(capsule.get("recovery_warnings"))),
+                html.escape(_context_count_or_na(capsule.get("warnings"))),
+            ]
+        )
+    return rows
+
+
+def _context_recent_relevant_html(bundle: dict[str, Any] | None) -> str:
+    """Render recent_relevant in service order with #251 field/link behavior."""
+    recent = bundle.get("recent_relevant") if isinstance(bundle, dict) else None
+    if not isinstance(recent, list) or not recent:
+        return '<p class="muted">No recent relevant items returned.</p>'
+    rows = [_context_recent_item_row(item) for item in recent]
+    return _html_table(
+        headers=["Path", "Type", "Score", "Modified", "Importance", "Warning", "Snippet", "Links"],
+        rows=rows,
+        empty_message="No recent relevant items returned.",
+    )
+
+
+def _context_recent_item_row(item: Any) -> list[str]:
+    """Render one recent item, degrading malformed shapes in-row."""
+    if not isinstance(item, dict):
+        return ["n/a", "n/a", "n/a", "n/a", "n/a", "None", "n/a", ""]
+    return [
+        html.escape(item["path"]) if isinstance(item.get("path"), str) else "n/a",
+        html.escape(item["type"]) if isinstance(item.get("type"), str) else "n/a",
+        html.escape(str(item["score"])) if _context_is_scalar(item.get("score")) else "n/a",
+        html.escape(item["modified_at"]) if isinstance(item.get("modified_at"), str) else "n/a",
+        html.escape(str(item["importance"])) if _context_is_scalar(item.get("importance")) else "n/a",
+        html.escape(item["warning"]) if isinstance(item.get("warning"), str) else "None",
+        html.escape(item["snippet"]) if isinstance(item.get("snippet"), str) else "n/a",
+        _context_recent_links(item),
+    ]
+
+
+def _context_recent_links(item: dict[str, Any]) -> str:
+    """Render deterministic links from explicit returned identity fields only."""
+    links: list[str] = []
+    subject_kind = item.get("subject_kind")
+    subject_id = item.get("subject_id")
+    if isinstance(subject_kind, str) and isinstance(subject_id, str) and subject_kind in UI_SUBJECT_KINDS:
+        if "/" not in subject_id:
+            links.append(_continuity_subject_link(subject_kind, subject_id, "Continuity"))
+        if subject_kind in {"thread", "task"}:
+            links.append(_graph_query_link(subject_kind, subject_id, "Graph"))
+    task_id = item.get("task_id")
+    if isinstance(task_id, str):
+        links.append(_task_detail_link(task_id))
+    return " ".join(links)
+
+
+def _context_is_scalar(value: Any) -> bool:
+    """Return whether a recent field may be rendered as a scalar."""
+    return isinstance(value, str | int | float | bool)
+
+
+def _context_render_value(value: Any) -> str:
+    """Return a deterministic string for scalar or structured context values."""
+    if value is None:
+        return "n/a"
+    if _context_is_scalar(value):
+        return str(value)
+    return _context_json(value)
+
+
+def _context_json(value: Any) -> str:
+    """Return deterministic JSON for structured context values."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _context_count_or_na(value: Any) -> str:
+    """Render warning counts when present."""
+    if isinstance(value, list):
+        return str(len(value))
+    if value is None:
+        return "n/a"
+    return _context_render_value(value)
 
 
 def _definition_rows_html(rows: list[tuple[str, str]]) -> str:
