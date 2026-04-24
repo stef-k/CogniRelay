@@ -209,6 +209,8 @@ def _write_capsule(
     subject_kind: str,
     subject_id: str,
     capsule_health_status: str | None = None,
+    related_documents: list[dict[str, Any]] | None = None,
+    thread_descriptor: dict[str, Any] | None = None,
 ) -> None:
     """Write one active continuity capsule to the repository fixture."""
     continuity_dir = repo_root / "memory" / "continuity"
@@ -219,6 +221,10 @@ def _write_capsule(
         subject_id=subject_id,
         capsule_health_status=capsule_health_status,
     )
+    if related_documents is not None:
+        payload["continuity"]["related_documents"] = related_documents
+    if thread_descriptor is not None:
+        payload["thread_descriptor"] = thread_descriptor
     (continuity_dir / f"{subject_kind}-{normalized}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -674,6 +680,105 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Open user archived list", detail.text)
         self.assertIn("Open user cold list", detail.text)
 
+    def test_ui_detail_page_shows_related_documents_and_thread_descriptor(self) -> None:
+        """The detail page should expose V2/V3 compatibility metadata read-only."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(
+                repo_root,
+                subject_kind="thread",
+                subject_id="thread-245",
+                related_documents=[
+                    {
+                        "path": "memory/projects/issue-245.md",
+                        "kind": "issue",
+                        "label": "UI compatibility audit",
+                        "relevance": "primary",
+                    }
+                ],
+                thread_descriptor={
+                    "label": "Issue 245 UI parity",
+                    "keywords": ["ui", "compatibility"],
+                    "scope_anchors": ["operator ui"],
+                    "identity_anchors": [{"kind": "issue", "value": "#245"}],
+                    "lifecycle": "active",
+                    "superseded_by": "thread-246",
+                },
+            )
+            detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/thread/thread-245",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-245"},
+            )
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("Related Documents", detail.text)
+        self.assertIn("memory/projects/issue-245.md", detail.text)
+        self.assertIn("issue", detail.text)
+        self.assertIn("UI compatibility audit", detail.text)
+        self.assertIn("primary", detail.text)
+        self.assertIn("Thread Descriptor", detail.text)
+        self.assertIn("Issue 245 UI parity", detail.text)
+        self.assertIn("compatibility", detail.text)
+        self.assertIn("operator ui", detail.text)
+        self.assertIn("#245", detail.text)
+        self.assertIn("thread-246", detail.text)
+        self.assertNotIn("prefer readable tables", detail.text)
+        self.assertIn("Not applicable for this subject kind.", detail.text)
+
+    def test_ui_detail_page_shows_related_documents_empty_state(self) -> None:
+        """Absent or empty related document metadata should render the documented empty state."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="thread", subject_id="thread-no-related-docs")
+            _write_capsule(
+                repo_root,
+                subject_kind="thread",
+                subject_id="thread-empty-related-docs",
+                related_documents=[],
+            )
+            absent_detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/thread/thread-no-related-docs",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-no-related-docs"},
+            )
+            empty_detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/thread/thread-empty-related-docs",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-empty-related-docs"},
+            )
+
+        self.assertEqual(absent_detail.status_code, 200)
+        self.assertIn("Related Documents", absent_detail.text)
+        self.assertIn("No related documents recorded.", absent_detail.text)
+        self.assertEqual(empty_detail.status_code, 200)
+        self.assertIn("Related Documents", empty_detail.text)
+        self.assertIn("No related documents recorded.", empty_detail.text)
+
+    def test_ui_detail_page_marks_stable_preferences_not_applicable_for_tasks(self) -> None:
+        """Stable preferences should not look like empty user/peer data on task capsules."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="task", subject_id="task-245")
+            detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/task/task-245",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "task", "subject_id": "task-245"},
+            )
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("Stable Preferences", detail.text)
+        self.assertIn("Not applicable for this subject kind.", detail.text)
+        self.assertNotIn("prefer readable tables", detail.text)
+
     def test_ui_detail_page_startup_summary_omits_dedicated_section_duplicates(self) -> None:
         """Startup summary should not duplicate dedicated trust/stable-preference sections."""
         with tempfile.TemporaryDirectory() as td:
@@ -774,6 +879,50 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("ui_continuity_snapshot_failed:RuntimeError", payload["warnings"])
         self.assertFalse(payload["continuity"]["available"])
         self.assertEqual(payload["continuity"]["latest_recorded_at"], "unavailable")
+
+    def test_ui_events_stream_degraded_detail_marks_task_preferences_not_applicable(self) -> None:
+        """Degraded live detail fallback should preserve stable-preference subject applicability."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host(
+                "127.0.0.1",
+                path="/ui/events",
+                query_string=b"detail_subject_kind=task&detail_subject_id=task-245",
+            )
+
+            with patch("app.ui.router._ui_live_detail_summary", side_effect=RuntimeError("boom")):
+                response = asyncio.run(
+                    endpoint(
+                        request,
+                        q=None,
+                        subject_kind=None,
+                        artifact_state=None,
+                        health_status=None,
+                        detail_subject_kind="task",
+                        detail_subject_id="task-245",
+                    )
+                )
+                event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertFalse(payload["ok"])
+        self.assertIn("ui_detail_snapshot_failed:RuntimeError", payload["warnings"])
+        self.assertIsNotNone(payload["detail"])
+        self.assertFalse(payload["detail"]["available"])
+        self.assertIn(
+            "Not applicable for this subject kind.",
+            payload["detail"]["sections"]["stable_preferences_html"],
+        )
+        self.assertNotIn("No stable preferences recorded.", payload["detail"]["sections"]["stable_preferences_html"])
 
     def test_ui_events_stream_includes_bounded_detail_summary_when_requested(self) -> None:
         """The SSE endpoint should expose a small detail summary for one subject when requested."""

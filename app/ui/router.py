@@ -235,6 +235,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             detail=detail,
             capsule=capsule,
             continuity=continuity,
+            subject_kind=subject_kind,
             startup_summary=_startup_summary_for_ui(detail.get("startup_summary")),
             trust_signals=detail.get("trust_signals"),
             related_summary=related_summary,
@@ -281,6 +282,8 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             open_loops_html=rendered_sections["open_loops_html"],
             session_trajectory_html=rendered_sections["session_trajectory_html"],
             stance_summary_html=rendered_sections["stance_summary_html"],
+            related_documents_html=rendered_sections["related_documents_html"],
+            thread_descriptor_section=rendered_sections["thread_descriptor_section"],
             stable_preferences_html=rendered_sections["stable_preferences_html"],
             negative_decisions_html=rendered_sections["negative_decisions_html"],
             rationale_entries_html=rendered_sections["rationale_entries_html"],
@@ -635,6 +638,7 @@ def _ui_live_detail_summary(
         detail=detail,
         capsule=capsule,
         continuity=continuity,
+        subject_kind=subject_kind,
         startup_summary=_startup_summary_for_ui(detail.get("startup_summary")),
         trust_signals=detail.get("trust_signals"),
         related_summary=_related_artifact_summary_rows(subject_kind=subject_kind, rows=related_rows),
@@ -661,6 +665,8 @@ def _ui_live_detail_summary(
             "open_loops_html": rendered_sections["open_loops_html"],
             "session_trajectory_html": rendered_sections["session_trajectory_html"],
             "stance_summary_html": rendered_sections["stance_summary_html"],
+            "related_documents_html": rendered_sections["related_documents_html"],
+            "thread_descriptor_section": rendered_sections["thread_descriptor_section"],
             "stable_preferences_html": rendered_sections["stable_preferences_html"],
             "negative_decisions_html": rendered_sections["negative_decisions_html"],
             "rationale_entries_html": rendered_sections["rationale_entries_html"],
@@ -741,7 +747,9 @@ def _empty_ui_detail_summary(*, subject_kind: str, subject_id: str, warning: str
             "open_loops_html": '<p class="muted">None</p>',
             "session_trajectory_html": '<p class="muted">None</p>',
             "stance_summary_html": '<p class="muted">None</p>',
-            "stable_preferences_html": '<p class="muted">No stable preferences recorded.</p>',
+            "related_documents_html": '<p class="muted">No related documents recorded.</p>',
+            "thread_descriptor_section": "",
+            "stable_preferences_html": _stable_preferences_html(capsule={}, subject_kind=subject_kind),
             "negative_decisions_html": '<p class="muted">No negative decisions recorded.</p>',
             "rationale_entries_html": '<p class="muted">No rationale entries recorded.</p>',
         },
@@ -996,6 +1004,7 @@ def _ui_detail_render_sections(
     detail: dict[str, Any],
     capsule: dict[str, Any],
     continuity: dict[str, Any],
+    subject_kind: str,
     startup_summary: Any,
     trust_signals: Any,
     related_summary: list[list[str]],
@@ -1016,11 +1025,9 @@ def _ui_detail_render_sections(
         "open_loops_html": _html_list(_coerce_str_list(continuity.get("open_loops"))),
         "session_trajectory_html": _html_list(_coerce_str_list(continuity.get("session_trajectory"))),
         "stance_summary_html": _paragraph(continuity.get("stance_summary")),
-        "stable_preferences_html": _structured_table(
-            rows=list(capsule.get("stable_preferences") or []),
-            columns=["tag", "content", "created_at", "updated_at", "last_confirmed_at"],
-            empty_message="No stable preferences recorded.",
-        ),
+        "related_documents_html": _related_documents_table(continuity.get("related_documents")),
+        "thread_descriptor_section": _thread_descriptor_section(capsule.get("thread_descriptor")),
+        "stable_preferences_html": _stable_preferences_html(capsule=capsule, subject_kind=subject_kind),
         "negative_decisions_html": _structured_table(
             rows=list(continuity.get("negative_decisions") or []),
             columns=["decision", "rationale", "created_at", "updated_at", "last_confirmed_at"],
@@ -1187,6 +1194,47 @@ def _render_object(value: Any, *, empty_message: str) -> str:
     if value is None:
         return f'<p class="muted">{html.escape(empty_message)}</p>'
     return _render_value(value)
+
+
+def _related_documents_table(value: Any) -> str:
+    """Render read-only related document metadata for one continuity capsule."""
+    rows = value if isinstance(value, list) else []
+    return _structured_table(
+        rows=rows,
+        columns=["path", "kind", "label", "relevance"],
+        empty_message="No related documents recorded.",
+    )
+
+
+def _thread_descriptor_section(value: Any) -> str:
+    """Render a read-only thread descriptor section when descriptor metadata exists."""
+    if not isinstance(value, dict) or not value:
+        return ""
+    descriptor = {
+        "label": value.get("label"),
+        "keywords": value.get("keywords"),
+        "scope_anchors": value.get("scope_anchors"),
+        "identity_anchors": value.get("identity_anchors"),
+        "lifecycle": value.get("lifecycle"),
+        "superseded_by": value.get("superseded_by"),
+    }
+    return (
+        '<article class="panel">'
+        "<h2>Thread Descriptor</h2>"
+        f"{_render_summary_rows(descriptor)}"
+        "</article>"
+    )
+
+
+def _stable_preferences_html(*, capsule: dict[str, Any], subject_kind: str) -> str:
+    """Render stable preferences only for subject kinds where they are valid."""
+    if subject_kind not in {"user", "peer"}:
+        return '<p class="muted">Not applicable for this subject kind.</p>'
+    return _structured_table(
+        rows=list(capsule.get("stable_preferences") or []),
+        columns=["tag", "content", "created_at", "updated_at", "last_confirmed_at"],
+        empty_message="No stable preferences recorded.",
+    )
 
 
 def _startup_summary_for_ui(value: Any) -> Any:

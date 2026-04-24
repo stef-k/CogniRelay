@@ -113,6 +113,8 @@
       setHTML(root, "[data-live-detail-open-loops]", payload.detail.sections.open_loops_html || "");
       setHTML(root, "[data-live-detail-session-trajectory]", payload.detail.sections.session_trajectory_html || "");
       setHTML(root, "[data-live-detail-stance-summary]", payload.detail.sections.stance_summary_html || "");
+      setHTML(root, "[data-live-detail-related-documents]", payload.detail.sections.related_documents_html || "");
+      setHTML(root, "[data-live-detail-thread-descriptor]", payload.detail.sections.thread_descriptor_section || "");
       setHTML(root, "[data-live-detail-stable-preferences]", payload.detail.sections.stable_preferences_html || "");
       setHTML(root, "[data-live-detail-negative-decisions]", payload.detail.sections.negative_decisions_html || "");
       setHTML(root, "[data-live-detail-rationale-entries]", payload.detail.sections.rationale_entries_html || "");
