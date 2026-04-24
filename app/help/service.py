@@ -21,6 +21,7 @@ from app.continuity.constants import (
     PATCH_STRUCTURED_MATCH_KEYS,
     PATCH_TARGET_MAX_LENGTH,
 )
+from app.continuity.validation import related_documents_limit_fixture
 from app.models import (
     ContextRetrieveRequest,
     ContinuityAttentionPolicy,
@@ -805,15 +806,6 @@ _RATIONALE_ENTRY_LIMITS = {
     "supersedes": {"max_length": 80},
     "timestamps": {"require_utc_when_present": True},
 }
-_RELATED_DOCUMENT_LIMITS = {
-    "path": {"max_length": 240, "pattern": "repo_relative_lexical_path"},
-    "kind": {"max_length": 32, "pattern": "^[a-z][a-z0-9_]*$"},
-    "label": {"max_length": 120},
-    "relevance": {"max_length": 32, "allowed_values": ["primary", "supporting", "background"]},
-    "required": ["path", "kind", "label"],
-    "additional_properties": False,
-    "reserved_embedded_content_keys": ["body", "content", "excerpt", "html", "markdown", "payload", "text"],
-}
 _SCOPE_ANCHOR_LIMITS = {
     "pattern": "^(user|peer|thread|task):[a-z0-9._-]{1,120}$",
     "prefix": {"allowed_values": ["user", "peer", "thread", "task"]},
@@ -860,9 +852,16 @@ def _field_limit(
     subfields = dict(subfield_limits or {})
     max_items = _field_constraint(model, field_name, "max_length") if value_type in {"string_list", "object_list"} else None
     max_length = _field_constraint(model, field_name, "max_length") if value_type in {"string", "serialized_bytes"} else None
+    if value_type == "string":
+        min_length = _field_constraint(model, field_name, "min_length")
+        if min_length is not None:
+            subfields["min_length"] = min_length
     if value_type in {"number", "integer_budget"}:
         minimum = _field_constraint(model, field_name, "ge")
         maximum = _field_constraint(model, field_name, "le")
+        default = model.model_fields[field_name].default
+        if value_type == "integer_budget" and default is not None:
+            subfields["default"] = default
         if minimum is not None:
             subfields["minimum"] = minimum
         if maximum is not None:
@@ -980,6 +979,7 @@ def _correction_guidance(
 
 
 def _validation_limits_table() -> dict[str, dict[str, Any]]:
+    related_documents_limits = related_documents_limit_fixture()
     limits: list[dict[str, Any]] = [
         _field_limit("continuity.top_priorities", "continuity_orientation", "string_list", ContinuityState, "top_priorities", per_item_max_length=160),
         _field_limit("continuity.open_loops", "continuity_orientation", "string_list", ContinuityState, "open_loops", per_item_max_length=160),
@@ -991,8 +991,8 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
             "continuity.related_documents",
             "continuity_orientation",
             "object_list",
-            max_items=8,
-            subfield_limits=_RELATED_DOCUMENT_LIMITS,
+            max_items=related_documents_limits["max_items"],
+            subfield_limits=related_documents_limits["subfield_limits"],
             reference="docs/payload-reference.md#continuityrelated_documents",
         ),
         _field_limit("continuity.stance_summary", "continuity_orientation", "string", ContinuityState, "stance_summary"),
@@ -1076,7 +1076,7 @@ def _validation_limits_table() -> dict[str, dict[str, Any]]:
                 "maximum": CONTEXT_RETRIEVE_MAX_MAX_TOKENS,
             },
         ),
-        _limit("context.retrieve.continuity_max_capsules", "retrieval_budget", "integer_budget", subfield_limits={"default": 1, "minimum": 1, "maximum": 4}),
+        _field_limit("context.retrieve.continuity_max_capsules", "retrieval_budget", "integer_budget", ContextRetrieveRequest, "continuity_max_capsules"),
         _limit(
             "continuity.capsule_serialized_utf8",
             "capsule_write_cap",

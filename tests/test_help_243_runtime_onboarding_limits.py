@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
-from typing import Literal, get_args, get_origin
+from typing import Any, Literal, get_args, get_origin
 
 from fastapi.testclient import TestClient
 
@@ -23,6 +23,7 @@ from app.continuity.constants import (
     PATCH_STRUCTURED_MATCH_KEYS,
     PATCH_TARGET_MAX_LENGTH,
 )
+from app.continuity.validation import related_documents_limit_fixture
 from app.help.service import onboarding_section_ids, validation_limit_field_paths
 from app.main import app
 from app.models import (
@@ -96,6 +97,76 @@ PRIORITY_FIELD_PATHS = [
 ]
 
 
+MODEL_DERIVED_FIELD_LIMITS = {
+    "context.retrieve.continuity_max_capsules": (ContextRetrieveRequest, "continuity_max_capsules", "integer_budget", None),
+    "context.retrieve.continuity_mode": (ContextRetrieveRequest, "continuity_mode", "enum", None),
+    "context.retrieve.continuity_resilience_policy": (ContextRetrieveRequest, "continuity_resilience_policy", "enum", None),
+    "context.retrieve.continuity_selectors": (ContextRetrieveRequest, "continuity_selectors", "object_list", None),
+    "context.retrieve.continuity_selectors.subject_id": (ContinuitySelector, "subject_id", "string", None),
+    "context.retrieve.continuity_selectors.subject_kind": (ContinuitySelector, "subject_kind", "enum", None),
+    "context.retrieve.continuity_verification_policy": (ContextRetrieveRequest, "continuity_verification_policy", "enum", None),
+    "context.retrieve.limit": (ContextRetrieveRequest, "limit", "number", None),
+    "context.retrieve.max_tokens_estimate": (ContextRetrieveRequest, "max_tokens_estimate", "integer_budget", None),
+    "context.retrieve.subject_id": (ContextRetrieveRequest, "subject_id", "string", None),
+    "context.retrieve.subject_kind": (ContextRetrieveRequest, "subject_kind", "enum", None),
+    "context.retrieve.time_window_days": (ContextRetrieveRequest, "time_window_days", "number", None),
+    "continuity.active_concerns": (ContinuityState, "active_concerns", "string_list", 160),
+    "continuity.active_constraints": (ContinuityState, "active_constraints", "string_list", 160),
+    "continuity.attention_policy.early_load": (ContinuityAttentionPolicy, "early_load", "string_list", None),
+    "continuity.attention_policy.presence_bias_overrides": (ContinuityAttentionPolicy, "presence_bias_overrides", "string_list", 160),
+    "continuity.canonical_sources": (ContinuityCapsule, "canonical_sources", "string_list", None),
+    "continuity.confidence.continuity": (ContinuityConfidence, "continuity", "number", None),
+    "continuity.confidence.relationship_model": (ContinuityConfidence, "relationship_model", "number", None),
+    "continuity.curiosity_queue": (ContinuityState, "curiosity_queue", "string_list", 120),
+    "continuity.drift_signals": (ContinuityState, "drift_signals", "string_list", 160),
+    "continuity.freshness.freshness_class": (ContinuityFreshness, "freshness_class", "enum", None),
+    "continuity.freshness.stale_after_seconds": (ContinuityFreshness, "stale_after_seconds", "number", None),
+    "continuity.long_horizon_commitments": (ContinuityState, "long_horizon_commitments", "string_list", 160),
+    "continuity.negative_decisions": (ContinuityState, "negative_decisions", "object_list", None),
+    "continuity.open_loops": (ContinuityState, "open_loops", "string_list", 160),
+    "continuity.rationale_entries": (ContinuityState, "rationale_entries", "object_list", None),
+    "continuity.relationship_model.preferred_style": (ContinuityRelationshipModel, "preferred_style", "string_list", 80),
+    "continuity.relationship_model.sensitivity_notes": (ContinuityRelationshipModel, "sensitivity_notes", "string_list", 120),
+    "continuity.relationship_model.trust_level": (ContinuityRelationshipModel, "trust_level", "enum", None),
+    "continuity.retrieval_hints.avoid": (ContinuityRetrievalHints, "avoid", "string_list", 160),
+    "continuity.retrieval_hints.load_next": (ContinuityRetrievalHints, "load_next", "string_list", None),
+    "continuity.retrieval_hints.must_include": (ContinuityRetrievalHints, "must_include", "string_list", 160),
+    "continuity.schema_version": (ContinuityCapsule, "schema_version", "enum", None),
+    "continuity.session_trajectory": (ContinuityState, "session_trajectory", "string_list", 80),
+    "continuity.source.inputs": (ContinuitySource, "inputs", "string_list", 200),
+    "continuity.source.producer": (ContinuitySource, "producer", "string", None),
+    "continuity.source.update_reason": (ContinuitySource, "update_reason", "enum", None),
+    "continuity.stance_summary": (ContinuityState, "stance_summary", "string", None),
+    "continuity.subject_id": (ContinuityCapsule, "subject_id", "string", None),
+    "continuity.subject_kind": (ContinuityCapsule, "subject_kind", "enum", None),
+    "continuity.thread_descriptor.identity_anchors": (ThreadDescriptor, "identity_anchors", "object_list", None),
+    "continuity.thread_descriptor.keywords": (ThreadDescriptor, "keywords", "string_list", 40),
+    "continuity.thread_descriptor.label": (ThreadDescriptor, "label", "string", None),
+    "continuity.thread_descriptor.scope_anchors": (ThreadDescriptor, "scope_anchors", "string_list", None),
+    "continuity.top_priorities": (ContinuityState, "top_priorities", "string_list", 160),
+    "continuity.trailing_notes": (ContinuityState, "trailing_notes", "string_list", 160),
+    "continuity.upsert.commit_message": (ContinuityUpsertRequest, "commit_message", "string", None),
+    "continuity.upsert.idempotency_key": (ContinuityUpsertRequest, "idempotency_key", "string", None),
+    "continuity.upsert.lifecycle_transition": (ContinuityUpsertRequest, "lifecycle_transition", "enum", None),
+    "continuity.upsert.merge_mode": (ContinuityUpsertRequest, "merge_mode", "enum", None),
+    "continuity.upsert.subject_id": (ContinuityUpsertRequest, "subject_id", "string", None),
+    "continuity.upsert.subject_kind": (ContinuityUpsertRequest, "subject_kind", "enum", None),
+    "continuity.upsert.superseded_by": (ContinuityUpsertRequest, "superseded_by", "string", None),
+    "continuity.verification_kind": (ContinuityCapsule, "verification_kind", "enum", None),
+    "continuity.working_hypotheses": (ContinuityState, "working_hypotheses", "string_list", 160),
+    "continuity.patch.commit_message": (ContinuityPatchRequest, "commit_message", "string", None),
+    "continuity.patch.subject_id": (ContinuityPatchRequest, "subject_id", "string", None),
+    "continuity.patch.subject_kind": (ContinuityPatchRequest, "subject_kind", "enum", None),
+    "session_end_snapshot.active_constraints": (SessionEndSnapshot, "active_constraints", "string_list", 160),
+    "session_end_snapshot.negative_decisions": (SessionEndSnapshot, "negative_decisions", "object_list", None),
+    "session_end_snapshot.open_loops": (SessionEndSnapshot, "open_loops", "string_list", 160),
+    "session_end_snapshot.rationale_entries": (SessionEndSnapshot, "rationale_entries", "object_list", None),
+    "session_end_snapshot.session_trajectory": (SessionEndSnapshot, "session_trajectory", "string_list", 80),
+    "session_end_snapshot.stance_summary": (SessionEndSnapshot, "stance_summary", "string", None),
+    "session_end_snapshot.top_priorities": (SessionEndSnapshot, "top_priorities", "string_list", 160),
+}
+
+
 def _literal_values(model: type, field_name: str) -> list[str]:
     annotation = model.model_fields[field_name].annotation
     if get_origin(annotation) is Literal:
@@ -111,6 +182,38 @@ def _field_constraint(model: type, field_name: str, attr: str) -> object:
         if hasattr(metadata, attr):
             return getattr(metadata, attr)
     raise AssertionError(f"{model.__name__}.{field_name} has no {attr} constraint")
+
+
+def _optional_field_constraint(model: type, field_name: str, attr: str) -> object:
+    for metadata in model.model_fields[field_name].metadata:
+        if hasattr(metadata, attr):
+            return getattr(metadata, attr)
+    return None
+
+
+def _expected_model_metadata(model: type, field_name: str, value_type: str, per_item_max_length: int | None) -> dict[str, Any]:
+    expected: dict[str, Any] = {
+        "max_items": _optional_field_constraint(model, field_name, "max_length") if value_type in {"string_list", "object_list"} else None,
+        "max_length": _optional_field_constraint(model, field_name, "max_length") if value_type in {"string", "serialized_bytes"} else None,
+        "per_item_max_length": per_item_max_length,
+        "subfield_limits": {},
+    }
+    if value_type == "string":
+        min_length = _optional_field_constraint(model, field_name, "min_length")
+        if min_length is not None:
+            expected["subfield_limits"]["min_length"] = min_length
+    if value_type in {"number", "integer_budget"}:
+        minimum = _optional_field_constraint(model, field_name, "ge")
+        maximum = _optional_field_constraint(model, field_name, "le")
+        if value_type == "integer_budget":
+            expected["subfield_limits"]["default"] = model.model_fields[field_name].default
+        if minimum is not None:
+            expected["subfield_limits"]["minimum"] = minimum
+        if maximum is not None:
+            expected["subfield_limits"]["maximum"] = maximum
+    if value_type == "enum":
+        expected["subfield_limits"]["allowed_values"] = _literal_values(model, field_name)
+    return expected
 
 
 class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
@@ -275,11 +378,56 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
                 "maximum": CONTEXT_RETRIEVE_MAX_MAX_TOKENS,
             },
         )
+        self.assertEqual(budget["subfield_limits"], _expected_model_metadata(ContextRetrieveRequest, "max_tokens_estimate", "integer_budget", None)["subfield_limits"])
+        continuity_capsules = self.client.get("/v1/help/limits/context.retrieve.continuity_max_capsules").json()["limit"]
+        self.assertEqual(
+            continuity_capsules["subfield_limits"],
+            _expected_model_metadata(ContextRetrieveRequest, "continuity_max_capsules", "integer_budget", None)["subfield_limits"],
+        )
         capsule = self.client.get("/v1/help/limits/continuity.capsule_serialized_utf8").json()["limit"]
         self.assertEqual(capsule["subfield_limits"]["label"], CAPSULE_SIZE_LIMIT_LABEL)
         self.assertEqual(capsule["reference"], "app.continuity.constants.CAPSULE_SIZE_LIMIT_BYTES")
         patch_targets = {path.removeprefix("patch.target.") for path in validation_limit_field_paths() if path.startswith("patch.target.")}
         self.assertEqual(patch_targets, PATCH_ALL_TARGETS)
+
+    def test_model_derived_limit_values_match_pydantic_metadata(self) -> None:
+        self.assertLessEqual(set(MODEL_DERIVED_FIELD_LIMITS), set(validation_limit_field_paths()))
+        for field_path, (model, field_name, value_type, per_item_max_length) in MODEL_DERIVED_FIELD_LIMITS.items():
+            with self.subTest(field_path=field_path):
+                emitted = self.client.get(f"/v1/help/limits/{field_path}").json()["limit"]
+                expected = _expected_model_metadata(model, field_name, value_type, per_item_max_length)
+                self.assertEqual(emitted["max_items"], expected["max_items"])
+                self.assertEqual(emitted["max_length"], expected["max_length"])
+                self.assertEqual(emitted["per_item_max_length"], expected["per_item_max_length"])
+                for key, value in expected["subfield_limits"].items():
+                    self.assertEqual(emitted["subfield_limits"].get(key), value)
+
+        for field_path, model, field_name in (
+            ("continuity.source.producer", ContinuitySource, "producer"),
+            ("continuity.thread_descriptor.label", ThreadDescriptor, "label"),
+            ("continuity.patch.subject_id", ContinuityPatchRequest, "subject_id"),
+        ):
+            with self.subTest(min_length_path=field_path):
+                emitted = self.client.get(f"/v1/help/limits/{field_path}").json()["limit"]
+                self.assertEqual(emitted["subfield_limits"]["min_length"], _field_constraint(model, field_name, "min_length"))
+
+    def test_related_documents_limits_match_validation_fixture(self) -> None:
+        emitted = self.client.get("/v1/help/limits/continuity.related_documents").json()["limit"]
+        fixture = related_documents_limit_fixture()
+        self.assertEqual(emitted["max_items"], fixture["max_items"])
+        self.assertEqual(emitted["subfield_limits"], fixture["subfield_limits"])
+        self.assertEqual(fixture["max_items"], 8)
+        self.assertEqual(fixture["subfield_limits"]["path"]["max_length"], 240)
+        self.assertEqual(fixture["subfield_limits"]["kind"]["max_length"], 32)
+        self.assertEqual(fixture["subfield_limits"]["label"]["max_length"], 120)
+        self.assertEqual(fixture["subfield_limits"]["relevance"]["max_length"], 32)
+        self.assertEqual(set(fixture["subfield_limits"]["relevance"]["allowed_values"]), {"primary", "supporting", "background"})
+        self.assertEqual(fixture["subfield_limits"]["required"], ["path", "kind", "label"])
+        self.assertIs(fixture["subfield_limits"]["additional_properties"], False)
+        self.assertEqual(
+            set(fixture["subfield_limits"]["reserved_embedded_content_keys"]),
+            {"content", "body", "text", "excerpt", "markdown", "html", "payload"},
+        )
 
     def test_validation_limit_coverage_matches_runtime_model_and_service_truth(self) -> None:
         for model, fields in {
