@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import stat
 from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -23,6 +25,7 @@ from app.continuity.listing import (
     _scan_cold_summaries,
     _scan_fallback_summaries,
 )
+from app.continuity.paths import continuity_fallback_rel_path
 from app.context.graph import derive_internal_graph_slice1
 from app.discovery import capabilities_payload, health_payload
 from app.git_manager import GitManager
@@ -33,9 +36,44 @@ from .render import render_template
 UI_SUBJECT_KINDS: tuple[str, ...] = ("user", "peer", "thread", "task")
 UI_ARTIFACT_STATES: tuple[str, ...] = ("active", "fallback", "archived", "cold")
 UI_HEALTH_STATUSES: tuple[str, ...] = ("healthy", "degraded", "conflicted")
+UI_TASK_STATUSES: tuple[str, ...] = ("open", "in_progress", "blocked", "done")
 UI_CONTINUITY_DISPLAY_LIMIT = 200
+UI_TASK_DISPLAY_LIMIT = 200
 UI_SSE_RETRY_MS = 5000
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@dataclass(frozen=True)
+class _TaskArtifact:
+    """One readable task artifact normalized for read-only UI rendering."""
+
+    task_id: str
+    status: str
+    inferred_status: str
+    root_rel: str
+    path_rel: str
+    root_rank: int
+    data: dict[str, Any]
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass
+class _TaskSourceState:
+    """Task artifact scan output with degraded-read warning codes."""
+
+    artifacts: list[_TaskArtifact] = field(default_factory=list)
+    root_warnings: list[str] = field(default_factory=list)
+    artifact_warnings: list[str] = field(default_factory=list)
+    duplicate_warnings: dict[str, str] = field(default_factory=dict)
+    canonical_by_id: dict[str, _TaskArtifact] = field(default_factory=dict)
+
+
+@dataclass
+class _RelatedDocumentResult:
+    """Related-document rows and warnings for one task."""
+
+    rows: list[dict[str, str]]
+    warnings: list[str]
 
 
 def build_ui_router(*, app_version: str) -> APIRouter:
@@ -297,6 +335,32 @@ def build_ui_router(*, app_version: str) -> APIRouter:
             content=body,
         )
 
+    @router.get("/tasks", response_class=HTMLResponse)
+    def ui_tasks(
+        request: Request,
+        task_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        q: str | None = Query(default=None),
+    ) -> HTMLResponse:
+        """Render the read-only task list or query-addressed task detail."""
+        settings = get_settings()
+        client_ip = _enforce_ui_access(request, settings)
+        auth = _ui_auth(client_ip)
+        task_id = _coerce_optional_query_value(task_id)
+        status = _coerce_optional_query_value(status)
+        q = _coerce_optional_query_value(q)
+        if "task_id" in request.query_params:
+            return _task_detail_page(settings=settings, auth=auth, task_id=task_id)
+        return _task_list_page(settings=settings, auth=auth, status=status, q=q)
+
+    @router.get("/tasks/{task_id}", response_class=HTMLResponse)
+    def ui_task_detail(request: Request, task_id: str) -> HTMLResponse:
+        """Render one read-only task detail page with graceful degradation."""
+        settings = get_settings()
+        client_ip = _enforce_ui_access(request, settings)
+        auth = _ui_auth(client_ip)
+        return _task_detail_page(settings=settings, auth=auth, task_id=task_id)
+
     @router.get("/graph", response_class=HTMLResponse)
     def ui_graph(
         request: Request,
@@ -453,6 +517,7 @@ def _page(*, title: str, current_path: str, content: str) -> HTMLResponse:
         title=html.escape(title),
         overview_nav_class=_nav_class(current_path == "/ui/"),
         continuity_nav_class=_nav_class(current_path.startswith("/ui/continuity")),
+        tasks_nav_class=_nav_class(current_path.startswith("/ui/tasks")),
         graph_nav_class=_nav_class(current_path.startswith("/ui/graph")),
         content=content,
     )
@@ -481,6 +546,552 @@ def _coerce_optional_query_value(value: Any) -> str | None:
     if value is None or isinstance(value, str):
         return value
     return None
+
+
+def _task_list_page(*, settings: Settings, auth: AuthContext, status: str | None, q: str | None) -> HTMLResponse:
+    """Render the #249 read-only task list page."""
+    source = _scan_task_sources(settings.repo_root)
+    status_filter = _normalize_ui_filter(status, UI_TASK_STATUSES)
+    query_tokens = _task_query_tokens(q)
+    canonical_rows = list(source.canonical_by_id.values())
+    filtered_rows = [
+        artifact for artifact in canonical_rows
+        if _task_matches_status(artifact, status_filter) and _task_matches_query(artifact, query_tokens)
+    ]
+    filtered_rows.sort(key=_task_sort_key)
+    display_rows = filtered_rows[:UI_TASK_DISPLAY_LIMIT]
+    related_by_task: dict[str, _RelatedDocumentResult] = {}
+    related_warnings: list[str] = []
+    for artifact in display_rows:
+        related = _task_related_documents(settings=settings, auth=auth, artifact=artifact)
+        related_by_task[artifact.task_id] = related
+        related_warnings.extend(related.warnings)
+    warnings = _dedupe_preserve_order(
+        [*source.root_warnings, *source.artifact_warnings, *source.duplicate_warnings.values(), *related_warnings]
+    )
+    status_options = "".join(_option_row(value=value, selected=(value == status_filter)) for value in UI_TASK_STATUSES)
+    body = render_template(
+        "task_list.html",
+        query_value=html.escape(_normalized_query_display(q)),
+        status_options=status_options,
+        selected_status=html.escape(status_filter or "all"),
+        normalized_query=html.escape(" ".join(query_tokens) if query_tokens else "none"),
+        displayed_count=str(len(display_rows)),
+        matched_count=str(len(filtered_rows)),
+        warning_count=str(len(warnings)),
+        result_truncated=_bool_label(len(filtered_rows) > UI_TASK_DISPLAY_LIMIT),
+        warnings_html=_task_warnings_panel(warnings),
+        task_table=_task_table_html(display_rows, related_by_task),
+    )
+    return _page(title="Tasks", current_path="/ui/tasks", content=body)
+
+
+def _task_detail_page(*, settings: Settings, auth: AuthContext, task_id: str | None) -> HTMLResponse:
+    """Render the #249 read-only task detail page."""
+    source = _scan_task_sources(settings.repo_root)
+    requested = task_id if isinstance(task_id, str) else None
+    decoded = requested if requested is not None else ""
+    normalized = decoded.strip()
+    not_found_warning = "task_not_found" if not normalized else f"task_not_found:{decoded}"
+    if not normalized:
+        body = _task_detail_body(
+            task_id=decoded,
+            artifact=None,
+            warnings=[not_found_warning, *source.root_warnings],
+            related=_RelatedDocumentResult(rows=[], warnings=[]),
+        )
+        return _page(title="Task Detail", current_path="/ui/tasks", content=body)
+    artifact = source.canonical_by_id.get(decoded)
+    if artifact is None:
+        body = _task_detail_body(
+            task_id=decoded,
+            artifact=None,
+            warnings=[not_found_warning, *source.root_warnings],
+            related=_RelatedDocumentResult(rows=[], warnings=[]),
+        )
+        return _page(title=f"Task Detail: {decoded}", current_path="/ui/tasks", content=body)
+    related = _task_related_documents(settings=settings, auth=auth, artifact=artifact)
+    warnings = [*artifact.warnings]
+    duplicate_warning = source.duplicate_warnings.get(artifact.task_id)
+    if duplicate_warning:
+        warnings.append(duplicate_warning)
+    warnings.extend(related.warnings)
+    body = _task_detail_body(task_id=decoded, artifact=artifact, warnings=_dedupe_preserve_order(warnings), related=related)
+    return _page(title=f"Task Detail: {artifact.task_id}", current_path="/ui/tasks", content=body)
+
+
+def _scan_task_sources(repo_root: Path) -> _TaskSourceState:
+    """Read task artifacts from the exact #249 roots with deterministic degradation."""
+    state = _TaskSourceState()
+    for root_rank, (root_rel, inferred_status) in enumerate((("tasks/open", "open"), ("tasks/done", "done"))):
+        root = repo_root / root_rel
+        if not root.exists():
+            state.root_warnings.append(f"task_root_missing:{root_rel}")
+            continue
+        if not root.is_dir():
+            state.root_warnings.append(f"task_root_invalid:{root_rel}")
+            continue
+        for path in sorted(root.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+                continue
+            path_rel = _repo_relative_path(repo_root, path)
+            if not _path_has_any_read_bit(path):
+                state.artifact_warnings.append(f"task_artifact_skipped:{path_rel}")
+                continue
+            try:
+                decoded = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                state.artifact_warnings.append(f"task_artifact_skipped:{path_rel}")
+                continue
+            if not isinstance(decoded, dict):
+                state.artifact_warnings.append(f"task_artifact_skipped:{path_rel}")
+                continue
+            task_id = _non_empty_str(decoded.get("task_id"))
+            warnings: list[str] = []
+            if task_id is None:
+                task_id = path.stem
+                warnings.append(f"task_id_inferred:{path_rel}")
+            status_value = _non_empty_str(decoded.get("status")) or inferred_status
+            state.artifacts.append(
+                _TaskArtifact(
+                    task_id=task_id,
+                    status=status_value,
+                    inferred_status=inferred_status,
+                    root_rel=root_rel,
+                    path_rel=path_rel,
+                    root_rank=root_rank,
+                    data=decoded,
+                    warnings=tuple(warnings),
+                )
+            )
+    by_id: dict[str, list[_TaskArtifact]] = {}
+    for artifact in state.artifacts:
+        by_id.setdefault(artifact.task_id, []).append(artifact)
+    for task_id, artifacts in by_id.items():
+        ordered = sorted(artifacts, key=lambda item: (item.root_rank, item.path_rel))
+        state.canonical_by_id[task_id] = ordered[0]
+        if len(ordered) > 1:
+            state.duplicate_warnings[task_id] = f"duplicate_task_artifacts:{task_id}"
+    return state
+
+
+def _repo_relative_path(repo_root: Path, path: Path) -> str:
+    """Return a stable POSIX repository-relative path."""
+    try:
+        return path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _path_has_any_read_bit(path: Path) -> bool:
+    """Return whether the artifact mode grants read access to anyone."""
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return False
+    return bool(mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH))
+
+
+def _non_empty_str(value: Any) -> str | None:
+    """Return a stripped non-empty string, ignoring all non-string values."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _task_query_tokens(value: str | None) -> list[str]:
+    """Normalize the #249 whitespace query tokens."""
+    if not isinstance(value, str):
+        return []
+    return [token for token in value.strip().lower().split() if token]
+
+
+def _task_matches_status(artifact: _TaskArtifact, status_filter: str | None) -> bool:
+    """Return whether one task matches the normalized status filter."""
+    return status_filter is None or artifact.status == status_filter
+
+
+def _task_matches_query(artifact: _TaskArtifact, tokens: list[str]) -> bool:
+    """Return whether every query token matches a permitted string field."""
+    if not tokens:
+        return True
+    fields = [
+        artifact.task_id,
+        artifact.status,
+        artifact.path_rel,
+        *[
+            value
+            for value in (
+                artifact.data.get("title"),
+                artifact.data.get("description"),
+                artifact.data.get("owner_peer"),
+                artifact.data.get("thread_id"),
+            )
+            if isinstance(value, str) and value.strip()
+        ],
+        *_string_list(artifact.data.get("collaborators")),
+    ]
+    searchable = [value.lower() for value in fields if value]
+    return all(any(token in field for field in searchable) for token in tokens)
+
+
+def _task_sort_key(artifact: _TaskArtifact) -> tuple[int, str, str, str]:
+    """Sort by updated_at descending, then task_id and artifact path ascending."""
+    updated_at = _display_str(artifact.data, "updated_at")
+    missing = 1 if updated_at == "" else 0
+    return (missing, _descending_text_key(updated_at), artifact.task_id, artifact.path_rel)
+
+
+def _descending_text_key(value: str) -> str:
+    """Invert code points for deterministic descending string sort."""
+    return "".join(chr(0x10FFFF - ord(char)) for char in value)
+
+
+def _display_str(data: dict[str, Any], key: str) -> str:
+    """Return a display/search scalar only when it is a non-empty string."""
+    return _non_empty_str(data.get(key)) or ""
+
+
+def _string_list(value: Any) -> list[str]:
+    """Return only non-empty string entries from a list field."""
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _task_related_documents(*, settings: Settings, auth: AuthContext, artifact: _TaskArtifact) -> _RelatedDocumentResult:
+    """Resolve related documents from task artifact, task metadata, and task continuity."""
+    rows: list[dict[str, str]] = []
+    warnings: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    _extend_related_document_rows(
+        rows=rows,
+        warnings=warnings,
+        seen=seen,
+        source="task_artifact",
+        value=artifact.data.get("related_documents"),
+    )
+    metadata = artifact.data.get("metadata") if isinstance(artifact.data.get("metadata"), dict) else {}
+    _extend_related_document_rows(
+        rows=rows,
+        warnings=warnings,
+        seen=seen,
+        source="task_metadata",
+        value=metadata.get("related_documents"),
+    )
+    try:
+        detail = continuity_read_service(
+            repo_root=settings.repo_root,
+            auth=auth,
+            req=ContinuityReadRequest(subject_kind="task", subject_id=artifact.task_id, allow_fallback=True, view="startup"),
+            now=datetime.now(timezone.utc),
+            audit=_noop_audit,
+        )
+    except Exception:
+        warnings.append(f"task_continuity_unavailable:{artifact.task_id}")
+        return _RelatedDocumentResult(rows=rows, warnings=_dedupe_preserve_order(warnings))
+    capsule = detail.get("capsule") if isinstance(detail, dict) else None
+    if isinstance(capsule, dict):
+        continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
+        continuity_related_documents = _task_continuity_related_documents_value(
+            settings=settings,
+            detail=detail,
+            task_id=artifact.task_id,
+            sanitized_value=continuity.get("related_documents"),
+        )
+        _extend_related_document_rows(
+            rows=rows,
+            warnings=warnings,
+            seen=seen,
+            source="task_continuity",
+            value=continuity_related_documents,
+        )
+        warnings.extend(f"task_continuity:{warning}" for warning in list(detail.get("recovery_warnings") or []))
+    return _RelatedDocumentResult(rows=rows, warnings=_dedupe_preserve_order(warnings))
+
+
+def _task_continuity_related_documents_value(
+    *,
+    settings: Settings,
+    detail: dict[str, Any],
+    task_id: str,
+    sanitized_value: Any,
+) -> Any:
+    """Return task-continuity related_documents, preserving raw pathless skips when available."""
+    if isinstance(sanitized_value, list):
+        return sanitized_value
+    source_state = str(detail.get("source_state") or "")
+    if source_state == "active":
+        rel = str(detail.get("path") or "")
+        raw = _read_json_object(settings.repo_root / rel)
+        continuity = raw.get("continuity") if isinstance(raw.get("continuity"), dict) else {}
+        return continuity.get("related_documents")
+    if source_state == "fallback":
+        rel = continuity_fallback_rel_path("task", task_id)
+        raw = _read_json_object(settings.repo_root / rel)
+        capsule = raw.get("capsule") if isinstance(raw.get("capsule"), dict) else {}
+        continuity = capsule.get("continuity") if isinstance(capsule.get("continuity"), dict) else {}
+        return continuity.get("related_documents")
+    return sanitized_value
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """Read a local JSON object for UI-only inspection; degrade to empty."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _extend_related_document_rows(
+    *,
+    rows: list[dict[str, str]],
+    warnings: list[str],
+    seen: set[tuple[str, str]],
+    source: str,
+    value: Any,
+) -> None:
+    """Append valid related document entries for one source, coalescing path skips."""
+    if not isinstance(value, list):
+        return
+    skipped = False
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        path = _non_empty_str(entry.get("path"))
+        if path is None:
+            skipped = True
+            continue
+        key = (path, source)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "path": path,
+                "kind": _non_empty_str(entry.get("kind")) or "",
+                "label": _non_empty_str(entry.get("label")) or "",
+                "relevance": _non_empty_str(entry.get("relevance")) or "",
+                "source": source,
+            }
+        )
+    if skipped:
+        warnings.append(f"related_document_skipped:{source}")
+
+
+def _task_table_html(rows: list[_TaskArtifact], related_by_task: dict[str, _RelatedDocumentResult]) -> str:
+    """Render the task list table with the exact #249 columns."""
+    table_rows: list[list[str]] = []
+    for artifact in rows:
+        collaborators = _string_list(artifact.data.get("collaborators"))
+        table_rows.append(
+            [
+                html.escape(artifact.status),
+                _task_detail_link(artifact.task_id),
+                _task_title_cell(artifact),
+                _muted_or_text(_display_str(artifact.data, "owner_peer"), "n/a"),
+                html.escape(", ".join(collaborators)) if collaborators else "None",
+                _thread_continuity_cell(_display_str(artifact.data, "thread_id")),
+                html.escape(str(len(_string_list(artifact.data.get("blocked_by"))))),
+                html.escape(str(len(related_by_task.get(artifact.task_id, _RelatedDocumentResult([], [])).rows))),
+                html.escape(_display_str(artifact.data, "updated_at") or "n/a"),
+                html.escape(artifact.path_rel),
+            ]
+        )
+    return _html_table(
+        headers=["Status", "Task", "Title", "Owner", "Collaborators", "Thread", "Blocked By", "Related Documents", "Updated", "Artifact"],
+        rows=table_rows,
+        empty_message="No tasks matched the current filter.",
+    )
+
+
+def _task_detail_body(
+    *,
+    task_id: str,
+    artifact: _TaskArtifact | None,
+    warnings: list[str],
+    related: _RelatedDocumentResult,
+) -> str:
+    """Render task detail sections in the exact #249 order."""
+    if artifact is None:
+        resolved_id = task_id.strip()
+        task_section = _definition_rows(
+            [
+                ("Task ID", resolved_id or "n/a"),
+                ("Title", "Untitled task"),
+                ("Description", "No description recorded."),
+                ("Status", "n/a"),
+                ("Owner", "n/a"),
+                ("Collaborators", "None"),
+                ("Due at", "n/a"),
+                ("Created at", "n/a"),
+                ("Updated at", "n/a"),
+            ]
+        )
+        relationships = '<p class="muted">n/a</p>'
+        artifact_html = _definition_rows([("Path", "n/a"), ("Root", "n/a"), ("Status inferred from root", "n/a")])
+    else:
+        data = artifact.data
+        task_section = _definition_rows(
+            [
+                ("Task ID", artifact.task_id),
+                ("Title", _display_str(data, "title") or "Untitled task"),
+                ("Description", _display_str(data, "description") or "No description recorded."),
+                ("Status", artifact.status),
+                ("Owner", _display_str(data, "owner_peer") or "n/a"),
+                ("Collaborators", ", ".join(_string_list(data.get("collaborators"))) or "None"),
+                ("Due at", _display_str(data, "due_at") or "n/a"),
+                ("Created at", _display_str(data, "created_at") or "n/a"),
+                ("Updated at", _display_str(data, "updated_at") or "n/a"),
+            ]
+        )
+        relationships = _task_relationships_html(artifact)
+        artifact_html = _definition_rows(
+            [
+                ("Path", artifact.path_rel),
+                ("Root", artifact.root_rel),
+                ("Status inferred from root", artifact.inferred_status),
+            ]
+        )
+    return (
+        '<section class="panel"><h2>Task</h2>'
+        f"{task_section}</section>"
+        '<section class="panel"><h2>Warnings</h2>'
+        f"{_html_list(warnings)}</section>"
+        '<section class="panel"><h2>Relationships</h2>'
+        f"{relationships}</section>"
+        '<section class="panel"><h2>Related Documents</h2>'
+        f"{_task_related_documents_table(related.rows)}</section>"
+        '<section class="panel"><h2>Metadata</h2>'
+        '<p class="muted">No metadata recorded.</p></section>'
+        '<section class="panel"><h2>Artifact</h2>'
+        f"{artifact_html}</section>"
+    )
+
+
+def _task_relationships_html(artifact: _TaskArtifact) -> str:
+    """Render task relationship rows and blockers with safe links."""
+    thread_id = _display_str(artifact.data, "thread_id")
+    thread_cell = "n/a"
+    if thread_id:
+        thread_graph = _graph_query_link("thread", thread_id, "Graph")
+        if "/" in thread_id:
+            thread_cell = f"Continuity link unavailable for slash-containing ID. {thread_graph}"
+        else:
+            thread_cell = f'{_continuity_subject_link("thread", thread_id, "Continuity")} {thread_graph}'
+    continuity_cell = (
+        "Continuity link unavailable for slash-containing ID."
+        if "/" in artifact.task_id
+        else _continuity_subject_link("task", artifact.task_id, "Continuity")
+    )
+    task_graph_cell = _graph_query_link("task", artifact.task_id, "Graph")
+    blockers = _string_list(artifact.data.get("blocked_by"))
+    blocker_rows = [
+        [html.escape(blocker), _task_detail_link(blocker), _graph_query_link("task", blocker, "Graph")]
+        for blocker in blockers
+    ]
+    return (
+        f"{_definition_rows_html([('Thread', thread_cell), ('Task continuity', continuity_cell), ('Task graph', task_graph_cell)])}"
+        "<h3>Blocked by</h3>"
+        f"{_html_table(headers=['Task ID', 'Task', 'Graph'], rows=blocker_rows, empty_message='No blocking tasks recorded.')}"
+    )
+
+
+def _task_related_documents_table(rows: list[dict[str, str]]) -> str:
+    """Render task related documents with the exact #249 columns."""
+    return _html_table(
+        headers=["Path", "Kind", "Label", "Relevance", "Source"],
+        rows=[
+            [
+                html.escape(row["path"]),
+                html.escape(row["kind"]),
+                html.escape(row["label"]),
+                html.escape(row["relevance"]),
+                html.escape(row["source"]),
+            ]
+            for row in rows
+        ],
+        empty_message="No related documents recorded.",
+    )
+
+
+def _task_warnings_panel(warnings: list[str]) -> str:
+    """Render the warning panel only when warning codes exist."""
+    if not warnings:
+        return ""
+    return f'<section class="panel"><h2>Warnings</h2>{_html_list(warnings)}</section>'
+
+
+def _task_title_cell(artifact: _TaskArtifact) -> str:
+    """Render title or the required muted empty state."""
+    title = _display_str(artifact.data, "title")
+    if title:
+        return html.escape(title)
+    return '<span class="muted">Untitled task</span>'
+
+
+def _muted_or_text(value: str, empty: str) -> str:
+    """Render a display value or muted empty-state text."""
+    if value:
+        return html.escape(value)
+    return f'<span class="muted">{html.escape(empty)}</span>'
+
+
+def _thread_continuity_cell(thread_id: str) -> str:
+    """Render the task-list thread cell."""
+    if not thread_id:
+        return '<span class="muted">n/a</span>'
+    if "/" in thread_id:
+        return "Continuity link unavailable for slash-containing ID."
+    return _continuity_subject_link("thread", thread_id, thread_id)
+
+
+def _task_detail_link(task_id: str) -> str:
+    """Render the canonical task detail link for safe and slash-containing IDs."""
+    href = _task_detail_href(task_id)
+    return f'<a href="{html.escape(href)}">{html.escape(task_id)}</a>'
+
+
+def _task_detail_href(task_id: str) -> str:
+    """Return the canonical task detail route for one task ID."""
+    if "/" in task_id:
+        return f"/ui/tasks?{urlencode({'task_id': task_id})}"
+    return f"/ui/tasks/{quote(task_id, safe='')}"
+
+
+def _continuity_subject_link(subject_kind: str, subject_id: str, label: str) -> str:
+    """Render a continuity path link for one safe path-segment ID."""
+    href = f"/ui/continuity/{quote(subject_kind, safe='')}/{quote(subject_id, safe='')}"
+    return f'<a href="{html.escape(href)}">{html.escape(label)}</a>'
+
+
+def _graph_query_link(subject_kind: str, subject_id: str, label: str) -> str:
+    """Render a graph query link backed by existing graph UI behavior."""
+    href = f"/ui/graph?{urlencode({'subject_kind': subject_kind, 'subject_id': subject_id})}"
+    return f'<a href="{html.escape(href)}">{html.escape(label)}</a>'
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    """Deduplicate warning codes without changing first-observed order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _definition_rows_html(rows: list[tuple[str, str]]) -> str:
+    """Render key/value rows where values are already escaped HTML fragments."""
+    parts = ['<dl class="kv-list">']
+    for label, value in rows:
+        parts.append(f"<dt>{html.escape(label)}</dt><dd>{value}</dd>")
+    parts.append("</dl>")
+    return "".join(parts)
 
 
 def _bool_label(value: bool) -> str:
