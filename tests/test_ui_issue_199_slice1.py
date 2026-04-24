@@ -209,6 +209,8 @@ def _write_capsule(
     subject_kind: str,
     subject_id: str,
     capsule_health_status: str | None = None,
+    related_documents: list[dict[str, Any]] | None = None,
+    thread_descriptor: dict[str, Any] | None = None,
 ) -> None:
     """Write one active continuity capsule to the repository fixture."""
     continuity_dir = repo_root / "memory" / "continuity"
@@ -219,6 +221,10 @@ def _write_capsule(
         subject_id=subject_id,
         capsule_health_status=capsule_health_status,
     )
+    if related_documents is not None:
+        payload["continuity"]["related_documents"] = related_documents
+    if thread_descriptor is not None:
+        payload["thread_descriptor"] = thread_descriptor
     (continuity_dir / f"{subject_kind}-{normalized}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -673,6 +679,72 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("Cold artifacts present", detail.text)
         self.assertIn("Open user archived list", detail.text)
         self.assertIn("Open user cold list", detail.text)
+
+    def test_ui_detail_page_shows_related_documents_and_thread_descriptor(self) -> None:
+        """The detail page should expose V2/V3 compatibility metadata read-only."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(
+                repo_root,
+                subject_kind="thread",
+                subject_id="thread-245",
+                related_documents=[
+                    {
+                        "path": "memory/projects/issue-245.md",
+                        "kind": "issue",
+                        "label": "UI compatibility audit",
+                        "relevance": "primary",
+                    }
+                ],
+                thread_descriptor={
+                    "label": "Issue 245 UI parity",
+                    "keywords": ["ui", "compatibility"],
+                    "scope_anchors": ["operator ui"],
+                    "identity_anchors": [{"kind": "issue", "value": "#245"}],
+                    "lifecycle": "active",
+                    "superseded_by": "thread-246",
+                },
+            )
+            detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/thread/thread-245",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-245"},
+            )
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("Related Documents", detail.text)
+        self.assertIn("memory/projects/issue-245.md", detail.text)
+        self.assertIn("issue", detail.text)
+        self.assertIn("UI compatibility audit", detail.text)
+        self.assertIn("primary", detail.text)
+        self.assertIn("Thread Descriptor", detail.text)
+        self.assertIn("Issue 245 UI parity", detail.text)
+        self.assertIn("compatibility", detail.text)
+        self.assertIn("operator ui", detail.text)
+        self.assertIn("#245", detail.text)
+        self.assertIn("thread-246", detail.text)
+        self.assertNotIn("prefer readable tables", detail.text)
+        self.assertIn("Not applicable for this subject kind.", detail.text)
+
+    def test_ui_detail_page_marks_stable_preferences_not_applicable_for_tasks(self) -> None:
+        """Stable preferences should not look like empty user/peer data on task capsules."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="task", subject_id="task-245")
+            detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/task/task-245",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "task", "subject_id": "task-245"},
+            )
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("Stable Preferences", detail.text)
+        self.assertIn("Not applicable for this subject kind.", detail.text)
+        self.assertNotIn("prefer readable tables", detail.text)
 
     def test_ui_detail_page_startup_summary_omits_dedicated_section_duplicates(self) -> None:
         """Startup summary should not duplicate dedicated trust/stable-preference sections."""
