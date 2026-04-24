@@ -5,6 +5,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models import ContinuityUpsertRequest
 
 
 EXPECTED_ROOT = {
@@ -94,11 +95,24 @@ EXPECTED_TOOLS = {
             "subject_kind": "thread",
             "subject_id": "issue-214",
             "capsule": {
+                "subject_kind": "thread",
+                "subject_id": "issue-214",
                 "updated_at": "2026-04-21T12:00:00Z",
-                "open_loops": [],
-                "top_priorities": [],
-                "active_constraints": [],
-                "stance_summary": "Ready to continue issue 214 work.",
+                "verified_at": "2026-04-21T12:00:00Z",
+                "source": {
+                    "producer": "runtime-help",
+                    "update_reason": "interaction_boundary",
+                    "inputs": [],
+                },
+                "continuity": {
+                    "top_priorities": [],
+                    "active_concerns": [],
+                    "active_constraints": [],
+                    "open_loops": [],
+                    "stance_summary": "Ready to continue issue 214 work.",
+                    "drift_signals": [],
+                },
+                "confidence": {"continuity": 0.9, "relationship_model": 0.0},
             },
         },
         "common_mistakes": [
@@ -217,11 +231,24 @@ EXPECTED_TOPICS = {
             "subject_kind": "thread",
             "subject_id": "issue-214",
             "capsule": {
+                "subject_kind": "thread",
+                "subject_id": "issue-214",
                 "updated_at": "2026-04-21T12:00:00Z",
-                "open_loops": [],
-                "top_priorities": [],
-                "active_constraints": [],
-                "stance_summary": "Ready to continue issue 214 work.",
+                "verified_at": "2026-04-21T12:00:00Z",
+                "source": {
+                    "producer": "runtime-help",
+                    "update_reason": "interaction_boundary",
+                    "inputs": [],
+                },
+                "continuity": {
+                    "top_priorities": [],
+                    "active_concerns": [],
+                    "active_constraints": [],
+                    "open_loops": [],
+                    "stance_summary": "Ready to continue issue 214 work.",
+                    "drift_signals": [],
+                },
+                "confidence": {"continuity": 0.9, "relationship_model": 0.0},
             },
             "session_end_snapshot": {
                 "open_loops": [],
@@ -311,11 +338,24 @@ EXPECTED_HOOKS = {
                 "subject_kind": "thread",
                 "subject_id": "issue-214",
                 "capsule": {
+                    "subject_kind": "thread",
+                    "subject_id": "issue-214",
                     "updated_at": "2026-04-21T12:00:00Z",
-                    "open_loops": [],
-                    "top_priorities": [],
-                    "active_constraints": [],
-                    "stance_summary": "Ready to continue issue 214 work.",
+                    "verified_at": "2026-04-21T12:00:00Z",
+                    "source": {
+                        "producer": "runtime-help",
+                        "update_reason": "interaction_boundary",
+                        "inputs": [],
+                    },
+                    "continuity": {
+                        "top_priorities": [],
+                        "active_concerns": [],
+                        "active_constraints": [],
+                        "open_loops": [],
+                        "stance_summary": "Ready to continue issue 214 work.",
+                        "drift_signals": [],
+                    },
+                    "confidence": {"continuity": 0.9, "relationship_model": 0.0},
                 },
             },
             "common_mistakes": [
@@ -346,11 +386,24 @@ EXPECTED_HOOKS = {
                 "subject_kind": "thread",
                 "subject_id": "issue-214",
                 "capsule": {
+                    "subject_kind": "thread",
+                    "subject_id": "issue-214",
                     "updated_at": "2026-04-21T12:00:00Z",
-                    "open_loops": [],
-                    "top_priorities": [],
-                    "active_constraints": [],
-                    "stance_summary": "Ready to continue issue 214 work.",
+                    "verified_at": "2026-04-21T12:00:00Z",
+                    "source": {
+                        "producer": "runtime-help",
+                        "update_reason": "interaction_boundary",
+                        "inputs": [],
+                    },
+                    "continuity": {
+                        "top_priorities": [],
+                        "active_concerns": [],
+                        "active_constraints": [],
+                        "open_loops": [],
+                        "stance_summary": "Ready to continue issue 214 work.",
+                        "drift_signals": [],
+                    },
+                    "confidence": {"continuity": 0.9, "relationship_model": 0.0},
                 },
                 "session_end_snapshot": {
                     "open_loops": [],
@@ -501,6 +554,18 @@ class TestHelp214Slice1SuccessBodies(HelpHttpTestCase):
         response = self.client.get("/v1/help/hooks")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), EXPECTED_HOOKS)
+
+    def test_upsert_help_examples_match_runtime_request_shape(self) -> None:
+        """Machine-facing upsert examples must be valid ContinuityUpsertRequest payloads."""
+        payloads = [
+            EXPECTED_TOOLS["continuity.upsert"]["minimal_payload"],
+            EXPECTED_TOPICS["continuity.upsert.session_end_snapshot"]["minimal_payload"],
+            EXPECTED_HOOKS["hooks"][2]["minimal_payload"],
+            EXPECTED_HOOKS["hooks"][3]["minimal_payload"],
+        ]
+        for payload in payloads:
+            with self.subTest(subject_id=payload["subject_id"]):
+                ContinuityUpsertRequest.model_validate(payload)
 
     def test_error_bodies(self) -> None:
         """Each supported error target returns its exact closed body."""

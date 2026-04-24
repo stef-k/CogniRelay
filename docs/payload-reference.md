@@ -74,9 +74,9 @@ The system is designed so that a fully-populated capsule with practical content 
 | `stable_preferences` (max 12 entries) | ~960 | up to 36 fields | Trimmed as whole unit under token pressure |
 | `verification_state` + `capsule_health` + `confidence` | ~185 | ~10 fields | |
 | Top-level metadata (`subject_kind`, `subject_id`, timestamps, etc.) | ~60 | ~6 fields | |
-| **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON (theoretical; see note below)** |
+| **Total (fully populated)** | **~3,400–3,800** | **~94 fields** | **~14 KB JSON (rich practical estimate; see note below)** |
 
-> **Note on write-time size limit:** The server enforces a 20 KB serialized-UTF-8 cap on each capsule at write time. The ~14 KB figure above is the theoretical maximum when *every* optional field is populated at its maximum length simultaneously. In practice a fully-featured capsule with realistic content fits within the 20 KB cap with bounded headroom, including rich `stable_preferences`.
+> **Note on write-time size limit:** The server enforces a hard 20 KB serialized-UTF-8 cap on each capsule at write time. The ~14 KB figure above is a rich practical capsule estimate with broad optional-section coverage, not an all-fields-at-maximum ceiling. Real writes must still fit under the 20 KB cap after serialization.
 
 ### Context window impact
 
@@ -122,6 +122,7 @@ The system is designed so that a fully-populated capsule with practical content 
 | `rationale_entries[].reasoning` | 560 chars |
 | `rationale_entries[].alternatives_considered[]` | 160 chars |
 | `rationale_entries[].depends_on[]` | 120 chars |
+| `rationale_entries[].supersedes` | 80 chars |
 | `conflict_summary` (in `verification_state`) | 240 chars |
 | `subject_id` | 200 chars |
 | `source.producer` | 100 chars |

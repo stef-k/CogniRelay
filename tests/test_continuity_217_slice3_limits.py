@@ -241,6 +241,9 @@ class TestContinuity217Slice3Limits(unittest.TestCase):
         self.assertIn("| `open_loops[]` | 160 chars |", text)
         self.assertIn("| `active_constraints[]` | 160 chars |", text)
         self.assertIn("| `session_trajectory[]` | 80 chars |", text)
+        self.assertIn("| `rationale_entries[].supersedes` | 80 chars |", text)
+        self.assertNotIn("theoretical maximum", text)
+        self.assertIn("hard 20 KB serialized-UTF-8 cap", text)
         self.assertIn("| `top_priorities` | list of strings | yes | max 8, each ≤ 160 chars |", text)
         self.assertIn("| `session_trajectory` | list of strings | no | max 5, each ≤ 80 chars, default `[]` |", text)
 
