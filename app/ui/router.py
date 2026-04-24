@@ -31,6 +31,7 @@ from app.context.graph import derive_internal_graph_slice1
 from app.discovery import capabilities_payload, health_payload
 from app.git_manager import GitManager
 from app.models import ContextRetrieveRequest, ContinuityReadRequest
+from app.ui.docs import UI_DOCS_BY_ID, UiDoc, doc_statuses, read_doc_source, render_doc_markdown
 
 from .render import render_template
 
@@ -405,6 +406,23 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         _enforce_ui_access(request, settings)
         return _render_graph_response(settings=settings, subject_kind=subject_kind, subject_id=subject_id)
 
+    @router.get("/docs", response_class=HTMLResponse)
+    def ui_docs(request: Request) -> HTMLResponse:
+        """Render the fixed read-only documentation index."""
+        settings = get_settings()
+        _enforce_ui_access(request, settings)
+        return _docs_index_page(settings.repo_root)
+
+    @router.get("/docs/{doc_id}", response_class=HTMLResponse)
+    def ui_doc_detail(request: Request, doc_id: str) -> HTMLResponse:
+        """Render one allowlisted Markdown document."""
+        settings = get_settings()
+        _enforce_ui_access(request, settings)
+        doc = UI_DOCS_BY_ID.get(doc_id)
+        if doc is None:
+            return _docs_not_found_page()
+        return _docs_detail_page(settings.repo_root, doc)
+
     @router.get("/events")
     async def ui_events(
         request: Request,
@@ -540,6 +558,7 @@ def _page(*, title: str, current_path: str, content: str) -> HTMLResponse:
         tasks_nav_class=_nav_class(current_path.startswith("/ui/tasks")),
         retrieval_nav_class=_nav_class(current_path.startswith("/ui/context")),
         graph_nav_class=_nav_class(current_path.startswith("/ui/graph")),
+        docs_nav_class=_nav_class(current_path.startswith("/ui/docs")),
         content=content,
     )
     return HTMLResponse(html_doc)
@@ -548,6 +567,106 @@ def _page(*, title: str, current_path: str, content: str) -> HTMLResponse:
 def _nav_class(active: bool) -> str:
     """Return the nav link class for the current page."""
     return "nav-link active" if active else "nav-link"
+
+
+def _docs_index_page(repo_root: Path) -> HTMLResponse:
+    """Render the read-only docs index with fixed allowlist ordering."""
+    statuses = doc_statuses(repo_root)
+    rows: list[list[str]] = []
+    warnings: list[str] = []
+    for status in statuses:
+        doc = status.doc
+        status_label = "Available" if status.available else "Unavailable"
+        title = html.escape(doc.title)
+        if status.available:
+            title = f'<a href="/ui/docs/{html.escape(doc.doc_id, quote=True)}">{title}</a>'
+        if status.warning:
+            warnings.append(status.warning)
+        rows.append(
+            [
+                title,
+                html.escape(doc.description),
+                html.escape(doc.path),
+                html.escape(status_label),
+            ]
+        )
+    body = render_template(
+        "docs_index.html",
+        docs_table=_html_table(
+            headers=["Title", "Description", "Source path", "Status"],
+            rows=rows,
+            empty_message="No documentation entries configured.",
+        ),
+        warnings_panel=_docs_warnings_panel(warnings),
+        runtime_help_panel=_runtime_help_panel(),
+    )
+    return _page(title="Documentation", current_path="/ui/docs", content=body)
+
+
+def _docs_detail_page(repo_root: Path, doc: UiDoc) -> HTMLResponse:
+    """Render one allowlisted document, degrading if the file is unavailable."""
+    source, warning = read_doc_source(repo_root, doc)
+    status = "Available" if source is not None else "Unavailable"
+    if source is None:
+        content_html = '<p class="muted">Document content is unavailable.</p>'
+        toc_html = '<p class="muted">No section headings available.</p>'
+    else:
+        rendered = render_doc_markdown(source=source, doc=doc)
+        content_html = rendered.content_html
+        toc_html = rendered.toc_html
+    body = render_template(
+        "docs_detail.html",
+        document_rows=_definition_rows(
+            [
+                ("Title", doc.title),
+                ("Source path", doc.path),
+                ("Status", status),
+            ]
+        ),
+        document_warning=_docs_warning_line(warning),
+        toc_html=toc_html,
+        runtime_help_panel=_runtime_help_panel(),
+        content_html=content_html,
+    )
+    return _page(title=doc.title, current_path="/ui/docs", content=body)
+
+
+def _docs_not_found_page() -> HTMLResponse:
+    """Render deterministic UI 404 for unknown docs IDs."""
+    body = (
+        '<section class="panel">'
+        "<h2>Documentation Not Found</h2>"
+        '<p class="warning">The requested documentation page is not available in the UI docs allowlist.</p>'
+        '<p><a href="/ui/docs">Back to documentation index</a></p>'
+        "</section>"
+    )
+    response = _page(title="Documentation Not Found", current_path="/ui/docs", content=body)
+    response.status_code = 404
+    return response
+
+
+def _docs_warnings_panel(warnings: list[str]) -> str:
+    """Render deterministic docs warning codes when present."""
+    if not warnings:
+        return ""
+    return '<section class="panel"><h2>Warnings</h2>' + _html_list(warnings) + "</section>"
+
+
+def _docs_warning_line(warning: str | None) -> str:
+    """Render the detail warning line for degraded docs."""
+    if warning is None:
+        return ""
+    return f'<p class="warning">{html.escape(warning)}</p>'
+
+
+def _runtime_help_panel() -> str:
+    """Render plain links to existing runtime help surfaces."""
+    links = [
+        '<a href="/v1/help">Runtime help index</a>',
+        '<a href="/v1/help/onboarding">Runtime onboarding index</a>',
+        '<a href="/v1/help/limits">Validation limits index</a>',
+    ]
+    return "<section class=\"panel\"><h2>Runtime Help</h2><ul>" + "".join(f"<li>{link}</li>" for link in links) + "</ul></section>"
 
 
 def _normalize_ui_filter(value: str | None, allowed: tuple[str, ...]) -> str | None:
