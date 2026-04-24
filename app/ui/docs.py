@@ -5,18 +5,15 @@ from __future__ import annotations
 import html
 import posixpath
 import re
-import secrets
-import xml.etree.ElementTree as etree
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urldefrag, urlsplit
 
 import bleach
 import markdown
-from markdown.extensions import Extension
 from markdown.extensions.toc import TocExtension
-from markdown.treeprocessors import Treeprocessor
 
 
 @dataclass(frozen=True)
@@ -131,18 +128,16 @@ def read_doc_source(repo_root: Path, doc: UiDoc) -> tuple[str | None, str | None
 
 def render_doc_markdown(*, source: str, doc: UiDoc) -> RenderedDoc:
     """Render Markdown to sanitized UI HTML with allowlisted doc-link behavior."""
-    token = secrets.token_urlsafe(16)
-    link_extension = _DocsLinkExtension(doc=doc, token=token)
     md = markdown.Markdown(
         extensions=[
             "fenced_code",
             "tables",
             TocExtension(slugify=_slugify_heading, toc_depth="2-3"),
-            link_extension,
         ],
         output_format="html",
     )
     rendered = md.convert(source)
+    rendered = _normalize_rendered_anchors(rendered, doc=doc)
     cleaned = bleach.Cleaner(
         tags=_ALLOWED_TAGS,
         attributes=_allowed_attribute,
@@ -150,9 +145,8 @@ def render_doc_markdown(*, source: str, doc: UiDoc) -> RenderedDoc:
         strip=True,
         strip_comments=True,
     ).clean(rendered)
-    content_html = _restore_generated_doc_links(cleaned, link_extension.generated_hrefs)
     return RenderedDoc(
-        content_html=content_html,
+        content_html=cleaned,
         toc_html=_toc_html(md.toc_tokens),
     )
 
@@ -189,15 +183,19 @@ def _allowed_attribute(tag: str, name: str, value: str) -> bool:
 def _allowed_href(value: str) -> bool:
     if value.startswith("http://") or value.startswith("https://"):
         return True
-    return False
+    if value.startswith("#"):
+        fragment = value[1:]
+        return _is_normalized_fragment(fragment)
+    split = urlsplit(value)
+    if split.scheme or split.netloc or split.query:
+        return False
+    if split.path not in {f"/ui/docs/{doc.doc_id}" for doc in UI_DOCS}:
+        return False
+    return not split.fragment or _is_normalized_fragment(split.fragment)
 
 
-def _restore_generated_doc_links(content: str, generated_hrefs: dict[str, str]) -> str:
-    restored = content
-    for placeholder, href in generated_hrefs.items():
-        restored = restored.replace(html.escape(placeholder, quote=True), html.escape(href, quote=True))
-        restored = restored.replace(placeholder, html.escape(href, quote=True))
-    return restored
+def _is_normalized_fragment(fragment: str) -> bool:
+    return bool(fragment) and quote(unquote(fragment), safe="-._~") == fragment
 
 
 def _toc_html(tokens: list[dict[str, Any]]) -> str:
@@ -226,76 +224,138 @@ def _flatten_toc_tokens(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return flattened
 
 
-class _DocsLinkExtension(Extension):
-    """Python-Markdown extension that rewrites links before final sanitization."""
+def _normalize_rendered_anchors(content: str, *, doc: UiDoc) -> str:
+    """Normalize rendered anchors before final sanitizer validation."""
+    parser = _RenderedAnchorNormalizer(doc=doc)
+    parser.feed(content)
+    parser.close()
+    return parser.content
 
-    def __init__(self, *, doc: UiDoc, token: str) -> None:
-        super().__init__()
+
+class _RenderedAnchorNormalizer(HTMLParser):
+    """Rewrite all rendered anchors through the UI docs link allowlist."""
+
+    def __init__(self, *, doc: UiDoc) -> None:
+        super().__init__(convert_charrefs=False)
         self.doc = doc
-        self.token = token
-        self.generated_hrefs: dict[str, str] = {}
-
-    def extendMarkdown(self, md: markdown.Markdown) -> None:  # noqa: N802 - Markdown extension API
-        md.treeprocessors.register(_DocsLinkTreeprocessor(md, extension=self), "cognirelay_docs_links", 5)
-
-
-class _DocsLinkTreeprocessor(Treeprocessor):
-    """Rewrite Markdown-generated anchors into the docs browser allowlist."""
-
-    def __init__(self, md: markdown.Markdown, *, extension: _DocsLinkExtension) -> None:
-        super().__init__(md)
-        self.extension = extension
-
-    def run(self, root: etree.Element) -> etree.Element:
-        for parent in list(root.iter()):
-            for index, child in enumerate(list(parent)):
-                if child.tag != "a":
-                    continue
-                self._rewrite_link(parent, index, child)
-        return root
-
-    def _rewrite_link(self, parent: etree.Element, index: int, link: etree.Element) -> None:
-        href = str(link.attrib.get("href", ""))
-        replacement = self._replacement_href(href)
-        if replacement is None:
-            _degrade_link(parent, index, link)
-            return
-        link.attrib["href"] = replacement
-        if replacement.startswith("http://") or replacement.startswith("https://"):
-            if not replacement.startswith(self._placeholder_prefix):
-                link.attrib["rel"] = "noreferrer"
+        self._parts: list[str] = []
+        self._anchor: dict[str, Any] | None = None
+        self._anchor_depth = 0
 
     @property
-    def _placeholder_prefix(self) -> str:
-        return f"https://cognirelay.invalid/__ui_docs__/{self.extension.token}/"
+    def content(self) -> str:
+        """Return normalized HTML collected so far."""
+        return "".join(self._parts)
 
-    def _replacement_href(self, href: str) -> str | None:
-        split = urlsplit(href)
-        if split.scheme or split.netloc:
-            if split.scheme in {"http", "https"}:
-                return href
-            return None
-        target, fragment = urldefrag(href)
-        normalized_fragment = normalize_fragment(fragment)
-        if target == "":
-            if not normalized_fragment:
-                return None
-            return self._placeholder(f"fragment/{normalized_fragment}", f"#{normalized_fragment}")
-        normalized_path = _normalize_doc_target(self.extension.doc.path, target)
-        target_doc_id = _UI_DOC_IDS_BY_PATH.get(normalized_path)
-        if target_doc_id is None:
-            return None
-        final_href = f"/ui/docs/{target_doc_id}"
-        placeholder_suffix = f"doc/{target_doc_id}"
-        if normalized_fragment:
-            final_href = f"{final_href}#{normalized_fragment}"
-            placeholder_suffix = f"{placeholder_suffix}/{normalized_fragment}"
-        return self._placeholder(placeholder_suffix, final_href)
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a" and self._anchor is None:
+            self._anchor = {"attrs": attrs, "html": [], "text": []}
+            self._anchor_depth = 1
+            return
+        if self._anchor is not None:
+            self._anchor_depth += 1
+            self._anchor["html"].append(self._format_starttag(tag, attrs))
+            return
+        self._parts.append(self._format_starttag(tag, attrs))
 
-    def _placeholder(self, suffix: str, final_href: str) -> str:
-        placeholder = self._placeholder_prefix + suffix
-        self.extension.generated_hrefs[placeholder] = final_href
-        return placeholder
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        target = self._anchor["html"] if self._anchor is not None else self._parts
+        target.append(self._format_starttag(tag, attrs, startend=True))
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._anchor is not None:
+            self._anchor_depth -= 1
+            if tag == "a" and self._anchor_depth == 0:
+                self._parts.append(self._render_anchor())
+                self._anchor = None
+                return
+            self._anchor["html"].append(f"</{tag}>")
+            return
+        self._parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor is not None:
+            self._anchor["html"].append(html.escape(data, quote=False))
+            self._anchor["text"].append(data)
+            return
+        self._parts.append(html.escape(data, quote=False))
+
+    def handle_entityref(self, name: str) -> None:
+        entity = f"&{name};"
+        if self._anchor is not None:
+            self._anchor["html"].append(entity)
+            self._anchor["text"].append(html.unescape(entity))
+            return
+        self._parts.append(entity)
+
+    def handle_charref(self, name: str) -> None:
+        charref = f"&#{name};"
+        if self._anchor is not None:
+            self._anchor["html"].append(charref)
+            self._anchor["text"].append(html.unescape(charref))
+            return
+        self._parts.append(charref)
+
+    def handle_comment(self, data: str) -> None:
+        target = self._anchor["html"] if self._anchor is not None else self._parts
+        target.append(f"<!--{data}-->")
+
+    def _render_anchor(self) -> str:
+        attrs = list(self._anchor["attrs"])
+        href = _attr_value(attrs, "href")
+        replacement = _replacement_href(self.doc, href or "")
+        if replacement is None:
+            text = "".join(self._anchor["text"])
+            return html.escape(text, quote=False) + " (not available in UI docs allowlist)"
+
+        normalized_attrs = [(name, value) for name, value in attrs if name not in {"href", "rel"}]
+        normalized_attrs.append(("href", replacement))
+        if replacement.startswith("http://") or replacement.startswith("https://"):
+            normalized_attrs.append(("rel", "noreferrer"))
+        return f"<a{_format_attrs(normalized_attrs)}>{''.join(self._anchor['html'])}</a>"
+
+    def _format_starttag(self, tag: str, attrs: list[tuple[str, str | None]], *, startend: bool = False) -> str:
+        suffix = " /" if startend else ""
+        return f"<{tag}{_format_attrs(attrs)}{suffix}>"
+
+
+def _attr_value(attrs: list[tuple[str, str | None]], name: str) -> str | None:
+    for attr_name, attr_value in attrs:
+        if attr_name == name:
+            return attr_value or ""
+    return None
+
+
+def _format_attrs(attrs: list[tuple[str, str | None]]) -> str:
+    formatted = []
+    for name, value in attrs:
+        if value is None:
+            formatted.append(f" {name}")
+            continue
+        formatted.append(f' {name}="{html.escape(value, quote=True)}"')
+    return "".join(formatted)
+
+
+def _replacement_href(doc: UiDoc, href: str) -> str | None:
+    split = urlsplit(href)
+    if split.scheme or split.netloc:
+        if split.scheme in {"http", "https"}:
+            return href
+        return None
+    target, fragment = urldefrag(href)
+    normalized_fragment = normalize_fragment(fragment)
+    if target == "":
+        if not normalized_fragment:
+            return None
+        return f"#{normalized_fragment}"
+    normalized_path = _normalize_doc_target(doc.path, target)
+    target_doc_id = _UI_DOC_IDS_BY_PATH.get(normalized_path)
+    if target_doc_id is None:
+        return None
+    final_href = f"/ui/docs/{target_doc_id}"
+    if normalized_fragment:
+        final_href = f"{final_href}#{normalized_fragment}"
+    return final_href
 
 
 def _normalize_doc_target(source_path: str, target: str) -> str:
@@ -304,10 +364,3 @@ def _normalize_doc_target(source_path: str, target: str) -> str:
     joined = decoded if base == "" else posixpath.join(base, decoded)
     normalized = posixpath.normpath(joined)
     return "" if normalized == "." else normalized
-
-
-def _degrade_link(parent: etree.Element, index: int, link: etree.Element) -> None:
-    span = etree.Element("span")
-    span.text = "".join(link.itertext()) + " (not available in UI docs allowlist)"
-    span.tail = link.tail
-    parent[index] = span

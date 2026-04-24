@@ -204,6 +204,7 @@ class UiDocsTests(unittest.TestCase):
 [BadJs](javascript:alert(1))
 
 <script>alert("x")</script>
+<a href="https://example.com/raw">raw</a>
 <a href="/ui/docs/agent-onboarding">raw internal</a>
 <a href="file:///tmp/secret">file</a>
 <span style="color:red" onclick="alert(1)">styled</span>
@@ -236,12 +237,15 @@ class UiDocsTests(unittest.TestCase):
         self.assertIn("Unsupported (not available in UI docs allowlist)", response.text)
         self.assertIn("RootInject (not available in UI docs allowlist)", response.text)
         self.assertIn('href="https://example.com/a?b=1" rel="noreferrer"', response.text)
+        self.assertIn('href="https://example.com/raw" rel="noreferrer">raw</a>', response.text)
+        self.assertIn("raw internal (not available in UI docs allowlist)", response.text)
         self.assertNotIn("javascript:alert", content)
         self.assertNotIn("<script>", content)
         self.assertNotIn("onclick", content)
         self.assertNotIn("style=", content)
         self.assertNotIn("<img", content)
         self.assertNotIn('href="/ui/docs/agent-onboarding">raw internal</a>', content)
+        self.assertNotIn('href="/ui/docs/agent-onboarding"', content)
         self.assertNotIn("file:///tmp/secret", content)
         self.assertIn("<pre><code>", response.text)
         self.assertIn("&lt;script&gt;safe text&lt;/script&gt;", response.text)
