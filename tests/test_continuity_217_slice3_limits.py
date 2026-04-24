@@ -233,6 +233,17 @@ class TestContinuity217Slice3Limits(unittest.TestCase):
         self.assertEqual(snapshot_schema["properties"]["top_priorities"]["maxItems"], 8)
         self.assertEqual(snapshot_schema["properties"]["active_constraints"]["maxItems"], 8)
 
+    def test_payload_reference_documents_runtime_core_item_limits(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "docs" / "payload-reference.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("no per-item limit", text)
+        self.assertIn("| `top_priorities[]` | 160 chars |", text)
+        self.assertIn("| `open_loops[]` | 160 chars |", text)
+        self.assertIn("| `active_constraints[]` | 160 chars |", text)
+        self.assertIn("| `session_trajectory[]` | 80 chars |", text)
+        self.assertIn("| `top_priorities` | list of strings | yes | max 8, each ≤ 160 chars |", text)
+        self.assertIn("| `session_trajectory` | list of strings | no | max 5, each ≤ 80 chars, default `[]` |", text)
+
 
 if __name__ == "__main__":
     unittest.main()
