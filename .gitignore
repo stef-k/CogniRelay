@@ -9,3 +9,4 @@ __pycache__/
 .locks/
 .query_index.db*
 data_repo/
+.codex
