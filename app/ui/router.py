@@ -749,7 +749,7 @@ def _empty_ui_detail_summary(*, subject_kind: str, subject_id: str, warning: str
             "stance_summary_html": '<p class="muted">None</p>',
             "related_documents_html": '<p class="muted">No related documents recorded.</p>',
             "thread_descriptor_section": "",
-            "stable_preferences_html": '<p class="muted">No stable preferences recorded.</p>',
+            "stable_preferences_html": _stable_preferences_html(capsule={}, subject_kind=subject_kind),
             "negative_decisions_html": '<p class="muted">No negative decisions recorded.</p>',
             "rationale_entries_html": '<p class="muted">No rationale entries recorded.</p>',
         },

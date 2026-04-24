@@ -728,6 +728,39 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertNotIn("prefer readable tables", detail.text)
         self.assertIn("Not applicable for this subject kind.", detail.text)
 
+    def test_ui_detail_page_shows_related_documents_empty_state(self) -> None:
+        """Absent or empty related document metadata should render the documented empty state."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _write_capsule(repo_root, subject_kind="thread", subject_id="thread-no-related-docs")
+            _write_capsule(
+                repo_root,
+                subject_kind="thread",
+                subject_id="thread-empty-related-docs",
+                related_documents=[],
+            )
+            absent_detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/thread/thread-no-related-docs",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-no-related-docs"},
+            )
+            empty_detail = _ui_html_response(
+                repo_root,
+                route_path="/ui/continuity/{subject_kind}/{subject_id}",
+                request_path="/ui/continuity/thread/thread-empty-related-docs",
+                env_overrides={"COGNIRELAY_UI_ENABLED": "true", "COGNIRELAY_UI_REQUIRE_LOCALHOST": "false"},
+                endpoint_kwargs={"subject_kind": "thread", "subject_id": "thread-empty-related-docs"},
+            )
+
+        self.assertEqual(absent_detail.status_code, 200)
+        self.assertIn("Related Documents", absent_detail.text)
+        self.assertIn("No related documents recorded.", absent_detail.text)
+        self.assertEqual(empty_detail.status_code, 200)
+        self.assertIn("Related Documents", empty_detail.text)
+        self.assertIn("No related documents recorded.", empty_detail.text)
+
     def test_ui_detail_page_marks_stable_preferences_not_applicable_for_tasks(self) -> None:
         """Stable preferences should not look like empty user/peer data on task capsules."""
         with tempfile.TemporaryDirectory() as td:
@@ -846,6 +879,50 @@ class TestOperatorUiSlice1(unittest.TestCase):
         self.assertIn("ui_continuity_snapshot_failed:RuntimeError", payload["warnings"])
         self.assertFalse(payload["continuity"]["available"])
         self.assertEqual(payload["continuity"]["latest_recorded_at"], "unavailable")
+
+    def test_ui_events_stream_degraded_detail_marks_task_preferences_not_applicable(self) -> None:
+        """Degraded live detail fallback should preserve stable-preference subject applicability."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self._client(
+                repo_root,
+                COGNIRELAY_UI_ENABLED="true",
+                COGNIRELAY_UI_REQUIRE_LOCALHOST="false",
+            )
+            import app.ui.router as ui_router
+
+            router = ui_router.build_ui_router(app_version="test-version")
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/events")
+            request = _request_with_transport_host(
+                "127.0.0.1",
+                path="/ui/events",
+                query_string=b"detail_subject_kind=task&detail_subject_id=task-245",
+            )
+
+            with patch("app.ui.router._ui_live_detail_summary", side_effect=RuntimeError("boom")):
+                response = asyncio.run(
+                    endpoint(
+                        request,
+                        q=None,
+                        subject_kind=None,
+                        artifact_state=None,
+                        health_status=None,
+                        detail_subject_kind="task",
+                        detail_subject_id="task-245",
+                    )
+                )
+                event = asyncio.run(_read_first_sse_event_chunk(response))
+
+        payload = json.loads(event["data"])
+        self.assertFalse(payload["ok"])
+        self.assertIn("ui_detail_snapshot_failed:RuntimeError", payload["warnings"])
+        self.assertIsNotNone(payload["detail"])
+        self.assertFalse(payload["detail"]["available"])
+        self.assertIn(
+            "Not applicable for this subject kind.",
+            payload["detail"]["sections"]["stable_preferences_html"],
+        )
+        self.assertNotIn("No stable preferences recorded.", payload["detail"]["sections"]["stable_preferences_html"])
 
     def test_ui_events_stream_includes_bounded_detail_summary_when_requested(self) -> None:
         """The SSE endpoint should expose a small detail summary for one subject when requested."""
