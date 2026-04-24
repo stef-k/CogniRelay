@@ -606,6 +606,9 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
                 "Keep at most 8 items, shorten each item to at most 160 characters, "
                 'and retry with field_path "continuity.top_priorities".'
             ),
+            "continuity.attention_policy.early_load": (
+                'Keep at most 8 items and retry with field_path "continuity.attention_policy.early_load".'
+            ),
             "patch.target.thread_descriptor.scope_anchors": (
                 "Keep at most 4 items, make each item match the documented pattern and subfield metadata, "
                 'and retry with field_path "patch.target.thread_descriptor.scope_anchors".'

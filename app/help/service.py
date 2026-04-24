@@ -962,7 +962,9 @@ def _correction_guidance(
     if value_type == "string_list" and per_item_max_length is not None:
         return f"Keep at most {max_items} items, shorten each item to at most {per_item_max_length} characters, and retry with field_path \"{field_path}\"."
     if value_type == "string_list":
-        return f"Keep at most {max_items} items, make each item match the documented pattern and subfield metadata, and retry with field_path \"{field_path}\"."
+        if _has_pattern_or_suffix_metadata(subfield_limits):
+            return f"Keep at most {max_items} items, make each item match the documented pattern and subfield metadata, and retry with field_path \"{field_path}\"."
+        return f"Keep at most {max_items} items and retry with field_path \"{field_path}\"."
     if value_type == "object_list":
         return f"Keep at most {max_items} items, apply the documented subfield limits, and retry with field_path \"{field_path}\"."
     if value_type == "operation_list":
@@ -976,6 +978,12 @@ def _correction_guidance(
     if value_type == "number":
         return f"Use a value within the documented numeric bounds and retry with field_path \"{field_path}\"."
     return f"Apply the documented nested field limits and retry with field_path \"{field_path}\"."
+
+
+def _has_pattern_or_suffix_metadata(subfield_limits: dict[str, Any]) -> bool:
+    if any(key in subfield_limits for key in ("pattern", "suffix", "suffix_pattern", "anchor_value")):
+        return True
+    return any(isinstance(value, dict) and "pattern" in value for value in subfield_limits.values())
 
 
 def _validation_limits_table() -> dict[str, dict[str, Any]]:
