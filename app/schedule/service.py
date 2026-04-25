@@ -8,11 +8,10 @@ import math
 import re
 import sqlite3
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, TypeVar
 
 from fastapi import HTTPException
 
@@ -33,6 +32,22 @@ _KINDS = {"reminder", "task_nudge"}
 _STATUSES = {"pending", "acknowledged", "done", "retired"}
 _SUBJECT_KINDS = {"user", "peer", "thread", "task"}
 _TERMINAL = {"acknowledged", "done", "retired"}
+_LIST_QUERY_KEYS = {
+    "status",
+    "due",
+    "task_id",
+    "thread_id",
+    "subject_kind",
+    "subject_id",
+    "include_retired",
+    "limit",
+    "offset",
+}
+_CREATE_KEYS = {"schedule_id", "idempotency_key", "kind", "title", "note", "due_at", "task_id", "thread_id", "subject_kind", "subject_id", "metadata"}
+_PATCH_KEYS = {"expected_version", "kind", "title", "note", "due_at", "task_id", "thread_id", "subject_kind", "subject_id", "metadata"}
+_ACK_KEYS = {"expected_version", "status", "reason"}
+_RETIRE_KEYS = {"expected_version", "reason"}
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -78,6 +93,64 @@ def _clock() -> _Clock:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def _classify_sqlite_error(exc: sqlite3.Error, *, bootstrap: bool = False) -> str:
+    msg = str(exc).lower()
+    if "locked" in msg or "busy" in msg:
+        return "schedule_db_locked"
+    if "malformed" in msg or "corrupt" in msg or "not a database" in msg or isinstance(exc, sqlite3.DatabaseError) and "database disk image is malformed" in msg:
+        return "schedule_db_corrupt"
+    return "schedule_bootstrap_failed" if bootstrap else "schedule_db_unavailable"
+
+
+def _rollback_quietly(conn: sqlite3.Connection | None) -> None:
+    if conn is None:
+        return
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        pass
+
+
+def _run_db_operation(
+    repo_root: Path,
+    *,
+    mutation: bool,
+    operation: Callable[[sqlite3.Connection, list[str]], _T],
+) -> _T:
+    db_path = repo_root / SCHEDULE_DB_REL
+    existed = db_path.exists()
+    last_failure: _StorageFailure | None = None
+    for attempt in range(SCHEDULE_SQLITE_LOCK_RETRIES + 1):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = _connect_once(repo_root, existed=existed)
+            warnings = ["schedule_db_missing"] if not existed else []
+            return operation(conn, warnings)
+        except _StorageFailure as exc:
+            last_failure = exc
+            if mutation:
+                _rollback_quietly(conn)
+            if exc.code == "schedule_db_locked" and attempt < SCHEDULE_SQLITE_LOCK_RETRIES:
+                time.sleep(SCHEDULE_SQLITE_LOCK_RETRY_DELAY_SECONDS)
+                continue
+            raise
+        except sqlite3.Error as exc:
+            code = _classify_sqlite_error(exc)
+            last_failure = _StorageFailure(code)
+            if mutation:
+                _rollback_quietly(conn)
+            if code == "schedule_db_locked" and attempt < SCHEDULE_SQLITE_LOCK_RETRIES:
+                time.sleep(SCHEDULE_SQLITE_LOCK_RETRY_DELAY_SECONDS)
+                continue
+            raise last_failure from exc
+        finally:
+            if conn is not None:
+                conn.close()
+    if last_failure is not None:
+        raise last_failure
+    raise _StorageFailure("schedule_db_unavailable")
 
 
 def _parse_due_at(value: Any, field: str = "due_at") -> tuple[str, int]:
@@ -175,6 +248,24 @@ def _validate_metadata(value: Any, *, supplied: bool) -> dict[str, Any]:
     return out
 
 
+def _validate_materialized_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata is not object")
+    out: dict[str, Any] = {}
+    for key, item in metadata.items():
+        if not isinstance(key, str) or isinstance(item, (dict, list)):
+            raise ValueError("metadata is not flat")
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError("metadata has non-finite number")
+        if item is not None and not isinstance(item, (str, int, float, bool)):
+            raise ValueError("metadata has invalid scalar")
+        out[key] = item
+    raw = _canonical_json(out)
+    if len(raw.encode("utf-8")) > 2048:
+        raise ValueError("metadata too large")
+    return out
+
+
 def _validate_subject(payload: dict[str, Any], *, prefix: str = "") -> tuple[str | None, str | None]:
     kind_field = f"{prefix}subject_kind" if prefix else "subject_kind"
     id_field = f"{prefix}subject_id" if prefix else "subject_id"
@@ -201,6 +292,12 @@ def _validate_subject(payload: dict[str, Any], *, prefix: str = "") -> tuple[str
     return kind_out, id_out
 
 
+def _reject_unknown_keys(payload: dict[str, Any], allowed: set[str]) -> None:
+    for key in payload:
+        if key not in allowed:
+            _raise_validation("invalid_schedule_payload", key, f"unexpected field: {key}")
+
+
 def _validate_actor(auth: AuthContext, field: str) -> str:
     actor = str(auth.peer_id or "").strip()
     if not (1 <= len(actor) <= 200):
@@ -219,17 +316,13 @@ def _connect_once(repo_root: Path, *, existed: bool) -> sqlite3.Connection:
         conn.execute("PRAGMA foreign_keys=ON")
         _bootstrap_schema(conn)
     except sqlite3.OperationalError as exc:
-        msg = str(exc).lower()
-        if "locked" in msg or "busy" in msg:
-            raise _StorageFailure("schedule_db_locked") from exc
-        if not existed:
-            raise _StorageFailure("schedule_bootstrap_failed") from exc
-        raise _StorageFailure("schedule_db_unavailable") from exc
+        code = _classify_sqlite_error(exc, bootstrap=not existed)
+        if not existed and code == "schedule_db_unavailable":
+            code = "schedule_bootstrap_failed"
+        raise _StorageFailure(code) from exc
     except sqlite3.DatabaseError as exc:
-        msg = str(exc).lower()
-        if "malformed" in msg or "corrupt" in msg:
-            raise _StorageFailure("schedule_db_corrupt") from exc
-        raise _StorageFailure("schedule_bootstrap_failed" if not existed else "schedule_db_unavailable") from exc
+        code = _classify_sqlite_error(exc, bootstrap=not existed)
+        raise _StorageFailure(code) from exc
     except OSError as exc:
         raise _StorageFailure("schedule_bootstrap_failed" if not existed else "schedule_db_unavailable") from exc
     return conn
@@ -307,74 +400,114 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     if max_version > SCHEDULE_SCHEMA_VERSION:
         raise _StorageFailure("schedule_schema_too_new")
     if max_version == 0:
-        conn.execute(
-            "INSERT OR IGNORE INTO schedule_schema_migrations(version, applied_at) VALUES (?, ?)",
-            (SCHEDULE_SCHEMA_VERSION, format_iso(iso_now())),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO schedule_schema_migrations(version, applied_at) VALUES (?, ?)",
+                (SCHEDULE_SCHEMA_VERSION, format_iso(iso_now())),
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            raise _StorageFailure("schedule_migration_failed") from exc
     elif existing is None:
         conn.commit()
 
 
-@contextmanager
-def _connection(repo_root: Path) -> Iterable[tuple[sqlite3.Connection, list[str]]]:
-    db_path = repo_root / SCHEDULE_DB_REL
-    existed = db_path.exists()
-    warnings: list[str] = []
-    last_failure: _StorageFailure | None = None
-    for attempt in range(SCHEDULE_SQLITE_LOCK_RETRIES + 1):
-        try:
-            conn = _connect_once(repo_root, existed=existed)
-            if not existed:
-                warnings.append("schedule_db_missing")
-            try:
-                yield conn, warnings
-            finally:
-                conn.close()
-            return
-        except _StorageFailure as exc:
-            last_failure = exc
-            if exc.code == "schedule_db_locked" and attempt < SCHEDULE_SQLITE_LOCK_RETRIES:
-                time.sleep(SCHEDULE_SQLITE_LOCK_RETRY_DELAY_SECONDS)
-                continue
-            raise
-    if last_failure is not None:
-        raise last_failure
+def _parse_stored_timestamp(value: Any, field: str) -> tuple[str, int]:
+    if not isinstance(value, str) or not _UTC_RE.fullmatch(value):
+        raise ValueError(f"{field} is not a UTC timestamp")
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError(f"{field} is invalid") from exc
+    return value, int(dt.timestamp())
+
+
+def _stored_optional_string(value: Any, field: str, *, max_len: int, min_len: int = 1) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} is not string")
+    if not (min_len <= len(value.strip()) <= max_len):
+        raise ValueError(f"{field} length invalid")
+    return value
 
 
 def _row_to_item(row: sqlite3.Row, now_ts: int) -> dict[str, Any]:
-    metadata = json.loads(row["metadata_json"])
-    if not isinstance(metadata, dict):
-        raise ValueError("metadata is not object")
-    status = str(row["status"])
+    schedule_id = row["schedule_id"]
+    if not isinstance(schedule_id, str) or not _SCHEDULE_ID_RE.fullmatch(schedule_id):
+        raise ValueError("schedule_id invalid")
+    kind = row["kind"]
+    if kind not in _KINDS:
+        raise ValueError("kind invalid")
+    status = row["status"]
+    if status not in _STATUSES:
+        raise ValueError("status invalid")
+    due_at, due_at_ts = _parse_stored_timestamp(row["due_at"], "due_at")
+    stored_due_at_ts = row["due_at_ts"]
+    if isinstance(stored_due_at_ts, bool) or not isinstance(stored_due_at_ts, int) or stored_due_at_ts != due_at_ts:
+        raise ValueError("due_at_ts invalid")
+    created_at, _created_ts = _parse_stored_timestamp(row["created_at"], "created_at")
+    updated_at, _updated_ts = _parse_stored_timestamp(row["updated_at"], "updated_at")
+    title = row["title"]
+    if not isinstance(title, str) or not (1 <= len(title.strip()) <= 160):
+        raise ValueError("title invalid")
+    note = _stored_optional_string(row["note"], "note", max_len=1000, min_len=0)
+    created_by = _stored_optional_string(row["created_by"], "created_by", max_len=200)
+    updated_by = _stored_optional_string(row["updated_by"], "updated_by", max_len=200)
+    terminal_at = row["terminal_at"]
+    terminal_by = _stored_optional_string(row["terminal_by"], "terminal_by", max_len=200)
+    terminal_reason = _stored_optional_string(row["terminal_reason"], "terminal_reason", max_len=500, min_len=0)
+    if status == "pending":
+        if terminal_at is not None or terminal_by is not None or terminal_reason is not None:
+            raise ValueError("pending row has terminal fields")
+    else:
+        if terminal_at is None or terminal_by is None:
+            raise ValueError("terminal row missing terminal fields")
+        terminal_at, _terminal_ts = _parse_stored_timestamp(terminal_at, "terminal_at")
+    task_id = _stored_optional_string(row["task_id"], "task_id", max_len=200)
+    thread_id = _stored_optional_string(row["thread_id"], "thread_id", max_len=200)
+    subject_kind = row["subject_kind"]
+    subject_id = _stored_optional_string(row["subject_id"], "subject_id", max_len=200)
+    if subject_kind is not None and subject_kind not in _SUBJECT_KINDS:
+        raise ValueError("subject_kind invalid")
+    if (subject_kind is None) != (subject_id is None):
+        raise ValueError("subject tuple invalid")
+    idempotency_key = _stored_optional_string(row["idempotency_key"], "idempotency_key", max_len=200)
+    try:
+        metadata = _validate_materialized_metadata(json.loads(row["metadata_json"]))
+    except (TypeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("metadata invalid") from exc
+    version = row["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("version invalid")
     if status in _TERMINAL:
         derived = "terminal"
-    elif int(row["due_at_ts"]) <= now_ts:
+    elif due_at_ts <= now_ts:
         derived = "due"
     else:
         derived = "scheduled"
     return {
-        "schedule_id": row["schedule_id"],
-        "kind": row["kind"],
+        "schedule_id": schedule_id,
+        "kind": kind,
         "status": status,
         "derived_state": derived,
         "title": row["title"],
-        "note": row["note"],
-        "due_at": row["due_at"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "created_by": row["created_by"],
-        "updated_by": row["updated_by"],
-        "terminal_at": row["terminal_at"],
-        "terminal_by": row["terminal_by"],
-        "terminal_reason": row["terminal_reason"],
-        "task_id": row["task_id"],
-        "thread_id": row["thread_id"],
-        "subject_kind": row["subject_kind"],
-        "subject_id": row["subject_id"],
-        "idempotency_key": row["idempotency_key"],
+        "note": note,
+        "due_at": due_at,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "created_by": created_by,
+        "updated_by": updated_by,
+        "terminal_at": terminal_at,
+        "terminal_by": terminal_by,
+        "terminal_reason": terminal_reason,
+        "task_id": task_id,
+        "thread_id": thread_id,
+        "subject_kind": subject_kind,
+        "subject_id": subject_id,
+        "idempotency_key": idempotency_key,
         "metadata": metadata,
-        "version": int(row["version"]),
+        "version": version,
     }
 
 
@@ -401,10 +534,7 @@ def _create_identity(payload: dict[str, Any], created_by: str) -> tuple[str, str
 
 
 def _normalize_create(payload: dict[str, Any], actor: str) -> tuple[dict[str, Any], str, str]:
-    allowed = {"schedule_id", "idempotency_key", "kind", "title", "note", "due_at", "task_id", "thread_id", "subject_kind", "subject_id", "metadata"}
-    for key in payload:
-        if key not in allowed:
-            _raise_validation("invalid_schedule_payload", key, f"unexpected field: {key}")
+    _reject_unknown_keys(payload, _CREATE_KEYS)
     for field in ("kind", "title", "due_at"):
         if field not in payload:
             _raise_validation("invalid_schedule_payload", field, f"{field} is required")
@@ -461,7 +591,7 @@ def schedule_create_service(*, repo_root: Path, auth: AuthContext, payload: dict
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
     try:
-        with _connection(repo_root) as (conn, warnings):
+        def _operation(conn: sqlite3.Connection, warnings: list[str]) -> tuple[int, dict[str, Any]]:
             schedule_id = normalized["schedule_id"]
             idempotency_key = normalized.get("idempotency_key")
             row_by_id = _select_by_id(conn, schedule_id)
@@ -513,6 +643,8 @@ def schedule_create_service(*, repo_root: Path, auth: AuthContext, payload: dict
             conn.commit()
             row = _select_by_id(conn, schedule_id)
             return 201, {"ok": True, "created": True, "item": _row_to_item(row, clock.now_ts), "warnings": warnings}
+
+        return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
 
@@ -529,7 +661,7 @@ def schedule_get_service(*, repo_root: Path, auth: AuthContext, schedule_id: str
     except _StorageFailure as exc:
         return {"ok": False, "item": None, "warnings": [exc.code]}
     try:
-        with _connection(repo_root) as (conn, warnings):
+        def _operation(conn: sqlite3.Connection, warnings: list[str]) -> dict[str, Any]:
             row = _select_by_id(conn, sid)
             if row is None:
                 raise HTTPException(status_code=404, detail={"code": "schedule_not_found", "schedule_id": sid, "warnings": warnings})
@@ -537,16 +669,18 @@ def schedule_get_service(*, repo_root: Path, auth: AuthContext, schedule_id: str
                 return {"ok": True, "item": _row_to_item(row, clock.now_ts), "warnings": warnings}
             except Exception:
                 return {"ok": False, "item": None, "warnings": [*warnings, f"schedule_row_invalid:{sid}"]}
+
+        return _run_db_operation(repo_root, mutation=False, operation=_operation)
     except _StorageFailure as exc:
         return {"ok": False, "item": None, "warnings": [exc.code]}
 
 
-def _parse_bool_query(value: Any, field: str) -> bool | None:
+def _parse_bool_query(value: Any, field: str, *, strict: bool = False) -> bool | None:
     if value is None:
         return None
     if isinstance(value, bool):
         return value
-    if isinstance(value, str):
+    if isinstance(value, str) and not strict:
         lowered = value.strip().lower()
         if lowered in {"true", "1", "yes", "on"}:
             return True
@@ -555,10 +689,12 @@ def _parse_bool_query(value: Any, field: str) -> bool | None:
     _raise_validation("invalid_schedule_query", field, f"{field.split('.')[-1]} must be a boolean")
 
 
-def _parse_int_query(value: Any, field: str, default: int, minimum: int, maximum: int) -> int:
+def _parse_int_query(value: Any, field: str, default: int, minimum: int, maximum: int, *, strict: bool = False) -> int:
     if value is None:
         return default
     if isinstance(value, bool):
+        _raise_validation("invalid_schedule_query", field, f"{field.split('.')[-1]} must be an integer between {minimum} and {maximum}")
+    if strict and not isinstance(value, int):
         _raise_validation("invalid_schedule_query", field, f"{field.split('.')[-1]} must be an integer between {minimum} and {maximum}")
     try:
         out = int(value)
@@ -569,34 +705,45 @@ def _parse_int_query(value: Any, field: str, default: int, minimum: int, maximum
     return out
 
 
-def _normalize_list_query(query: dict[str, Any]) -> dict[str, Any]:
+def _normalize_list_query(query: dict[str, Any], *, strict_types: bool = False) -> dict[str, Any]:
+    _reject_unknown_keys(query, _LIST_QUERY_KEYS)
     status = query.get("status")
+    if status is not None and not isinstance(status, str):
+        _raise_validation("invalid_schedule_status", "query.status", "status must be pending, acknowledged, done, or retired")
     if status is not None and status not in _STATUSES:
         _raise_validation("invalid_schedule_status", "query.status", "status must be pending, acknowledged, done, or retired")
-    due = _parse_bool_query(query.get("due"), "query.due")
+    due = _parse_bool_query(query.get("due"), "query.due", strict=strict_types)
     task_id = query.get("task_id")
     if task_id is not None:
-        task_id = str(task_id).strip()
+        if not isinstance(task_id, str):
+            _raise_validation("invalid_schedule_query", "query.task_id", "task_id must be 1-200 characters")
+        task_id = task_id.strip()
         if not (1 <= len(task_id) <= 200):
             _raise_validation("invalid_schedule_query", "query.task_id", "task_id must be 1-200 characters")
     thread_id = query.get("thread_id")
     if thread_id is not None:
-        thread_id = str(thread_id).strip()
+        if not isinstance(thread_id, str):
+            _raise_validation("invalid_schedule_query", "query.thread_id", "thread_id must be 1-200 characters")
+        thread_id = thread_id.strip()
         if not (1 <= len(thread_id) <= 200):
             _raise_validation("invalid_schedule_query", "query.thread_id", "thread_id must be 1-200 characters")
     subject_kind = query.get("subject_kind")
     subject_id = query.get("subject_id")
+    if subject_kind is not None and not isinstance(subject_kind, str):
+        _raise_validation("invalid_schedule_subject", "query.subject_kind", "subject_kind must be user, peer, thread, or task")
     if subject_kind is not None and subject_kind not in _SUBJECT_KINDS:
         _raise_validation("invalid_schedule_subject", "query.subject_kind", "subject_kind must be user, peer, thread, or task")
     if subject_id is not None:
-        subject_id = str(subject_id).strip()
+        if not isinstance(subject_id, str):
+            _raise_validation("invalid_schedule_query", "query.subject_id", "subject_id must be 1-200 characters")
+        subject_id = subject_id.strip()
         if not (1 <= len(subject_id) <= 200):
             _raise_validation("invalid_schedule_query", "query.subject_id", "subject_id must be 1-200 characters")
     if (subject_kind is None) != (subject_id is None):
         _raise_validation("invalid_schedule_subject", "query.subject_kind", "subject_kind and subject_id must be supplied or cleared together")
-    include_retired = _parse_bool_query(query.get("include_retired"), "query.include_retired")
-    limit = _parse_int_query(query.get("limit"), "query.limit", 50, 1, 200)
-    offset = _parse_int_query(query.get("offset"), "query.offset", 0, 0, 10000)
+    include_retired = _parse_bool_query(query.get("include_retired"), "query.include_retired", strict=strict_types)
+    limit = _parse_int_query(query.get("limit"), "query.limit", 50, 1, 200, strict=strict_types)
+    offset = _parse_int_query(query.get("offset"), "query.offset", 0, 0, 10000, strict=strict_types)
     return {
         "status": status,
         "due": due,
@@ -638,7 +785,7 @@ def schedule_list_service(*, repo_root: Path, auth: AuthContext, query: dict[str
     except _StorageFailure as exc:
         return {"ok": False, "count": 0, "total": 0, "limit": 50, "offset": 0, "items": [], "warnings": [exc.code]}
     try:
-        with _connection(repo_root) as (conn, warnings):
+        def _operation(conn: sqlite3.Connection, warnings: list[str]) -> dict[str, Any]:
             rows = conn.execute("SELECT * FROM scheduled_items ORDER BY due_at_ts ASC, schedule_id ASC").fetchall()
             items: list[dict[str, Any]] = []
             skipped = False
@@ -663,6 +810,8 @@ def schedule_list_service(*, repo_root: Path, auth: AuthContext, query: dict[str
                 "items": returned,
                 "warnings": warnings,
             }
+
+        return _run_db_operation(repo_root, mutation=False, operation=_operation)
     except _StorageFailure as exc:
         return {"ok": False, "count": 0, "total": 0, "limit": normalized["limit"], "offset": normalized["offset"], "items": [], "warnings": [exc.code]}
 
@@ -678,10 +827,7 @@ def _normalize_expected_version(value: Any, *, required: bool) -> int | None:
 
 
 def _normalize_patch(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    allowed = {"expected_version", "kind", "title", "note", "due_at", "task_id", "thread_id", "subject_kind", "subject_id", "metadata"}
-    for key in payload:
-        if key not in allowed:
-            _raise_validation("invalid_schedule_payload", key, f"unexpected field: {key}")
+    _reject_unknown_keys(payload, _PATCH_KEYS)
     expected = _normalize_expected_version(payload.get("expected_version"), required=True)
     mutable_keys = set(payload) - {"expected_version"}
     if not mutable_keys:
@@ -730,7 +876,7 @@ def schedule_update_service(*, repo_root: Path, auth: AuthContext, schedule_id: 
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
     try:
-        with _connection(repo_root) as (conn, warnings):
+        def _operation(conn: sqlite3.Connection, warnings: list[str]) -> dict[str, Any]:
             row = _select_by_id(conn, sid)
             if row is None:
                 raise HTTPException(status_code=404, detail={"code": "schedule_not_found", "schedule_id": sid, "warnings": warnings})
@@ -754,6 +900,8 @@ def schedule_update_service(*, repo_root: Path, auth: AuthContext, schedule_id: 
             conn.execute(f"UPDATE scheduled_items SET {', '.join(assignments)} WHERE schedule_id = ?", values)
             conn.commit()
             return {"ok": True, "updated": True, "item": _row_to_item(_select_by_id(conn, sid), clock.now_ts), "warnings": warnings}
+
+        return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
 
@@ -763,10 +911,7 @@ def _normalize_reason(payload: dict[str, Any]) -> str | None:
 
 
 def _normalize_ack(payload: dict[str, Any]) -> tuple[int | None, str, str | None]:
-    allowed = {"expected_version", "status", "reason"}
-    for key in payload:
-        if key not in allowed:
-            _raise_validation("invalid_schedule_payload", key, f"unexpected field: {key}")
+    _reject_unknown_keys(payload, _ACK_KEYS)
     expected = _normalize_expected_version(payload.get("expected_version"), required=False)
     status = payload.get("status", "acknowledged")
     if status is None:
@@ -790,7 +935,7 @@ def schedule_acknowledge_service(*, repo_root: Path, auth: AuthContext, schedule
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
     try:
-        with _connection(repo_root) as (conn, warnings):
+        def _operation(conn: sqlite3.Connection, warnings: list[str]) -> dict[str, Any]:
             row = _select_by_id(conn, sid)
             if row is None:
                 raise HTTPException(status_code=404, detail={"code": "schedule_not_found", "schedule_id": sid, "warnings": warnings})
@@ -816,15 +961,14 @@ def schedule_acknowledge_service(*, repo_root: Path, auth: AuthContext, schedule
             )
             conn.commit()
             return {"ok": True, "updated": True, "item": _row_to_item(_select_by_id(conn, sid), clock.now_ts), "warnings": warnings}
+
+        return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
 
 
 def _normalize_retire(payload: dict[str, Any]) -> tuple[int | None, str | None]:
-    allowed = {"expected_version", "reason"}
-    for key in payload:
-        if key not in allowed:
-            _raise_validation("invalid_schedule_payload", key, f"unexpected field: {key}")
+    _reject_unknown_keys(payload, _RETIRE_KEYS)
     return _normalize_expected_version(payload.get("expected_version"), required=False), _normalize_reason(payload)
 
 
@@ -842,7 +986,7 @@ def schedule_retire_service(*, repo_root: Path, auth: AuthContext, schedule_id: 
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
     try:
-        with _connection(repo_root) as (conn, warnings):
+        def _operation(conn: sqlite3.Connection, warnings: list[str]) -> dict[str, Any]:
             row = _select_by_id(conn, sid)
             if row is None:
                 raise HTTPException(status_code=404, detail={"code": "schedule_not_found", "schedule_id": sid, "warnings": warnings})
@@ -867,6 +1011,8 @@ def schedule_retire_service(*, repo_root: Path, auth: AuthContext, schedule_id: 
             )
             conn.commit()
             return {"ok": True, "updated": True, "item": _row_to_item(_select_by_id(conn, sid), clock.now_ts), "warnings": warnings}
+
+        return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:
         _raise_http_storage(exc.code)
 
@@ -896,7 +1042,7 @@ def _schedule_context(repo_root: Path, auth: AuthContext, scopes: set[tuple[str,
     try:
         auth.require_read_path(SCHEDULE_DB_REL)
         clock = _clock()
-        with _connection(repo_root) as (conn, warnings):
+        def _operation(conn: sqlite3.Connection, warnings: list[str]) -> dict[str, Any]:
             rows = conn.execute("SELECT * FROM scheduled_items WHERE status = 'pending' ORDER BY due_at_ts ASC, schedule_id ASC").fetchall()
             due: list[dict[str, Any]] = []
             upcoming: list[dict[str, Any]] = []
@@ -928,6 +1074,8 @@ def _schedule_context(repo_root: Path, auth: AuthContext, scopes: set[tuple[str,
                 },
                 "warnings": warnings,
             }
+
+        return _run_db_operation(repo_root, mutation=False, operation=_operation)
     except _StorageFailure as exc:
         return _empty_context(upcoming_window_hours, [exc.code])
     except Exception:
@@ -973,20 +1121,24 @@ def validate_schedule_mcp_arguments(name: str, arguments: dict[str, Any]) -> dic
         if name == "schedule.create":
             _normalize_create(arguments, "mcp-validation")
         elif name == "schedule.get":
+            _reject_unknown_keys(arguments, {"schedule_id"})
             _validate_schedule_id(arguments.get("schedule_id"))
         elif name == "schedule.list":
-            _normalize_list_query(arguments)
+            _normalize_list_query(arguments, strict_types=True)
         elif name == "schedule.update":
+            _reject_unknown_keys(arguments, {"schedule_id"} | _PATCH_KEYS)
             _validate_schedule_id(arguments.get("schedule_id"))
             body = dict(arguments)
             body.pop("schedule_id", None)
             _normalize_patch(body)
         elif name == "schedule.acknowledge":
+            _reject_unknown_keys(arguments, {"schedule_id"} | _ACK_KEYS)
             _validate_schedule_id(arguments.get("schedule_id"))
             body = dict(arguments)
             body.pop("schedule_id", None)
             _normalize_ack(body)
         elif name == "schedule.retire":
+            _reject_unknown_keys(arguments, {"schedule_id"} | _RETIRE_KEYS)
             _validate_schedule_id(arguments.get("schedule_id"))
             body = dict(arguments)
             body.pop("schedule_id", None)
