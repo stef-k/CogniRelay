@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import re
 import stat
 from collections import Counter
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from app.context.graph import derive_internal_graph_slice1
 from app.discovery import capabilities_payload, health_payload
 from app.git_manager import GitManager
 from app.models import ContextRetrieveRequest, ContinuityReadRequest
+from app.schedule import schedule_list_service
 from app.ui.docs import UI_DOCS_BY_ID, UiDoc, doc_statuses, read_doc_source, render_doc_markdown
 
 from .render import render_template
@@ -39,10 +41,14 @@ UI_SUBJECT_KINDS: tuple[str, ...] = ("user", "peer", "thread", "task")
 UI_ARTIFACT_STATES: tuple[str, ...] = ("active", "fallback", "archived", "cold")
 UI_HEALTH_STATUSES: tuple[str, ...] = ("healthy", "degraded", "conflicted")
 UI_TASK_STATUSES: tuple[str, ...] = ("open", "in_progress", "blocked", "done")
+UI_SCHEDULE_STATUSES: tuple[str, ...] = ("pending", "acknowledged", "done", "retired")
+UI_SCHEDULE_DERIVED_STATES: tuple[str, ...] = ("scheduled", "due", "terminal")
 UI_CONTINUITY_DISPLAY_LIMIT = 200
 UI_TASK_DISPLAY_LIMIT = 200
+UI_SCHEDULE_DISPLAY_LIMIT = 200
 UI_SSE_RETRY_MS = 5000
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+_SCHEDULE_QUERY_SPLIT_RE = re.compile(r"[ \t\n\r\f\v]+")
 
 
 @dataclass(frozen=True)
@@ -363,6 +369,14 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         auth = _ui_auth(client_ip)
         return _task_detail_page(settings=settings, auth=auth, task_id=task_id)
 
+    @router.get("/schedule", response_class=HTMLResponse)
+    def ui_schedule(request: Request) -> HTMLResponse:
+        """Render the read-only schedule/reminder inspection page."""
+        settings = get_settings()
+        client_ip = _enforce_ui_access(request, settings)
+        auth = _ui_auth(client_ip)
+        return _schedule_list_page(settings=settings, auth=auth, request=request)
+
     @router.get("/context", response_class=HTMLResponse)
     def ui_context(request: Request) -> HTMLResponse:
         """Render the read-only context retrieval inspector."""
@@ -556,6 +570,7 @@ def _page(*, title: str, current_path: str, content: str) -> HTMLResponse:
         overview_nav_class=_nav_class(current_path == "/ui/"),
         continuity_nav_class=_nav_class(current_path.startswith("/ui/continuity")),
         tasks_nav_class=_nav_class(current_path.startswith("/ui/tasks")),
+        schedule_nav_class=_nav_class(current_path.startswith("/ui/schedule")),
         retrieval_nav_class=_nav_class(current_path.startswith("/ui/context")),
         graph_nav_class=_nav_class(current_path.startswith("/ui/graph")),
         docs_nav_class=_nav_class(current_path.startswith("/ui/docs")),
@@ -765,6 +780,265 @@ def _task_detail_page(*, settings: Settings, auth: AuthContext, task_id: str | N
     warnings.extend(related.warnings)
     body = _task_detail_body(task_id=decoded, artifact=artifact, warnings=_dedupe_preserve_order(warnings), related=related)
     return _page(title=f"Task Detail: {artifact.task_id}", current_path="/ui/tasks", content=body)
+
+
+def _schedule_list_page(*, settings: Settings, auth: AuthContext, request: Request) -> HTMLResponse:
+    """Render the #260 read-only schedule list using the shipped schedule service."""
+    filters, ui_warnings = _schedule_ui_filters(request)
+    service_query: dict[str, Any] = {
+        "limit": UI_SCHEDULE_DISPLAY_LIMIT,
+        "offset": 0,
+        "include_retired": filters["include_retired"],
+    }
+    if filters["status"] is not None:
+        service_query["status"] = filters["status"]
+    try:
+        result = schedule_list_service(repo_root=settings.repo_root, auth=auth, query=service_query)
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "count": 0,
+            "total": 0,
+            "limit": UI_SCHEDULE_DISPLAY_LIMIT,
+            "offset": 0,
+            "items": [],
+            "warnings": [f"schedule_ui_service_exception:{exc.__class__.__name__}"],
+        }
+        ui_warnings = []
+    items = [item for item in list(result.get("items") or []) if isinstance(item, dict)]
+    filtered_items = _schedule_apply_ui_filters(items, derived_state=filters["derived_state"], q=filters["q"])
+    service_count = _schedule_int(result.get("count"))
+    service_total = _schedule_int(result.get("total"))
+    service_limit = _schedule_int(result.get("limit"), default=UI_SCHEDULE_DISPLAY_LIMIT)
+    warnings = _dedupe_preserve_order([*_coerce_str_list(result.get("warnings")), *ui_warnings])
+    truncated = service_total > service_count
+    status_options = "".join(_option_row(value=value, selected=(value == filters["status"])) for value in UI_SCHEDULE_STATUSES)
+    derived_state_options = "".join(_option_row(value=value, selected=(value == filters["derived_state"])) for value in UI_SCHEDULE_DERIVED_STATES)
+    body = render_template(
+        "schedule_list.html",
+        status_options=status_options,
+        derived_state_options=derived_state_options,
+        selected_status=html.escape(filters["status"] or "all"),
+        selected_derived_state=html.escape(filters["derived_state"] or "all"),
+        include_retired_false_selected=' selected="selected"' if not filters["include_retired"] else "",
+        include_retired_true_selected=' selected="selected"' if filters["include_retired"] else "",
+        query_value=html.escape(filters["q"]),
+        count=str(len(filtered_items)),
+        service_count=str(service_count),
+        service_total=str(service_total),
+        limit=str(service_limit),
+        truncated=_bool_label(truncated),
+        truncation_notice=_schedule_truncation_notice(truncated, service_limit),
+        warnings_html=_schedule_warnings_panel(warnings),
+        schedule_table=_schedule_table_html(filtered_items),
+    )
+    return _page(title="Schedule", current_path="/ui/schedule", content=body)
+
+
+def _schedule_ui_filters(request: Request) -> tuple[dict[str, Any], list[str]]:
+    """Normalize #260 UI-only filters and return validation warning codes."""
+    params = request.query_params
+    warnings: list[str] = []
+    status = _schedule_normalize_all_filter(params.get("status"), UI_SCHEDULE_STATUSES)
+    if status == "__invalid__":
+        warnings.append("invalid_schedule_ui_filter:status")
+        status = None
+    derived_state = _schedule_normalize_all_filter(params.get("derived_state"), UI_SCHEDULE_DERIVED_STATES)
+    if derived_state == "__invalid__":
+        warnings.append("invalid_schedule_ui_filter:derived_state")
+        derived_state = None
+    include_retired = False
+    raw_include_retired = params.get("include_retired")
+    if raw_include_retired in (None, "", "false"):
+        include_retired = False
+    elif raw_include_retired == "true":
+        include_retired = True
+    else:
+        warnings.append("invalid_schedule_ui_filter:include_retired")
+    q_values = params.getlist("q")
+    raw_q = q_values[0] if q_values else ""
+    return {
+        "status": status,
+        "derived_state": derived_state,
+        "include_retired": include_retired,
+        "q": raw_q,
+    }, warnings
+
+
+def _schedule_normalize_all_filter(value: str | None, allowed: tuple[str, ...]) -> str | None:
+    """Normalize missing, empty, and all to no filter; flag unsupported values."""
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if normalized == "" or normalized == "all":
+        return None
+    if normalized in allowed:
+        return normalized
+    return "__invalid__"
+
+
+def _schedule_apply_ui_filters(items: list[dict[str, Any]], *, derived_state: str | None, q: str) -> list[dict[str, Any]]:
+    """Apply derived_state and q filters without changing service order."""
+    out = items
+    if derived_state is not None:
+        out = [item for item in out if item.get("derived_state") == derived_state]
+    tokens = _schedule_query_tokens(q)
+    if tokens:
+        out = [item for item in out if _schedule_matches_query(item, tokens)]
+    return out
+
+
+def _schedule_query_tokens(value: str) -> list[str]:
+    """Return casefolded tokens using the #260 ASCII whitespace algorithm."""
+    return [token.casefold() for token in _SCHEDULE_QUERY_SPLIT_RE.split(value) if token]
+
+
+def _schedule_matches_query(item: dict[str, Any], tokens: list[str]) -> bool:
+    """Return whether all query tokens match the permitted rendered fields."""
+    fields = [
+        _schedule_search_value(item.get(field))
+        for field in (
+            "schedule_id",
+            "kind",
+            "status",
+            "derived_state",
+            "title",
+            "due_at",
+            "task_id",
+            "thread_id",
+            "subject_kind",
+            "subject_id",
+            "updated_at",
+        )
+    ]
+    return all(any(token in field for field in fields) for token in tokens)
+
+
+def _schedule_search_value(value: Any) -> str:
+    """Return a casefolded searchable string for scalar schedule fields."""
+    if isinstance(value, str):
+        return str(value).casefold()
+    return ""
+
+
+def _schedule_table_html(items: list[dict[str, Any]]) -> str:
+    """Render the schedule table with exactly the #260 columns."""
+    return _html_table(
+        headers=[
+            "schedule_id",
+            "kind",
+            "status",
+            "derived_state",
+            "title",
+            "due_at",
+            "task_id",
+            "thread_id",
+            "subject_kind",
+            "subject_id",
+            "updated_at",
+        ],
+        rows=[_schedule_row_cells(item) for item in items],
+        empty_message="No schedule items matched the current filters.",
+    )
+
+
+def _schedule_row_cells(item: dict[str, Any]) -> list[str]:
+    """Render one schedule item row, degrading malformed cells in place."""
+    return [
+        _schedule_scalar_cell(item.get("schedule_id")),
+        _schedule_scalar_cell(item.get("kind")),
+        _schedule_scalar_cell(item.get("status")),
+        _schedule_scalar_cell(item.get("derived_state")),
+        _schedule_scalar_cell(item.get("title")),
+        _schedule_scalar_cell(item.get("due_at")),
+        _schedule_task_cell(item.get("task_id")),
+        _schedule_thread_cell(item.get("thread_id")),
+        _schedule_scalar_cell(item.get("subject_kind")),
+        _schedule_subject_id_cell(item),
+        _schedule_scalar_cell(item.get("updated_at")),
+    ]
+
+
+def _schedule_scalar_cell(value: Any) -> str:
+    """Render schedule scalar values or the required muted n/a."""
+    if value is None or value == "":
+        return '<span class="muted">n/a</span>'
+    if isinstance(value, str | int | float | bool):
+        return html.escape(str(value))
+    return '<span class="muted">n/a</span>'
+
+
+def _schedule_task_cell(value: Any) -> str:
+    """Render task_id with task detail first and retrieval appended."""
+    if not isinstance(value, str) or value == "":
+        return '<span class="muted">n/a</span>'
+    task_link = _task_detail_link(value)
+    retrieval = _schedule_context_task_link(value)
+    return _schedule_inline_parts([task_link, retrieval])
+
+
+def _schedule_thread_cell(value: Any) -> str:
+    """Render thread_id value plus supported continuity and graph links."""
+    if not isinstance(value, str) or value == "":
+        return '<span class="muted">n/a</span>'
+    parts = [html.escape(value)]
+    if "/" not in value:
+        parts.append(_continuity_subject_link("thread", value, "Continuity"))
+    parts.append(_graph_query_link("thread", value, "Graph"))
+    return _schedule_inline_parts(parts)
+
+
+def _schedule_subject_id_cell(item: dict[str, Any]) -> str:
+    """Render subject_id value plus supported continuity, graph, and retrieval links."""
+    subject_id = item.get("subject_id")
+    if not isinstance(subject_id, str) or subject_id == "":
+        return '<span class="muted">n/a</span>'
+    subject_kind = item.get("subject_kind")
+    parts = [html.escape(subject_id)]
+    if isinstance(subject_kind, str) and subject_kind in UI_SUBJECT_KINDS:
+        if "/" not in subject_id:
+            parts.append(_continuity_subject_link(subject_kind, subject_id, "Continuity"))
+        if subject_kind in {"thread", "task"}:
+            parts.append(_graph_query_link(subject_kind, subject_id, "Graph"))
+        if not isinstance(item.get("task_id"), str) or item.get("task_id") == "":
+            parts.append(_schedule_context_subject_link(subject_kind, subject_id))
+    return _schedule_inline_parts(parts)
+
+
+def _schedule_context_task_link(task_id: str) -> str:
+    """Render the context retrieval link for a task-backed schedule row."""
+    href = f"/ui/context?{urlencode({'task': task_id})}"
+    return f'<a href="{html.escape(href)}">Retrieval</a>'
+
+
+def _schedule_context_subject_link(subject_kind: str, subject_id: str) -> str:
+    """Render the context retrieval link for a subject-backed schedule row."""
+    href = f"/ui/context?{urlencode({'subject_kind': subject_kind, 'subject_id': subject_id})}"
+    return f'<a href="{html.escape(href)}">Retrieval</a>'
+
+
+def _schedule_inline_parts(parts: list[str]) -> str:
+    """Join already-escaped inline cell fragments with the required separator."""
+    return " · ".join(parts)
+
+
+def _schedule_warnings_panel(warnings: list[str]) -> str:
+    """Render visible schedule warning codes using the existing panel pattern."""
+    if not warnings:
+        return ""
+    return f'<section class="panel"><h2>Warnings</h2>{_html_list(warnings)}</section>'
+
+
+def _schedule_truncation_notice(truncated: bool, limit: int) -> str:
+    """Render the fixed-limit truncation notice when the service result is capped."""
+    if not truncated:
+        return ""
+    return f'<p class="warning">Only the first {html.escape(str(limit))} service-ordered rows are available in this UI slice.</p>'
+
+
+def _schedule_int(value: Any, *, default: int = 0) -> int:
+    """Coerce service count fields for summary rendering."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
 def _scan_task_sources(repo_root: Path) -> _TaskSourceState:

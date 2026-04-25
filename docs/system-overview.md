@@ -148,10 +148,10 @@ The shipped operator UI is an optional local-operator observability surface moun
 - It is server-rendered HTML with local static assets only.
 - It is not a SPA and does not require npm, Node, bundlers, or CDN assets.
 - It is read-only in the currently supported posture.
-- It exposes bounded continuity, graph, task, context-retrieval, and docs inspection rather than a general admin/control panel.
+- It exposes bounded continuity, graph, task, schedule, context-retrieval, and docs inspection rather than a general admin/control panel.
 - It includes bounded live updates through `/ui/events` SSE for small overview/list/detail live regions, with pages remaining usable without JS.
 
-The supported posture keeps `COGNIRELAY_UI_REQUIRE_LOCALHOST=true`, so `/ui` remains a loopback-scoped operator surface rather than a normal remotely exposed web app. Non-local auth/session models, mutation actions, schedule mutation pages, standalone archive/cold maintenance consoles, WebSockets, and broader reactive UI behavior are deferred to future explicit issues rather than implied by the current deployment model.
+The supported posture keeps `COGNIRELAY_UI_REQUIRE_LOCALHOST=true`, so `/ui` remains a loopback-scoped operator surface rather than a normal remotely exposed web app. The schedule page is list-only inspection backed by the shipped schedule list service; schedule mutation pages, schedule SSE/live updates, background scheduler loops, non-local auth/session models, mutation actions, standalone archive/cold maintenance consoles, WebSockets, and broader reactive UI behavior are deferred to future explicit issues rather than implied by the current deployment model.
 
 Access isolation between agents is enforced entirely by token scopes and namespace/path restrictions. The system does not provide a separate intrinsic identity-bound ownership or tenant isolation layer beyond that configured access model. Any token with read access to `memory/continuity` can read any capsule in that namespace — capsule privacy depends on the operator not granting that access to collaborator tokens. In the default `collaboration_peer` template this access is excluded, which protects owner-private continuity as configured policy.
 

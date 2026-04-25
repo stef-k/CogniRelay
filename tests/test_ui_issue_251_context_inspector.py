@@ -414,7 +414,7 @@ class ContextInspectorIssue251Tests(unittest.TestCase):
         self.assertNotIn('method="post"', response.text.lower())
         self.assertNotIn("delete", response.text.lower())
         self.assertNotIn("reminder", response.text.lower())
-        self.assertNotIn("schedule", response.text.lower())
+        self.assertIn('href="/ui/schedule"', response.text)
         self.assertNotIn("onboarding", response.text.lower())
         self.assertNotIn('data-live-page="context"', response.text)
         self.assertNotIn("retrieval", sse_payload)
