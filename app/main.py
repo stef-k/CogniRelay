@@ -419,7 +419,7 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         recent_list=lambda req, auth_ctx: recent_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         schedule_create=lambda payload, auth_ctx: schedule_create_payload(payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
         schedule_get=lambda schedule_id, auth_ctx: schedule_get(schedule_id=schedule_id, auth=auth_ctx),  # type: ignore[arg-type]
-        schedule_list=lambda query, auth_ctx: schedule_list(auth=auth_ctx, **query),  # type: ignore[arg-type]
+        schedule_list=lambda query, auth_ctx: schedule_list_payload(query=query, auth=auth_ctx),  # type: ignore[arg-type]
         schedule_update=lambda schedule_id, payload, auth_ctx: schedule_update_payload(schedule_id=schedule_id, payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
         schedule_acknowledge=lambda schedule_id, payload, auth_ctx: schedule_acknowledge_payload(schedule_id=schedule_id, payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
         schedule_retire=lambda schedule_id, payload, auth_ctx: schedule_retire_payload(schedule_id=schedule_id, payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
@@ -1001,6 +1001,11 @@ def schedule_get(schedule_id: str, auth: AuthContext = Depends(require_auth)) ->
     return schedule_get_service(repo_root=settings.repo_root, auth=auth, schedule_id=schedule_id)
 
 
+def schedule_list_payload(query: dict[str, Any], auth: AuthContext) -> dict:
+    settings, _gm = _services()
+    return schedule_list_service(repo_root=settings.repo_root, auth=auth, query=query)
+
+
 @app.get("/v1/schedule/items")
 def schedule_list(
     status: str | None = Query(default=None),
@@ -1015,9 +1020,7 @@ def schedule_list(
     auth: AuthContext = Depends(require_auth),
 ) -> dict:
     """List scheduled items with deterministic filters."""
-    settings, _gm = _services()
-    return schedule_list_service(
-        repo_root=settings.repo_root,
+    return schedule_list_payload(
         auth=auth,
         query={
             "status": status,

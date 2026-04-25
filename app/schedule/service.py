@@ -50,6 +50,13 @@ _RETIRE_KEYS = {"expected_version", "reason"}
 _T = TypeVar("_T")
 
 
+class _RowLike(dict[str, Any]):
+    """Tiny mapping adapter for materializing committed mutation candidates."""
+
+    def keys(self):
+        return super().keys()
+
+
 @dataclass(frozen=True)
 class _ValidationFailure(Exception):
     detail: dict[str, str]
@@ -432,6 +439,15 @@ def _stored_optional_string(value: Any, field: str, *, max_len: int, min_len: in
     return value
 
 
+def _stored_required_string(value: Any, field: str, *, max_len: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} is not string")
+    out = value.strip()
+    if not (1 <= len(out) <= max_len):
+        raise ValueError(f"{field} length invalid")
+    return value
+
+
 def _row_to_item(row: sqlite3.Row, now_ts: int) -> dict[str, Any]:
     schedule_id = row["schedule_id"]
     if not isinstance(schedule_id, str) or not _SCHEDULE_ID_RE.fullmatch(schedule_id):
@@ -452,8 +468,8 @@ def _row_to_item(row: sqlite3.Row, now_ts: int) -> dict[str, Any]:
     if not isinstance(title, str) or not (1 <= len(title.strip()) <= 160):
         raise ValueError("title invalid")
     note = _stored_optional_string(row["note"], "note", max_len=1000, min_len=0)
-    created_by = _stored_optional_string(row["created_by"], "created_by", max_len=200)
-    updated_by = _stored_optional_string(row["updated_by"], "updated_by", max_len=200)
+    created_by = _stored_required_string(row["created_by"], "created_by", max_len=200)
+    updated_by = _stored_required_string(row["updated_by"], "updated_by", max_len=200)
     terminal_at = row["terminal_at"]
     terminal_by = _stored_optional_string(row["terminal_by"], "terminal_by", max_len=200)
     terminal_reason = _stored_optional_string(row["terminal_reason"], "terminal_reason", max_len=500, min_len=0)
@@ -472,6 +488,8 @@ def _row_to_item(row: sqlite3.Row, now_ts: int) -> dict[str, Any]:
         raise ValueError("subject_kind invalid")
     if (subject_kind is None) != (subject_id is None):
         raise ValueError("subject tuple invalid")
+    if kind == "task_nudge" and not any([task_id, thread_id, subject_kind and subject_id]):
+        raise ValueError("task_nudge missing link")
     idempotency_key = _stored_optional_string(row["idempotency_key"], "idempotency_key", max_len=200)
     try:
         metadata = _validate_materialized_metadata(json.loads(row["metadata_json"]))
@@ -513,6 +531,10 @@ def _row_to_item(row: sqlite3.Row, now_ts: int) -> dict[str, Any]:
 
 def _select_by_id(conn: sqlite3.Connection, schedule_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM scheduled_items WHERE schedule_id = ?", (schedule_id,)).fetchone()
+
+
+def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
 
 
 def _create_identity(payload: dict[str, Any], created_by: str) -> tuple[str, str]:
@@ -640,9 +662,34 @@ def schedule_create_service(*, repo_root: Path, auth: AuthContext, payload: dict
                     _canonical_json(normalized["metadata"]),
                 ),
             )
+            candidate = {
+                "schedule_id": schedule_id,
+                "kind": normalized["kind"],
+                "status": "pending",
+                "title": normalized["title"],
+                "note": normalized["note"],
+                "due_at": normalized["due_at"],
+                "due_at_ts": normalized["due_at_ts"],
+                "created_at": clock.now_iso,
+                "updated_at": clock.now_iso,
+                "created_by": actor,
+                "updated_by": actor,
+                "terminal_at": None,
+                "terminal_by": None,
+                "terminal_reason": None,
+                "task_id": normalized["task_id"],
+                "thread_id": normalized["thread_id"],
+                "subject_kind": normalized["subject_kind"],
+                "subject_id": normalized["subject_id"],
+                "idempotency_key": idempotency_key,
+                "create_identity_hash": identity_hash,
+                "create_identity_json": identity_json,
+                "metadata_json": _canonical_json(normalized["metadata"]),
+                "version": 1,
+            }
+            item = _row_to_item(_RowLike(candidate), clock.now_ts)
             conn.commit()
-            row = _select_by_id(conn, schedule_id)
-            return 201, {"ok": True, "created": True, "item": _row_to_item(row, clock.now_ts), "warnings": warnings}
+            return 201, {"ok": True, "created": True, "item": item, "warnings": warnings}
 
         return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:
@@ -893,13 +940,17 @@ def schedule_update_service(*, repo_root: Path, auth: AuthContext, schedule_id: 
             changed = any(row[key] != value for key, value in changes.items())
             if not changed:
                 return {"ok": True, "updated": False, "item": _row_to_item(row, clock.now_ts), "warnings": warnings}
+            candidate["updated_at"] = clock.now_iso
+            candidate["updated_by"] = actor
+            candidate["version"] = int(row["version"]) + 1
+            item = _row_to_item(_RowLike(candidate), clock.now_ts)
             assignments = [f"{key} = ?" for key in changes]
             values = list(changes.values())
             assignments.extend(["updated_at = ?", "updated_by = ?", "version = version + 1"])
             values.extend([clock.now_iso, actor, sid])
             conn.execute(f"UPDATE scheduled_items SET {', '.join(assignments)} WHERE schedule_id = ?", values)
             conn.commit()
-            return {"ok": True, "updated": True, "item": _row_to_item(_select_by_id(conn, sid), clock.now_ts), "warnings": warnings}
+            return {"ok": True, "updated": True, "item": item, "warnings": warnings}
 
         return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:
@@ -959,8 +1010,21 @@ def schedule_acknowledge_service(*, repo_root: Path, auth: AuthContext, schedule
                 """,
                 (target_status, clock.now_iso, actor, reason, clock.now_iso, actor, sid),
             )
+            candidate = _row_dict(row)
+            candidate.update(
+                {
+                    "status": target_status,
+                    "terminal_at": clock.now_iso,
+                    "terminal_by": actor,
+                    "terminal_reason": reason,
+                    "updated_at": clock.now_iso,
+                    "updated_by": actor,
+                    "version": int(row["version"]) + 1,
+                }
+            )
+            item = _row_to_item(_RowLike(candidate), clock.now_ts)
             conn.commit()
-            return {"ok": True, "updated": True, "item": _row_to_item(_select_by_id(conn, sid), clock.now_ts), "warnings": warnings}
+            return {"ok": True, "updated": True, "item": item, "warnings": warnings}
 
         return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:
@@ -1009,8 +1073,21 @@ def schedule_retire_service(*, repo_root: Path, auth: AuthContext, schedule_id: 
                 """,
                 (clock.now_iso, actor, reason, clock.now_iso, actor, sid),
             )
+            candidate = _row_dict(row)
+            candidate.update(
+                {
+                    "status": "retired",
+                    "terminal_at": clock.now_iso,
+                    "terminal_by": actor,
+                    "terminal_reason": reason,
+                    "updated_at": clock.now_iso,
+                    "updated_by": actor,
+                    "version": int(row["version"]) + 1,
+                }
+            )
+            item = _row_to_item(_RowLike(candidate), clock.now_ts)
             conn.commit()
-            return {"ok": True, "updated": True, "item": _row_to_item(_select_by_id(conn, sid), clock.now_ts), "warnings": warnings}
+            return {"ok": True, "updated": True, "item": item, "warnings": warnings}
 
         return _run_db_operation(repo_root, mutation=True, operation=_operation)
     except _StorageFailure as exc:

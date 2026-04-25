@@ -10,7 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from app.auth import AuthContext
+from app.config import Settings
+from app.main import app
 from app.models import ContextRetrieveRequest, ContinuitySelector
+from app.mcp.service import reset_bootstrap_state
 from app.schedule import (
     SCHEDULE_DB_REL,
     schedule_acknowledge_service,
@@ -23,6 +28,7 @@ from app.schedule import (
     validate_schedule_mcp_arguments,
 )
 from tests.helpers import AllowAllAuthStub
+from tests.helpers import SimpleGitManagerStub
 
 
 class _Row(dict):
@@ -79,12 +85,19 @@ class _FakeConn:
         self.rows = rows
         self.rollback_called = False
         self.closed = False
+        self.committed = False
+        self.insert_count = 0
 
     def execute(self, sql, _params=()):
         for marker, exc in list(self.failures):
+            if marker == "POST_COMMIT_SELECT" and self.committed and "SELECT" in sql:
+                self.failures.remove((marker, exc))
+                raise exc
             if marker in sql:
                 self.failures.remove((marker, exc))
                 raise exc
+        if "INSERT INTO scheduled_items" in sql:
+            self.insert_count += 1
         if "SELECT * FROM scheduled_items WHERE schedule_id" in sql:
             return _Result(one=self.row)
         if "SELECT * FROM scheduled_items WHERE idempotency_key" in sql:
@@ -98,6 +111,7 @@ class _FakeConn:
             if marker == "COMMIT":
                 self.failures.remove((marker, exc))
                 raise exc
+        self.committed = True
 
     def rollback(self):
         self.rollback_called = True
@@ -323,6 +337,25 @@ class Schedule255Tests(unittest.TestCase):
         self.assertEqual(body["item"]["schedule_id"], "sched_retry")
         self.assertEqual(mocked_connect.call_count, 2)
 
+    def test_create_does_not_retry_committed_mutation_when_post_commit_select_would_fail(self) -> None:
+        fake = _FakeConn(failures=[("POST_COMMIT_SELECT", sqlite3.OperationalError("database is locked"))])
+        with patch("app.schedule.service._connect_once", return_value=fake) as mocked_connect:
+            status, body = schedule_create_service(
+                repo_root=self.repo_root,
+                auth=self.auth,
+                payload={
+                    "kind": "reminder",
+                    "title": "Check build",
+                    "due_at": "2026-05-01T12:00:00Z",
+                    "thread_id": "thread-1",
+                },
+            )
+        self.assertEqual(status, 201)
+        self.assertTrue(body["created"])
+        self.assertEqual(body["item"]["title"], "Check build")
+        self.assertEqual(fake.insert_count, 1)
+        self.assertEqual(mocked_connect.call_count, 1)
+
     def test_malformed_rows_degrade_get_list_and_context_without_repair(self) -> None:
         _status, body = self._create(schedule_id="sched_badrow")
         conn = sqlite3.connect(self.repo_root / SCHEDULE_DB_REL)
@@ -355,6 +388,54 @@ class Schedule255Tests(unittest.TestCase):
         self.assertEqual(context["due"]["count"], 0)
         self.assertIn("schedule_rows_skipped", context["warnings"])
         self.assertIn("schedule_row_invalid:sched_badrow", context["warnings"])
+
+    def test_malformed_required_actor_and_task_nudge_link_rows_degrade(self) -> None:
+        self._create(schedule_id="sched_good")
+        self._create(schedule_id="sched_bad_actor", title="Bad actor")
+        self._create(schedule_id="sched_bad_link", title="Bad link")
+        conn = sqlite3.connect(self.repo_root / SCHEDULE_DB_REL)
+        conn.execute("UPDATE scheduled_items SET created_by = ? WHERE schedule_id = ?", (sqlite3.Binary(b"x"), "sched_bad_actor"))
+        conn.execute(
+            """
+            UPDATE scheduled_items
+            SET kind = 'task_nudge', task_id = NULL, thread_id = NULL,
+                subject_kind = NULL, subject_id = NULL
+            WHERE schedule_id = ?
+            """,
+            ("sched_bad_link",),
+        )
+        conn.commit()
+        conn.close()
+
+        for schedule_id in ("sched_bad_actor", "sched_bad_link"):
+            with self.subTest(schedule_id=schedule_id):
+                got = schedule_get_service(repo_root=self.repo_root, auth=self.auth, schedule_id=schedule_id)
+                self.assertFalse(got["ok"])
+                self.assertIsNone(got["item"])
+                self.assertIn(f"schedule_row_invalid:{schedule_id}", got["warnings"])
+
+        listed = schedule_list_service(repo_root=self.repo_root, auth=self.auth, query={})
+        self.assertEqual(listed["count"], 1)
+        self.assertEqual(listed["items"][0]["schedule_id"], "sched_good")
+        self.assertIn("schedule_rows_skipped", listed["warnings"])
+        self.assertIn("schedule_row_invalid:sched_bad_actor", listed["warnings"])
+        self.assertIn("schedule_row_invalid:sched_bad_link", listed["warnings"])
+
+        context = schedule_context_for_context_retrieve(
+            repo_root=self.repo_root,
+            auth=self.auth,
+            req=ContextRetrieveRequest(
+                task="resume",
+                continuity_selectors=[ContinuitySelector(subject_kind="thread", subject_id="thread-1")],
+            ),
+            due_limit=10,
+            upcoming_limit=5,
+            upcoming_window_hours=200,
+        )
+        self.assertEqual(context["upcoming"]["count"], 1)
+        self.assertIn("schedule_rows_skipped", context["warnings"])
+        self.assertIn("schedule_row_invalid:sched_bad_actor", context["warnings"])
+        self.assertIn("schedule_row_invalid:sched_bad_link", context["warnings"])
 
     def test_mcp_get_list_unknown_keys_and_strict_types(self) -> None:
         self.assertEqual(
@@ -481,3 +562,214 @@ class Schedule255Tests(unittest.TestCase):
             payload={"expected_version": 1},
         )
         self.assertTrue(retired["updated"])
+
+
+class Schedule255McpRuntimeTests(unittest.TestCase):
+    _AUTH_HEADER = {"authorization": "Bearer schedule-token"}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._client_context = TestClient(app)
+        cls.client = cls._client_context.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._client_context.__exit__(None, None, None)
+
+    def setUp(self) -> None:
+        reset_bootstrap_state()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo_root = Path(self.tmp.name)
+        self.settings = Settings(
+            repo_root=self.repo_root,
+            auto_init_git=False,
+            git_author_name="n/a",
+            git_author_email="n/a",
+            tokens={},
+            audit_log_enabled=False,
+        )
+        self.auth = AuthContext(
+            token="schedule-token",
+            peer_id="peer-alpha",
+            scopes={"read:files", "write:projects"},
+            read_namespaces={"*"},
+            write_namespaces={"*"},
+            client_ip="127.0.0.1",
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _bootstrap(self) -> None:
+        initialized = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"},
+            },
+            headers=self._AUTH_HEADER,
+        )
+        self.assertEqual(initialized.status_code, 200)
+        ready = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            headers=self._AUTH_HEADER,
+        )
+        self.assertEqual(ready.status_code, 204)
+
+    def _call(self, name: str, arguments: dict) -> dict:
+        response = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": name,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+            headers=self._AUTH_HEADER,
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def _patched_runtime(self):
+        return patch("app.main._services", return_value=(self.settings, SimpleGitManagerStub())), patch(
+            "app.main.require_auth", return_value=self.auth
+        )
+
+    def test_mcp_tools_call_success_for_all_schedule_tools_returns_structured_content(self) -> None:
+        services_patch, auth_patch = self._patched_runtime()
+        with services_patch, auth_patch:
+            self._bootstrap()
+            created = self._call(
+                "schedule.create",
+                {
+                    "schedule_id": "sched_mcp_success",
+                    "kind": "reminder",
+                    "title": "Check build",
+                    "due_at": "2026-05-01T12:00:00Z",
+                    "thread_id": "thread-1",
+                },
+            )["result"]["structuredContent"]
+            self.assertTrue(created["ok"])
+            self.assertTrue(created["created"])
+            self.assertEqual(created["item"]["schedule_id"], "sched_mcp_success")
+
+            got = self._call("schedule.get", {"schedule_id": "sched_mcp_success"})["result"]["structuredContent"]
+            self.assertTrue(got["ok"])
+            self.assertEqual(got["item"]["schedule_id"], "sched_mcp_success")
+
+            listed = self._call("schedule.list", {"thread_id": "thread-1"})["result"]["structuredContent"]
+            self.assertTrue(listed["ok"])
+            self.assertEqual(listed["count"], 1)
+
+            updated = self._call(
+                "schedule.update",
+                {"schedule_id": "sched_mcp_success", "expected_version": 1, "title": "Updated"},
+            )["result"]["structuredContent"]
+            self.assertTrue(updated["updated"])
+            self.assertEqual(updated["item"]["version"], 2)
+
+            acked = self._call(
+                "schedule.acknowledge",
+                {"schedule_id": "sched_mcp_success", "expected_version": 2, "status": "done"},
+            )["result"]["structuredContent"]
+            self.assertTrue(acked["updated"])
+            self.assertEqual(acked["item"]["status"], "done")
+
+            self._call(
+                "schedule.create",
+                {
+                    "schedule_id": "sched_mcp_retire",
+                    "kind": "task_nudge",
+                    "title": "Review task",
+                    "due_at": "2026-05-02T12:00:00Z",
+                    "task_id": "task-1",
+                },
+            )
+            retired = self._call(
+                "schedule.retire",
+                {"schedule_id": "sched_mcp_retire", "expected_version": 1, "reason": "obsolete"},
+            )["result"]["structuredContent"]
+            self.assertTrue(retired["updated"])
+            self.assertEqual(retired["item"]["status"], "retired")
+
+    def test_mcp_schedule_invalid_params_preserve_single_schedule_detail(self) -> None:
+        services_patch, auth_patch = self._patched_runtime()
+        with services_patch, auth_patch:
+            self._bootstrap()
+            malformed_due = self._call(
+                "schedule.create",
+                {"kind": "reminder", "title": "Check", "due_at": "2026-05-01T12:00:00+00:00"},
+            )
+            self.assertEqual(malformed_due["error"]["code"], -32602)
+            self.assertEqual(malformed_due["error"]["data"]["reason"], "schema validation failed")
+            self.assertEqual(malformed_due["error"]["data"]["detail"]["code"], "invalid_schedule_due_at")
+
+            invalid_metadata = self._call(
+                "schedule.create",
+                {
+                    "kind": "reminder",
+                    "title": "Check",
+                    "due_at": "2026-05-01T12:00:00Z",
+                    "metadata": {"nested": {"bad": True}},
+                },
+            )
+            self.assertEqual(invalid_metadata["error"]["code"], -32602)
+            self.assertEqual(invalid_metadata["error"]["data"]["detail"]["code"], "invalid_schedule_metadata")
+
+    def test_mcp_schedule_execution_errors_preserve_schedule_detail(self) -> None:
+        services_patch, auth_patch = self._patched_runtime()
+        with services_patch, auth_patch:
+            self._bootstrap()
+            self._call(
+                "schedule.create",
+                {
+                    "schedule_id": "sched_mcp_conflict",
+                    "kind": "reminder",
+                    "title": "Check",
+                    "due_at": "2026-05-01T12:00:00Z",
+                },
+            )
+
+            stale = self._call(
+                "schedule.update",
+                {"schedule_id": "sched_mcp_conflict", "expected_version": 99, "title": "Changed"},
+            )
+            self.assertEqual(stale["error"]["code"], -32003)
+            self.assertEqual(stale["error"]["data"]["detail"]["code"], "schedule_version_conflict")
+
+            conflict = self._call(
+                "schedule.create",
+                {
+                    "schedule_id": "sched_mcp_conflict",
+                    "kind": "reminder",
+                    "title": "Different",
+                    "due_at": "2026-05-02T12:00:00Z",
+                },
+            )
+            self.assertEqual(conflict["error"]["code"], -32003)
+            self.assertEqual(conflict["error"]["data"]["detail"]["code"], "schedule_id_conflict")
+
+        reset_bootstrap_state()
+        services_patch, auth_patch = self._patched_runtime()
+        with services_patch, auth_patch, patch(
+            "app.schedule.service._connect_once",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            self._bootstrap()
+            storage = self._call(
+                "schedule.create",
+                {"kind": "reminder", "title": "Check", "due_at": "2026-05-01T12:00:00Z"},
+            )
+            self.assertEqual(storage["error"]["code"], -32003)
+            self.assertEqual(storage["error"]["data"]["detail"]["code"], "schedule_db_locked")
+
+    def test_non_schedule_mcp_success_shape_remains_unchanged(self) -> None:
+        services_patch, auth_patch = self._patched_runtime()
+        with services_patch, auth_patch:
+            self._bootstrap()
+            payload = self._call("system.discovery", {})
+        self.assertEqual(sorted(payload["result"].keys()), ["content", "structuredContent"])
+        self.assertIn("counts", payload["result"]["structuredContent"])
