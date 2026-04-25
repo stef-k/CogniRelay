@@ -15,6 +15,13 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import AuthContext
+from app.context.graph import (
+    CONTEXT_GRAPH_CAPS,
+    derive_agent_graph_context,
+    graph_anchor_not_provided,
+    graph_anchor_not_supported,
+    suppressed_graph_context,
+)
 from app.timestamps import format_compact, format_iso, parse_iso
 from app.continuity import build_continuity_state, continuity_read_service
 from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
@@ -47,6 +54,43 @@ _PRIMARY_INDEX_ARTIFACTS = (
     "index/index_state.json",
 )
 _RAW_SCAN_CANDIDATE_LIMIT = 200
+
+
+def _context_graph_anchor(req: ContextRetrieveRequest) -> tuple[str | None, str | None, str | None]:
+    """Select the #256 graph anchor from primary fields and selectors."""
+    saw_non_empty_unsupported: str | None = None
+    if req.subject_kind in {"thread", "task"} and req.subject_id:
+        return req.subject_kind, req.subject_id, None
+    if req.subject_kind in {"user", "peer"} and req.subject_id:
+        saw_non_empty_unsupported = req.subject_kind
+
+    for selector in req.continuity_selectors:
+        if selector.subject_kind in {"thread", "task"} and selector.subject_id:
+            return selector.subject_kind, selector.subject_id, None
+        if selector.subject_kind in {"user", "peer"} and selector.subject_id and saw_non_empty_unsupported is None:
+            saw_non_empty_unsupported = selector.subject_kind
+
+    if saw_non_empty_unsupported is not None:
+        return None, None, saw_non_empty_unsupported
+    return None, None, None
+
+
+def _context_graph_context(repo_root: Path, auth: AuthContext, req: ContextRetrieveRequest) -> dict[str, Any]:
+    """Build the graph_context response adjunct without changing base retrieval."""
+    if req.continuity_mode == "off":
+        return suppressed_graph_context(CONTEXT_GRAPH_CAPS)
+    kind, subject_id, unsupported_kind = _context_graph_anchor(req)
+    if kind and subject_id:
+        return derive_agent_graph_context(
+            repo_root=repo_root,
+            auth=auth,
+            subject_kind=kind,
+            subject_id=subject_id,
+            caps=CONTEXT_GRAPH_CAPS,
+        )
+    if unsupported_kind is not None:
+        return graph_anchor_not_supported(CONTEXT_GRAPH_CAPS, unsupported_kind)
+    return graph_anchor_not_provided(CONTEXT_GRAPH_CAPS)
 
 
 def _is_continuity_cold_path(rel: str) -> bool:
@@ -643,6 +687,27 @@ def context_retrieve_service(
         ],
         "continuity_state": continuity_state,
     }
+    try:
+        bundle["graph_context"] = _context_graph_context(repo_root, auth, req)
+    except Exception:
+        bundle["graph_context"] = {
+            "anchor": None,
+            "nodes": [],
+            "edges": [],
+            "related_documents": [],
+            "blockers": [],
+            "truncation": {
+                name: {"limit": limit, "available": 0, "returned": 0, "truncated": False}
+                for name, limit in CONTEXT_GRAPH_CAPS.items()
+            },
+            "warnings": [
+                {
+                    "code": "graph_derivation_failed",
+                    "message": "Graph context could not be derived.",
+                    "details": {"reason": "helper_exception"},
+                }
+            ],
+        }
     continuity_selectors = [
         {
             "subject_kind": item["subject_kind"],

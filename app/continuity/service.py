@@ -1211,6 +1211,13 @@ def continuity_read_service(
         },
     )
     if req.view == "startup":
+        from app.context.graph import (  # Local import avoids a package import cycle with app.context.service.
+            STARTUP_GRAPH_CAPS,
+            derive_agent_graph_context,
+            graph_anchor_not_provided,
+            graph_anchor_not_supported,
+        )
+
         try:
             out["startup_summary"] = _build_startup_summary(out)
         except Exception:
@@ -1218,6 +1225,38 @@ def continuity_read_service(
             out["startup_summary"] = None
             # out["recovery_warnings"] is the same list object populated earlier in this function.
             out["recovery_warnings"].append(CONTINUITY_WARNING_STARTUP_SUMMARY_BUILD_FAILED)
+        try:
+            if req.subject_kind in {"thread", "task"}:
+                out["graph_summary"] = derive_agent_graph_context(
+                    repo_root=repo_root,
+                    auth=auth,
+                    subject_kind=req.subject_kind,
+                    subject_id=req.subject_id,
+                    caps=STARTUP_GRAPH_CAPS,
+                )
+            elif req.subject_kind in {"user", "peer"}:
+                out["graph_summary"] = graph_anchor_not_supported(STARTUP_GRAPH_CAPS, req.subject_kind)
+            else:
+                out["graph_summary"] = graph_anchor_not_provided(STARTUP_GRAPH_CAPS)
+        except Exception:
+            out["graph_summary"] = {
+                "anchor": None,
+                "nodes": [],
+                "edges": [],
+                "related_documents": [],
+                "blockers": [],
+                "truncation": {
+                    name: {"limit": limit, "available": 0, "returned": 0, "truncated": False}
+                    for name, limit in STARTUP_GRAPH_CAPS.items()
+                },
+                "warnings": [
+                    {
+                        "code": "graph_derivation_failed",
+                        "message": "Graph context could not be derived.",
+                        "details": {"reason": "helper_exception"},
+                    }
+                ],
+            }
     return out
 
 

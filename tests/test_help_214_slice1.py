@@ -64,6 +64,7 @@ EXPECTED_TOOLS = {
         "when_to_use": [
             "Use when the runtime needs persisted orientation for a subject.",
             "Use at session start when continuity is needed before prompting.",
+            "Use view=\"startup\" when the agent also needs the bounded top-level graph_summary.",
         ],
         "read_operations": [
             "POST /v1/continuity/read",
@@ -79,10 +80,12 @@ EXPECTED_TOOLS = {
         "common_mistakes": [
             "Using a view value that is not defined by the continuity.read contract.",
             "Omitting subject_kind or subject_id.",
+            "Expecting graph_summary on non-startup continuity.read responses.",
         ],
         "correction_hints": [
             "Use view: startup and allow_fallback: true for startup continuity guidance.",
             "Provide both subject_kind and subject_id.",
+            "Read graph warnings from graph_summary.warnings; non-startup reads are intentionally graph-free.",
         ],
     },
     "continuity.upsert": {
@@ -141,6 +144,7 @@ EXPECTED_TOOLS = {
         "when_to_use": [
             "Use when the runtime needs a compact context package instead of a raw continuity capsule.",
             "Use before prompting when context retrieval is the contract-defined entrypoint.",
+            "Use when the agent needs the default bounded bundle.graph_context alongside continuity_state.",
         ],
         "read_operations": [
             "POST /v1/context/retrieve",
@@ -156,10 +160,12 @@ EXPECTED_TOOLS = {
         "common_mistakes": [
             "Using continuity.read fields as if they were context.retrieve fields.",
             "Persisting prompt text, retrieved snippets, or transcript material through context.retrieve.",
+            "Looking for graph warnings in continuity_state.warnings instead of bundle.graph_context.warnings.",
         ],
         "correction_hints": [
             "Use exactly task, subject_kind, subject_id, and continuity_mode in the minimal payload shape defined by this issue.",
             "Keep context.retrieve read-only and do not persist prompt or retrieval transcript material.",
+            "When continuity_mode is off, expect an empty bundle.graph_context with graph_suppressed_by_continuity_mode.",
         ],
     },
 }
