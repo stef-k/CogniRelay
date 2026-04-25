@@ -314,7 +314,7 @@ class TaskViewsIssue249Tests(unittest.TestCase):
         self.assertNotIn("metadata&lt;/script&gt;", response.text)
         self.assertNotIn('method="post"', response.text.lower())
         self.assertNotIn("delete", response.text.lower())
-        self.assertNotIn("schedule", response.text.lower())
+        self.assertIn('href="/ui/schedule"', response.text)
 
     def test_query_detail_slash_id_not_found_and_slash_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

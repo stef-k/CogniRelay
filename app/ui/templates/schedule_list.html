@@ -1,0 +1,48 @@
+<section class="panel">
+  <form method="get" action="/ui/schedule" class="filter-form">
+    <label class="filter-field" for="status">
+      <span>status</span>
+      <select id="status" name="status">
+        <option value="">all</option>
+        ${status_options}
+      </select>
+    </label>
+    <label class="filter-field" for="derived_state">
+      <span>derived_state</span>
+      <select id="derived_state" name="derived_state">
+        <option value="">all</option>
+        ${derived_state_options}
+      </select>
+    </label>
+    <label class="filter-field" for="q">
+      <span>q</span>
+      <input id="q" name="q" type="text" value="${query_value}" />
+    </label>
+    <label class="filter-field" for="include_retired">
+      <span>include_retired</span>
+      <select id="include_retired" name="include_retired">
+        <option value="false"${include_retired_false_selected}>false</option>
+        <option value="true"${include_retired_true_selected}>true</option>
+      </select>
+    </label>
+    <button type="submit">Filter</button>
+  </form>
+</section>
+<section class="panel">
+  <h2>Summary</h2>
+  <dl class="kv-list">
+    <dt>count</dt><dd>${count}</dd>
+    <dt>service_count</dt><dd>${service_count}</dd>
+    <dt>service_total</dt><dd>${service_total}</dd>
+    <dt>limit</dt><dd>${limit}</dd>
+    <dt>truncated</dt><dd>${truncated}</dd>
+    <dt>status</dt><dd>${selected_status}</dd>
+    <dt>derived_state</dt><dd>${selected_derived_state}</dd>
+  </dl>
+  ${truncation_notice}
+</section>
+${warnings_html}
+<section class="panel">
+  <h2>Schedule table</h2>
+  ${schedule_table}
+</section>
