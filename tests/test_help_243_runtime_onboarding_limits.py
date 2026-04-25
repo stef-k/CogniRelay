@@ -93,6 +93,14 @@ PRIORITY_FIELD_PATHS = [
     "patch.target.thread_descriptor.identity_anchors",
     "context.retrieve.max_tokens_estimate",
     "context.retrieve.continuity_max_capsules",
+    "context.retrieve.graph_context.nodes",
+    "context.retrieve.graph_context.edges",
+    "context.retrieve.graph_context.related_documents",
+    "context.retrieve.graph_context.blockers",
+    "continuity.read.startup.graph_summary.nodes",
+    "continuity.read.startup.graph_summary.edges",
+    "continuity.read.startup.graph_summary.related_documents",
+    "continuity.read.startup.graph_summary.blockers",
     "continuity.capsule_serialized_utf8",
 ]
 
@@ -318,6 +326,7 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
             "session_end_snapshot",
             "patch_targets",
             "retrieval_budget",
+            "response_orientation_caps",
             "capsule_write_cap",
             "continuity_payload",
         ])
