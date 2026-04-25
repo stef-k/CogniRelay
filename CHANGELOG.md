@@ -7,6 +7,18 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-04-26
+
+### Fixed
+
+- Clarified agent onboarding and runtime help examples for thread-scoped
+  `context.retrieve` calls so cold-start agents use `subject_kind="thread"`
+  plus `subject_id`, not a top-level `thread_id`, for primary retrieval
+  scoping.
+- Clarified schedule due-inspection examples for explicit `thread_id` filters
+  and subject tuple filters while preserving the existing MCP `system.tool_usage`
+  compact response shape.
+
 ## [1.4.0] - 2026-04-25
 
 ### Added
