@@ -339,6 +339,11 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     existing = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schedule_schema_migrations'"
     ).fetchone()
+    if existing is not None:
+        max_row = conn.execute("SELECT MAX(version) AS version FROM schedule_schema_migrations").fetchone()
+        max_version = int(max_row["version"] or 0)
+        if max_version > SCHEDULE_SCHEMA_VERSION:
+            raise _StorageFailure("schedule_schema_too_new")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS schedule_schema_migrations (
@@ -1113,6 +1118,21 @@ def _empty_context(window_hours: int, warnings: list[str] | None = None) -> dict
     }
 
 
+def _schedule_scope_sql(scopes: set[tuple[str, str]]) -> tuple[str, list[str]]:
+    clauses: list[str] = []
+    params: list[str] = []
+    for subject_kind, subject_id in sorted(scopes):
+        clauses.append("(subject_kind = ? AND subject_id = ?)")
+        params.extend([subject_kind, subject_id])
+        if subject_kind == "thread":
+            clauses.append("thread_id = ?")
+            params.append(subject_id)
+        elif subject_kind == "task":
+            clauses.append("task_id = ?")
+            params.append(subject_id)
+    return " OR ".join(clauses), params
+
+
 def _schedule_context(repo_root: Path, auth: AuthContext, scopes: set[tuple[str, str]], *, due_limit: int, upcoming_limit: int, upcoming_window_hours: int) -> dict[str, Any]:
     if not scopes:
         return _empty_context(upcoming_window_hours)
@@ -1120,7 +1140,15 @@ def _schedule_context(repo_root: Path, auth: AuthContext, scopes: set[tuple[str,
         auth.require_read_path(SCHEDULE_DB_REL)
         clock = _clock()
         def _operation(conn: sqlite3.Connection, warnings: list[str]) -> dict[str, Any]:
-            rows = conn.execute("SELECT * FROM scheduled_items WHERE status = 'pending' ORDER BY due_at_ts ASC, schedule_id ASC").fetchall()
+            scope_where, scope_params = _schedule_scope_sql(scopes)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM scheduled_items
+                WHERE status = 'pending' AND ({scope_where})
+                ORDER BY due_at_ts ASC, schedule_id ASC
+                """,
+                scope_params,
+            ).fetchall()
             due: list[dict[str, Any]] = []
             upcoming: list[dict[str, Any]] = []
             skipped = False

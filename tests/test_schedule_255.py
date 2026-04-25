@@ -275,6 +275,83 @@ class Schedule255Tests(unittest.TestCase):
         self.assertEqual(context["due"]["count"], 1)
         self.assertEqual(context["due"]["items"][0]["schedule_id"], "sched_due")
 
+    def test_scoped_context_does_not_warn_about_unrelated_malformed_rows(self) -> None:
+        with patch("app.schedule.service.iso_now") as mocked_now:
+            mocked_now.return_value = datetime(2026, 4, 25, 9, 0, 0, tzinfo=timezone.utc)
+            self._create(
+                schedule_id="sched_threadgood",
+                due_at="2026-04-25T09:00:01Z",
+                thread_id="thread-good",
+                subject_kind="thread",
+                subject_id="thread-good",
+            )
+            self._create(
+                schedule_id="sched_badother",
+                due_at="2026-04-25T09:00:01Z",
+                thread_id="thread-other",
+                subject_kind="thread",
+                subject_id="thread-other",
+            )
+        conn = sqlite3.connect(self.repo_root / SCHEDULE_DB_REL)
+        conn.execute("UPDATE scheduled_items SET metadata_json = ? WHERE schedule_id = ?", ('{"nested":{"bad":true}}', "sched_badother"))
+        conn.commit()
+        conn.close()
+
+        with patch("app.schedule.service.iso_now") as mocked_now:
+            mocked_now.return_value = datetime(2026, 4, 25, 9, 0, 2, tzinfo=timezone.utc)
+            context = schedule_context_for_context_retrieve(
+                repo_root=self.repo_root,
+                auth=self.auth,
+                req=ContextRetrieveRequest(
+                    task="resume",
+                    continuity_selectors=[ContinuitySelector(subject_kind="thread", subject_id="thread-good")],
+                ),
+                due_limit=10,
+                upcoming_limit=5,
+                upcoming_window_hours=72,
+            )
+
+        self.assertEqual(context["due"]["count"], 1)
+        self.assertEqual(context["due"]["items"][0]["schedule_id"], "sched_threadgood")
+        self.assertNotIn("schedule_row_invalid:sched_badother", context["warnings"])
+        self.assertNotIn("schedule_rows_skipped", context["warnings"])
+
+    def test_future_schema_read_does_not_bootstrap_slice_one_tables(self) -> None:
+        db_path = self.repo_root / SCHEDULE_DB_REL
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE schedule_schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("INSERT INTO schedule_schema_migrations(version, applied_at) VALUES (2, '2026-04-25T09:00:00Z')")
+        conn.commit()
+        conn.close()
+
+        listed = schedule_list_service(repo_root=self.repo_root, auth=self.auth, query={})
+        got = schedule_get_service(repo_root=self.repo_root, auth=self.auth, schedule_id="sched_missing")
+
+        self.assertFalse(listed["ok"])
+        self.assertEqual(listed["warnings"], ["schedule_schema_too_new"])
+        self.assertFalse(got["ok"])
+        self.assertEqual(got["warnings"], ["schedule_schema_too_new"])
+
+        conn = sqlite3.connect(db_path)
+        objects = conn.execute(
+            """
+            SELECT type, name
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+            ORDER BY type, name
+            """
+        ).fetchall()
+        conn.close()
+        self.assertEqual(objects, [("table", "schedule_schema_migrations")])
+
     def test_mcp_validation_returns_single_schedule_detail(self) -> None:
         detail = validate_schedule_mcp_arguments(
             "schedule.create",
@@ -435,7 +512,7 @@ class Schedule255Tests(unittest.TestCase):
         self.assertEqual(context["upcoming"]["count"], 1)
         self.assertIn("schedule_rows_skipped", context["warnings"])
         self.assertIn("schedule_row_invalid:sched_bad_actor", context["warnings"])
-        self.assertIn("schedule_row_invalid:sched_bad_link", context["warnings"])
+        self.assertNotIn("schedule_row_invalid:sched_bad_link", context["warnings"])
 
     def test_mcp_get_list_unknown_keys_and_strict_types(self) -> None:
         self.assertEqual(
