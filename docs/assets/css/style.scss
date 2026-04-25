@@ -33,13 +33,27 @@ body {
   color: #e6edf3;
 }
 
+.markdown-body .highlighter-rouge,
+.markdown-body .highlight {
+  background: #161b22;
+  color: #e6edf3;
+}
+
 .markdown-body pre {
   background: #161b22;
+  color: #e6edf3;
   border: 1px solid #30363d;
+}
+
+.markdown-body pre.highlight,
+.markdown-body .highlight pre {
+  background: #161b22;
+  color: #e6edf3;
 }
 
 .markdown-body pre code {
   background: transparent;
+  color: inherit;
 }
 
 .markdown-body table tr {
