@@ -274,7 +274,10 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "context.retrieve",
-            "description": "Build a compact context bundle for task continuation with continuity resilience and degraded index fallback.",
+            "description": (
+                "Build a compact context bundle for task continuation with continuity resilience, degraded index fallback, "
+                "and default bundle.graph_context graph orientation. No graph request flag is required."
+            ),
             "method": "POST",
             "path": "/v1/context/retrieve",
             "scopes": ["search", "read_namespaces"],
@@ -292,7 +295,10 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "continuity.read",
-            "description": "Read one continuity capsule by exact selector with active, fallback, or structured missing-state output.",
+            "description": (
+                "Read one continuity capsule by exact selector with active, fallback, or structured missing-state output. "
+                "Startup view includes top-level graph_summary; non-startup reads remain graph-free. No graph request flag is required."
+            ),
             "method": "POST",
             "path": "/v1/continuity/read",
             "scopes": ["read:files", "read_namespaces"],

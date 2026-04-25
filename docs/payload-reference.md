@@ -665,6 +665,35 @@ When derived search indexes are stale, `continuity_state.recovery_warnings` incl
 
 The bounded `#213` mixed-retrieval bundle remains internal-only in slice 1 and is not part of the external `POST /v1/context/retrieve` response shape.
 
+### Graph Runtime Sections
+
+`POST /v1/context/retrieve` includes `bundle.graph_context` by default. `POST /v1/continuity/read` includes top-level `graph_summary` only when `view` is `"startup"` and only after the base read succeeds. Non-startup continuity reads remain graph-free. When `context.retrieve` uses `continuity_mode="off"`, graph derivation is suppressed and `bundle.graph_context.warnings` contains `graph_suppressed_by_continuity_mode`.
+
+Both sections use the same compact shape:
+
+```json
+{
+  "anchor": {"id": "task:task-123", "kind": "task", "subject_id": "task-123"},
+  "nodes": [{"id": "thread:thread-abc", "kind": "thread", "subject_id": "thread-abc"}],
+  "edges": [{"relationship": "linked_to_thread", "source_id": "task:task-123", "target_id": "thread:thread-abc"}],
+  "related_documents": [{"path": "docs/example.md", "node_id": "document:docs/example.md", "source_id": "task:task-123"}],
+  "blockers": [{"task_id": "task-123", "blocked_by_task_id": "task-456", "source_id": "task:task-123", "target_id": "task:task-456"}],
+  "truncation": {
+    "nodes": {"limit": 24, "available": 1, "returned": 1, "truncated": false},
+    "edges": {"limit": 32, "available": 1, "returned": 1, "truncated": false},
+    "related_documents": {"limit": 8, "available": 1, "returned": 1, "truncated": false},
+    "blockers": {"limit": 8, "available": 1, "returned": 1, "truncated": false}
+  },
+  "warnings": []
+}
+```
+
+Caps are fixed implementation constants, not settings: `bundle.graph_context` returns at most 24 nodes, 32 edges, 8 related documents, and 8 blockers; startup `graph_summary` returns at most 12 nodes, 16 edges, 4 related documents, and 4 blockers. Nodes sort by `id`; edges sort by `relationship`, `source_id`, and `target_id`; node-cap endpoint pruning happens before edge and projection caps.
+
+Graph warnings are objects with `code`, `message`, and `details`. Codes are `graph_anchor_not_provided`, `graph_anchor_not_supported`, `graph_anchor_not_found`, `graph_derivation_failed`, `graph_truncated`, `graph_result_malformed`, `graph_source_denied`, and `graph_suppressed_by_continuity_mode`. Auth/path denials use `graph_source_denied` with safe `source_class`, repo-relative `path` or `null`, and `anchor_id`; denied sources are omitted and graph warnings stay local to the graph section.
+
+The durable continuity capsule write cap remains `20 KB` serialized UTF-8. Graph data is derived response data only, is never persisted into capsules, and does not consume the capsule write cap. #255 `schedule_context` is scheduler-owned future/coexisting response data and is not defined by the graph contract.
+
 ## Salience Ranking
 
 When `sort="salience"` is set on `POST /v1/continuity/list`, or when capsules are returned through `POST /v1/context/retrieve`, the system applies a deterministic multi-signal sort that surfaces the most decision-relevant capsules first. Nothing is stored — salience is computed at retrieval time from in-memory capsule state.

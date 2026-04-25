@@ -17,8 +17,8 @@ CogniRelay is a bounded continuity and orientation system for agents, not a tran
 The minimum shipped bootstrap path is a read first, then bounded retrieval only when the first work step needs more context. Do not turn startup into a discovery tour or write merely because an agent resumed.
 
 1. Call `continuity.read` / `POST /v1/continuity/read` with `view="startup"` and `allow_fallback=true`.
-2. Consume the returned startup-oriented continuity result as the first orientation input.
-3. Optionally call `context.retrieve` / `POST /v1/context/retrieve` when the first work step needs bounded fresh context beyond startup orientation.
+2. Consume the returned startup-oriented continuity result as the first orientation input, including top-level `graph_summary` when present.
+3. Optionally call `context.retrieve` / `POST /v1/context/retrieve` when the first work step needs bounded fresh context beyond startup orientation; it includes `bundle.graph_context` by default unless `continuity_mode="off"` suppresses graph derivation.
 
 If the startup result has warnings, fallback state, stale continuity, trimming, or degraded trust, use the best returned result already received and verify critical assumptions only against the shipped help/reference lookup surfaces named in this manual and the current task inputs already in hand.
 
@@ -29,13 +29,14 @@ Map runtime-specific hook names to these four canonical hooks. `startup` and `pr
 | Hook | Operating route | Write discipline |
 | --- | --- | --- |
 | `startup` | Read with `POST /v1/continuity/read` / `continuity.read`, using `view="startup"` and `allow_fallback=true`. | Read-only. Do not write to mark resume. |
-| `pre_prompt` | Retrieve with `POST /v1/context/retrieve` / `context.retrieve`. | Read-only. Do not persist prompt text, retrieved snippets, or transcript material. |
+| `pre_prompt` | Retrieve with `POST /v1/context/retrieve` / `context.retrieve`. | Read-only. Do not persist prompt text, retrieved snippets, graph context, or transcript material. |
 | `post_prompt` | Write/update only through `POST /v1/continuity/upsert` / `continuity.upsert`. | Write only when write-eligible fields changed. Skip otherwise. |
 | `pre_compaction_or_handoff` | Write/update only through `POST /v1/continuity/upsert` / `continuity.upsert`. | Write only when write-eligible fields changed before context loss. Skip otherwise. |
 
 - At onboarding level, `post_prompt` and `pre_compaction_or_handoff` use only the continuity write/update route: HTTP `POST /v1/continuity/upsert` and MCP `continuity.upsert`.
 - Shipped narrow update variants such as `POST /v1/continuity/patch` / `continuity.patch` and lifecycle-specialized surfaces are deeper specialized follow-ons, not canonical hook routes in onboarding.
 - Prompt text, response text, transcripts, raw tool chatter, shell output, and copied retrieval snippets must not be written into continuity at any hook.
+- Graph orientation is derived response data only. Read `graph_summary.warnings` or `bundle.graph_context.warnings` for graph-local degradation such as `graph_source_denied` or `graph_truncated`; non-startup `continuity.read` remains graph-free.
 - Use deeper references only for exact hook matrix details after this mapping is clear.
 
 ## How To Ask CogniRelay For Help

@@ -676,7 +676,7 @@ class TestContextGraph219Slice1(unittest.TestCase):
             },
         )
 
-    def test_context_retrieve_contract_remains_internal_only(self) -> None:
+    def test_context_retrieve_exposes_public_graph_context_without_raw_helper_shape(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             now = datetime.now(timezone.utc)
@@ -695,10 +695,9 @@ class TestContextGraph219Slice1(unittest.TestCase):
                 audit=lambda *_args, **_kwargs: None,
             )
 
-        self.assertNotIn("graph", result)
-        self.assertNotIn("anchor", result)
         self.assertIn("bundle", result)
-        self.assertNotIn("graph", result["bundle"])
-        self.assertNotIn("anchor", result["bundle"])
+        self.assertIn("graph_context", result["bundle"])
+        self.assertNotIn("anchor", result)
+        self.assertNotIn("family", json.dumps(result["bundle"]["graph_context"]))
         self.assertIn("continuity_state", result["bundle"])
         self.assertIn("recent_relevant", result["bundle"])
