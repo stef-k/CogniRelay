@@ -1569,6 +1569,7 @@ def capabilities_payload() -> dict[str, Any]:
             "governance_policy_pack",
             "abuse_controls",
             "host_ops_orchestration",
+            "derived_graph_runtime_context",
             "schedule.one_shot_reminders",
         ]
     }
@@ -1613,6 +1614,12 @@ def capabilities_v1_payload() -> dict[str, Any]:
             },
             "context.retrieve.continuity_state": {
                 "summary": "Multi-capsule continuity-oriented context bundles with fallback and degradation",
+            },
+            "context.retrieve.graph_context": {
+                "summary": "Bounded derived graph context included by default on context retrieval responses",
+            },
+            "continuity.read.startup_graph_summary": {
+                "summary": "Bounded derived graph summary included on startup continuity reads after base read success",
             },
             "schedule.one_shot_reminders": {
                 "summary": "SQLite-backed one-shot reminders and task nudges surfaced by pull/list and orientation responses",

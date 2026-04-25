@@ -63,9 +63,12 @@ The application areas above are grounded in capabilities the system currently im
 - **Salience ranking** — deterministic multi-signal sorting on list and retrieval paths that surfaces the most decision-relevant capsules first.
 - **Stable preferences** — explicit standing instructions that persist across threads (e.g., timezone, units, communication style).
 - **Rationale entries** — structured decision reasoning with kind/status lifecycle and supersession semantics, preserving *why* alongside *what*.
+- **Derived graph orientation** — bounded `bundle.graph_context` on `POST /v1/context/retrieve` and top-level `graph_summary` on startup `POST /v1/continuity/read`, derived from task and continuity artifacts without storing graph data in capsules.
+- **Schedule orientation** — SQLite-backed one-shot reminders and task nudges surfaced through pull/list routes and scoped `schedule_context` in startup/read and context-retrieve orientation responses.
+- **Runtime help and validation-limit lookup** — bounded `/v1/help`, onboarding, and limits surfaces plus MCP request-method equivalents for agents that need exact contract recovery without loading the full docs corpus.
 - **Versioned capability discovery** — `GET /v1/capabilities` lets agents discover what the current instance supports before building integration logic.
 - **Bounded coordination primitives** — handoffs, shared coordination artifacts, and reconciliation records for inter-agent collaboration without shared-state mutation.
-- **Lightweight client and MCP support** — a stdlib-only CLI client and MCP bootstrap flow for integration without heavy dependencies.
+- **Operator UI and lightweight clients** — a local read-only UI with continuity, graph, task, context-retrieval, and docs inspection, plus a stdlib-only CLI client and MCP bootstrap flow for integration without heavy dependencies.
 
 ## Research and Evaluation Value
 
@@ -139,16 +142,16 @@ The system should not be read as a peer-equal shared-instance platform. The coll
 
 ### Optional operator UI
 
-The shipped operator UI for issue `#199` is an optional local-operator observability surface mounted under `/ui`.
+The shipped operator UI is an optional local-operator observability surface mounted under `/ui`.
 
 - It is disabled by default.
 - It is server-rendered HTML with local static assets only.
 - It is not a SPA and does not require npm, Node, bundlers, or CDN assets.
 - It is read-only in the currently supported posture.
-- It exposes bounded continuity inspection rather than a general admin/control panel.
+- It exposes bounded continuity, graph, task, context-retrieval, and docs inspection rather than a general admin/control panel.
 - It includes bounded live updates through `/ui/events` SSE for small overview/list/detail live regions, with pages remaining usable without JS.
 
-The supported posture keeps `COGNIRELAY_UI_REQUIRE_LOCALHOST=true`, so `/ui` remains a loopback-scoped operator surface rather than a normal remotely exposed web app. Non-local auth/session models, mutation actions, standalone archive/cold maintenance consoles, WebSockets, and broader reactive UI behavior are deferred to future explicit issues rather than implied by the current deployment model.
+The supported posture keeps `COGNIRELAY_UI_REQUIRE_LOCALHOST=true`, so `/ui` remains a loopback-scoped operator surface rather than a normal remotely exposed web app. Non-local auth/session models, mutation actions, schedule mutation pages, standalone archive/cold maintenance consoles, WebSockets, and broader reactive UI behavior are deferred to future explicit issues rather than implied by the current deployment model.
 
 Access isolation between agents is enforced entirely by token scopes and namespace/path restrictions. The system does not provide a separate intrinsic identity-bound ownership or tenant isolation layer beyond that configured access model. Any token with read access to `memory/continuity` can read any capsule in that namespace — capsule privacy depends on the operator not granting that access to collaborator tokens. In the default `collaboration_peer` template this access is excluded, which protects owner-private continuity as configured policy.
 
@@ -274,7 +277,7 @@ The collaborator-grade continuity wave (#119 family) added several capabilities 
 
 **Session-end snapshot (#167).** `POST /v1/continuity/upsert` accepts a `session_end_snapshot` that merges fresh startup-critical fields into the base capsule before persistence, reducing caller burden at session end. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm.
 
-**`GET /v1/capabilities` (#179).** A versioned, machine-readable feature map that allows agents to discover what the current instance supports before building integration logic. Returns 12 feature keys covering the continuity enhancements above plus coordination, messaging, peers, and discovery surfaces. See [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.
+**`GET /v1/capabilities` (#179).** A versioned, machine-readable feature map that allows agents to discover what the current instance supports before building integration logic. It covers the continuity enhancements above plus graph context, schedule reminders, coordination, messaging, peers, and discovery surfaces. See [API Surface](api-surface.md#get-v1capabilities--versioned-feature-map) for the endpoint contract.
 
 #### Mechanical Assistance and Agent Authorship
 
@@ -461,7 +464,8 @@ For the complete MCP integration notes, including what is and is not mirrored th
 - Use `continuity_resilience_policy` on `POST /v1/context/retrieve` when you need to permit fallback snapshots, explicitly prefer active continuity first, or insist on active continuity only
 - Expect `POST /v1/context/retrieve` to degrade deterministically when search indexes are stale or missing: stale keeps indexed retrieval with warnings, missing falls back to a bounded raw scan
 - Both `POST /v1/continuity/read` and `POST /v1/context/retrieve` include per-capsule `trust_signals` alongside capsule data; on the multi-capsule retrieval path, an aggregate `trust_signals` block summarises the worst-case across all capsules — see the [Continuity model § Trust signals](#trust-signals) section for the derivation model and [Payload Reference](payload-reference.md) for field-level structure
-- Use `POST /v1/continuity/read` when you need the full capsule for one exact selector; set `allow_fallback=true` when you want structured fallback or missing-state degradation; pass `view="startup"` to include a pre-structured `startup_summary` extraction alongside the full capsule
+- Expect `POST /v1/context/retrieve` to include bounded derived `bundle.graph_context` by default and scoped `bundle.schedule_context` when a primary subject or continuity selectors are present; these sections are response data, not continuity capsule storage
+- Use `POST /v1/continuity/read` when you need the full capsule for one exact selector; set `allow_fallback=true` when you want structured fallback or missing-state degradation; pass `view="startup"` to include a pre-structured `startup_summary` extraction, top-level `graph_summary`, and scoped `schedule_context` alongside the full capsule
 - Use `POST /v1/continuity/refresh/plan` when you need a deterministic list of the next continuity capsules that should be refreshed
 - Use `POST /v1/continuity/retention/plan` when you need the next deterministic window of stale archived continuity eligible for explicit cold-store policy application
 - Use `POST /v1/continuity/compare` when you need a deterministic diff and recommended verification outcome before rewriting an active capsule

@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.main import discovery, discovery_tools, discovery_workflows, manifest
+from app.main import capabilities, capabilities_v1, discovery, discovery_tools, discovery_workflows, manifest
 
 
 class TestDiscoveryEndpoints(unittest.TestCase):
@@ -111,6 +111,26 @@ class TestDiscoveryEndpoints(unittest.TestCase):
             ["read:files", "write:projects", "read_namespaces", "write_namespaces"],
         )
         self.assertFalse(by_name["continuity.refresh_plan"]["idempotent"])
+
+    def test_capabilities_advertise_graph_and_schedule_runtime_surfaces(self) -> None:
+        """Capability descriptors should stay coherent with shipped graph and schedule orientation."""
+        legacy_features = set(capabilities()["features"])
+        self.assertIn("derived_graph_runtime_context", legacy_features)
+        self.assertIn("schedule.one_shot_reminders", legacy_features)
+
+        feature_map = capabilities_v1()["features"]
+        self.assertEqual(
+            feature_map["context.retrieve.graph_context"]["summary"],
+            "Bounded derived graph context included by default on context retrieval responses",
+        )
+        self.assertEqual(
+            feature_map["continuity.read.startup_graph_summary"]["summary"],
+            "Bounded derived graph summary included on startup continuity reads after base read success",
+        )
+        self.assertEqual(
+            feature_map["schedule.one_shot_reminders"]["summary"],
+            "SQLite-backed one-shot reminders and task nudges surfaced by pull/list and orientation responses",
+        )
 
     def test_workflow_catalog_has_bootstrap(self) -> None:
         """Workflow catalog should expose the bootstrap workflow."""

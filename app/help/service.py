@@ -771,8 +771,9 @@ _ONBOARDING_BODIES = {
     ),
     "retrieval": (
         "## Retrieval Mental Model\n"
-        "Use POST /v1/context/retrieve for bounded context packages. It includes scoped schedule_context when the request carries "
-        "a primary subject or continuity selectors. Tune max_tokens_estimate and continuity_max_capsules within runtime limits."
+        "Use POST /v1/context/retrieve for bounded context packages. It includes bundle.graph_context by default and scoped "
+        "schedule_context when the request carries a primary subject or continuity selectors. Graph and schedule warnings stay "
+        "local to their response sections. Tune max_tokens_estimate and continuity_max_capsules within runtime limits."
     ),
     "trust_and_degradation": (
         "## Trust and Degradation Rules\n"
@@ -787,7 +788,8 @@ _ONBOARDING_BODIES = {
     ),
     "anti_patterns": (
         "## Anti-Patterns\n"
-        "Do not request or preload the full onboarding document by default. Do not ask for a full payload schema when a field-specific limit lookup is enough."
+        "Do not request or preload the full onboarding document by default. Do not ask for a full payload schema when a field-specific limit lookup is enough. "
+        "Do not treat derived graph_context, graph_summary, or schedule_context as continuity capsule data to persist."
     ),
     "references": (
         "## References / Where To Look Next\n"
@@ -798,6 +800,7 @@ _ONBOARDING_BODIES = {
 _ONBOARDING_BULLETS = {
     "bootstrap": [
         "Call continuity.read with view=\"startup\" and allow_fallback=true.",
+        "Inspect top-level graph_summary and schedule_context.due.items when present.",
         "Use context.retrieve only when bounded working context is needed.",
         "Use /v1/help/onboarding for section discovery.",
     ],
@@ -823,6 +826,7 @@ _ONBOARDING_BULLETS = {
     ],
     "retrieval": [
         "Retrieve bounded context through context.retrieve.",
+        "Expect bundle.graph_context by default and scoped schedule_context when selectors are present.",
         "Keep max_tokens_estimate and continuity_max_capsules inside runtime bounds.",
         "Avoid changing continuity read semantics for retrieval.",
     ],
@@ -839,7 +843,7 @@ _ONBOARDING_BULLETS = {
     "anti_patterns": [
         "Do not add a full onboarding fallback.",
         "Do not return a full payload schema by default.",
-        "Do not broaden this surface into UI, scheduling, graph retrieval, or continuity semantics.",
+        "Do not persist derived graph or schedule orientation into continuity capsules.",
     ],
     "references": [
         "Start with runtime help when available.",

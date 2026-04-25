@@ -6,7 +6,7 @@ import unittest
 from app.discovery.service import capabilities_v1_payload
 from app.main import capabilities, capabilities_v1
 
-# All v1 feature keys from the spec (§4) plus #176 additions.
+# All v1 feature keys from the spec (§4) plus later shipped capability descriptors.
 V1_FEATURE_KEYS = frozenset(
     {
         "continuity.read.startup_view",
@@ -19,6 +19,8 @@ V1_FEATURE_KEYS = frozenset(
         "continuity.patch",
         "continuity.lifecycle",
         "context.retrieve.continuity_state",
+        "context.retrieve.graph_context",
+        "continuity.read.startup_graph_summary",
         "schedule.one_shot_reminders",
         "coordination.handoffs",
         "coordination.shared_state",

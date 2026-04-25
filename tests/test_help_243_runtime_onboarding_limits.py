@@ -705,7 +705,7 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
         text = Path("docs/agent-onboarding.md").read_text(encoding="utf-8")
         self.assertEqual(onboarding_section_ids(), SECTION_IDS)
         anchors = {
-            "bootstrap": ["POST /v1/continuity/read", 'view="startup"', "allow_fallback=true"],
+            "bootstrap": ["POST /v1/continuity/read", 'view="startup"', "allow_fallback=true", "schedule_context.due.items", "graph_summary"],
             "hooks": ["startup", "pre_prompt", "post_prompt", "pre_compaction_or_handoff"],
             "help_lookup": [
                 "GET /v1/help",
@@ -719,7 +719,7 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
                 "system.error_guide",
             ],
             "limits_and_routing": ["continuity.top_priorities", "continuity.open_loops", "continuity.active_constraints", "GET /v1/help/limits/{field_path}"],
-            "retrieval": ["POST /v1/context/retrieve", "max_tokens_estimate", "continuity_max_capsules"],
+            "retrieval": ["POST /v1/context/retrieve", "max_tokens_estimate", "continuity_max_capsules", "bundle.graph_context", "schedule_context"],
             "trust_and_degradation": ["warnings", "allow_fallback", "degraded"],
             "anti_patterns": ["Do not", "full onboarding document", "full payload schema"],
             "references": ["docs/api-surface.md", "docs/mcp.md", "docs/payload-reference.md"],
@@ -730,6 +730,21 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
                 self.assertTrue(any(ref.startswith("docs/agent-onboarding.md") for ref in section["references"]))
                 for phrase in phrases:
                     self.assertIn(phrase, text)
+
+    def test_onboarding_runtime_help_mentions_shipped_graph_and_schedule_orientation(self) -> None:
+        bootstrap = self.client.get("/v1/help/onboarding/sections/bootstrap").json()
+        bootstrap_text = " ".join([bootstrap["body_md"], *bootstrap["bullets"]])
+        self.assertIn("graph_summary", bootstrap_text)
+        self.assertIn("schedule_context.due.items", bootstrap_text)
+
+        retrieval = self.client.get("/v1/help/onboarding/sections/retrieval").json()
+        retrieval_text = " ".join([retrieval["body_md"], *retrieval["bullets"]])
+        self.assertIn("bundle.graph_context", retrieval_text)
+        self.assertIn("schedule_context", retrieval_text)
+
+        anti_patterns = self.client.get("/v1/help/onboarding/sections/anti_patterns").json()
+        anti_pattern_text = " ".join([anti_patterns["body_md"], *anti_patterns["bullets"]])
+        self.assertIn("Do not persist derived graph or schedule orientation into continuity capsules.", anti_pattern_text)
 
 
 if __name__ == "__main__":
