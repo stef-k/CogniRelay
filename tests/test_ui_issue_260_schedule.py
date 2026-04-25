@@ -164,6 +164,11 @@ class ScheduleUiIssue260Tests(unittest.TestCase):
                 query_string=b"status=bogus&include_retired=yes",
                 service=Mock(return_value=_schedule_result(items=[])),
             )
+            padded, padded_service = _ui_schedule_response(
+                Path(tmp),
+                query_string=b"status=%20pending%20",
+                service=Mock(return_value=_schedule_result(items=[])),
+            )
             all_filter, all_service = _ui_schedule_response(
                 Path(tmp),
                 query_string=b"status=&include_retired=false",
@@ -177,6 +182,8 @@ class ScheduleUiIssue260Tests(unittest.TestCase):
         self.assertEqual(invalid_service.call_args.kwargs["query"], {"limit": 200, "offset": 0, "include_retired": False})
         self.assertIn("invalid_schedule_ui_filter:status", invalid.text)
         self.assertIn("invalid_schedule_ui_filter:include_retired", invalid.text)
+        self.assertEqual(padded_service.call_args.kwargs["query"], {"limit": 200, "offset": 0, "include_retired": False})
+        self.assertIn("invalid_schedule_ui_filter:status", padded.text)
         self.assertEqual(all_service.call_args.kwargs["query"], {"limit": 200, "offset": 0, "include_retired": False})
         self.assertNotIn("invalid_schedule_ui_filter", all_filter.text)
 
@@ -197,6 +204,11 @@ class ScheduleUiIssue260Tests(unittest.TestCase):
                 query_string=b"derived_state=late",
                 service=Mock(return_value=_schedule_result(items=items)),
             )
+            padded, padded_service = _ui_schedule_response(
+                Path(tmp),
+                query_string=b"derived_state=%20due%20",
+                service=Mock(return_value=_schedule_result(items=items)),
+            )
 
         self.assertEqual(service.call_args.kwargs["query"], {"limit": 200, "offset": 0, "include_retired": False})
         self.assertIn('value="  BETA\ttask-beta  "', response.text)
@@ -206,6 +218,8 @@ class ScheduleUiIssue260Tests(unittest.TestCase):
         self.assertIn("<dt>count</dt><dd>1</dd>", response.text)
         self.assertEqual(invalid_service.call_args.kwargs["query"], {"limit": 200, "offset": 0, "include_retired": False})
         self.assertIn("invalid_schedule_ui_filter:derived_state", invalid.text)
+        self.assertEqual(padded_service.call_args.kwargs["query"], {"limit": 200, "offset": 0, "include_retired": False})
+        self.assertIn("invalid_schedule_ui_filter:derived_state", padded.text)
 
     def test_link_order_and_url_encoding_for_task_thread_subject_and_retrieval(self) -> None:
         items = [
@@ -269,6 +283,11 @@ class ScheduleUiIssue260Tests(unittest.TestCase):
                 Path(tmp),
                 service=Mock(side_effect=RuntimeError("raw secret")),
             )
+            failed_invalid_filter, _service = _ui_schedule_response(
+                Path(tmp),
+                query_string=b"status=bogus",
+                service=Mock(side_effect=RuntimeError("raw secret")),
+            )
 
         self.assertEqual(malformed.status_code, 200)
         self.assertIn("schedule_rows_skipped", malformed.text)
@@ -278,6 +297,12 @@ class ScheduleUiIssue260Tests(unittest.TestCase):
         self.assertIn("schedule_ui_service_exception:RuntimeError", failed.text)
         self.assertNotIn("raw secret", failed.text)
         self.assertIn("No schedule items matched the current filters.", failed.text)
+        self.assertIn("schedule_ui_service_exception:RuntimeError", failed_invalid_filter.text)
+        self.assertIn("invalid_schedule_ui_filter:status", failed_invalid_filter.text)
+        self.assertLess(
+            failed_invalid_filter.text.index("schedule_ui_service_exception:RuntimeError"),
+            failed_invalid_filter.text.index("invalid_schedule_ui_filter:status"),
+        )
 
     def test_read_only_no_mutation_controls_services_or_schedule_live_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

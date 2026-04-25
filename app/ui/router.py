@@ -804,7 +804,6 @@ def _schedule_list_page(*, settings: Settings, auth: AuthContext, request: Reque
             "items": [],
             "warnings": [f"schedule_ui_service_exception:{exc.__class__.__name__}"],
         }
-        ui_warnings = []
     items = [item for item in list(result.get("items") or []) if isinstance(item, dict)]
     filtered_items = _schedule_apply_ui_filters(items, derived_state=filters["derived_state"], q=filters["q"])
     service_count = _schedule_int(result.get("count"))
@@ -869,7 +868,7 @@ def _schedule_normalize_all_filter(value: str | None, allowed: tuple[str, ...]) 
     """Normalize missing, empty, and all to no filter; flag unsupported values."""
     if value is None:
         return None
-    normalized = str(value).strip()
+    normalized = str(value)
     if normalized == "" or normalized == "all":
         return None
     if normalized in allowed:
