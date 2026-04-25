@@ -19,6 +19,7 @@ V1_FEATURE_KEYS = frozenset(
         "continuity.patch",
         "continuity.lifecycle",
         "context.retrieve.continuity_state",
+        "schedule.one_shot_reminders",
         "coordination.handoffs",
         "coordination.shared_state",
         "messaging.direct",

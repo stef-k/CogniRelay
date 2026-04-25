@@ -314,6 +314,7 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
                 "notes",
                 "continuity_state",
                 "graph_context",
+                "schedule_context",
             },
         )
         self.assertEqual(

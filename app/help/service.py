@@ -1454,11 +1454,6 @@ def help_onboarding_bootstrap_payload() -> dict[str, Any]:
             "mcp_tool": "context.retrieve",
             "when_to_use": "when the first work step needs bounded context beyond startup orientation",
         },
-        "reminder_route": {
-            "http": "GET /v1/schedule/items",
-            "mcp_tool": "schedule.list",
-            "when_to_use": "manual reminder inspection; due reminders also arrive in startup/context schedule_context",
-        },
         "help_routes": {
             "tools": {"http": "GET /v1/help/tools/{name}", "mcp_method": "system.tool_usage"},
             "topics": {"http": "GET /v1/help/topics/{id}", "mcp_method": "system.topic_help"},
