@@ -246,6 +246,74 @@ class TestGraphRuntime256(unittest.TestCase):
         self.assertEqual(graph["warnings"][0]["code"], "graph_source_denied")
         self.assertEqual(graph["warnings"][0]["details"]["path"], "tasks/open/task-1.json")
 
+    def test_read_files_scope_denial_skips_only_task_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_json(repo_root, "tasks/open/task-1.json", {"task_id": "task-1", "thread_id": "thread-1"})
+            _write_json(
+                repo_root,
+                "memory/continuity/task-task-1.json",
+                _capsule(
+                    subject_kind="task",
+                    subject_id="task-1",
+                    related_documents=[{"path": "docs/allowed.md", "kind": "spec", "label": "Allowed"}],
+                ),
+            )
+
+            with patch("app.context.graph._load_task_candidate") as load_task_candidate:
+                graph = derive_agent_graph_context(
+                    repo_root=repo_root,
+                    auth=_AuthStub(denied_scopes={"read:files"}),
+                    subject_kind="task",
+                    subject_id="task-1",
+                    caps=CONTEXT_GRAPH_CAPS,
+                )
+
+        load_task_candidate.assert_not_called()
+        self.assertEqual(graph["anchor"], {"id": "task:task-1", "kind": "task", "subject_id": "task-1"})
+        self.assertEqual(graph["nodes"], [{"id": "document:docs/allowed.md", "kind": "document", "subject_id": "docs/allowed.md"}])
+        self.assertEqual(
+            graph["edges"],
+            [{"relationship": "references_document", "source_id": "task:task-1", "target_id": "document:docs/allowed.md"}],
+        )
+        self.assertEqual(
+            graph["related_documents"],
+            [{"path": "docs/allowed.md", "node_id": "document:docs/allowed.md", "source_id": "task:task-1"}],
+        )
+        source_denials = [warning for warning in graph["warnings"] if warning["code"] == "graph_source_denied"]
+        self.assertEqual(len(source_denials), 1)
+        self.assertEqual(
+            source_denials[0]["details"],
+            {"source_class": "task_artifact", "path": None, "anchor_id": "task:task-1"},
+        )
+
+    def test_read_files_scope_denial_empty_when_selected_task_has_no_continuity_representation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_json(repo_root, "tasks/open/task-1.json", {"task_id": "task-1", "thread_id": "thread-1"})
+
+            with patch("app.context.graph._load_task_candidate") as load_task_candidate:
+                graph = derive_agent_graph_context(
+                    repo_root=repo_root,
+                    auth=_AuthStub(denied_scopes={"read:files"}),
+                    subject_kind="task",
+                    subject_id="task-1",
+                    caps=CONTEXT_GRAPH_CAPS,
+                )
+
+        load_task_candidate.assert_not_called()
+        self.assertIsNone(graph["anchor"])
+        self.assertEqual(graph["nodes"], [])
+        self.assertEqual(graph["edges"], [])
+        self.assertEqual(graph["related_documents"], [])
+        self.assertEqual([warning["code"] for warning in graph["warnings"]], ["graph_source_denied"])
+        self.assertEqual(
+            graph["warnings"][0]["details"],
+            {"source_class": "task_artifact", "path": None, "anchor_id": "task:task-1"},
+        )
+
     def test_related_document_denial_omits_node_edge_projection_without_path_leak(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)

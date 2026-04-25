@@ -384,7 +384,18 @@ def derive_internal_graph_slice1(
     anchor_id = f"{subject_kind}:{subject_id}"
     source_denials: list[dict[str, Any]] = []
     try:
-        task_paths = _authorized_task_candidates(repo_root, auth, anchor_id, source_denials)
+        task_paths: list[Path] = []
+        try:
+            if auth is not None:
+                auth.require("read:files")
+            task_paths = _authorized_task_candidates(repo_root, auth, anchor_id, source_denials)
+        except HTTPException:
+            source_denials.append(
+                graph_warning(
+                    "graph_source_denied",
+                    {"source_class": "task_artifact", "path": None, "anchor_id": anchor_id},
+                )
+            )
         continuity_paths = _authorized_continuity_candidates(repo_root, auth, anchor_id, source_denials)
     except GraphDerivationError as exc:
         return _empty_graph_result("graph_derivation_failed", reason=exc.reason)
@@ -717,14 +728,6 @@ def derive_agent_graph_context(
         return _empty_public_graph(caps, [graph_warning("graph_anchor_not_supported", {"subject_kind": subject_kind})])
     if not isinstance(subject_id, str) or subject_id == "":
         return _empty_public_graph(caps, [graph_warning("graph_anchor_not_provided")])
-    anchor_id = f"{subject_kind}:{subject_id}"
-    try:
-        auth.require("read:files")
-    except HTTPException:
-        return _empty_public_graph(
-            caps,
-            [graph_warning("graph_source_denied", {"source_class": "task_artifact", "path": None, "anchor_id": anchor_id})],
-        )
     try:
         result = derive_internal_graph_slice1(repo_root=repo_root, subject_kind=subject_kind, subject_id=subject_id, auth=auth)
     except Exception:
