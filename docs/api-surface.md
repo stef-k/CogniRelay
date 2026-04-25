@@ -61,7 +61,7 @@ Returns a deterministic, machine-readable feature map for the current build. No 
 
 **Semantics:** Presence of a key in `features` means the capability is available on this instance. Absence means it is unavailable. Keys are opaque stable identifiers — agents should treat them as exact-match strings, not parse the dots programmatically.
 
-**v1 feature registry (12 keys):**
+**v1 feature registry includes:**
 
 | Feature key | Summary |
 |---|---|
@@ -72,6 +72,7 @@ Returns a deterministic, machine-readable feature map for the current build. No 
 | `continuity.read.thread_identity` | Thread descriptors with scope anchors and lifecycle transitions |
 | `continuity.stable_preferences` | Stable user and peer preferences persisted on continuity capsules |
 | `context.retrieve.continuity_state` | Multi-capsule continuity-oriented context bundles with fallback and degradation |
+| `schedule.one_shot_reminders` | SQLite-backed one-shot reminders and task nudges surfaced by pull/list and orientation responses |
 | `coordination.handoffs` | Local-first inter-agent handoff artifacts with consume tracking |
 | `coordination.shared_state` | Owner-authored shared coordination artifacts with version control |
 | `messaging.direct` | Tracked direct messages with ack, reject, defer, and delivery state |
@@ -94,6 +95,12 @@ For the bounded MCP 2025-11-25 bootstrap flow, the post-bootstrap help/reference
 - `GET /v1/index/status`: inspect derived index state
 - `POST /v1/search`: query-driven search across indexed content
 - `POST /v1/recent`: latest indexed items without a search query
+- `POST /v1/schedule/items`: create a one-shot reminder or task nudge
+- `GET /v1/schedule/items/{schedule_id}`: read one scheduled item
+- `GET /v1/schedule/items`: list scheduled items with status, due, link, subject, retired, limit, and offset filters
+- `PATCH /v1/schedule/items/{schedule_id}`: update mutable fields on a pending scheduled item with `expected_version`
+- `POST /v1/schedule/items/{schedule_id}/acknowledge`: mark a pending item `acknowledged` or `done`
+- `POST /v1/schedule/items/{schedule_id}/retire`: retire a scheduled item without deleting it
 - `POST /v1/context/retrieve`: compact continuity-oriented context bundle
 - `POST /v1/continuity/upsert`: create or replace one continuity capsule
 - `POST /v1/continuity/read`: load one active continuity capsule by exact selector
@@ -129,6 +136,8 @@ Notable behavior:
 - `POST /v1/context/retrieve` now also accepts `continuity_resilience_policy` so callers can allow fallback snapshots, use the explicit active-first `prefer_active` mode, or require active continuity only
 - when derived search indexes are stale, `POST /v1/context/retrieve` keeps indexed retrieval and adds `continuity_index_stale`; when they are missing, it falls back to a bounded raw file scan and adds `continuity_index_missing`
 - `POST /v1/context/retrieve` includes `bundle.graph_context` by default. The graph section is derived from existing task and continuity artifacts, uses fixed response caps, and keeps graph warnings local to `bundle.graph_context.warnings`. When `continuity_mode="off"`, graph derivation is suppressed and the graph section contains `graph_suppressed_by_continuity_mode`.
+- one-shot schedule data is stored only in SQLite at `memory/schedule/schedule.db`; create/update/acknowledge/retire do not mutate task files, continuity capsules, graph data, callbacks, commands, or messages
+- `POST /v1/context/retrieve` includes `bundle.schedule_context` when scoped by primary subject or continuity selectors. `POST /v1/continuity/read` with `view="startup"` includes top-level `schedule_context`. Both are read-only, scoped to matching task/thread/subject links, and include due plus upcoming buckets.
 - `POST /v1/continuity/upsert` is the V1 write path for continuity capsules under `memory/continuity/`
 - successful `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` now refresh a recovery-only fallback snapshot under `memory/continuity/fallback/`
 - `POST /v1/continuity/upsert` and `POST /v1/continuity/revalidate` surface fallback snapshot failures through additive `recovery_warnings` instead of failing the already durable active write
@@ -176,7 +185,7 @@ Notable behavior:
 - `POST /v1/continuity/list` accepts `sort="salience"` to apply deterministic multi-signal salience ranking; when applied, each capsule carries a `salience` block and the response includes aggregate `salience_metadata` — see [Payload Reference](payload-reference.md#salience-ranking) for the sort key and response structure
 - `POST /v1/continuity/read` and `POST /v1/context/retrieve` now include a `trust_signals` block alongside capsule data — an objective, mechanical trust assessment across four dimensions (recency, completeness, integrity, scope_match); `trust_signals` is `null` when the capsule is missing; the `startup_summary` view also includes `trust_signals` as a top-level key; `build_continuity_state` returns both per-capsule and aggregate `trust_signals`; age fields are `null` (not `0`) when timestamps are missing/malformed; `recency.phase` falls back to `"expired"` on malformed `verified_at`; aggregate trust handles compact per-capsule shapes; `recovery_warnings` includes `"trust_signals_aggregate_failed"` when aggregate computation fails
 - Graph response warnings use object shape with stable codes including `graph_anchor_not_provided`, `graph_anchor_not_supported`, `graph_anchor_not_found`, `graph_derivation_failed`, `graph_truncated`, `graph_result_malformed`, `graph_source_denied`, and `graph_suppressed_by_continuity_mode`. Auth/path denials omit denied sources and never copy graph warnings into `recovery_warnings` or `continuity_state.warnings`.
-- #256 does not implement #255 scheduling. A future scheduler-owned `schedule_context` section may coexist beside graph sections, but scheduler storage, APIs, caps, warnings, and semantics are owned by #255.
+- #255 scheduling is implemented as one-shot reminders/task nudges only. Deferred/non-goals remain recurrence, background scheduler loops, SSE/push, UI schedule pages, arbitrary execution, webhooks/callbacks, automatic task or continuity mutation, graph mutation, and graph DB integration.
 - Continuity schema is now `1.1` for newly written continuity capsules and continuity archive/fallback/cold artifacts. Stabilized legacy `1.0` continuity payloads remain supported for load/upgrade when they already have the modern required capsule structure. Truly pre-stabilization payloads missing required modern capsule fields are still a bounded unsupported migration case.
 
 ## Peers and messaging

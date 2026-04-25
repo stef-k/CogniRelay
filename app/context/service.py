@@ -24,10 +24,12 @@ from app.context.graph import (
 )
 from app.timestamps import format_compact, format_iso, parse_iso
 from app.continuity import build_continuity_state, continuity_read_service
+from app.config import get_settings
 from app.indexer import TEXT_SUFFIXES, incremental_rebuild_index, list_recent_files, load_files_index, rebuild_index, search_index
 from app.models import AppendRequest, ContextRetrieveRequest, ContextSnapshotRequest, ContinuityReadRequest, RecentRequest, SearchRequest, WriteRequest
 from app.git_safety import safe_commit_new_file, safe_commit_updated_file, try_commit_file
 from app.storage import StorageError, read_text_file, safe_path, write_text_file
+from app.schedule import schedule_context_for_context_retrieve
 
 _logger = logging.getLogger(__name__)
 
@@ -708,6 +710,16 @@ def context_retrieve_service(
                 }
             ],
         }
+    if (req.subject_kind and req.subject_id) or req.continuity_selectors:
+        settings = get_settings()
+        bundle["schedule_context"] = schedule_context_for_context_retrieve(
+            repo_root=repo_root,
+            auth=auth,
+            req=req,
+            due_limit=settings.schedule_due_limit,
+            upcoming_limit=settings.schedule_upcoming_limit,
+            upcoming_window_hours=settings.schedule_upcoming_window_hours,
+        )
     continuity_selectors = [
         {
             "subject_kind": item["subject_kind"],

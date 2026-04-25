@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from app.auth import AuthContext
 from app.help import is_mcp_help_method, resolve_mcp_help_method
+from app.schedule import validate_schedule_mcp_arguments
 from app.timestamps import format_iso, iso_now
 
 SUPPORTED_PROTOCOL_VERSION = "2025-11-25"
@@ -587,7 +588,17 @@ def handle_mcp_request_payload(
         return _invalid_params(request_id, "arguments must be an object")
 
     schema = tool.get("input_schema")
-    if isinstance(schema, dict):
+    if tool_name.startswith("schedule."):
+        detail = validate_schedule_mcp_arguments(tool_name, arguments)
+        if detail is not None:
+            return _jsonrpc_error(
+                200,
+                request_id,
+                -32602,
+                "Invalid params",
+                {"reason": "schema validation failed", "detail": detail},
+            )
+    elif isinstance(schema, dict):
         schema_errors = _validate_schema_value(arguments, schema, path="", root_schema=schema)
         if schema_errors:
             return _jsonrpc_error(
@@ -622,6 +633,14 @@ def handle_mcp_request_payload(
             return _jsonrpc_error(200, request_id, -32001, "Unauthorized", {"reason": "authentication required"})
         if exc.status_code == 403:
             return _jsonrpc_error(200, request_id, -32002, "Forbidden", {"reason": "forbidden"})
+        if tool_name.startswith("schedule.") and exc.status_code in {404, 409, 422, 503}:
+            return _jsonrpc_error(
+                200,
+                request_id,
+                -32003,
+                "Tool execution failed",
+                {"reason": "tool execution failed", "detail": exc.detail},
+            )
         if exc.status_code == 404:
             return _jsonrpc_error(200, request_id, -32004, "Not Found", {"reason": "not found"})
         return _jsonrpc_error(200, request_id, -32003, "Tool execution failed", {"reason": "tool execution failed"})

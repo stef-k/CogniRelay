@@ -707,7 +707,44 @@ Graph warnings are objects with required `code`, `message`, and `details` fields
 
 Warning ordering is deterministic: sort by code in the table order above, then by `details.source_class`, `details.path`, `details.field`, and `details.anchor_id` where present.
 
-The durable continuity capsule write cap remains `20 KB` serialized UTF-8. Graph data is derived response data only, is never persisted into capsules, and does not consume the capsule write cap. #255 `schedule_context` is scheduler-owned future/coexisting response data and is not defined by the graph contract.
+The durable continuity capsule write cap remains `20 KB` serialized UTF-8. Graph data is derived response data only, is never persisted into capsules, and does not consume the capsule write cap. #255 `schedule_context` is scheduler-owned response data that coexists beside graph sections without changing graph semantics.
+
+## Schedule Reminders
+
+Schedule slice 1 stores one-shot `reminder` and `task_nudge` rows in SQLite at `memory/schedule/schedule.db`. The database is authoritative durable state; scheduled items are not mirrored into task JSON, continuity capsules, graph data, or UI state. Startup/read bootstrap may create the directory, database, schema, indexes, and migration row for read/search callers and emits `schedule_db_missing` when it observed an absent DB and created an empty store.
+
+HTTP routes:
+
+- `POST /v1/schedule/items`
+- `GET /v1/schedule/items/{schedule_id}`
+- `GET /v1/schedule/items`
+- `PATCH /v1/schedule/items/{schedule_id}`
+- `POST /v1/schedule/items/{schedule_id}/acknowledge`
+- `POST /v1/schedule/items/{schedule_id}/retire`
+
+Every returned item includes `schedule_id`, `kind`, `status`, response-only `derived_state`, `title`, `note`, `due_at`, `created_at`, `updated_at`, `created_by`, `updated_by`, terminal fields, optional `task_id`, optional `thread_id`, optional `subject_kind` plus `subject_id`, optional `idempotency_key`, `metadata`, and `version`. `derived_state` is `terminal` for acknowledged/done/retired rows, `due` for pending rows with `due_at_ts <= now_ts`, and `scheduled` for pending rows in the future.
+
+Client timestamps for schedule payloads must be exact UTC seconds strings: `YYYY-MM-DDTHH:MM:SSZ`. Offsets, local/naive timestamps, and subseconds are rejected. Create and pending due-at updates require a future due time. Each operation uses one captured UTC clock snapshot for all comparisons and writes.
+
+Schedule metadata is a flat JSON object with scalar values only; nested arrays/objects and non-finite numbers are rejected. Canonical metadata and create identity JSON use sorted compact JSON with `ensure_ascii=False` and must fit within 2048 UTF-8 bytes. `create_identity_hash` and `create_identity_json` are immutable after creation and are used for deterministic idempotent replay even if mutable row fields change later.
+
+`schedule_context` appears in:
+
+```json
+{
+  "schedule_context": {
+    "due": {"items": [], "count": 0, "truncated": false},
+    "upcoming": {"window_hours": 72, "items": [], "count": 0, "truncated": false},
+    "warnings": []
+  }
+}
+```
+
+`POST /v1/continuity/read` includes this block when `view="startup"`. `POST /v1/context/retrieve` includes `bundle.schedule_context` when the request has a primary subject or explicit `continuity_selectors`. Scope is exact thread/task/subject matching with thread and task aliasing through `thread_id` and `task_id`; unrelated global reminders are not injected into scoped orientation.
+
+User-facing schedule settings are exactly `COGNIRELAY_SCHEDULE_DUE_LIMIT` (default `10`, min `1`, max `100`), `COGNIRELAY_SCHEDULE_UPCOMING_LIMIT` (default `5`, min `0`, max `100`), and `COGNIRELAY_SCHEDULE_UPCOMING_WINDOW_HOURS` (default `72`, min `1`, max `720`). SQLite busy timeout and retry constants are internal and are not `.env` settings.
+
+Non-goals remain explicit: no recurrence, background scheduler loop, SSE/push delivery, UI schedule page, arbitrary command execution, webhooks/callbacks, automatic task mutation, automatic continuity mutation, graph mutation, or graph DB behavior.
 
 ## Salience Ranking
 

@@ -64,7 +64,8 @@ The post-#119 continuity enhancements are not separate MCP tools — they are pa
 - **Trust signals**: `continuity.read` and `context.retrieve` responses include `trust_signals` automatically — no extra parameter needed. See [Payload Reference](payload-reference.md#read--post-v1continuityread) for the four dimensions.
 - **Graph runtime context**: `tools/call` with `name="context.retrieve"` returns `structuredContent.bundle.graph_context` by default. `tools/call` with `name="continuity.read"` and `arguments.view="startup"` returns top-level `structuredContent.graph_summary`; non-startup `continuity.read` remains graph-free. No graph request flag is advertised or required.
 - Graph warning codes are local to the graph section: `graph_anchor_not_provided`, `graph_anchor_not_supported`, `graph_anchor_not_found`, `graph_derivation_failed`, `graph_truncated`, `graph_result_malformed`, `graph_source_denied`, and `graph_suppressed_by_continuity_mode`.
-- #255 scheduler behavior is separate. If a scheduler-owned `schedule_context` section exists later, MCP graph sections coexist beside it without changing scheduler semantics.
+- **One-shot reminders**: `schedule.create`, `schedule.get`, `schedule.list`, `schedule.update`, `schedule.acknowledge`, and `schedule.retire` map to the HTTP schedule routes. Due evaluation is pull-only; due reminders also appear in startup/context `schedule_context` for matching scopes. `schedule.acknowledge` with `status="done"` is the completion path; there is no separate `schedule.done` tool.
+- Schedule is data-only: no recurrence, background loop, SSE/push, UI schedule page, command execution, webhook/callback, automatic task mutation, automatic continuity mutation, graph mutation, or graph database behavior is included.
 - **Session-end snapshot**: Canonical `pre_compaction_or_handoff` may pass `session_end_snapshot` only when no write-eligible non-snapshot field changed. See [Payload Reference](payload-reference.md#session-end-snapshot-helper) for the merge algorithm.
 - **Thread identity filters**: Pass `lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, and `anchor_value` in `continuity.list` to filter by thread scope. See [Payload Reference](payload-reference.md#threaddescriptor) for the model.
 - **Lifecycle transitions**: Pass `lifecycle_transition` and `superseded_by` in `continuity.upsert` to transition thread lifecycle. See [Payload Reference](payload-reference.md#upsert--post-v1continuityupsert) for constraints.
@@ -118,6 +119,12 @@ MCP tools are adapters over the HTTP API. Examples:
 - `messages.send` -> `POST /v1/messages/send`
 - `continuity.refresh_plan` -> `POST /v1/continuity/refresh/plan`
 - `continuity.delete` -> `POST /v1/continuity/delete`
+- `schedule.create` -> `POST /v1/schedule/items`
+- `schedule.get` -> `GET /v1/schedule/items/{schedule_id}`
+- `schedule.list` -> `GET /v1/schedule/items`
+- `schedule.update` -> `PATCH /v1/schedule/items/{schedule_id}`
+- `schedule.acknowledge` -> `POST /v1/schedule/items/{schedule_id}/acknowledge`
+- `schedule.retire` -> `POST /v1/schedule/items/{schedule_id}/retire`
 - `code.checks_run` -> `POST /v1/code/checks/run`
 - `security.tokens_issue` -> `POST /v1/security/tokens/issue`
 - `ops.run` -> `POST /v1/ops/run`
@@ -178,6 +185,8 @@ HTTP status handling is intentionally narrow:
 - `400` for parse failures and envelope-invalid requests
 - `200` for JSON-RPC success and JSON-RPC error envelopes after envelope acceptance
 - `204` only for successful `notifications/initialized`
+
+Schedule validation failures raised before dispatch map to JSON-RPC `-32602` with `error.data.reason="schema validation failed"` and the single schedule detail under `error.data.detail`. Schedule domain `404`, `409`, `422`, and `503` failures after dispatch map to `-32003 Tool execution failed` with the HTTP `detail` preserved under `error.data.detail`. Degraded schedule reads/lists that return HTTP `200` remain JSON-RPC successes with `structuredContent.ok=false` and warning codes in the structured payload.
 - `403` for denied non-loopback `Origin` values on `POST /v1/mcp`
 
 ## Recommendations

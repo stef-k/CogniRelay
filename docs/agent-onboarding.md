@@ -18,7 +18,8 @@ The minimum shipped bootstrap path is a read first, then bounded retrieval only 
 
 1. Call `continuity.read` / `POST /v1/continuity/read` with `view="startup"` and `allow_fallback=true`.
 2. Consume the returned startup-oriented continuity result as the first orientation input, including top-level `graph_summary` when present.
-3. Optionally call `context.retrieve` / `POST /v1/context/retrieve` when the first work step needs bounded fresh context beyond startup orientation; it includes `bundle.graph_context` by default unless `continuity_mode="off"` suppresses graph derivation.
+3. Check `schedule_context.due.items` in startup output when present. Due reminders are read-only orientation data; they are not executed or auto-acknowledged.
+4. Optionally call `context.retrieve` / `POST /v1/context/retrieve` when the first work step needs bounded fresh context beyond startup orientation; it includes `bundle.graph_context` by default unless `continuity_mode="off"` suppresses graph derivation and includes scoped `schedule_context` when the request has a primary subject or continuity selectors.
 
 If the startup result has warnings, fallback state, stale continuity, trimming, or degraded trust, use the best returned result already received and verify critical assumptions only against the shipped help/reference lookup surfaces named in this manual and the current task inputs already in hand.
 
@@ -37,6 +38,7 @@ Map runtime-specific hook names to these four canonical hooks. `startup` and `pr
 - Shipped narrow update variants such as `POST /v1/continuity/patch` / `continuity.patch` and lifecycle-specialized surfaces are deeper specialized follow-ons, not canonical hook routes in onboarding.
 - Prompt text, response text, transcripts, raw tool chatter, shell output, and copied retrieval snippets must not be written into continuity at any hook.
 - Graph orientation is derived response data only. Read `graph_summary.warnings` or `bundle.graph_context.warnings` for graph-local degradation such as `graph_source_denied` or `graph_truncated`; non-startup `continuity.read` remains graph-free.
+- Reminder orientation is also read-only. `schedule_context` appears in startup/context orientation for matching thread, task, or subject scopes; use `schedule.list` for manual inspection, `schedule.acknowledge` with `status="done"` for completion, or `schedule.retire` when a reminder is no longer relevant.
 - Use deeper references only for exact hook matrix details after this mapping is clear.
 
 ## How To Ask CogniRelay For Help
@@ -66,6 +68,7 @@ Use this closed routing list for ordinary operation. Prefer HTTP identifiers at 
 | startup/orientation recovery | `POST /v1/continuity/read` | `continuity.read` | `POST /v1/continuity/read` with `view="startup"` and `allow_fallback=true` | `continuity.read` is the transport-equivalent alternate for runtimes using MCP |
 | bounded retrieval | `POST /v1/context/retrieve` | `context.retrieve` | `POST /v1/context/retrieve` | `context.retrieve` is the transport-equivalent alternate for runtimes using MCP |
 | continuity write/update | `POST /v1/continuity/upsert` | `continuity.upsert` | `POST /v1/continuity/upsert` | `continuity.upsert` is the transport-equivalent alternate for runtimes using MCP; shipped narrow update variants `POST /v1/continuity/patch` / `continuity.patch` and `POST /v1/continuity/lifecycle` / `continuity.lifecycle` are specialized follow-ons, not the preferred onboarding-level route |
+| reminder inspection | `GET /v1/schedule/items` | `schedule.list` | `GET /v1/schedule/items?due=true` for explicit due inspection | Due reminders also arrive through startup/context `schedule_context`; no SSE, recurrence, UI schedule page, callback, or background scheduler exists |
 | task lookup | `GET /v1/tasks/query` | `tasks.query` | `GET /v1/tasks/query` | `tasks.query` is the transport-equivalent alternate for runtimes using MCP |
 | help lookup | `GET /v1/help` | `system.help` | `GET /v1/help` | `system.help` is the transport-equivalent alternate for runtimes using MCP; exact sub-lookups stay `GET /v1/help/tools/{name}`, `GET /v1/help/topics/{id}`, `GET /v1/help/hooks`, `GET /v1/help/errors/{code}` and `system.tool_usage`, `system.topic_help`, `system.hook_guide`, `system.error_guide` |
 
@@ -92,6 +95,7 @@ Current shipped bootstrap-critical limits/caps agents routinely author against:
 - Native retrieval default budget (`max_tokens_estimate`) = `12000`.
 - Multi-capsule continuity retrieval cap (`continuity_max_capsules`) = `4`.
 - Continuity capsule serialized write cap = `20 KB`.
+- Schedule orientation caps: due items default to `10`, upcoming items default to `5`, and upcoming window defaults to `72` hours. These are response caps for reminders, not continuity capsule storage.
 
 ## Operational Workflow Rules
 

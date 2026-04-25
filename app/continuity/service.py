@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 from app.auth import AuthContext
+from app.config import get_settings
 from app.timestamps import parse_iso as _parse_iso, format_iso, format_compact, iso_now
 from app.lifecycle_warnings import make_error_detail, make_warning
 from app.storage import build_cold_gzip_bytes
@@ -49,6 +50,7 @@ from app.models import (
     ContextRetrieveRequest,
 )
 from app.storage import canonical_json, safe_path, write_bytes_file, write_text_file
+from app.schedule import schedule_context_for_startup_read
 from app.continuity.constants import (
     CAPSULE_SIZE_LIMIT_ERROR_DETAIL,
     CAPSULE_SIZE_LIMIT_BYTES,
@@ -1257,6 +1259,15 @@ def continuity_read_service(
                     }
                 ],
             }
+        settings = get_settings()
+        out["schedule_context"] = schedule_context_for_startup_read(
+            repo_root=repo_root,
+            auth=auth,
+            req=req,
+            due_limit=settings.schedule_due_limit,
+            upcoming_limit=settings.schedule_upcoming_limit,
+            upcoming_window_hours=settings.schedule_upcoming_window_hours,
+        )
     return out
 
 

@@ -62,6 +62,89 @@ from app.models import (
 from app.storage import canonical_json
 
 
+def _schedule_metadata_schema() -> dict[str, Any]:
+    return {"type": ["object", "null"], "additionalProperties": {"type": ["string", "number", "boolean", "null"]}}
+
+
+def _schedule_create_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["kind", "title", "due_at"],
+        "properties": {
+            "schedule_id": {"type": "string"},
+            "idempotency_key": {"type": "string"},
+            "kind": {"type": "string", "enum": ["reminder", "task_nudge"]},
+            "title": {"type": "string", "minLength": 1, "maxLength": 160},
+            "note": {"type": ["string", "null"], "maxLength": 1000},
+            "due_at": {"type": "string"},
+            "task_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 200},
+            "thread_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 200},
+            "subject_kind": {"type": ["string", "null"], "enum": ["user", "peer", "thread", "task", None]},
+            "subject_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 200},
+            "metadata": _schedule_metadata_schema(),
+        },
+    }
+
+
+def _schedule_list_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "status": {"type": "string", "enum": ["pending", "acknowledged", "done", "retired"]},
+            "due": {"type": "boolean"},
+            "task_id": {"type": "string", "minLength": 1, "maxLength": 200},
+            "thread_id": {"type": "string", "minLength": 1, "maxLength": 200},
+            "subject_kind": {"type": "string", "enum": ["user", "peer", "thread", "task"]},
+            "subject_id": {"type": "string", "minLength": 1, "maxLength": 200},
+            "include_retired": {"type": "boolean", "default": False},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
+        },
+    }
+
+
+def _schedule_update_schema() -> dict[str, Any]:
+    schema = _schedule_create_schema()
+    props = dict(schema["properties"])
+    props.pop("idempotency_key", None)
+    props["expected_version"] = {"type": "integer", "minimum": 1}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schedule_id", "expected_version"],
+        "properties": props,
+    }
+
+
+def _schedule_ack_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schedule_id"],
+        "properties": {
+            "schedule_id": {"type": "string"},
+            "expected_version": {"type": "integer", "minimum": 1},
+            "status": {"type": "string", "enum": ["acknowledged", "done"], "default": "acknowledged"},
+            "reason": {"type": ["string", "null"], "maxLength": 500},
+        },
+    }
+
+
+def _schedule_retire_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schedule_id"],
+        "properties": {
+            "schedule_id": {"type": "string"},
+            "expected_version": {"type": "integer", "minimum": 1},
+            "reason": {"type": ["string", "null"], "maxLength": 500},
+        },
+    }
+
+
 def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict[str, Any]]:
     """Return the machine-readable tool catalog exposed by the service."""
     return [
@@ -271,6 +354,60 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["search", "read_namespaces"],
             "idempotent": True,
             "input_schema": schema_for_model(RecentRequest),
+        },
+        {
+            "name": "schedule.create",
+            "description": "Create a one-shot reminder or task nudge; due reminders surface through pull/list and orientation responses.",
+            "method": "POST",
+            "path": "/v1/schedule/items",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": True,
+            "input_schema": _schedule_create_schema(),
+        },
+        {
+            "name": "schedule.get",
+            "description": "Read one scheduled reminder or task nudge by schedule_id.",
+            "method": "GET",
+            "path": "/v1/schedule/items/{schedule_id}",
+            "scopes": ["read:files", "read_namespaces"],
+            "idempotent": True,
+            "input_schema": {"type": "object", "properties": {"schedule_id": {"type": "string"}}, "required": ["schedule_id"], "additionalProperties": False},
+        },
+        {
+            "name": "schedule.list",
+            "description": "List scheduled items with due/upcoming filters; due evaluation is pull-only and does not mutate rows.",
+            "method": "GET",
+            "path": "/v1/schedule/items",
+            "scopes": ["read:files", "read_namespaces"],
+            "idempotent": True,
+            "input_schema": _schedule_list_schema(),
+        },
+        {
+            "name": "schedule.update",
+            "description": "Patch mutable fields on a pending scheduled item using expected_version.",
+            "method": "PATCH",
+            "path": "/v1/schedule/items/{schedule_id}",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": _schedule_update_schema(),
+        },
+        {
+            "name": "schedule.acknowledge",
+            "description": "Mark a scheduled item acknowledged or done; no separate schedule.done tool exists.",
+            "method": "POST",
+            "path": "/v1/schedule/items/{schedule_id}/acknowledge",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": _schedule_ack_schema(),
+        },
+        {
+            "name": "schedule.retire",
+            "description": "Retire a scheduled item without deleting it.",
+            "method": "POST",
+            "path": "/v1/schedule/items/{schedule_id}/retire",
+            "scopes": ["write:projects", "write_namespaces"],
+            "idempotent": False,
+            "input_schema": _schedule_retire_schema(),
         },
         {
             "name": "context.retrieve",
@@ -1102,6 +1239,12 @@ def invoke_tool_by_name(
     peer_manifest: Callable[[str, AuthContext | None], dict[str, Any]],
     search: Callable[[SearchRequest, AuthContext | None], dict[str, Any]],
     recent_list: Callable[[RecentRequest, AuthContext | None], dict[str, Any]],
+    schedule_create: Callable[[dict[str, Any], AuthContext | None], dict[str, Any]],
+    schedule_get: Callable[[str, AuthContext | None], dict[str, Any]],
+    schedule_list: Callable[[dict[str, Any], AuthContext | None], dict[str, Any]],
+    schedule_update: Callable[[str, dict[str, Any], AuthContext | None], dict[str, Any]],
+    schedule_acknowledge: Callable[[str, dict[str, Any], AuthContext | None], dict[str, Any]],
+    schedule_retire: Callable[[str, dict[str, Any], AuthContext | None], dict[str, Any]],
     context_retrieve: Callable[[ContextRetrieveRequest, AuthContext | None], dict[str, Any]],
     continuity_upsert: Callable[[ContinuityUpsertRequest, AuthContext | None], dict[str, Any]],
     continuity_read: Callable[[ContinuityReadRequest, AuthContext | None], dict[str, Any]],
@@ -1209,6 +1352,24 @@ def invoke_tool_by_name(
         return search(SearchRequest(**args), auth)
     if name == "recent.list":
         return recent_list(RecentRequest(**args), auth)
+    if name == "schedule.create":
+        return schedule_create(args, auth)
+    if name == "schedule.get":
+        return schedule_get(str(args["schedule_id"]), auth)
+    if name == "schedule.list":
+        return schedule_list(args, auth)
+    if name == "schedule.update":
+        req_args = dict(args)
+        schedule_id = str(req_args.pop("schedule_id"))
+        return schedule_update(schedule_id, req_args, auth)
+    if name == "schedule.acknowledge":
+        req_args = dict(args)
+        schedule_id = str(req_args.pop("schedule_id"))
+        return schedule_acknowledge(schedule_id, req_args, auth)
+    if name == "schedule.retire":
+        req_args = dict(args)
+        schedule_id = str(req_args.pop("schedule_id"))
+        return schedule_retire(schedule_id, req_args, auth)
     if name == "context.retrieve":
         return context_retrieve(ContextRetrieveRequest(**args), auth)
     if name == "continuity.upsert":
@@ -1408,6 +1569,7 @@ def capabilities_payload() -> dict[str, Any]:
             "governance_policy_pack",
             "abuse_controls",
             "host_ops_orchestration",
+            "schedule.one_shot_reminders",
         ]
     }
 
@@ -1451,6 +1613,9 @@ def capabilities_v1_payload() -> dict[str, Any]:
             },
             "context.retrieve.continuity_state": {
                 "summary": "Multi-capsule continuity-oriented context bundles with fallback and degradation",
+            },
+            "schedule.one_shot_reminders": {
+                "summary": "SQLite-backed one-shot reminders and task nudges surfaced by pull/list and orientation responses",
             },
             "coordination.handoffs": {
                 "summary": "Local-first inter-agent handoff artifacts with consume tracking",
