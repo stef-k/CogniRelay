@@ -214,18 +214,21 @@ _TOOLS = {
         ],
         "write_operations": [],
         "minimal_payload": {
-            "task": "Address determinism findings on issue #214 only.",
+            "task": "Continue work related to thread release-v1.4-followup after restart/downtime.",
             "subject_kind": "thread",
-            "subject_id": "issue-214",
-            "continuity_mode": "required",
+            "subject_id": "release-v1.4-followup",
+            "continuity_mode": "auto",
+            "continuity_resilience_policy": "allow_fallback",
+            "continuity_verification_policy": "allow_degraded",
         },
         "common_mistakes": [
             "Using continuity.read fields as if they were context.retrieve fields.",
+            "Using top-level thread_id for primary context.retrieve thread scoping.",
             "Persisting prompt text, retrieved snippets, or transcript material through context.retrieve.",
             "Looking for graph warnings in continuity_state.warnings instead of bundle.graph_context.warnings.",
         ],
         "correction_hints": [
-            "Use exactly task, subject_kind, subject_id, and continuity_mode in the minimal payload shape defined by this issue.",
+            "For primary thread retrieval scoping, use subject_kind=\"thread\" plus subject_id=\"release-v1.4-followup\".",
             "Keep context.retrieve read-only and do not persist prompt or retrieval transcript material.",
             "When continuity_mode is off, expect an empty bundle.graph_context with graph_suppressed_by_continuity_mode.",
         ],
@@ -268,12 +271,17 @@ _TOOLS = {
         "when_to_use": [
             "Use for manual inspection of all reminders or for explicit due polling.",
             "Use due=true to return pending items whose due_at is at or before the operation clock.",
+            "Use GET /v1/schedule/items?due=true&thread_id=release-v1.4-followup for explicit thread_id due inspection.",
+            "Use GET /v1/schedule/items?due=true&subject_kind=thread&subject_id=release-v1.4-followup for subject tuple due inspection.",
         ],
         "read_operations": ["GET /v1/schedule/items", "schedule.list"],
         "write_operations": [],
         "minimal_payload": {"due": True, "limit": 10},
         "common_mistakes": ["Expecting schedule.list to mark reminders delivered or acknowledged."],
-        "correction_hints": ["Call schedule.acknowledge after the agent has handled a due reminder."],
+        "correction_hints": [
+            "schedule.list supports explicit thread_id filtering and subject_kind=thread&subject_id filtering.",
+            "Call schedule.acknowledge after the agent has handled a due reminder.",
+        ],
     },
     "schedule.update": {
         "kind": "tool",
@@ -1790,12 +1798,20 @@ def resolve_mcp_help_method(
         payload = help_tool_payload(tool_name or "")
         if isinstance(payload, JSONResponse):
             return None, _mcp_invalid_params("unknown tool", name=tool_name)
+        summary = str(payload["purpose"])
+        if tool_name == "context.retrieve":
+            summary += ' Thread scoping uses subject_kind="thread" plus subject_id="release-v1.4-followup", not top-level thread_id.'
+        elif tool_name == "schedule.list":
+            summary += (
+                " Due inspection supports due=true&thread_id=release-v1.4-followup and "
+                "due=true&subject_kind=thread&subject_id=release-v1.4-followup."
+            )
         return _mcp_result(
             {
                 "surface": "tool_help",
                 "httpEquivalent": f"/v1/help/tools/{tool_name}",
                 "name": tool_name,
-                "summary": str(payload["purpose"]),
+                "summary": summary,
             }
         ), None
 

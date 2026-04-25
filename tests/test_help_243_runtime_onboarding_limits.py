@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -700,6 +701,64 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
         self.assertNotRegex(text, r"\|[^\n]*field_path[^\n]*max_items")
         field_path_mentions = set(re.findall(r"`((?:continuity|session_end_snapshot|patch|context\.retrieve)\.[a-zA-Z0-9_.]+)`", text))
         self.assertLessEqual(len(field_path_mentions), 20)
+
+    def test_docs_agent_onboarding_has_thread_scoped_context_retrieve_without_thread_id_example(self) -> None:
+        text = Path("docs/agent-onboarding.md").read_text(encoding="utf-8")
+        context_blocks: list[dict[str, Any]] = []
+        for match in re.finditer(r"```json\s*(.*?)```", text, flags=re.DOTALL):
+            nearby_prose = text[max(0, match.start() - 300) : match.start()]
+            if "context.retrieve" not in nearby_prose:
+                continue
+            payload = json.loads(match.group(1))
+            context_blocks.append(payload)
+            self.assertNotIn("thread_id", payload)
+
+        self.assertTrue(context_blocks)
+        self.assertTrue(
+            any(
+                payload.get("subject_kind") == "thread"
+                and payload.get("subject_id") == "release-v1.4-followup"
+                and payload.get("continuity_mode") == "auto"
+                for payload in context_blocks
+            )
+        )
+
+    def test_runtime_tool_help_contains_issue_264_selector_guidance_without_new_keys(self) -> None:
+        expected_tool_keys = {
+            "kind",
+            "id",
+            "purpose",
+            "when_to_use",
+            "read_operations",
+            "write_operations",
+            "minimal_payload",
+            "common_mistakes",
+            "correction_hints",
+        }
+
+        context_payload = self.client.get("/v1/help/tools/context.retrieve").json()
+        self.assertEqual(set(context_payload), expected_tool_keys)
+        self.assertNotIn("examples", context_payload)
+        self.assertNotIn("thread_id", context_payload["minimal_payload"])
+        context_text = json.dumps(context_payload, sort_keys=True)
+        for token in ("subject_kind", "thread", "subject_id", "release-v1.4-followup"):
+            with self.subTest(tool="context.retrieve", token=token):
+                self.assertIn(token, context_text)
+
+        schedule_payload = self.client.get("/v1/help/tools/schedule.list").json()
+        self.assertEqual(set(schedule_payload), expected_tool_keys)
+        self.assertNotIn("examples", schedule_payload)
+        schedule_text = json.dumps(schedule_payload, sort_keys=True)
+        for token in (
+            "due=true",
+            "thread_id",
+            "subject_kind=thread",
+            "subject_id",
+            "due=true&thread_id=release-v1.4-followup",
+            "due=true&subject_kind=thread&subject_id=release-v1.4-followup",
+        ):
+            with self.subTest(tool="schedule.list", token=token):
+                self.assertIn(token, schedule_text)
 
     def test_onboarding_runtime_constants_align_with_doc_anchors(self) -> None:
         text = Path("docs/agent-onboarding.md").read_text(encoding="utf-8")

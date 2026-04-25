@@ -21,6 +21,19 @@ The minimum shipped bootstrap path is a read first, then bounded retrieval only 
 3. Check `schedule_context.due.items` in startup output when present. Due reminders are read-only orientation data; they are not executed or auto-acknowledged.
 4. Optionally call `context.retrieve` / `POST /v1/context/retrieve` when the first work step needs bounded fresh context beyond startup orientation; it includes `bundle.graph_context` by default unless `continuity_mode="off"` suppresses graph derivation and includes scoped `schedule_context` when the request has a primary subject or continuity selectors.
 
+For primary thread scoping, `context.retrieve` uses `subject_kind` + `subject_id`, not top-level `thread_id`:
+
+```json
+{
+  "task": "Continue work related to thread release-v1.4-followup after restart/downtime.",
+  "subject_kind": "thread",
+  "subject_id": "release-v1.4-followup",
+  "continuity_mode": "auto",
+  "continuity_resilience_policy": "allow_fallback",
+  "continuity_verification_policy": "allow_degraded"
+}
+```
+
 If the startup result has warnings, fallback state, stale continuity, trimming, or degraded trust, use the best returned result already received and verify critical assumptions only against the shipped help/reference lookup surfaces named in this manual and the current task inputs already in hand.
 
 ## Canonical Hooks
@@ -38,7 +51,7 @@ Map runtime-specific hook names to these four canonical hooks. `startup` and `pr
 - Shipped narrow update variants such as `POST /v1/continuity/patch` / `continuity.patch` and lifecycle-specialized surfaces are deeper specialized follow-ons, not canonical hook routes in onboarding.
 - Prompt text, response text, transcripts, raw tool chatter, shell output, and copied retrieval snippets must not be written into continuity at any hook.
 - Graph orientation is derived response data only. Read `graph_summary.warnings` or `bundle.graph_context.warnings` for graph-local degradation such as `graph_source_denied` or `graph_truncated`; non-startup `continuity.read` remains graph-free.
-- Reminder orientation is also read-only. `schedule_context` appears in startup/context orientation for matching thread, task, or subject scopes; use `schedule.list` for manual inspection, `schedule.acknowledge` with `status="done"` for completion, or `schedule.retire` when a reminder is no longer relevant.
+- Reminder orientation is also read-only. `schedule.list` supports explicit `thread_id` filtering and subject tuple filtering; `schedule_context` also appears in startup/context orientation for matching thread, task, or subject scopes. Use `schedule.acknowledge` with `status="done"` for completion, or `schedule.retire` when a reminder is no longer relevant.
 - Use deeper references only for exact hook matrix details after this mapping is clear.
 
 ## How To Ask CogniRelay For Help
@@ -71,6 +84,13 @@ Use this closed routing list for ordinary operation. Prefer HTTP identifiers at 
 | reminder inspection | `GET /v1/schedule/items` | `schedule.list` | `GET /v1/schedule/items?due=true` for explicit due inspection | Due reminders also arrive through startup/context `schedule_context`; no SSE, recurrence, UI schedule page, callback, or background scheduler exists |
 | task lookup | `GET /v1/tasks/query` | `tasks.query` | `GET /v1/tasks/query` | `tasks.query` is the transport-equivalent alternate for runtimes using MCP |
 | help lookup | `GET /v1/help` | `system.help` | `GET /v1/help` | `system.help` is the transport-equivalent alternate for runtimes using MCP; exact sub-lookups stay `GET /v1/help/tools/{name}`, `GET /v1/help/topics/{id}`, `GET /v1/help/hooks`, `GET /v1/help/errors/{code}` and `system.tool_usage`, `system.topic_help`, `system.hook_guide`, `system.error_guide` |
+
+Compact due-reminder inspection examples:
+
+```text
+GET /v1/schedule/items?due=true&thread_id=release-v1.4-followup
+GET /v1/schedule/items?due=true&subject_kind=thread&subject_id=release-v1.4-followup
+```
 
 Task creation and task updates are described at onboarding level only through the continuity write/update path: `POST /v1/continuity/upsert` on HTTP and `continuity.upsert` on MCP. Any specialized task-write behavior belongs in deeper reference/help lookup, not in bootstrap routing.
 
