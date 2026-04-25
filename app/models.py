@@ -133,6 +133,76 @@ class ContextSnapshotRequest(BaseModel):
     include_core: bool = True
 
 
+class ScheduleCreateRequest(BaseModel):
+    """Request payload for creating a one-shot scheduled reminder or nudge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schedule_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    kind: Literal["reminder", "task_nudge"]
+    title: str
+    note: Optional[str] = None
+    due_at: str
+    task_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    subject_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ScheduleListRequest(BaseModel):
+    """Tool payload for listing scheduled reminders."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Optional[Literal["pending", "acknowledged", "done", "retired"]] = None
+    due: Optional[bool] = None
+    task_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    subject_id: Optional[str] = None
+    include_retired: bool = False
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0, le=10000)
+
+
+class ScheduleUpdateRequest(BaseModel):
+    """Request payload for patching a pending scheduled item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    kind: Optional[Literal["reminder", "task_nudge"]] = None
+    title: Optional[str] = None
+    note: Optional[str] = None
+    due_at: Optional[str] = None
+    task_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    subject_kind: Optional[Literal["user", "peer", "thread", "task"]] = None
+    subject_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ScheduleAcknowledgeRequest(BaseModel):
+    """Request payload for acknowledging or completing a scheduled item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: Optional[int] = Field(default=None, ge=1)
+    status: Literal["acknowledged", "done"] = "acknowledged"
+    reason: Optional[str] = None
+
+
+class ScheduleRetireRequest(BaseModel):
+    """Request payload for retiring a scheduled item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: Optional[int] = Field(default=None, ge=1)
+    reason: Optional[str] = None
+
+
 class DeliveryPolicy(BaseModel):
     """Delivery behavior attached to outbound messages."""
 

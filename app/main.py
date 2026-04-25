@@ -38,6 +38,14 @@ from .context import (
     search_service,
     write_file_service,
 )
+from .schedule import (
+    schedule_acknowledge_service,
+    schedule_create_service,
+    schedule_get_service,
+    schedule_list_service,
+    schedule_retire_service,
+    schedule_update_service,
+)
 from .continuity import (
     continuity_archive_service,
     continuity_cold_rehydrate_service,
@@ -409,6 +417,12 @@ def _invoke_tool_by_name(name: str, arguments: dict[str, Any], auth: AuthContext
         peer_manifest=lambda peer_id, auth_ctx: peer_manifest(peer_id=peer_id, auth=auth_ctx),  # type: ignore[arg-type]
         search=lambda req, auth_ctx: search(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         recent_list=lambda req, auth_ctx: recent_list(req=req, auth=auth_ctx),  # type: ignore[arg-type]
+        schedule_create=lambda payload, auth_ctx: schedule_create_payload(payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
+        schedule_get=lambda schedule_id, auth_ctx: schedule_get(schedule_id=schedule_id, auth=auth_ctx),  # type: ignore[arg-type]
+        schedule_list=lambda query, auth_ctx: schedule_list_payload(query=query, auth=auth_ctx),  # type: ignore[arg-type]
+        schedule_update=lambda schedule_id, payload, auth_ctx: schedule_update_payload(schedule_id=schedule_id, payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
+        schedule_acknowledge=lambda schedule_id, payload, auth_ctx: schedule_acknowledge_payload(schedule_id=schedule_id, payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
+        schedule_retire=lambda schedule_id, payload, auth_ctx: schedule_retire_payload(schedule_id=schedule_id, payload=payload, auth=auth_ctx),  # type: ignore[arg-type]
         context_retrieve=lambda req, auth_ctx: context_retrieve(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_upsert=lambda req, auth_ctx: continuity_upsert(req=req, auth=auth_ctx),  # type: ignore[arg-type]
         continuity_read=lambda req, auth_ctx: continuity_read(req=req, auth=auth_ctx),  # type: ignore[arg-type]
@@ -941,6 +955,118 @@ def recent_list(req: RecentRequest, auth: AuthContext = Depends(require_auth)) -
         req=req,
         audit=_make_audit(settings, gm),
     )
+
+
+async def _schedule_json_body(request: FastAPIRequest) -> dict[str, Any]:
+    try:
+        raw = await request.body()
+        if not raw:
+            return {}
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_schedule_payload", "field": "body", "message": "body must be valid JSON"},
+        )
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_schedule_payload", "field": "body", "message": "body must be a JSON object"},
+        )
+    return payload
+
+
+def schedule_create_payload(payload: dict[str, Any], auth: AuthContext) -> dict:
+    settings, _gm = _services()
+    _status_code, body = schedule_create_service(repo_root=settings.repo_root, auth=auth, payload=payload)
+    return body
+
+
+@app.post("/v1/schedule/items")
+async def schedule_create(request: FastAPIRequest, auth: AuthContext = Depends(require_auth)) -> JSONResponse:
+    """Create a one-shot scheduled reminder or task nudge."""
+    settings, _gm = _services()
+    status_code, body = schedule_create_service(
+        repo_root=settings.repo_root,
+        auth=auth,
+        payload=await _schedule_json_body(request),
+    )
+    return JSONResponse(status_code=status_code, content=body)
+
+
+@app.get("/v1/schedule/items/{schedule_id}")
+def schedule_get(schedule_id: str, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Read one scheduled item by id."""
+    settings, _gm = _services()
+    return schedule_get_service(repo_root=settings.repo_root, auth=auth, schedule_id=schedule_id)
+
+
+def schedule_list_payload(query: dict[str, Any], auth: AuthContext) -> dict:
+    settings, _gm = _services()
+    return schedule_list_service(repo_root=settings.repo_root, auth=auth, query=query)
+
+
+@app.get("/v1/schedule/items")
+def schedule_list(
+    status: str | None = Query(default=None),
+    due: str | None = Query(default=None),
+    task_id: str | None = Query(default=None),
+    thread_id: str | None = Query(default=None),
+    subject_kind: str | None = Query(default=None),
+    subject_id: str | None = Query(default=None),
+    include_retired: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    offset: str | None = Query(default=None),
+    auth: AuthContext = Depends(require_auth),
+) -> dict:
+    """List scheduled items with deterministic filters."""
+    return schedule_list_payload(
+        auth=auth,
+        query={
+            "status": status,
+            "due": due,
+            "task_id": task_id,
+            "thread_id": thread_id,
+            "subject_kind": subject_kind,
+            "subject_id": subject_id,
+            "include_retired": include_retired,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+
+
+def schedule_update_payload(schedule_id: str, payload: dict[str, Any], auth: AuthContext) -> dict:
+    settings, _gm = _services()
+    return schedule_update_service(repo_root=settings.repo_root, auth=auth, schedule_id=schedule_id, payload=payload)
+
+
+@app.patch("/v1/schedule/items/{schedule_id}")
+async def schedule_update(schedule_id: str, request: FastAPIRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Patch mutable fields on a pending scheduled item."""
+    return schedule_update_payload(schedule_id, await _schedule_json_body(request), auth)
+
+
+def schedule_acknowledge_payload(schedule_id: str, payload: dict[str, Any], auth: AuthContext) -> dict:
+    settings, _gm = _services()
+    return schedule_acknowledge_service(repo_root=settings.repo_root, auth=auth, schedule_id=schedule_id, payload=payload)
+
+
+@app.post("/v1/schedule/items/{schedule_id}/acknowledge")
+async def schedule_acknowledge(schedule_id: str, request: FastAPIRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Mark a scheduled item acknowledged or done."""
+    return schedule_acknowledge_payload(schedule_id, await _schedule_json_body(request), auth)
+
+
+def schedule_retire_payload(schedule_id: str, payload: dict[str, Any], auth: AuthContext) -> dict:
+    settings, _gm = _services()
+    return schedule_retire_service(repo_root=settings.repo_root, auth=auth, schedule_id=schedule_id, payload=payload)
+
+
+@app.post("/v1/schedule/items/{schedule_id}/retire")
+async def schedule_retire(schedule_id: str, request: FastAPIRequest, auth: AuthContext = Depends(require_auth)) -> dict:
+    """Retire a scheduled item without deleting it."""
+    return schedule_retire_payload(schedule_id, await _schedule_json_body(request), auth)
 
 
 def _extract_cached_raw_body(request: FastAPIRequest) -> dict | None:

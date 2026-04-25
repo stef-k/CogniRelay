@@ -37,6 +37,12 @@ EXPECTED_ROOT = {
         "continuity.read",
         "continuity.upsert",
         "context.retrieve",
+        "schedule.create",
+        "schedule.get",
+        "schedule.list",
+        "schedule.update",
+        "schedule.acknowledge",
+        "schedule.retire",
     ],
     "non_tool_topics": [
         "continuity.read.startup_view",
@@ -640,8 +646,14 @@ class TestHelp214Slice1Validation(HelpHttpTestCase):
                                 "continuity.read",
                                 "continuity.upsert",
                                 "context.retrieve",
+                                "schedule.create",
+                                "schedule.get",
+                                "schedule.list",
+                                "schedule.update",
+                                "schedule.acknowledge",
+                                "schedule.retire",
                             ],
-                            "correction_hint": "Use one of: continuity.read, continuity.upsert, context.retrieve.",
+                            "correction_hint": "Use one of the tool names returned by GET /v1/help.",
                         }
                     ],
                 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -269,38 +270,40 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
             "salience_metadata": None,
         }
 
-        with (
-            patch("app.context.service._load_core_memory", return_value=[]),
-            patch("app.context.service.build_continuity_state", return_value=continuity_state),
-            patch(
-                "app.context.service._assemble_mixed_retrieval_bundle",
-                return_value={
-                    "continuity": [{"subject_kind": "thread", "subject_id": "thread-abc"}],
-                    "supporting_documents": [
-                        {"ok": True, "path": "docs/specs/thread-abc.md", "content": "Spec body? yes."},
-                    ],
-                    "search_hits": [
-                        {"path": "docs/notes/thread-abc.md", "type": "note", "snippet": "Search follow-on.", "score": 2.0},
-                    ],
-                },
-            ) as mixed_retrieval_mock,
-        ):
-            now = datetime.now(timezone.utc)
-            auth = _AuthStub()
-            result = context_retrieve_service(
-                repo_root=Path("."),
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            with (
+                patch("app.context.service._load_core_memory", return_value=[]),
+                patch("app.context.service.build_continuity_state", return_value=continuity_state),
+                patch(
+                    "app.context.service._assemble_mixed_retrieval_bundle",
+                    return_value={
+                        "continuity": [{"subject_kind": "thread", "subject_id": "thread-abc"}],
+                        "supporting_documents": [
+                            {"ok": True, "path": "docs/specs/thread-abc.md", "content": "Spec body? yes."},
+                        ],
+                        "search_hits": [
+                            {"path": "docs/notes/thread-abc.md", "type": "note", "snippet": "Search follow-on.", "score": 2.0},
+                        ],
+                    },
+                ) as mixed_retrieval_mock,
+            ):
+                now = datetime.now(timezone.utc)
+                auth = _AuthStub()
+                result = context_retrieve_service(
+                    repo_root=repo_root,
+                    auth=auth,
+                    req=req,
+                    now=now,
+                    audit=lambda *_args, **_kwargs: None,
+                )
+
+            mixed_retrieval_mock.assert_called_once_with(
+                repo_root=repo_root,
                 auth=auth,
                 req=req,
                 now=now,
-                audit=lambda *_args, **_kwargs: None,
             )
-
-        mixed_retrieval_mock.assert_called_once_with(
-            repo_root=Path("."),
-            auth=auth,
-            req=req,
-            now=now,
-        )
         self.assertEqual(
             set(result["bundle"].keys()),
             {
@@ -314,6 +317,7 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
                 "notes",
                 "continuity_state",
                 "graph_context",
+                "schedule_context",
             },
         )
         self.assertEqual(
@@ -355,30 +359,31 @@ class TestMixedRetrievalSlice1(unittest.TestCase):
             "salience_metadata": None,
         }
 
-        with (
-            patch("app.context.service._load_core_memory", return_value=[]),
-            patch("app.context.service.build_continuity_state", return_value=continuity_state),
-            patch(
-                "app.context.service._assemble_mixed_retrieval_bundle",
-                return_value={
-                    "continuity": [{"subject_kind": "task", "subject_id": "task-42"}],
-                    "supporting_documents": [
-                        {"ok": True, "path": "docs/tasks/task-42.md", "content": "Task support"},
-                    ],
-                    "search_hits": [
-                        {"path": "docs/tasks/task-42.md", "type": "task_note", "snippet": "Fallback hit", "score": 1.0},
-                        {"path": "docs/other.md", "type": "note", "snippet": "Second hit", "score": 0.5},
-                    ],
-                },
-            ),
-        ):
-            result = context_retrieve_service(
-                repo_root=Path("."),
-                auth=_AuthStub(),
-                req=req,
-                now=datetime.now(timezone.utc),
-                audit=lambda *_args, **_kwargs: None,
-            )
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch("app.context.service._load_core_memory", return_value=[]),
+                patch("app.context.service.build_continuity_state", return_value=continuity_state),
+                patch(
+                    "app.context.service._assemble_mixed_retrieval_bundle",
+                    return_value={
+                        "continuity": [{"subject_kind": "task", "subject_id": "task-42"}],
+                        "supporting_documents": [
+                            {"ok": True, "path": "docs/tasks/task-42.md", "content": "Task support"},
+                        ],
+                        "search_hits": [
+                            {"path": "docs/tasks/task-42.md", "type": "task_note", "snippet": "Fallback hit", "score": 1.0},
+                            {"path": "docs/other.md", "type": "note", "snippet": "Second hit", "score": 0.5},
+                        ],
+                    },
+                ),
+            ):
+                result = context_retrieve_service(
+                    repo_root=Path(td),
+                    auth=_AuthStub(),
+                    req=req,
+                    now=datetime.now(timezone.utc),
+                    audit=lambda *_args, **_kwargs: None,
+                )
 
         self.assertEqual(
             [item["path"] for item in result["bundle"]["recent_relevant"]],

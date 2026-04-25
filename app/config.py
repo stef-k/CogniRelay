@@ -146,6 +146,11 @@ class Settings:
     episodic_retention_days: int = 180
     segment_history_batch_limit: int = 500
 
+    # One-shot schedule/reminder settings (issue #255)
+    schedule_due_limit: int = 10
+    schedule_upcoming_limit: int = 5
+    schedule_upcoming_window_hours: int = 72
+
 
 _cached: Settings | None = None
 
@@ -600,6 +605,15 @@ def get_settings(force_reload: bool = False) -> Settings:
         ),
         segment_history_batch_limit=_parse_int(
             _env_first("COGNIRELAY_SEGMENT_HISTORY_BATCH_LIMIT"), 500, minimum=1,
+        ),
+        schedule_due_limit=_parse_int(
+            _env_first("COGNIRELAY_SCHEDULE_DUE_LIMIT"), 10, minimum=1, maximum=100,
+        ),
+        schedule_upcoming_limit=_parse_int(
+            _env_first("COGNIRELAY_SCHEDULE_UPCOMING_LIMIT"), 5, minimum=0, maximum=100,
+        ),
+        schedule_upcoming_window_hours=_parse_int(
+            _env_first("COGNIRELAY_SCHEDULE_UPCOMING_WINDOW_HOURS"), 72, minimum=1, maximum=720,
         ),
     )
     _validate_registry_lifecycle_settings(_cached)

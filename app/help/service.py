@@ -44,6 +44,12 @@ _TOOL_IDS = [
     "continuity.read",
     "continuity.upsert",
     "context.retrieve",
+    "schedule.create",
+    "schedule.get",
+    "schedule.list",
+    "schedule.update",
+    "schedule.acknowledge",
+    "schedule.retire",
 ]
 
 _TOPIC_IDS = [
@@ -223,6 +229,84 @@ _TOOLS = {
             "Keep context.retrieve read-only and do not persist prompt or retrieval transcript material.",
             "When continuity_mode is off, expect an empty bundle.graph_context with graph_suppressed_by_continuity_mode.",
         ],
+    },
+    "schedule.create": {
+        "kind": "tool",
+        "id": "schedule.create",
+        "purpose": "Create a one-shot reminder or task nudge.",
+        "when_to_use": [
+            "Use when an agent needs a durable reminder surfaced later through startup/context orientation or schedule.list.",
+            "Use task_nudge only when the item is linked to a task, thread, or continuity subject.",
+        ],
+        "read_operations": ["GET /v1/schedule/items", "schedule.list"],
+        "write_operations": ["POST /v1/schedule/items", "schedule.create"],
+        "minimal_payload": {"kind": "reminder", "title": "Check build status", "due_at": "2026-05-01T12:00:00Z"},
+        "common_mistakes": [
+            "Using offsets, local times, or subseconds instead of exact UTC YYYY-MM-DDTHH:MM:SSZ.",
+            "Expecting CogniRelay to execute commands, send callbacks, or mutate tasks when a reminder is due.",
+        ],
+        "correction_hints": [
+            "Use UTC Z timestamps at seconds precision.",
+            "Due reminders are data records surfaced by pull/list and orientation responses until acknowledged, done, or retired.",
+        ],
+    },
+    "schedule.get": {
+        "kind": "tool",
+        "id": "schedule.get",
+        "purpose": "Read one scheduled item by schedule_id.",
+        "when_to_use": ["Use when inspecting a known reminder or task nudge."],
+        "read_operations": ["GET /v1/schedule/items/{schedule_id}", "schedule.get"],
+        "write_operations": [],
+        "minimal_payload": {"schedule_id": "sched_example1"},
+        "common_mistakes": ["Treating due_state as persisted; derived_state is computed at read time."],
+        "correction_hints": ["Use schedule.list with due=true for due-item polling."],
+    },
+    "schedule.list": {
+        "kind": "tool",
+        "id": "schedule.list",
+        "purpose": "List scheduled reminders and task nudges with deterministic filters.",
+        "when_to_use": [
+            "Use for manual inspection of all reminders or for explicit due polling.",
+            "Use due=true to return pending items whose due_at is at or before the operation clock.",
+        ],
+        "read_operations": ["GET /v1/schedule/items", "schedule.list"],
+        "write_operations": [],
+        "minimal_payload": {"due": True, "limit": 10},
+        "common_mistakes": ["Expecting schedule.list to mark reminders delivered or acknowledged."],
+        "correction_hints": ["Call schedule.acknowledge after the agent has handled a due reminder."],
+    },
+    "schedule.update": {
+        "kind": "tool",
+        "id": "schedule.update",
+        "purpose": "Patch mutable fields on a pending scheduled item.",
+        "when_to_use": ["Use to change title, due_at, links, kind, note, or metadata before terminal transition."],
+        "read_operations": ["GET /v1/schedule/items/{schedule_id}", "schedule.get"],
+        "write_operations": ["PATCH /v1/schedule/items/{schedule_id}", "schedule.update"],
+        "minimal_payload": {"schedule_id": "sched_example1", "expected_version": 1, "title": "Updated title"},
+        "common_mistakes": ["Omitting expected_version.", "Trying to patch an acknowledged, done, or retired item."],
+        "correction_hints": ["Read the item first and supply the current version; terminal rows cannot be updated."],
+    },
+    "schedule.acknowledge": {
+        "kind": "tool",
+        "id": "schedule.acknowledge",
+        "purpose": "Mark a pending scheduled item acknowledged or done.",
+        "when_to_use": ["Use after a due reminder has been seen or the associated task nudge is complete."],
+        "read_operations": ["GET /v1/schedule/items/{schedule_id}", "schedule.get"],
+        "write_operations": ["POST /v1/schedule/items/{schedule_id}/acknowledge", "schedule.acknowledge"],
+        "minimal_payload": {"schedule_id": "sched_example1", "expected_version": 1, "status": "acknowledged"},
+        "common_mistakes": ["Looking for a separate schedule.done tool."],
+        "correction_hints": ["Use schedule.acknowledge with status=\"done\" to mark completion."],
+    },
+    "schedule.retire": {
+        "kind": "tool",
+        "id": "schedule.retire",
+        "purpose": "Retire a scheduled item without deleting it.",
+        "when_to_use": ["Use when a reminder is no longer relevant but should remain auditable."],
+        "read_operations": ["GET /v1/schedule/items/{schedule_id}", "schedule.get"],
+        "write_operations": ["POST /v1/schedule/items/{schedule_id}/retire", "schedule.retire"],
+        "minimal_payload": {"schedule_id": "sched_example1", "expected_version": 1, "reason": "No longer relevant"},
+        "common_mistakes": ["Looking for a hard-delete route."],
+        "correction_hints": ["Hard delete, recurrence, SSE, UI mutation, callbacks, and automation are deferred."],
     },
 }
 
@@ -658,6 +742,7 @@ _ONBOARDING_BODIES = {
     "bootstrap": (
         "## Minimum Startup Path\n"
         "Start with POST /v1/continuity/read using view=\"startup\" and allow_fallback=true. "
+        "Check schedule_context.due.items when present; due reminders arrive through startup/context orientation and remain read-only until schedule.acknowledge or schedule.retire. "
         "Use POST /v1/context/retrieve only when the first work step needs bounded context beyond startup orientation."
     ),
     "hooks": (
@@ -686,7 +771,8 @@ _ONBOARDING_BODIES = {
     ),
     "retrieval": (
         "## Retrieval Mental Model\n"
-        "Use POST /v1/context/retrieve for bounded context packages. Tune max_tokens_estimate and continuity_max_capsules within runtime limits."
+        "Use POST /v1/context/retrieve for bounded context packages. It includes scoped schedule_context when the request carries "
+        "a primary subject or continuity selectors. Tune max_tokens_estimate and continuity_max_capsules within runtime limits."
     ),
     "trust_and_degradation": (
         "## Trust and Degradation Rules\n"
@@ -1379,6 +1465,7 @@ def help_onboarding_bootstrap_payload() -> dict[str, Any]:
         "warnings": [
             "Do not preload the full onboarding manual by default.",
             "Use field-specific validation-limit lookup after ordinary continuity validation failures.",
+            "Do not expect schedule recurrence, SSE, callbacks, UI mutation, background execution, or automatic task/continuity mutation.",
             "Treat warnings, fallback, and degraded responses as caution signals, not crashes.",
         ],
     }
@@ -1472,7 +1559,7 @@ def help_tool_payload(name: str) -> dict[str, Any] | JSONResponse:
         field="name",
         detail="Unsupported tool name.",
         allowed_values=list(_TOOL_IDS),
-        correction_hint="Use one of: continuity.read, continuity.upsert, context.retrieve.",
+        correction_hint="Use one of the tool names returned by GET /v1/help.",
     )
 
 
