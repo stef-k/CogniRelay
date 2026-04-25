@@ -413,7 +413,8 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "name": "context.retrieve",
             "description": (
                 "Build a compact context bundle for task continuation with continuity resilience, degraded index fallback, "
-                "and default bundle.graph_context graph orientation. No graph request flag is required."
+                "default bundle.graph_context graph orientation, and scoped bundle.schedule_context reminders. "
+                "No graph request flag is required."
             ),
             "method": "POST",
             "path": "/v1/context/retrieve",
@@ -434,7 +435,8 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "name": "continuity.read",
             "description": (
                 "Read one continuity capsule by exact selector with active, fallback, or structured missing-state output. "
-                "Startup view includes top-level graph_summary; non-startup reads remain graph-free. No graph request flag is required."
+                "Startup view includes top-level graph_summary and schedule_context; non-startup reads remain graph-free. "
+                "No graph request flag is required."
             ),
             "method": "POST",
             "path": "/v1/continuity/read",
@@ -1569,6 +1571,7 @@ def capabilities_payload() -> dict[str, Any]:
             "governance_policy_pack",
             "abuse_controls",
             "host_ops_orchestration",
+            "derived_graph_runtime_context",
             "schedule.one_shot_reminders",
         ]
     }
@@ -1613,6 +1616,12 @@ def capabilities_v1_payload() -> dict[str, Any]:
             },
             "context.retrieve.continuity_state": {
                 "summary": "Multi-capsule continuity-oriented context bundles with fallback and degradation",
+            },
+            "context.retrieve.graph_context": {
+                "summary": "Bounded derived graph context included by default on context retrieval responses",
+            },
+            "continuity.read.startup_graph_summary": {
+                "summary": "Bounded derived graph summary included on startup continuity reads after base read success",
             },
             "schedule.one_shot_reminders": {
                 "summary": "SQLite-backed one-shot reminders and task nudges surfaced by pull/list and orientation responses",

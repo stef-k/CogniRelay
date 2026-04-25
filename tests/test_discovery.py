@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.main import discovery, discovery_tools, discovery_workflows, manifest
+from app.main import capabilities, capabilities_v1, discovery, discovery_tools, discovery_workflows, manifest
 
 
 class TestDiscoveryEndpoints(unittest.TestCase):
@@ -111,6 +111,46 @@ class TestDiscoveryEndpoints(unittest.TestCase):
             ["read:files", "write:projects", "read_namespaces", "write_namespaces"],
         )
         self.assertFalse(by_name["continuity.refresh_plan"]["idempotent"])
+
+        context_retrieve_descriptor = f"{by_name['context.retrieve']['name']} {by_name['context.retrieve']['description']}"
+        for token in ("context.retrieve", "bundle.graph_context", "bundle.schedule_context", "graph_context", "schedule_context"):
+            with self.subTest(tool="context.retrieve", token=token):
+                self.assertIn(token, context_retrieve_descriptor)
+
+        continuity_read_descriptor = f"{by_name['continuity.read']['name']} {by_name['continuity.read']['description']}"
+        for token in ("continuity.read", "startup", "graph_summary", "schedule_context"):
+            with self.subTest(tool="continuity.read", token=token):
+                self.assertIn(token, continuity_read_descriptor)
+
+    def test_capabilities_advertise_graph_and_schedule_runtime_surfaces(self) -> None:
+        """Capability descriptors should stay coherent with shipped graph and schedule orientation."""
+        legacy_features = set(capabilities()["features"])
+        self.assertIn("derived_graph_runtime_context", legacy_features)
+        self.assertIn("schedule.one_shot_reminders", legacy_features)
+
+        feature_map = capabilities_v1()["features"]
+        for feature_key in (
+            "context.retrieve.graph_context",
+            "continuity.read.startup_graph_summary",
+            "schedule.one_shot_reminders",
+        ):
+            with self.subTest(feature_key=feature_key):
+                self.assertIn(feature_key, feature_map)
+
+        graph_context_summary = feature_map["context.retrieve.graph_context"]["summary"]
+        for token in ("graph", "context", "default", "context retrieval"):
+            with self.subTest(feature_key="context.retrieve.graph_context", token=token):
+                self.assertIn(token, graph_context_summary)
+
+        startup_graph_summary = feature_map["continuity.read.startup_graph_summary"]["summary"]
+        for token in ("graph", "summary", "startup", "continuity reads"):
+            with self.subTest(feature_key="continuity.read.startup_graph_summary", token=token):
+                self.assertIn(token, startup_graph_summary)
+
+        schedule_summary = feature_map["schedule.one_shot_reminders"]["summary"]
+        for token in ("reminders", "task nudges", "orientation responses"):
+            with self.subTest(feature_key="schedule.one_shot_reminders", token=token):
+                self.assertIn(token, schedule_summary)
 
     def test_workflow_catalog_has_bootstrap(self) -> None:
         """Workflow catalog should expose the bootstrap workflow."""

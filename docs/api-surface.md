@@ -10,7 +10,7 @@ The sections below mirror that runtime shape and group endpoints by behavior rat
 
 For practical agent integration guidance, start with [Agent Onboarding](agent-onboarding.md). For capsule structure and request/response schemas, see [Payload Reference](payload-reference.md). For the higher-level system thesis, recovery model, and authority boundaries, see [Reviewer Guide](reviewer-guide.md).
 
-This document covers the machine-facing HTTP contract. The optional `/ui` operator surface shipped for issue `#199` is intentionally outside that API contract: it is a local-only, read-only, server-rendered observability layer over existing read-side services, not a second programmable interface.
+This document covers the machine-facing HTTP contract. The optional `/ui` operator surface is intentionally outside that API contract: it is a local-only, read-only, server-rendered observability layer over existing read-side services, not a second programmable interface.
 
 ## Discovery and contracts
 
@@ -71,7 +71,12 @@ Returns a deterministic, machine-readable feature map for the current build. No 
 | `continuity.read.salience_ranking` | Deterministic multi-signal salience sorting on list and read paths |
 | `continuity.read.thread_identity` | Thread descriptors with scope anchors and lifecycle transitions |
 | `continuity.stable_preferences` | Stable user and peer preferences persisted on continuity capsules |
+| `continuity.upsert.preserve_mode` | Preserve-by-default field merge on upsert with `merge_mode='preserve'` |
+| `continuity.patch` | Partial list-field patch operations on existing continuity capsules |
+| `continuity.lifecycle` | Standalone lifecycle transitions for thread and task capsules |
 | `context.retrieve.continuity_state` | Multi-capsule continuity-oriented context bundles with fallback and degradation |
+| `context.retrieve.graph_context` | Bounded derived graph context included by default on context retrieval responses |
+| `continuity.read.startup_graph_summary` | Bounded derived graph summary included on startup continuity reads after base read success |
 | `schedule.one_shot_reminders` | SQLite-backed one-shot reminders and task nudges surfaced by pull/list and orientation responses |
 | `coordination.handoffs` | Local-first inter-agent handoff artifacts with consume tracking |
 | `coordination.shared_state` | Owner-authored shared coordination artifacts with version control |
@@ -287,5 +292,5 @@ For exact runtime expectations, use `GET /v1/discovery/tools` and `GET /v1/manif
 - **#120 — Thread identity and scope boundaries**: Added `thread_descriptor` on `ContinuityCapsule` with `ThreadDescriptor` model (label, keywords, scope anchors, identity anchors, lifecycle, superseded_by). Added `lifecycle_transition` and `superseded_by` on upsert. Added list filters: `lifecycle`, `scope_anchor`, `keyword`, `label_exact`, `anchor_kind`, `anchor_value`. See [Payload Reference](payload-reference.md#threaddescriptor).
 - **#123 — Salience ranking**: Added `sort="salience"` on `POST /v1/continuity/list` and deterministic salience sorting on context-retrieve paths. Six-signal sort key with per-capsule `salience` block and aggregate `salience_metadata`. See [Payload Reference](payload-reference.md#salience-ranking).
 - **#194 — Structured-entry timestamp refinement**: Continuity schema `1.1` replaces structured-entry `set_at` with `created_at`, `updated_at`, and `last_confirmed_at` for `stable_preferences`, `rationale_entries`, and `negative_decisions`. Stabilized-shape legacy continuity payloads remain supported for upgrade; truly pre-stabilization payloads missing required modern fields are not auto-migrated. Sammy's oldest real continuity capsule sample falls into the supported stabilized-shape legacy bucket. See [Payload Reference](payload-reference.md#continuity-capsule-structure).
-- **#179 — `GET /v1/capabilities`**: Added versioned, machine-readable feature map endpoint. Returns 12 feature keys covering continuity enhancements, coordination, messaging, peers, and discovery. See [Discovery and contracts](#get-v1capabilities--versioned-feature-map) above.
+- **#179 — `GET /v1/capabilities`**: Added versioned, machine-readable feature map endpoint. The registry now covers continuity enhancements, graph context, schedule reminders, coordination, messaging, peers, and discovery. See [Discovery and contracts](#get-v1capabilities--versioned-feature-map) above.
 - **#163 — Python CLI client**: Added `tools/cognirelay_client.py`, a stdlib-only command-line client for continuity read, upsert, and token hashing. See [CLI Client](cognirelay-client.md).
