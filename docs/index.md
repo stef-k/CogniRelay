@@ -17,28 +17,23 @@ coordination surfaces without access to the owner's continuity capsules.
 For the full product introduction, installation notes, and feature summary, see
 the [README](../README.md).
 
-## Start Here
+## Documentation
 
-- [Agent Onboarding](agent-onboarding.md): practical integration guide for
-  cold-start and already-running agents.
 - [System Overview](system-overview.md): implemented product shape, runtime
   model, and agent usage guidance.
-- [Payload Reference](payload-reference.md): continuity capsule structure,
-  request/response schemas, and field constraints.
+- [Agent Onboarding](agent-onboarding.md): practical integration guide for
+  cold-start and already-running agents.
 - [API Surface](api-surface.md): currently implemented HTTP behavior grouped by
   domain.
 - [MCP Guide](mcp.md): MCP bootstrap flow, request methods, and tool mapping.
-
-## Additional References
-
+- [Payload Reference](payload-reference.md): continuity capsule structure,
+  request/response schemas, and field constraints.
 - [CogniRelay Client](cognirelay-client.md): stdlib-only command-line tool for
   continuity read, upsert, and token hashing.
 - [Reviewer Guide](reviewer-guide.md): system thesis, boundaries, recovery
   model, and authority limits.
 - [External References and Case Studies](external-references.md): external
   experiments, usage notes, and scoped collaboration/evaluation references.
-- [MCP Convergence Audit](mcp-216-convergence-audit.md): historical MCP
-  convergence audit for issue #216.
 
 ## Releases
 
