@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 from pathlib import Path
 from typing import Any
 
@@ -40,13 +41,30 @@ _GRAPH_WARNING_MESSAGES = {
 _GRAPH_WARNING_ORDER = {code: idx for idx, code in enumerate(_GRAPH_WARNING_MESSAGES)}
 
 
-def _empty_graph_result(warning: str) -> dict[str, Any]:
+class GraphDerivationError(Exception):
+    """Internal graph derivation failure with a public-safe reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class GraphInternalWarning(str):
+    """String-compatible internal warning with optional public-safe metadata."""
+
+    def __new__(cls, value: str, *, reason: str | None = None) -> GraphInternalWarning:
+        obj = str.__new__(cls, value)
+        obj.reason = reason
+        return obj
+
+
+def _empty_graph_result(warning: str, *, reason: str | None = None) -> dict[str, Any]:
     """Return the exact empty-result shape for one warning."""
     return {
         "anchor": None,
         "nodes": [],
         "edges": [],
-        "warnings": [warning],
+        "warnings": [GraphInternalWarning(warning, reason=reason) if reason else warning],
     }
 
 
@@ -162,9 +180,9 @@ def _enumerate_task_candidates(repo_root: Path) -> list[Path]:
     for rel in _TASK_ROOTS:
         root = repo_root / rel
         if not root.exists():
-            raise OSError(f"Task root is missing: {rel}")
+            raise GraphDerivationError("task_root_missing")
         if root.exists() and not root.is_dir():
-            raise OSError(f"Task root is not a directory: {rel}")
+            raise GraphDerivationError("task_root_missing")
         for path in root.iterdir():
             if path.is_symlink():
                 continue
@@ -199,18 +217,23 @@ def _load_continuity_candidate(repo_root: Path, rel: str) -> dict[str, Any] | No
 def _enumerate_continuity_candidates(repo_root: Path) -> list[str]:
     """Enumerate the exact slice-1 continuity candidate paths."""
     candidates: list[str] = []
+    seen: set[str] = set()
     for rel in _CONTINUITY_ROOTS:
         root = repo_root / rel
         if not root.exists():
-            raise OSError(f"Continuity root is missing: {rel}")
+            raise GraphDerivationError("continuity_root_missing")
         if root.exists() and not root.is_dir():
-            raise OSError(f"Continuity root is not a directory: {rel}")
+            raise GraphDerivationError("continuity_root_missing")
         for path in root.rglob("*"):
             if path.is_symlink():
                 continue
             if not path.is_file():
                 continue
-            candidates.append(str(path.relative_to(repo_root)).replace("\\", "/"))
+            candidate = str(path.relative_to(repo_root)).replace("\\", "/")
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
     return candidates
 
 
@@ -222,6 +245,14 @@ def _source_class_for_continuity_rel(rel: str) -> str:
     if rel.startswith("memory/continuity/archive/"):
         return "archive_artifact"
     return "continuity_capsule"
+
+
+def _safe_warning_path(path: str) -> str | None:
+    """Return path only when it is safe repo-relative warning metadata."""
+    normalized = posixpath.normpath(path) if path else ""
+    if not normalized or normalized == "." or normalized.startswith("/") or normalized.startswith(".."):
+        return None
+    return normalized
 
 
 def _authorized_task_candidates(
@@ -280,6 +311,8 @@ def _derive_documents_and_reference_edges(
     anchor_id: str,
     anchor_family: str,
     capsules: list[dict[str, Any]],
+    auth: AuthContext | None,
+    source_denials: list[dict[str, Any]],
     nodes: dict[str, str],
     edges: set[tuple[str, str, str]],
 ) -> None:
@@ -290,6 +323,17 @@ def _derive_documents_and_reference_edges(
         except Exception:
             continue
         for path in paths:
+            if auth is not None:
+                try:
+                    auth.require_read_path(path)
+                except HTTPException:
+                    source_denials.append(
+                        graph_warning(
+                            "graph_source_denied",
+                            {"source_class": "related_document", "path": _safe_warning_path(path), "anchor_id": anchor_id},
+                        )
+                    )
+                    continue
             _add_node(nodes, family="document", subject_id=path, anchor_id=anchor_id)
             _add_edge(
                 edges,
@@ -342,8 +386,10 @@ def derive_internal_graph_slice1(
     try:
         task_paths = _authorized_task_candidates(repo_root, auth, anchor_id, source_denials)
         continuity_paths = _authorized_continuity_candidates(repo_root, auth, anchor_id, source_denials)
+    except GraphDerivationError as exc:
+        return _empty_graph_result("graph_derivation_failed", reason=exc.reason)
     except Exception:
-        return _empty_graph_result("graph_derivation_failed")
+        return _empty_graph_result("graph_derivation_failed", reason="helper_exception")
 
     try:
         tasks = [payload for path in task_paths if (payload := _load_task_candidate(path)) is not None]
@@ -382,6 +428,8 @@ def derive_internal_graph_slice1(
                 anchor_id=anchor_id,
                 anchor_family="thread",
                 capsules=anchor_capsules,
+                auth=auth,
+                source_denials=source_denials,
                 nodes=nodes,
                 edges=edges,
             )
@@ -437,6 +485,8 @@ def derive_internal_graph_slice1(
                 anchor_id=anchor_id,
                 anchor_family="task",
                 capsules=anchor_capsules,
+                auth=auth,
+                source_denials=source_denials,
                 nodes=nodes,
                 edges=edges,
             )
@@ -463,8 +513,10 @@ def derive_internal_graph_slice1(
             "warnings": [],
             **({"source_denials": source_denials} if source_denials else {}),
         }
+    except GraphDerivationError as exc:
+        return _empty_graph_result("graph_derivation_failed", reason=exc.reason)
     except Exception:
-        return _empty_graph_result("graph_derivation_failed")
+        return _empty_graph_result("graph_derivation_failed", reason="helper_exception")
 
 
 def _public_node_from_id(node_id: Any) -> dict[str, str] | None:
@@ -495,14 +547,21 @@ def _public_edge(edge: Any) -> dict[str, str] | None:
     return {"relationship": relationship, "source_id": source_id, "target_id": target_id}
 
 
-def _map_internal_warning(warning: Any, *, kind: str | None, subject_id: str | None) -> dict[str, Any] | None:
+def _map_internal_warning(
+    warning: Any,
+    *,
+    kind: str | None,
+    subject_id: str | None,
+    derivation_failure_reason: str | None = None,
+) -> dict[str, Any] | None:
     if warning == "invalid_subject_kind":
         return graph_warning("graph_anchor_not_supported", {"subject_kind": kind})
     if warning == "anchor_not_found":
         anchor_id = f"{kind}:{subject_id}" if kind and subject_id else None
         return graph_warning("graph_anchor_not_found", {"anchor_id": anchor_id, "kind": kind, "subject_id": subject_id})
     if warning == "graph_derivation_failed":
-        return graph_warning("graph_derivation_failed", {"reason": "helper_exception"})
+        warning_reason = getattr(warning, "reason", None)
+        return graph_warning("graph_derivation_failed", {"reason": warning_reason or derivation_failure_reason or "unknown"})
     if isinstance(warning, dict) and warning.get("code"):
         return warning
     return None
@@ -517,8 +576,14 @@ def compact_agent_graph(
 ) -> dict[str, Any]:
     """Convert the raw helper graph into the public bounded agent graph shape."""
     public_warnings: list[dict[str, Any]] = []
+    derivation_failure_reason = None
     for item in helper_result.get("warnings", []):
-        mapped = _map_internal_warning(item, kind=selected_kind, subject_id=selected_subject_id)
+        mapped = _map_internal_warning(
+            item,
+            kind=selected_kind,
+            subject_id=selected_subject_id,
+            derivation_failure_reason=derivation_failure_reason,
+        )
         if mapped is not None:
             public_warnings.append(mapped)
     for item in helper_result.get("source_denials", []):
@@ -528,6 +593,8 @@ def compact_agent_graph(
     if selected_kind not in _VALID_SUBJECT_KINDS or not selected_subject_id:
         return _empty_public_graph(caps, public_warnings)
     if any(warning.get("code") in {"graph_anchor_not_found", "graph_derivation_failed"} for warning in public_warnings):
+        return _empty_public_graph(caps, public_warnings)
+    if helper_result.get("anchor") is None and any(warning.get("code") == "graph_source_denied" for warning in public_warnings):
         return _empty_public_graph(caps, public_warnings)
 
     malformed_nodes = 0

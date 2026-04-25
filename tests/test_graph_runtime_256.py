@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from app.context.graph import CONTEXT_GRAPH_CAPS, compact_agent_graph
+from app.context.graph import CONTEXT_GRAPH_CAPS, compact_agent_graph, derive_agent_graph_context
 from app.context.service import context_retrieve_service
 from app.continuity.service import continuity_read_service
 from app.help.service import help_limit_payload, help_limits_index_payload, help_tool_payload
@@ -245,6 +245,199 @@ class TestGraphRuntime256(unittest.TestCase):
         self.assertNotIn({"id": "task:task-1", "kind": "task", "subject_id": "task-1"}, graph["nodes"])
         self.assertEqual(graph["warnings"][0]["code"], "graph_source_denied")
         self.assertEqual(graph["warnings"][0]["details"]["path"], "tasks/open/task-1.json")
+
+    def test_related_document_denial_omits_node_edge_projection_without_path_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_json(
+                repo_root,
+                "memory/continuity/thread-thread-1.json",
+                _capsule(
+                    subject_kind="thread",
+                    subject_id="thread-1",
+                    related_documents=[
+                        {"path": "docs/public.md", "kind": "spec", "label": "Public"},
+                        {"path": "docs/secret.md", "kind": "spec", "label": "Secret"},
+                    ],
+                ),
+            )
+            result = context_retrieve_service(
+                repo_root=repo_root,
+                auth=_AuthStub(denied_paths={"docs/secret.md"}),
+                req=ContextRetrieveRequest(task="continue", subject_kind="thread", subject_id="thread-1"),
+                now=_now(),
+                audit=lambda *_args, **_kwargs: None,
+            )
+
+        graph = result["bundle"]["graph_context"]
+        self.assertEqual(
+            graph["related_documents"],
+            [{"path": "docs/public.md", "node_id": "document:docs/public.md", "source_id": "thread:thread-1"}],
+        )
+        self.assertIn({"id": "document:docs/public.md", "kind": "document", "subject_id": "docs/public.md"}, graph["nodes"])
+        self.assertNotIn("document:docs/secret.md", json.dumps(graph["nodes"]))
+        self.assertNotIn("document:docs/secret.md", json.dumps(graph["edges"]))
+        self.assertNotIn("docs/secret.md", json.dumps(graph["related_documents"]))
+        self.assertEqual(
+            [warning for warning in graph["warnings"] if warning["code"] == "graph_source_denied"],
+            [
+                {
+                    "code": "graph_source_denied",
+                    "message": "A graph source was omitted because access was denied.",
+                    "details": {
+                        "source_class": "related_document",
+                        "path": "docs/secret.md",
+                        "anchor_id": "thread:thread-1",
+                    },
+                }
+            ],
+        )
+
+    def test_selected_anchor_denial_returns_empty_graph_without_malformed_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_json(repo_root, "memory/continuity/thread-thread-1.json", _capsule(subject_kind="thread", subject_id="thread-1"))
+            graph = derive_agent_graph_context(
+                repo_root=repo_root,
+                auth=_AuthStub(denied_paths={"memory/continuity/thread-thread-1.json"}),
+                subject_kind="thread",
+                subject_id="thread-1",
+                caps=CONTEXT_GRAPH_CAPS,
+            )
+
+        self.assertIsNone(graph["anchor"])
+        self.assertEqual(graph["nodes"], [])
+        self.assertEqual(graph["edges"], [])
+        self.assertEqual(graph["related_documents"], [])
+        self.assertEqual([warning["code"] for warning in graph["warnings"]], ["graph_source_denied"])
+        self.assertEqual(graph["warnings"][0]["details"]["source_class"], "continuity_capsule")
+        self.assertNotIn("graph_result_malformed", json.dumps(graph["warnings"]))
+
+    def test_derivation_failures_preserve_public_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            (repo_root / "tasks/open").mkdir(parents=True)
+            graph = derive_agent_graph_context(
+                repo_root=repo_root,
+                auth=_AuthStub(),
+                subject_kind="thread",
+                subject_id="thread-1",
+                caps=CONTEXT_GRAPH_CAPS,
+            )
+        self.assertEqual(graph["warnings"][0]["details"]["reason"], "task_root_missing")
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            (repo_root / "memory/continuity/archive").rmdir()
+            graph = derive_agent_graph_context(
+                repo_root=repo_root,
+                auth=_AuthStub(),
+                subject_kind="thread",
+                subject_id="thread-1",
+                caps=CONTEXT_GRAPH_CAPS,
+            )
+        self.assertEqual(graph["warnings"][0]["details"]["reason"], "continuity_root_missing")
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            with patch("app.context.graph._enumerate_task_candidates", side_effect=RuntimeError("boom")):
+                graph = derive_agent_graph_context(
+                    repo_root=repo_root,
+                    auth=_AuthStub(),
+                    subject_kind="thread",
+                    subject_id="thread-1",
+                    caps=CONTEXT_GRAPH_CAPS,
+                )
+        self.assertEqual(graph["warnings"][0]["details"]["reason"], "helper_exception")
+
+    def test_archive_fallback_and_cold_candidates_are_denied_before_file_open(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            denied = {
+                "memory/continuity/archive/thread-thread-1.json",
+                "memory/continuity/fallback/thread-thread-1.json",
+                "memory/continuity/cold/index/thread-thread-1.json",
+            }
+            for rel in denied:
+                _write_json(repo_root, rel, {"not": "a valid envelope", "subject_id": "thread-1"})
+            graph = derive_agent_graph_context(
+                repo_root=repo_root,
+                auth=_AuthStub(denied_paths=denied),
+                subject_kind="thread",
+                subject_id="thread-1",
+                caps=CONTEXT_GRAPH_CAPS,
+            )
+
+        self.assertIsNone(graph["anchor"])
+        self.assertEqual(
+            sorted((warning["details"]["source_class"], warning["details"]["path"]) for warning in graph["warnings"]),
+            [
+                ("archive_artifact", "memory/continuity/archive/thread-thread-1.json"),
+                ("cold_index_artifact", "memory/continuity/cold/index/thread-thread-1.json"),
+                ("fallback_artifact", "memory/continuity/fallback/thread-thread-1.json"),
+            ],
+        )
+
+    def test_startup_user_peer_unsupported_and_missing_anchor_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_json(repo_root, "memory/continuity/user-user-1.json", _capsule(subject_kind="user", subject_id="user-1"))
+            unsupported = continuity_read_service(
+                repo_root=repo_root,
+                auth=_AuthStub(),
+                req=ContinuityReadRequest(subject_kind="user", subject_id="user-1", view="startup"),
+                now=_now(),
+                audit=lambda *_args, **_kwargs: None,
+            )
+        self.assertIsNone(unsupported["graph_summary"]["anchor"])
+        self.assertEqual(unsupported["graph_summary"]["warnings"][0]["code"], "graph_anchor_not_supported")
+
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            _create_graph_roots(repo_root)
+            _write_json(repo_root, "memory/continuity/thread-thread-1.json", _capsule(subject_kind="thread", subject_id="thread-1"))
+            with patch(
+                "app.context.graph.derive_internal_graph_slice1",
+                return_value={"anchor": None, "nodes": [], "edges": [], "warnings": ["anchor_not_found"]},
+            ):
+                missing = continuity_read_service(
+                    repo_root=repo_root,
+                    auth=_AuthStub(),
+                    req=ContinuityReadRequest(subject_kind="thread", subject_id="thread-1", view="startup"),
+                    now=_now(),
+                    audit=lambda *_args, **_kwargs: None,
+                )
+        self.assertEqual(missing["graph_summary"]["warnings"][0]["code"], "graph_anchor_not_found")
+
+    def test_exact_warning_message_details_schemas(self) -> None:
+        graph = compact_agent_graph(
+            {
+                "anchor": {"bad": "shape"},
+                "nodes": [{"bad": "shape"}],
+                "edges": [{"bad": "shape"}],
+                "warnings": ["graph_derivation_failed"],
+                "derivation_failure_reason": "unknown",
+            },
+            selected_kind="task",
+            selected_subject_id="task-1",
+            caps=CONTEXT_GRAPH_CAPS,
+        )
+        self.assertEqual(
+            graph["warnings"],
+            [
+                {
+                    "code": "graph_derivation_failed",
+                    "message": "Graph context could not be derived.",
+                    "details": {"reason": "unknown"},
+                }
+            ],
+        )
 
     def test_malformed_helper_anchor_is_counted_without_anchor_not_found(self) -> None:
         graph = compact_agent_graph(

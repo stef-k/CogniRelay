@@ -690,7 +690,22 @@ Both sections use the same compact shape:
 
 Caps are fixed implementation constants, not settings: `bundle.graph_context` returns at most 24 nodes, 32 edges, 8 related documents, and 8 blockers; startup `graph_summary` returns at most 12 nodes, 16 edges, 4 related documents, and 4 blockers. Nodes sort by `id`; edges sort by `relationship`, `source_id`, and `target_id`; node-cap endpoint pruning happens before edge and projection caps.
 
-Graph warnings are objects with `code`, `message`, and `details`. Codes are `graph_anchor_not_provided`, `graph_anchor_not_supported`, `graph_anchor_not_found`, `graph_derivation_failed`, `graph_truncated`, `graph_result_malformed`, `graph_source_denied`, and `graph_suppressed_by_continuity_mode`. Auth/path denials use `graph_source_denied` with safe `source_class`, repo-relative `path` or `null`, and `anchor_id`; denied sources are omitted and graph warnings stay local to the graph section.
+Graph warnings are objects with required `code`, `message`, and `details` fields. `details` is always an object; use `{}` when no extra fields apply.
+
+| Code | Exact message | Details schema | Default details |
+| --- | --- | --- | --- |
+| `graph_anchor_not_provided` | `No graph anchor was provided.` | `{}` | `{}` |
+| `graph_anchor_not_supported` | `The selected subject kind is not supported as a graph anchor.` | `{"subject_kind": string or null}` | `{"subject_kind": null}` |
+| `graph_anchor_not_found` | `The selected graph anchor was not found.` | `{"anchor_id": string or null, "kind": string or null, "subject_id": string or null}` | `{"anchor_id": null, "kind": null, "subject_id": null}` |
+| `graph_derivation_failed` | `Graph context could not be derived.` | `{"reason": string}` | `{"reason": "unknown"}` |
+| `graph_truncated` | `Graph context was truncated to configured caps.` | `{"field": "nodes" \| "edges" \| "related_documents" \| "blockers", "limit": integer, "available": integer}` | No omitted fields; use actual `field`, `limit`, and `available`. |
+| `graph_result_malformed` | `Malformed graph helper results were skipped.` | `{"malformed_nodes": integer, "malformed_edges": integer, "malformed_anchors": integer}` | `{"malformed_nodes": 0, "malformed_edges": 0, "malformed_anchors": 0}` |
+| `graph_source_denied` | `A graph source was omitted because access was denied.` | `{"source_class": string, "path": string or null, "anchor_id": string or null}` | `{"source_class": "unknown", "path": null, "anchor_id": null}` |
+| `graph_suppressed_by_continuity_mode` | `Graph context was suppressed because continuity mode is off.` | `{}` | `{}` |
+
+`graph_derivation_failed.details.reason` is deterministic and public-safe, such as `task_root_missing`, `continuity_root_missing`, `helper_exception`, `malformed_source_unrecoverable`, or `unknown`; it never includes raw exception text. `graph_source_denied.details.path` may include only a safe repo-relative denied path or `null`; it never includes file contents, absolute host paths, stack traces, or raw authorization messages. Denied sources are omitted and graph warnings stay local to the graph section.
+
+Warning ordering is deterministic: sort by code in the table order above, then by `details.source_class`, `details.path`, `details.field`, and `details.anchor_id` where present.
 
 The durable continuity capsule write cap remains `20 KB` serialized UTF-8. Graph data is derived response data only, is never persisted into capsules, and does not consume the capsule write cap. #255 `schedule_context` is scheduler-owned future/coexisting response data and is not defined by the graph contract.
 
