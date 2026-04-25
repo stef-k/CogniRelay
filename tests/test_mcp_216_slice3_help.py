@@ -241,6 +241,29 @@ class TestMcp216Slice3Help(unittest.TestCase):
                     else:
                         self.assertEqual(value, expected)
 
+    def test_tool_usage_summaries_include_issue_264_guidance_without_shape_expansion(self) -> None:
+        """Tool usage keeps the compact shape while carrying selector examples in summary text."""
+        self._bootstrap()
+        cases = {
+            "context.retrieve": ("subject_kind", "thread", "subject_id", "release-v1.4-followup"),
+            "schedule.list": (
+                "due=true&thread_id=release-v1.4-followup",
+                "due=true&subject_kind=thread&subject_id=release-v1.4-followup",
+            ),
+        }
+        for request_id, (tool_name, tokens) in enumerate(cases.items(), start=240):
+            with self.subTest(tool_name=tool_name):
+                response = self._request(request_id, "system.tool_usage", params={"name": tool_name})
+                self.assertEqual(response.status_code, 200)
+                structured = response.json()["result"]["structuredContent"]
+                self.assertEqual(
+                    set(structured),
+                    {"surface", "httpEquivalent", "name", "summary"},
+                )
+                summary = structured["summary"]
+                for token in tokens:
+                    self.assertIn(token, summary)
+
     def test_system_help_and_system_hook_guide_enforce_empty_object_params(self) -> None:
         """Zero-argument slice-3 methods accept only omitted params or {} and reject extra keys."""
         self._bootstrap()
