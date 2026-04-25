@@ -7,6 +7,46 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-04-25
+
+### Added
+
+- Added a bounded runtime onboarding/help surface so agents can discover
+  startup rules, operational guidance, validation limits, and shipped route
+  identifiers without preloading the repository documentation.
+- Added derived graph context to agent-facing runtime paths: `context.retrieve`
+  now returns bounded `bundle.graph_context`, and startup `continuity.read`
+  returns top-level `graph_summary` after the base read succeeds.
+- Added SQLite-backed one-shot schedule reminders and task nudges with HTTP
+  and MCP create/read/list/update/acknowledge/retire surfaces, UTC-only
+  timestamps, pull-based due evaluation, and scoped `schedule_context` in
+  startup/context orientation responses.
+- Added read-only operator UI pages for graph inspection, task-centric
+  inspection, context retrieval inspection, documentation browsing, and
+  schedule/reminder inspection.
+
+### Changed
+
+- Reworked `docs/agent-onboarding.md` into the single concise bootstrap and
+  operating manual for agents, with reference detail kept in the payload/API/MCP
+  docs and runtime help surfaces.
+- Synchronized payload reference, API surface, MCP docs, runtime help,
+  discovery descriptors, capabilities, and UI docs with the post-#218 runtime
+  feature set.
+- Expanded discovery/capability metadata to advertise graph context, startup
+  graph summaries, schedule reminders, and the current operator UI surfaces.
+
+### Fixed
+
+- Corrected stale documentation and runtime help claims around continuity field
+  limits, help payload examples, MCP anchors, graph availability, and schedule
+  availability.
+- Hardened graph runtime integration so graph derivation is bounded,
+  auth/path-aware, degraded-safe, and never persisted into continuity capsules.
+- Hardened schedule storage and MCP behavior around SQLite failures,
+  idempotency, validation error mapping, malformed rows, and generated database
+  artifacts.
+
 ## [1.3.1] - 2026-04-17
 
 ### Fixed
