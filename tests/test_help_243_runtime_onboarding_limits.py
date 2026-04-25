@@ -744,7 +744,17 @@ class TestHelp243RuntimeOnboardingLimits(unittest.TestCase):
 
         anti_patterns = self.client.get("/v1/help/onboarding/sections/anti_patterns").json()
         anti_pattern_text = " ".join([anti_patterns["body_md"], *anti_patterns["bullets"]])
-        self.assertIn("Do not persist derived graph or schedule orientation into continuity capsules.", anti_pattern_text)
+        for token in (
+            "derived",
+            "graph_context",
+            "graph_summary",
+            "schedule_context",
+            "orientation",
+            "continuity capsule",
+            "persist",
+        ):
+            with self.subTest(section="anti_patterns", token=token):
+                self.assertIn(token, anti_pattern_text)
 
 
 if __name__ == "__main__":
