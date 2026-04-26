@@ -7,6 +7,19 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-04-26
+
+### Fixed
+
+- Fixed standards-compatible MCP startup for clients that include optional
+  `clientInfo` implementation metadata such as `title`, `description`,
+  `websiteUrl`, or `icons` in `initialize`. CogniRelay now accepts those
+  standard metadata fields for both supported protocol versions while
+  preserving strict validation for unsupported initialize parameters.
+- Updated MCP documentation, API surface notes, convergence audit text, runtime
+  MCP error help, and regression coverage so the fix is agent-agnostic rather
+  than Codex-specific.
+
 ## [1.4.4] - 2026-04-26
 
 ### Fixed
