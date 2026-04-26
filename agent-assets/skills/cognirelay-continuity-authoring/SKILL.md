@@ -1,3 +1,9 @@
+---
+name: cognirelay-continuity-authoring
+description: Use when maintaining CogniRelay continuity responsibly from an agent runtime. The agent authors semantic capsule meaning; hooks and adapters only read, gather facts, template, validate, diff,
+  write, and read back.
+---
+
 # CogniRelay Continuity Authoring
 
 Use this skill when an agent runtime needs to maintain CogniRelay continuity responsibly.
