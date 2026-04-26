@@ -47,6 +47,7 @@ EXCLUDED_DIFF_PREFIXES = (
 )
 PLACEHOLDER_RE = re.compile(r"\b(?:TODO|TBD|PLACEHOLDER|FILL ME|REPLACE ME)\b", re.IGNORECASE)
 BRACKET_PLACEHOLDER_RE = re.compile(r"^(?:<[^<>]+>|\[[^\[\]]+\])$")
+UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
 def envelope(ok: bool, mode: str, result: dict[str, Any] | None = None, errors: list[dict[str, str]] | None = None, warnings: list[Any] | None = None) -> dict[str, Any]:
@@ -141,6 +142,25 @@ def validate_payload_shape(payload: Any) -> list[dict[str, str]]:
     return errors
 
 
+def timestamp_errors(payload: dict[str, Any]) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    capsule = payload.get("capsule", {})
+    if not isinstance(capsule, dict):
+        return errors
+    for key in ("updated_at", "verified_at"):
+        path = f"/capsule/{key}"
+        value = capsule.get(key)
+        if not isinstance(value, str) or not value.strip():
+            errors.append({"code": "invalid_input", "message": "Timestamp must be a non-empty UTC string.", "field": path})
+            continue
+        stripped = value.strip()
+        if PLACEHOLDER_RE.search(stripped) or BRACKET_PLACEHOLDER_RE.match(stripped):
+            errors.append({"code": "placeholder_rejected", "message": "Timestamp placeholder is not allowed.", "field": path})
+        elif not UTC_TIMESTAMP_RE.match(stripped):
+            errors.append({"code": "invalid_input", "message": "Timestamp must use UTC Z format.", "field": path})
+    return errors
+
+
 def placeholder_errors(value: Any, parts: list[str] | None = None) -> list[dict[str, str]]:
     parts = parts or []
     path = pointer(parts) if parts else ""
@@ -228,17 +248,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def network_config(args: argparse.Namespace) -> tuple[str, str, float]:
-    base_url = (args.base_url or os.getenv("COGNIRELAY_BASE_URL") or "").rstrip("/")
+def normalize_base_url(value: str) -> str:
+    return value[:-1] if value.endswith("/") else value
+
+
+def resolve_timeout(value: float | None) -> tuple[float, dict[str, str] | None]:
+    if value is not None:
+        return value, None
+    raw = os.getenv("COGNIRELAY_TIMEOUT_SECONDS", "10")
+    try:
+        return float(raw), None
+    except ValueError:
+        return 0.0, {"code": "invalid_config", "message": "Timeout must be numeric seconds.", "field": "timeout"}
+
+
+def network_config(args: argparse.Namespace) -> tuple[str, str, float, dict[str, str] | None]:
+    base_url = normalize_base_url(args.base_url or os.getenv("COGNIRELAY_BASE_URL") or "")
     token = args.token or os.getenv("COGNIRELAY_TOKEN") or ""
-    timeout = args.timeout if args.timeout is not None else float(os.getenv("COGNIRELAY_TIMEOUT_SECONDS", "10"))
-    return base_url, token, timeout
+    timeout, timeout_error = resolve_timeout(args.timeout)
+    return base_url, token, timeout, timeout_error
 
 
 def readback(mode: str, args: argparse.Namespace) -> int:
-    base_url, token, timeout = network_config(args)
+    base_url, token, timeout, timeout_error = network_config(args)
     subject_kind = args.subject_kind or os.getenv("COGNIRELAY_SUBJECT_KIND") or ""
     subject_id = args.subject_id or os.getenv("COGNIRELAY_SUBJECT_ID") or ""
+    if timeout_error is not None:
+        return emit(envelope(False, mode, errors=[timeout_error]), 2)
     if not base_url or not token:
         return emit(envelope(False, mode, errors=[{"code": "missing_config", "message": "Missing CogniRelay base URL or token."}]), 2)
     if not subject_kind or not subject_id:
@@ -279,7 +315,15 @@ def main(argv: list[str] | None = None) -> int:
         return readback(mode, args)
     if mode in {"dry-run", "write"}:
         if args.server_compare:
-            return emit(envelope(False, mode, result={"diff": {"current_available": False, "added": [], "removed": [], "changed": []}}, errors=[{"code": "server_compare_not_implemented", "message": "Server compare is not implemented by this hook."}]), 2)
+            return emit(
+                envelope(
+                    False,
+                    mode,
+                    result={"diff": {"current_available": False, "added": [], "removed": [], "changed": []}},
+                    errors=[{"code": "server_compare_not_implemented", "message": "Server compare is not implemented by this hook."}],
+                ),
+                2,
+            )
         if not args.input:
             return emit(envelope(False, mode, errors=[{"code": "missing_input", "message": "--input PATH|- is required.", "field": "input"}]), 2)
         try:
@@ -288,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             return emit(envelope(False, mode, errors=[{"code": "invalid_input", "message": f"Could not read input payload: {exc.__class__.__name__}", "field": "input"}]), 2)
         errors = validate_payload_shape(payload)
         if not errors:
+            errors.extend(timestamp_errors(payload))
             errors.extend(placeholder_errors(payload))
             errors.extend(write_semantic_requirements(payload))
         diff = semantic_diff(payload) if isinstance(payload, dict) else {"current_available": False, "added": [], "removed": [], "changed": []}
@@ -295,7 +340,9 @@ def main(argv: list[str] | None = None) -> int:
             return emit(envelope(False, mode, result={"valid": False, "diff": diff, "placeholder_errors": errors}, errors=errors), 2)
         if mode == "dry-run":
             return emit(envelope(True, mode, result={"valid": True, "diff": diff, "placeholder_errors": []}), 0)
-        base_url, token, timeout = network_config(args)
+        base_url, token, timeout, timeout_error = network_config(args)
+        if timeout_error is not None:
+            return emit(envelope(False, mode, errors=[timeout_error]), 2)
         if not base_url or not token:
             return emit(envelope(False, mode, errors=[{"code": "missing_config", "message": "Missing CogniRelay base URL or token."}]), 2)
         try:

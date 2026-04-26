@@ -23,6 +23,8 @@ the [README](../README.md).
   model, and agent usage guidance.
 - [Agent Onboarding](agent-onboarding.md): practical integration guide for
   cold-start and already-running agents.
+- [Last-mile Adapter Kit](../agent-assets/README.md): copyable skill and hook
+  assets for agent-authored continuity integration.
 - [API Surface](api-surface.md): currently implemented HTTP behavior grouped by
   domain.
 - [MCP Guide](mcp.md): MCP bootstrap flow, request methods, and tool mapping.

@@ -37,6 +37,20 @@ def env_bool(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def normalize_base_url(value: str) -> str:
+    return value[:-1] if value.endswith("/") else value
+
+
+def resolve_timeout(value: float | None) -> tuple[float, dict[str, str] | None]:
+    if value is not None:
+        return value, None
+    raw = os.getenv("COGNIRELAY_TIMEOUT_SECONDS", "10")
+    try:
+        return float(raw), None
+    except ValueError:
+        return 0.0, {"code": "invalid_config", "message": "Timeout must be numeric seconds.", "field": "timeout"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read CogniRelay startup continuity and optional bounded context.")
     parser.add_argument("--base-url")
@@ -53,14 +67,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    base_url = (args.base_url or os.getenv("COGNIRELAY_BASE_URL") or "").rstrip("/")
+    base_url = normalize_base_url(args.base_url or os.getenv("COGNIRELAY_BASE_URL") or "")
     token = args.token or os.getenv("COGNIRELAY_TOKEN") or ""
     subject_kind = args.subject_kind or os.getenv("COGNIRELAY_SUBJECT_KIND") or ""
     subject_id = args.subject_id or os.getenv("COGNIRELAY_SUBJECT_ID") or ""
     task = args.task if args.task is not None else os.getenv("COGNIRELAY_RETRIEVAL_TASK", "")
-    timeout = args.timeout if args.timeout is not None else float(os.getenv("COGNIRELAY_TIMEOUT_SECONDS", "10"))
+    timeout, timeout_error = resolve_timeout(args.timeout)
     context_enabled = (args.context_retrieve or env_bool(os.getenv("COGNIRELAY_CONTEXT_RETRIEVE"))) and not args.no_context_retrieve
 
+    if timeout_error is not None:
+        return emit(envelope(False, "retrieval", errors=[timeout_error]), 2)
     if not base_url:
         return emit(envelope(False, "retrieval", errors=[{"code": "missing_config", "message": "Missing CogniRelay base URL.", "field": "base_url"}]), 2)
     if not token:
@@ -79,7 +95,15 @@ def main(argv: list[str] | None = None) -> int:
             context_payload = {"task": task, "subject_kind": subject_kind, "subject_id": subject_id}
             context_status, context = post_json(base_url, token, "/v1/context/retrieve", context_payload, timeout)
             if context_status < 200 or context_status >= 300:
-                return emit(envelope(False, "retrieval", result={"startup": startup, "status": context_status}, errors=[{"code": "http_error", "message": "Context retrieve returned an unsuccessful status."}]), 4)
+                return emit(
+                    envelope(
+                        False,
+                        "retrieval",
+                        result={"startup": startup, "status": context_status},
+                        errors=[{"code": "http_error", "message": "Context retrieve returned an unsuccessful status."}],
+                    ),
+                    4,
+                )
             result["context"] = context
         return emit(envelope(True, "retrieval", result=result), 0)
     except urllib.error.HTTPError as exc:
