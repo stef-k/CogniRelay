@@ -253,6 +253,17 @@ class TestMcp216Slice3Help(unittest.TestCase):
                 for token in tokens:
                     self.assertIn(token, summary)
 
+    def test_error_guide_mentions_initialize_client_info_metadata(self) -> None:
+        """Runtime MCP error help should describe the initialize metadata boundary."""
+        self._bootstrap()
+        response = self._request(250, "system.error_guide", params={"code": -32602})
+        self.assertEqual(response.status_code, 200)
+        structured = response.json()["result"]["structuredContent"]
+        self.assertEqual(set(structured), {"surface", "httpEquivalent", "code", "title", "summary"})
+        summary = structured["summary"]
+        for token in ("initialize", "clientInfo", "protocolVersion", "Implementation metadata"):
+            self.assertIn(token, summary)
+
     def test_system_help_and_system_hook_guide_enforce_empty_object_params(self) -> None:
         """Zero-argument slice-3 methods accept only omitted params or {} and reject extra keys."""
         self._bootstrap()

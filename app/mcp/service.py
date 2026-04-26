@@ -424,8 +424,9 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
         client_info = params["clientInfo"]
         if not isinstance(client_info, dict):
             return _invalid_params(request_id, "clientInfo must be an object")
+        implementation_keys = {"name", "version", "title", "description", "websiteUrl", "icons"}
         for key in client_info:
-            if key not in {"name", "version"}:
+            if key not in implementation_keys:
                 return _invalid_params(request_id, "unexpected clientInfo field", field=key)
         if "name" not in client_info:
             return _invalid_params(request_id, "clientInfo.name is required")
@@ -435,6 +436,16 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
             not isinstance(client_info.get("version"), str) or not str(client_info["version"]).strip()
         ):
             return _invalid_params(request_id, "clientInfo.version must be a non-empty string")
+        if "title" in client_info and (
+            not isinstance(client_info.get("title"), str)
+        ):
+            return _invalid_params(request_id, "clientInfo.title must be a string")
+        if "description" in client_info and not isinstance(client_info.get("description"), str):
+            return _invalid_params(request_id, "clientInfo.description must be a string")
+        if "websiteUrl" in client_info and not isinstance(client_info.get("websiteUrl"), str):
+            return _invalid_params(request_id, "clientInfo.websiteUrl must be a string")
+        if "icons" in client_info and not isinstance(client_info.get("icons"), list):
+            return _invalid_params(request_id, "clientInfo.icons must be an array")
 
     return {
         "protocolVersion": protocol_version,

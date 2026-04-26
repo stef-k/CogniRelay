@@ -14,6 +14,12 @@ The `#216` runtime target is MCP `2025-11-25` Streamable HTTP with a temporary b
 - `POST /v1/mcp` is the only MCP request endpoint that may succeed
 - `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
 - `GET /.well-known/mcp.json` is supplemental metadata only
+- `initialize.params` is closed to `protocolVersion`, `capabilities`, and
+  `clientInfo`; `clientInfo` follows the MCP `Implementation` metadata shape
+  for the supported protocol versions. CogniRelay validates required
+  client identity fields and accepts standard optional metadata such as
+  `title`, `description`, `websiteUrl`, and `icons` without echoing or storing
+  it.
 
 The base posture remains tools-first. It does not add MCP resources, MCP prompts, SSE, or a broader compatibility transport. Runtime help/reference surfaces are post-bootstrap request methods, not tools.
 
@@ -23,6 +29,26 @@ For an MCP-oriented client, the canonical slice-2 bootstrap sequence is exactly:
 
 1. `GET /.well-known/mcp.json`
 2. `POST /v1/mcp` with `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`
+
+Standards-compliant clients may also include `capabilities` and `clientInfo`
+metadata:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-11-25",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "agent-client",
+      "version": "1.0.0",
+      "title": "Agent Client"
+    }
+  }
+}
+```
 
 After `initialize` succeeds, normal MCP usage may call:
 

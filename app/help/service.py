@@ -1634,7 +1634,11 @@ _MCP_ERROR_GUIDES = {
     },
     -32602: {
         "title": "Invalid params",
-        "summary": "The method name is recognized, but the params shape or target value is invalid for that specific request.",
+        "summary": (
+            "The method name is recognized, but the params shape or target value is invalid for that specific request. "
+            "For MCP initialize, keep top-level params limited to protocolVersion, capabilities, and clientInfo; "
+            "clientInfo accepts standard MCP Implementation metadata."
+        ),
     },
     -32000: {
         "title": "Server not initialized",
