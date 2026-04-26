@@ -9,7 +9,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
     """Validate the public discovery surface exposed by the API."""
 
     def test_discovery_has_bounded_mcp_metadata(self) -> None:
-        """Discovery should advertise the bounded MCP 2025-11-25 metadata fields."""
+        """Discovery should advertise the bounded MCP compatibility metadata fields."""
         payload = discovery()
         self.assertTrue(payload["ok"])
         self.assertEqual(
@@ -20,6 +20,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
                 "version": payload["protocol"]["version"],
                 "transport": "streamable-http",
                 "mcp_protocol_version": "2025-11-25",
+                "supported_mcp_protocol_versions": ["2025-06-18", "2025-11-25"],
                 "post_endpoint": {"path": "/v1/mcp", "method": "POST", "posture": "active"},
                 "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST", "posture": "deferred"},
             },
@@ -191,6 +192,7 @@ class TestDiscoveryEndpoints(unittest.TestCase):
                 "scope": "mixed (depends on tool)",
                 "transport": "streamable-http",
                 "mcp_protocol_version": "2025-11-25",
+                "supported_mcp_protocol_versions": ["2025-06-18", "2025-11-25"],
                 "posture": "active",
             },
         )

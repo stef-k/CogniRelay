@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-from app.timestamps import format_iso, iso_now
 from typing import Any, Callable
 
 from app.auth import AuthContext
 from app.help import mcp_help_method_names
+from app.mcp.service import PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
 from app.models import (
     AppendRequest,
     BackupCreateRequest,
@@ -60,6 +60,7 @@ from app.models import (
     WriteRequest,
 )
 from app.storage import canonical_json
+from app.timestamps import format_iso, iso_now
 
 
 def _schedule_metadata_schema() -> dict[str, Any]:
@@ -204,7 +205,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
         },
         {
             "name": "system.discovery",
-            "description": "Return machine guidance and bounded MCP 2025-11-25 entrypoints.",
+            "description": "Return machine guidance and bounded MCP compatibility entrypoints.",
             "method": "GET",
             "path": "/v1/discovery",
             "scopes": [],
@@ -1128,7 +1129,8 @@ def discovery_payload(contract_version: str, *, tools: list[dict[str, Any]], wor
             "style": "mcp-2025-11-25",
             "version": contract_version,
             "transport": "streamable-http",
-            "mcp_protocol_version": "2025-11-25",
+            "mcp_protocol_version": PREFERRED_PROTOCOL_VERSION,
+            "supported_mcp_protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
             "post_endpoint": {"path": "/v1/mcp", "method": "POST", "posture": "active"},
             "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST", "posture": "deferred"},
         },
@@ -1161,7 +1163,7 @@ def discovery_payload(contract_version: str, *, tools: list[dict[str, Any]], wor
                 (
                     "POST /v1/mcp "
                     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
-                    "\"params\":{\"protocolVersion\":\"2025-11-25\"}}"
+                    f"\"params\":{{\"protocolVersion\":\"{PREFERRED_PROTOCOL_VERSION}\"}}}}"
                 ),
                 "POST /v1/mcp {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}",
             ],
@@ -1200,7 +1202,8 @@ def well_known_mcp_payload(contract_version: str) -> dict[str, Any]:
         "transport": "streamable-http",
         "endpoint": "/v1/mcp",
         "contract_version": contract_version,
-        "mcp_protocol_version": "2025-11-25",
+        "mcp_protocol_version": PREFERRED_PROTOCOL_VERSION,
+        "supported_mcp_protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
         "supplemental": True,
         "get_endpoint": {"path": "/v1/mcp", "status": 405, "allow": "POST"},
         "methods": [
@@ -1639,7 +1642,7 @@ def capabilities_v1_payload() -> dict[str, Any]:
                 "summary": "Peer registration, trust-level transitions, and manifest exchange",
             },
             "discovery.tools": {
-                "summary": "Machine-readable tool catalog for the bounded MCP 2025-11-25 surface",
+                "summary": "Machine-readable tool catalog for the bounded MCP compatibility surface",
             },
         },
     }
@@ -1667,7 +1670,8 @@ def manifest_payload(*, app_version: str) -> dict[str, Any]:
             "POST /v1/mcp": {
                 "scope": "mixed (depends on tool)",
                 "transport": "streamable-http",
-                "mcp_protocol_version": "2025-11-25",
+                "mcp_protocol_version": PREFERRED_PROTOCOL_VERSION,
+                "supported_mcp_protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
                 "posture": "active",
             },
             "POST /v1/write": {"scope": "write:* by write_namespace"},

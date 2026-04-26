@@ -83,6 +83,7 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(payload["endpoint"], "/v1/mcp")
         self.assertEqual(payload["transport"], "streamable-http")
         self.assertEqual(payload["mcp_protocol_version"], "2025-11-25")
+        self.assertEqual(payload["supported_mcp_protocol_versions"], ["2025-06-18", "2025-11-25"])
         self.assertTrue(payload["supplemental"])
         self.assertEqual(payload["get_endpoint"], {"path": "/v1/mcp", "status": 405, "allow": "POST"})
         self.assertIn("initialize", payload["methods"])
@@ -104,6 +105,19 @@ class TestMcpRpcCompatibility(unittest.TestCase):
         self.assertEqual(res["result"]["protocolVersion"], "2025-11-25")
         self.assertEqual(res["result"]["capabilities"], {"tools": {"listChanged": False}})
         self.assertNotIn("instructions", res["result"])
+
+    def test_initialize_accepts_compat_protocol_version(self) -> None:
+        """Initialize should echo the accepted compatibility protocol version."""
+        req = {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        }
+        res = mcp_rpc(req)
+        self.assertEqual(res["jsonrpc"], "2.0")
+        self.assertEqual(res["id"], 100)
+        self.assertEqual(res["result"]["protocolVersion"], "2025-06-18")
 
     def test_http_initialize_accepts_jsonrpc_body(self) -> None:
         """The generated HTTP contract should require a JSON request body for MCP initialize."""

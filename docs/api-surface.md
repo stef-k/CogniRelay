@@ -24,9 +24,9 @@ This document covers the machine-facing HTTP contract. The optional `/ui` operat
 - `GET /v1/discovery/tools`: tool catalog with schemas and scopes
 - `GET /v1/discovery/workflows`: suggested autonomous workflows
 - `GET /.well-known/cognirelay.json`: well-known discovery entrypoint
-- `GET /.well-known/mcp.json`: bounded MCP 2025-11-25 supplemental descriptor
+- `GET /.well-known/mcp.json`: bounded MCP supplemental descriptor advertising preferred/latest `2025-11-25` and initialize compatibility for `2025-06-18` plus `2025-11-25`
 - `GET /v1/mcp`: deferred in slice 2; returns `405` with `Allow: POST`
-- `POST /v1/mcp`: bounded MCP 2025-11-25 Streamable HTTP posture for the base methods `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`, plus post-bootstrap help/reference request methods including onboarding and validation-limit lookup
+- `POST /v1/mcp`: bounded MCP Streamable HTTP posture for the base methods `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`, plus post-bootstrap help/reference request methods including onboarding and validation-limit lookup. `initialize` accepts protocol versions `2025-06-18` and `2025-11-25`; `2025-11-25` remains preferred/latest.
 
 ## Runtime help
 
@@ -82,13 +82,13 @@ Returns a deterministic, machine-readable feature map for the current build. No 
 | `coordination.shared_state` | Owner-authored shared coordination artifacts with version control |
 | `messaging.direct` | Tracked direct messages with ack, reject, defer, and delivery state |
 | `peers.registry` | Peer registration, trust-level transitions, and manifest exchange |
-| `discovery.tools` | Machine-readable tool catalog for the bounded MCP 2025-11-25 surface |
+| `discovery.tools` | Machine-readable tool catalog for the bounded MCP compatibility surface |
 
 **Versioning:** `version` is the schema version, not the app version. It increments only when the response shape changes incompatibly. Adding or removing feature keys does not change the version. Clients must tolerate unknown keys. Summaries are human-readable hints, not machine-parsed contracts.
 
 **Relationship to legacy `GET /capabilities`:** The two endpoints are independent. The legacy endpoint returns a flat string list and is unchanged.
 
-For the bounded MCP 2025-11-25 bootstrap flow, the post-bootstrap help/reference request-method additions, the tool metadata model, and the `POST /v1/mcp` posture, see `docs/mcp.md`.
+For the bounded MCP bootstrap flow, initialize protocol compatibility, the post-bootstrap help/reference request-method additions, the tool metadata model, and the `POST /v1/mcp` posture, see `docs/mcp.md`.
 
 ## Memory, file, and index operations
 
