@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""Validate and update local CogniRelay release/version surfaces."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _datetime
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+SURFACES = ("app_version", "changelog", "release_notes", "docs_index")
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+CHANGELOG_HEADING_RE = re.compile(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$", re.MULTILINE)
+APP_VERSION_RE = re.compile(r"(FastAPI\([^)]*\bversion=)([\"'])([^\"']+)(\2)", re.DOTALL)
+LATEST_RE = re.compile(r"^- \[Latest release notes: v([0-9]+\.[0-9]+\.[0-9]+)\]\(releases/v\1\.md\)$")
+NORMAL_RELEASE_RE = re.compile(r"^- \[v([0-9]+\.[0-9]+\.[0-9]+) release notes\]\(releases/v\1\.md\)$")
+
+
+CONTENT_ERROR_CODES = {
+    "version_mismatch",
+    "changelog_release_missing",
+    "changelog_date_mismatch",
+    "release_notes_missing",
+    "release_notes_conflict",
+    "docs_latest_mismatch",
+    "docs_previous_latest_missing",
+    "docs_duplicate_release_link",
+    "docs_release_link_order",
+}
+VALIDATION_ERROR_CODES = {
+    "invalid_args",
+    "invalid_version",
+    "invalid_date",
+    "invalid_title",
+    "dirty_worktree",
+    "not_git_worktree",
+}
+
+
+@dataclass(frozen=True)
+class SurfaceError(Exception):
+    """Structured release helper error for one local surface."""
+
+    code: str
+    message: str
+    surface: str | None = None
+    path: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"code": self.code, "message": self.message, "surface": self.surface, "path": self.path}
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser variant that raises instead of exiting."""
+
+    def error(self, message: str) -> None:
+        raise SurfaceError("invalid_args", message)
+
+
+def standard_result(
+    *,
+    ok: bool,
+    mode: str | None,
+    version: str | None,
+    date: str | None,
+    dry_run: bool = False,
+    checked: list[dict[str, Any]] | None = None,
+    updated: list[dict[str, Any]] | None = None,
+    warnings: list[dict[str, Any]] | None = None,
+    errors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return the standard JSON-compatible result object."""
+    tag = f"v{version}" if version else None
+    return {
+        "ok": ok,
+        "mode": mode,
+        "version": version,
+        "tag": tag,
+        "date": date,
+        "dry_run": dry_run,
+        "checked": checked or [],
+        "updated": updated or [],
+        "warnings": warnings or [],
+        "errors": errors or [],
+    }
+
+
+def error_result(error: SurfaceError, *, mode: str | None = None, version: str | None = None, date: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+    """Return a standard failure result containing a single error."""
+    return standard_result(ok=False, mode=mode, version=version, date=date, dry_run=dry_run, errors=[error.as_dict()])
+
+
+def update_entry(surface: str, path: str, action: str, *, dry_run: bool, would_write: bool) -> dict[str, Any]:
+    """Return an ordered update entry, including dry-run write intent when needed."""
+    entry: dict[str, Any] = {"surface": surface, "path": path, "action": action}
+    if dry_run:
+        entry["would_write"] = would_write
+    return entry
+
+
+def exit_code_for(result: dict[str, Any]) -> int:
+    """Classify the process exit code for a standard result."""
+    if result["ok"]:
+        return 0
+    codes = {error["code"] for error in result["errors"]}
+    if codes and codes <= VALIDATION_ERROR_CODES:
+        return 2
+    if codes and all(code in CONTENT_ERROR_CODES for code in codes):
+        return 1
+    return 3
+
+
+def validate_version(value: str) -> str:
+    """Return a normalized version or raise a validation error."""
+    if not VERSION_RE.fullmatch(value):
+        raise SurfaceError("invalid_version", "--version must match X.Y.Z")
+    return value
+
+
+def validate_date(value: str) -> str:
+    """Return an ISO release date after calendar validation."""
+    try:
+        return _datetime.date.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise SurfaceError("invalid_date", "--date must be a valid YYYY-MM-DD date") from exc
+
+
+def validate_title(value: str | None) -> str:
+    """Return a stripped single-line title or raise a validation error."""
+    title = (value or "").strip()
+    if not title or "\n" in title or "\r" in title or CONTROL_RE.search(title):
+        raise SurfaceError("invalid_title", "--title must be non-empty, single-line, and contain no control characters")
+    return title
+
+
+def today_utc() -> str:
+    """Return the current UTC calendar date."""
+    return _datetime.datetime.now(_datetime.timezone.utc).date().isoformat()
+
+
+def rel_path(path: Path, root: Path) -> str:
+    """Return a POSIX path relative to the repository root."""
+    return path.relative_to(root).as_posix()
+
+
+def read_text(path: Path, root: Path, surface: str) -> str:
+    """Read a required UTF-8 file or raise a structured IO error."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SurfaceError("read_failed", f"cannot read {rel_path(path, root)}: {exc}", surface, rel_path(path, root)) from exc
+
+
+def write_text(path: Path, root: Path, surface: str, content: str) -> None:
+    """Write a UTF-8 file or raise a structured IO error."""
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise SurfaceError("write_failed", f"cannot write {rel_path(path, root)}: {exc}", surface, rel_path(path, root)) from exc
+
+
+def ensure_parent(path: Path, root: Path, surface: str) -> None:
+    """Create a file parent directory when the contract allows it."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SurfaceError("write_failed", f"cannot create {rel_path(path.parent, root)}: {exc}", surface, rel_path(path.parent, root)) from exc
+
+
+def check_app_version(root: Path, version: str) -> dict[str, Any] | SurfaceError:
+    """Validate the FastAPI app version assignment."""
+    path = root / "app" / "main.py"
+    text = read_text(path, root, "app_version")
+    match = APP_VERSION_RE.search(text)
+    if not match:
+        raise SurfaceError("app_version_parse_failed", "FastAPI app version assignment was not found", "app_version", rel_path(path, root))
+    if match.group(3) != version:
+        return SurfaceError("version_mismatch", f"FastAPI app version is {match.group(3)}, expected {version}", "app_version", rel_path(path, root))
+    return {"surface": "app_version", "path": rel_path(path, root), "ok": True}
+
+
+def update_app_version(root: Path, version: str, *, dry_run: bool) -> tuple[dict[str, Any], dict[str, Any] | SurfaceError]:
+    """Update the FastAPI app version assignment if needed."""
+    path = root / "app" / "main.py"
+    text = read_text(path, root, "app_version")
+    match = APP_VERSION_RE.search(text)
+    if not match:
+        raise SurfaceError("app_version_parse_failed", "FastAPI app version assignment was not found", "app_version", rel_path(path, root))
+    checked = {"surface": "app_version", "path": rel_path(path, root), "ok": match.group(3) == version}
+    if match.group(3) == version:
+        return checked, update_entry("app_version", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False)
+    updated_text = text[: match.start(3)] + version + text[match.end(3) :]
+    if not dry_run:
+        write_text(path, root, "app_version", updated_text)
+    return checked, update_entry("app_version", rel_path(path, root), "updated", dry_run=dry_run, would_write=True)
+
+
+def changelog_sections(text: str, root: Path, path: Path) -> tuple[re.Match[str], re.Match[str]]:
+    """Return the Unreleased heading and first older release heading."""
+    unreleased = re.search(r"^## \[Unreleased\]$", text, re.MULTILINE)
+    if not unreleased:
+        raise SurfaceError("changelog_parse_failed", "missing ## [Unreleased] heading", "changelog", rel_path(path, root))
+    older = CHANGELOG_HEADING_RE.search(text, unreleased.end())
+    if not older:
+        raise SurfaceError("changelog_parse_failed", "missing older release heading after ## [Unreleased]", "changelog", rel_path(path, root))
+    return unreleased, older
+
+
+def check_changelog(root: Path, version: str, date: str) -> dict[str, Any] | SurfaceError:
+    """Validate the requested changelog release heading."""
+    path = root / "CHANGELOG.md"
+    text = read_text(path, root, "changelog")
+    unreleased, older = changelog_sections(text, root, path)
+    heading = f"## [{version}] - {date}"
+    search_end = CHANGELOG_HEADING_RE.search(text, older.end())
+    boundary = search_end.start() if search_end else len(text)
+    if heading not in text[unreleased.end() : boundary]:
+        version_heading = re.search(rf"^## \[{re.escape(version)}\] - ([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})$", text[unreleased.end() : boundary], re.MULTILINE)
+        if version_heading:
+            return SurfaceError("changelog_date_mismatch", f"changelog release {version} has date {version_heading.group(1)}, expected {date}", "changelog", rel_path(path, root))
+        return SurfaceError("changelog_release_missing", f"changelog release heading {heading} is missing", "changelog", rel_path(path, root))
+    return {"surface": "changelog", "path": rel_path(path, root), "ok": True}
+
+
+def update_changelog(root: Path, version: str, date: str, title: str, *, dry_run: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Insert the generated changelog section if it is absent."""
+    path = root / "CHANGELOG.md"
+    text = read_text(path, root, "changelog")
+    unreleased, older = changelog_sections(text, root, path)
+    existing = check_changelog(root, version, date)
+    if isinstance(existing, dict):
+        return existing, update_entry("changelog", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False)
+    if existing.code == "changelog_date_mismatch":
+        return {"surface": "changelog", "path": rel_path(path, root), "ok": False}, existing
+
+    section = f"## [{version}] - {date}\n\n### Changed\n\n- {title}\n\n"
+    unreleased_body = text[unreleased.end() : older.start()]
+    insert_at = older.start()
+    if not unreleased_body.strip():
+        insert_at = unreleased.end()
+        if text[insert_at:].startswith("\n\n"):
+            insert_at += 2
+        elif text[insert_at:].startswith("\n"):
+            insert_at += 1
+    new_text = text[:insert_at] + section + text[insert_at:]
+    if not dry_run:
+        write_text(path, root, "changelog", new_text)
+    return {"surface": "changelog", "path": rel_path(path, root), "ok": False}, update_entry(
+        "changelog",
+        rel_path(path, root),
+        "updated",
+        dry_run=dry_run,
+        would_write=True,
+    )
+
+
+def release_notes_path(root: Path, version: str) -> Path:
+    """Return the release notes path for a version."""
+    return root / "docs" / "releases" / f"v{version}.md"
+
+
+def check_release_notes(root: Path, version: str, date: str) -> dict[str, Any] | SurfaceError:
+    """Validate release notes heading and date line."""
+    path = release_notes_path(root, version)
+    if not path.exists():
+        return SurfaceError("release_notes_missing", f"{rel_path(path, root)} is missing", "release_notes", rel_path(path, root))
+    text = read_text(path, root, "release_notes")
+    lines = text.splitlines()
+    expected_heading = f"# CogniRelay v{version} Release Notes"
+    expected_date = f"Release date: {date}"
+    if not lines or lines[0] != expected_heading:
+        return SurfaceError("release_notes_conflict", f"release notes heading must be {expected_heading}", "release_notes", rel_path(path, root))
+    if len(lines) < 3 or lines[2] != expected_date:
+        return SurfaceError("release_notes_conflict", f"release notes date line must be {expected_date}", "release_notes", rel_path(path, root))
+    return {"surface": "release_notes", "path": rel_path(path, root), "ok": True}
+
+
+def release_notes_template(version: str, date: str, title: str) -> str:
+    """Return the deterministic release notes template."""
+    return (
+        f"# CogniRelay v{version} Release Notes\n\n"
+        f"Release date: {date}\n\n"
+        f"{title}\n\n"
+        "## Verification\n\n"
+        "Release preparation should pass:\n\n"
+        "```bash\n"
+        "git diff --check\n"
+        "./.venv/bin/python -m ruff check app tests tools agent-assets\n"
+        "./.venv/bin/python -m unittest discover -s tests -v\n"
+        "```\n"
+    )
+
+
+def update_release_notes(root: Path, version: str, date: str, title: str, *, dry_run: bool) -> tuple[dict[str, Any], dict[str, Any] | SurfaceError]:
+    """Create release notes or preserve matching existing notes."""
+    path = release_notes_path(root, version)
+    existing = check_release_notes(root, version, date)
+    if isinstance(existing, dict):
+        return existing, update_entry("release_notes", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False)
+    if existing.code != "release_notes_missing":
+        return {"surface": "release_notes", "path": rel_path(path, root), "ok": False}, existing
+    if not dry_run:
+        ensure_parent(path, root, "release_notes")
+        write_text(path, root, "release_notes", release_notes_template(version, date, title))
+    return {"surface": "release_notes", "path": rel_path(path, root), "ok": False}, update_entry(
+        "release_notes",
+        rel_path(path, root),
+        "created",
+        dry_run=dry_run,
+        would_write=True,
+    )
+
+
+def release_list_bounds(text: str, root: Path, path: Path) -> tuple[int, int]:
+    """Return start/end offsets for the bounded release bullet list."""
+    heading = re.search(r"^## Releases$", text, re.MULTILINE)
+    if not heading:
+        raise SurfaceError("docs_index_parse_failed", "missing ## Releases heading", "docs_index", rel_path(path, root))
+    pos = heading.end()
+    if text[pos:].startswith("\n"):
+        pos += 1
+    if text[pos:].startswith("\n"):
+        pos += 1
+    line_start = pos
+    end = pos
+    saw_list = False
+    for line in text[pos:].splitlines(keepends=True):
+        if line.startswith("## "):
+            break
+        if line.startswith("- "):
+            saw_list = True
+            end = line_start + len(line)
+        elif saw_list and line.strip():
+            break
+        elif not saw_list and line.strip():
+            raise SurfaceError("docs_index_parse_failed", "release list must begin with Markdown bullets", "docs_index", rel_path(path, root))
+        line_start += len(line)
+    if not saw_list:
+        raise SurfaceError("docs_index_parse_failed", "release list is missing after ## Releases", "docs_index", rel_path(path, root))
+    return pos, end
+
+
+def release_list_lines(root: Path) -> tuple[Path, str, int, int, list[str]]:
+    """Return docs index text and bounded release list lines."""
+    path = root / "docs" / "index.md"
+    text = read_text(path, root, "docs_index")
+    start, end = release_list_bounds(text, root, path)
+    return path, text, start, end, text[start:end].splitlines()
+
+
+def check_docs_index(root: Path, version: str) -> dict[str, Any] | SurfaceError:
+    """Validate the latest release pointer and previous latest list entry."""
+    path, _text, _start, _end, lines = release_list_lines(root)
+    expected_latest = f"- [Latest release notes: v{version}](releases/v{version}.md)"
+    if not lines or lines[0] != expected_latest:
+        return SurfaceError("docs_latest_mismatch", f"latest release pointer must be {expected_latest}", "docs_index", rel_path(path, root))
+    if len(lines) < 2 or not NORMAL_RELEASE_RE.fullmatch(lines[1]):
+        return SurfaceError("docs_previous_latest_missing", "previous latest release link must be immediately below latest pointer", "docs_index", rel_path(path, root))
+    seen: set[str] = set()
+    for line in lines[1:]:
+        match = NORMAL_RELEASE_RE.fullmatch(line)
+        if not match:
+            continue
+        release_version = match.group(1)
+        if release_version in seen or release_version == version:
+            return SurfaceError("docs_duplicate_release_link", f"duplicate or current normal release link for v{release_version}", "docs_index", rel_path(path, root))
+        seen.add(release_version)
+    return {"surface": "docs_index", "path": rel_path(path, root), "ok": True}
+
+
+def update_docs_index(root: Path, version: str, *, dry_run: bool) -> tuple[dict[str, Any], dict[str, Any] | SurfaceError]:
+    """Update only the bounded release list in docs/index.md."""
+    path, text, start, end, lines = release_list_lines(root)
+    if not lines:
+        raise SurfaceError("docs_index_parse_failed", "release list is missing after ## Releases", "docs_index", rel_path(path, root))
+    latest_match = LATEST_RE.fullmatch(lines[0])
+    if not latest_match:
+        raise SurfaceError("docs_index_parse_failed", "first release list item must be the latest release pointer", "docs_index", rel_path(path, root))
+    previous_latest = latest_match.group(1)
+    checked = check_docs_index(root, version)
+    if isinstance(checked, dict):
+        return checked, update_entry("docs_index", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False)
+
+    new_latest = f"- [Latest release notes: v{version}](releases/v{version}.md)"
+    previous_normal = f"- [v{previous_latest} release notes](releases/v{previous_latest}.md)"
+    remaining: list[str] = []
+    for line in lines[1:]:
+        normal = NORMAL_RELEASE_RE.fullmatch(line)
+        if normal and normal.group(1) in {version, previous_latest}:
+            continue
+        remaining.append(line)
+    new_lines = [new_latest, previous_normal, *remaining]
+    new_block = "\n".join(new_lines) + "\n"
+    new_text = text[:start] + new_block + text[end:]
+    if not dry_run:
+        write_text(path, root, "docs_index", new_text)
+    return {"surface": "docs_index", "path": rel_path(path, root), "ok": False}, update_entry(
+        "docs_index",
+        rel_path(path, root),
+        "updated",
+        dry_run=dry_run,
+        would_write=True,
+    )
+
+
+def check_release(root: Path, version: str, date: str) -> dict[str, Any]:
+    """Check local release surfaces for a requested version."""
+    checked: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    checks = (
+        lambda: check_app_version(root, version),
+        lambda: check_changelog(root, version, date),
+        lambda: check_release_notes(root, version, date),
+        lambda: check_docs_index(root, version),
+    )
+    for func in checks:
+        try:
+            result = func()
+        except SurfaceError as exc:
+            errors.append(exc.as_dict())
+            continue
+        if isinstance(result, SurfaceError):
+            errors.append(result.as_dict())
+        else:
+            checked.append(result)
+    return standard_result(ok=not errors, mode="check", version=version, date=date, checked=checked, errors=errors)
+
+
+def update_release(root: Path, version: str, date: str, title: str, *, dry_run: bool) -> dict[str, Any]:
+    """Update local release surfaces for a requested version."""
+    checked: list[dict[str, Any]] = []
+    updated: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for func in (update_app_version, update_changelog, update_release_notes, update_docs_index):
+        try:
+            if func is update_app_version or func is update_docs_index:
+                check_entry, update_entry = func(root, version, dry_run=dry_run)
+            else:
+                check_entry, update_entry = func(root, version, date, title, dry_run=dry_run)
+        except SurfaceError as exc:
+            errors.append(exc.as_dict())
+            continue
+        checked.append(check_entry)
+        if isinstance(update_entry, SurfaceError):
+            errors.append(update_entry.as_dict())
+        else:
+            updated.append(update_entry)
+    return standard_result(ok=not errors, mode="update", version=version, date=date, dry_run=dry_run, checked=checked, updated=updated, errors=errors)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse CLI arguments or raise a structured validation error."""
+    parser = JsonArgumentParser(prog="prepare_release.py", add_help=True)
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+    for mode in ("check", "update"):
+        sub = subparsers.add_parser(mode)
+        sub.add_argument("--version", required=True)
+        sub.add_argument("--date", default=today_utc())
+        sub.add_argument("--allow-dirty", action="store_true")
+        if mode == "update":
+            sub.add_argument("--title", required=True)
+            sub.add_argument("--dry-run", action="store_true")
+    return parser.parse_args(argv)
+
+
+def resolve_repo_root() -> Path:
+    """Resolve the git repository root from the current working directory."""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], check=False, capture_output=True, text=True)
+    except OSError as exc:
+        raise SurfaceError("not_git_worktree", f"cannot run git rev-parse: {exc}") from exc
+    if proc.returncode != 0:
+        raise SurfaceError("not_git_worktree", "current directory is not inside a git worktree")
+    return Path(proc.stdout.strip()).resolve()
+
+
+def ensure_clean_worktree(root: Path) -> None:
+    """Fail when tracked or untracked non-ignored files are present."""
+    try:
+        proc = subprocess.run(["git", "status", "--porcelain=v1"], cwd=root, check=False, capture_output=True, text=True)
+    except OSError as exc:
+        raise SurfaceError("dirty_worktree", f"cannot inspect git status: {exc}") from exc
+    if proc.returncode != 0:
+        raise SurfaceError("dirty_worktree", "cannot inspect git status")
+    if proc.stdout:
+        raise SurfaceError("dirty_worktree", "worktree has tracked or untracked non-ignored changes")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    mode = version = date = None
+    dry_run = False
+    try:
+        args = parse_args(argv)
+        mode = args.mode
+        version = validate_version(args.version)
+        date = validate_date(args.date)
+        dry_run = bool(getattr(args, "dry_run", False))
+        title = validate_title(getattr(args, "title", None)) if mode == "update" else None
+        root = resolve_repo_root()
+        if not args.allow_dirty:
+            ensure_clean_worktree(root)
+        result = check_release(root, version, date) if mode == "check" else update_release(root, version, date, title or "", dry_run=dry_run)
+    except SurfaceError as exc:
+        result = error_result(exc, mode=mode, version=version, date=date, dry_run=dry_run)
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return exit_code_for(result)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
