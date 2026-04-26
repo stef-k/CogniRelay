@@ -33,7 +33,10 @@ def _write_fixture(root: Path, *, version: str = "1.4.8", latest: str = "1.4.8")
         "## [Unreleased]\n\n"
         f"## [{latest}] - 2026-04-26\n\n"
         "### Fixed\n\n"
-        "- Previous release.\n",
+        "- Previous release.\n\n"
+        "## [1.4.7] - 2026-04-25\n\n"
+        "### Fixed\n\n"
+        "- Older release.\n",
         encoding="utf-8",
     )
     (root / "docs" / "index.md").write_text(
@@ -138,6 +141,104 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual(prepare_release.exit_code_for(result), 1)
             self.assertEqual(result["errors"][0]["code"], "changelog_date_mismatch")
             self.assertEqual(changelog.read_text(encoding="utf-8").count("## [1.4.9]"), 1)
+
+    def test_update_conflict_writes_no_release_surfaces(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            notes = root / "docs" / "releases" / "v1.4.9.md"
+            notes.write_text(
+                "# CogniRelay v1.4.9 Release Notes\n\n"
+                "Release date: 2026-04-26\n\n"
+                "Conflicting existing notes.\n",
+                encoding="utf-8",
+            )
+            tracked_paths = [
+                root / "app" / "main.py",
+                root / "CHANGELOG.md",
+                root / "docs" / "index.md",
+                notes,
+            ]
+            before = {path: path.read_text(encoding="utf-8") for path in tracked_paths}
+
+            result = prepare_release.update_release(root, "1.4.9", "2026-04-27", "Release helper", dry_run=False)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+            self.assertIn("release_notes_conflict", {error["code"] for error in result["errors"]})
+            self.assertEqual({path: path.read_text(encoding="utf-8") for path in tracked_paths}, before)
+
+    def test_changelog_check_requires_exact_heading_line(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root, version="1.4.9", latest="1.4.8")
+            (root / "CHANGELOG.md").write_text(
+                "# Changelog\n\n"
+                "## [Unreleased]\n\n"
+                "### Notes\n\n"
+                "- Mention `## [1.4.9] - 2026-04-27` in prose, not as a heading.\n\n"
+                "```text\n"
+                "## [1.4.9] - 2026-04-27\n"
+                "```\n\n"
+                "## [1.4.8] - 2026-04-26\n\n"
+                "### Fixed\n\n"
+                "- Previous release.\n\n"
+                "## [1.4.7] - 2026-04-25\n\n"
+                "### Fixed\n\n"
+                "- Older release.\n",
+                encoding="utf-8",
+            )
+            (root / "docs" / "releases" / "v1.4.9.md").write_text(
+                "# CogniRelay v1.4.9 Release Notes\n\nRelease date: 2026-04-27\n",
+                encoding="utf-8",
+            )
+            (root / "docs" / "index.md").write_text(
+                "# CogniRelay Documentation\n\n"
+                "## Releases\n\n"
+                "- [Latest release notes: v1.4.9](releases/v1.4.9.md)\n"
+                "- [v1.4.8 release notes](releases/v1.4.8.md)\n",
+                encoding="utf-8",
+            )
+
+            result = prepare_release.check_release(root, "1.4.9", "2026-04-27")
+
+            self.assertFalse(result["ok"])
+            self.assertIn("changelog_release_missing", {error["code"] for error in result["errors"]})
+
+    def test_docs_index_check_requires_exact_previous_latest_from_changelog(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root, version="1.4.9", latest="1.4.9")
+            (root / "CHANGELOG.md").write_text(
+                "# Changelog\n\n"
+                "## [Unreleased]\n\n"
+                "## [1.4.9] - 2026-04-27\n\n"
+                "### Changed\n\n"
+                "- Current release.\n\n"
+                "## [1.4.8] - 2026-04-26\n\n"
+                "### Fixed\n\n"
+                "- Previous release.\n\n"
+                "## [1.4.7] - 2026-04-25\n\n"
+                "### Fixed\n\n"
+                "- Older release.\n",
+                encoding="utf-8",
+            )
+            (root / "docs" / "releases" / "v1.4.9.md").write_text(
+                "# CogniRelay v1.4.9 Release Notes\n\nRelease date: 2026-04-27\n",
+                encoding="utf-8",
+            )
+            (root / "docs" / "index.md").write_text(
+                "# CogniRelay Documentation\n\n"
+                "## Releases\n\n"
+                "- [Latest release notes: v1.4.9](releases/v1.4.9.md)\n"
+                "- [v1.4.7 release notes](releases/v1.4.7.md)\n",
+                encoding="utf-8",
+            )
+
+            result = prepare_release.check_release(root, "1.4.9", "2026-04-27")
+
+            self.assertFalse(result["ok"])
+            self.assertIn("docs_previous_latest_missing", {error["code"] for error in result["errors"]})
 
     def test_existing_matching_release_notes_are_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as td:
