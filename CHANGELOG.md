@@ -7,6 +7,12 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex MCP startup compatibility when clients call `tools/list`
+  immediately after successful `initialize` without sending a separate
+  `notifications/initialized` notification.
+
 ## [1.4.3] - 2026-04-26
 
 ### Fixed

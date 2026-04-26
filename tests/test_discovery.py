@@ -48,7 +48,6 @@ class TestDiscoveryEndpoints(unittest.TestCase):
                     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
                     "\"params\":{\"protocolVersion\":\"2025-11-25\"}}"
                 ),
-                "POST /v1/mcp {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}",
             ],
         )
 

@@ -530,16 +530,14 @@ def handle_mcp_request_payload(
     phase = _bootstrap_phase(bootstrap_key)
 
     if method == "initialize":
-        if phase != _BOOTSTRAP_NONE:
-            return _server_not_initialized(request_id, "notifications/initialized")
         result = _validate_initialize(request_id, request_payload.get("params"), server_version)
         if isinstance(result, McpHttpResponse):
             return result
-        _set_bootstrap_phase(bootstrap_key, _BOOTSTRAP_INITIALIZED)
+        _set_bootstrap_phase(bootstrap_key, _BOOTSTRAP_READY)
         return _jsonrpc_success(request_id, result)
 
     if method == "notifications/initialized":
-        if phase == _BOOTSTRAP_INITIALIZED:
+        if phase in {_BOOTSTRAP_INITIALIZED, _BOOTSTRAP_READY}:
             _set_bootstrap_phase(bootstrap_key, _BOOTSTRAP_READY)
         return _response(204, None)
 

@@ -82,8 +82,8 @@ class TestMcp216Slice3Help(unittest.TestCase):
             ],
         )
 
-    def test_help_methods_are_bootstrap_gated_but_never_method_not_found(self) -> None:
-        """Recognized slice-3 help methods must use the existing bootstrap errors until ready."""
+    def test_help_methods_are_pre_initialize_gated_but_ready_after_initialize(self) -> None:
+        """Recognized slice-3 help methods must gate only until initialize succeeds."""
         methods = [
             ("system.help", {}),
             ("system.tool_usage", {"name": "continuity.read"}),
@@ -122,21 +122,10 @@ class TestMcp216Slice3Help(unittest.TestCase):
         self.assertEqual(initialize.status_code, 200)
 
         for request_id, (method, params) in enumerate(methods, start=30):
-            with self.subTest(phase="post_initialize_pre_notification", method=method):
+            with self.subTest(phase="post_initialize", method=method):
                 response = self._request(request_id, method, params=params)
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.json(),
-                    {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": {
-                            "code": -32000,
-                            "message": "Server not initialized",
-                            "data": {"required_step": "notifications/initialized"},
-                        },
-                    },
-                )
+                self.assertIn("result", response.json())
 
     def test_tools_list_excludes_help_request_methods(self) -> None:
         """The five slice-3 method names must not appear as tools."""
