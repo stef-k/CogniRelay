@@ -24,6 +24,8 @@ HELP_LINKS = {
     "limits_index": "/v1/help/limits",
 }
 
+MODES = ("facts", "template", "dry-run", "write", "readback", "doctor")
+
 SEMANTIC_PREFIXES = (
     "/capsule/continuity",
     "/capsule/stable_preferences",
@@ -48,6 +50,26 @@ EXCLUDED_DIFF_PREFIXES = (
 PLACEHOLDER_RE = re.compile(r"\b(?:TODO|TBD|PLACEHOLDER|FILL ME|REPLACE ME)\b", re.IGNORECASE)
 BRACKET_PLACEHOLDER_RE = re.compile(r"^(?:<[^<>]+>|\[[^\[\]]+\])$")
 UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+
+
+class InvalidArgsError(Exception):
+    """Raised when argparse should emit the hook JSON failure envelope."""
+
+    def __init__(self, message: str, field: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.field = field
+
+
+class HookArgumentParser(argparse.ArgumentParser):
+    """Argument parser that preserves --help and defers errors to JSON output."""
+
+    def error(self, message: str) -> None:
+        field = None
+        if message.startswith("argument "):
+            target = message.split(":", 1)[0].removeprefix("argument ")
+            field = target.removeprefix("--").replace("-", "_")
+        raise InvalidArgsError(message, field)
 
 
 def envelope(ok: bool, mode: str, result: dict[str, Any] | None = None, errors: list[dict[str, str]] | None = None, warnings: list[Any] | None = None) -> dict[str, Any]:
@@ -82,6 +104,33 @@ def post_json(base_url: str, token: str, path: str, payload: dict[str, Any], tim
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read().decode("utf-8")
         return response.status, json.loads(body) if body else {}
+
+
+def redact_token(value: Any, token: str) -> Any:
+    if not token:
+        return value
+    if isinstance(value, dict):
+        return {key: redact_token(child, token) for key, child in value.items()}
+    if isinstance(value, list):
+        return [redact_token(child, token) for child in value]
+    if isinstance(value, str):
+        return value.replace(token, "[REDACTED]")
+    return value
+
+
+def bounded_current_state(value: dict[str, Any], token: str, max_chars: int = 6000) -> dict[str, Any]:
+    redacted = redact_token(value, token)
+    encoded = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
+    if len(encoded) <= max_chars:
+        return redacted
+    return {"truncated": True, "json": encoded[:max_chars]}
+
+
+def http_error_result(exc: urllib.error.HTTPError) -> dict[str, Any]:
+    result: dict[str, Any] = {"status": exc.code}
+    if exc.reason:
+        result["reason"] = str(exc.reason)[:120]
+    return result
 
 
 def current_git_facts() -> dict[str, str]:
@@ -236,8 +285,8 @@ def semantic_diff(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate, write, and read back CogniRelay continuity payloads.")
-    parser.add_argument("mode", choices=["facts", "template", "dry-run", "write", "readback", "doctor"])
+    parser = HookArgumentParser(description="Validate, write, and read back CogniRelay continuity payloads.")
+    parser.add_argument("mode", choices=MODES)
     parser.add_argument("--base-url")
     parser.add_argument("--token")
     parser.add_argument("--subject-kind", choices=["thread", "task", "user", "peer"])
@@ -285,30 +334,67 @@ def readback(mode: str, args: argparse.Namespace) -> int:
             return emit(envelope(False, mode, result={"status": status}, errors=[{"code": "http_error", "message": "Continuity read returned an unsuccessful status."}]), 4)
         return emit(envelope(True, mode, result={"readback": response, "trust_signals": response.get("trust_signals", {}), "recovery_warnings": response.get("recovery_warnings", [])}), 0)
     except urllib.error.HTTPError as exc:
-        return emit(envelope(False, mode, result={"status": exc.code}, errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status."}]), 4)
+        return emit(envelope(False, mode, result=http_error_result(exc), errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status. Response body omitted."}]), 4)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         print(f"CogniRelay save-hook transport failure: {exc.__class__.__name__}", file=sys.stderr)
         return emit(envelope(False, mode, errors=[{"code": "transport_failure", "message": "No usable HTTP response was received."}]), 3)
 
 
+def best_known_mode(argv: list[str] | None) -> str:
+    values = sys.argv[1:] if argv is None else argv
+    return values[0] if values and values[0] in MODES else "unknown"
+
+
+def facts_result(args: argparse.Namespace, subject_kind: str, subject_id: str) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    base_url, token, timeout, timeout_error = network_config(args)
+    result = {
+        "subject": {"kind": subject_kind or None, "id": subject_id or None},
+        "config": {
+            "base_url_present": bool(args.base_url or os.getenv("COGNIRELAY_BASE_URL")),
+            "token_present": bool(args.token or os.getenv("COGNIRELAY_TOKEN")),
+        },
+        "mechanical_facts": {"utc_now": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "git": current_git_facts()},
+        "help_links": HELP_LINKS,
+    }
+    warnings: list[dict[str, str]] = []
+    if timeout_error is not None:
+        warnings.append({"code": "current_state_unavailable", "message": "Current state read skipped because timeout configuration is invalid.", "field": "timeout"})
+        return result, warnings
+    if not base_url or not token or not subject_kind or not subject_id:
+        warnings.append({"code": "missing_config_for_current_state", "message": "Current state read skipped because base URL, token, subject kind, or subject id is missing."})
+        return result, warnings
+    try:
+        _status, response = post_json(
+            base_url,
+            token,
+            "/v1/continuity/read",
+            {"subject_kind": subject_kind, "subject_id": subject_id, "view": "startup", "allow_fallback": True},
+            timeout,
+        )
+        result["current_state"] = bounded_current_state(response, token)
+    except urllib.error.HTTPError as exc:
+        warnings.append({"code": "current_state_unavailable", "message": "Current state read returned an unsuccessful status. Response body omitted.", "field": str(exc.code)})
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        warnings.append({"code": "current_state_unavailable", "message": "No usable current state HTTP response was received."})
+    return result, warnings
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except InvalidArgsError as exc:
+        error = {"code": "invalid_args", "message": exc.message}
+        if exc.field:
+            error["field"] = exc.field
+        return emit(envelope(False, best_known_mode(argv), errors=[error]), 2)
     mode = args.mode
     subject_kind = args.subject_kind or os.getenv("COGNIRELAY_SUBJECT_KIND") or ""
     subject_id = args.subject_id or os.getenv("COGNIRELAY_SUBJECT_ID") or ""
 
     if mode == "facts":
-        result = {
-            "subject": {"kind": subject_kind or None, "id": subject_id or None},
-            "config": {
-                "base_url_present": bool(args.base_url or os.getenv("COGNIRELAY_BASE_URL")),
-                "token_present": bool(args.token or os.getenv("COGNIRELAY_TOKEN")),
-            },
-            "mechanical_facts": {"utc_now": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "git": current_git_facts()},
-            "help_links": HELP_LINKS,
-        }
-        return emit(envelope(True, mode, result=result), 0)
+        result, warnings = facts_result(args, subject_kind, subject_id)
+        return emit(envelope(True, mode, result=result, warnings=warnings), 0)
     if mode == "template":
         return emit(envelope(True, mode, result={"payload": template_payload(subject_kind, subject_id)}), 0)
     if mode in {"readback", "doctor"}:
@@ -352,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
             result = {"upsert_response": response}
             return emit(envelope(True, mode, result=result), 0)
         except urllib.error.HTTPError as exc:
-            return emit(envelope(False, mode, result={"status": exc.code}, errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status."}]), 4)
+            return emit(envelope(False, mode, result=http_error_result(exc), errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status. Response body omitted."}]), 4)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             print(f"CogniRelay write transport failure: {exc.__class__.__name__}", file=sys.stderr)
             return emit(envelope(False, mode, errors=[{"code": "transport_failure", "message": "No usable HTTP response was received."}]), 3)

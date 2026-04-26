@@ -12,6 +12,25 @@ import urllib.request
 from typing import Any
 
 
+class InvalidArgsError(Exception):
+    """Raised when argparse should emit the hook JSON failure envelope."""
+
+    def __init__(self, message: str, field: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.field = field
+
+
+class HookArgumentParser(argparse.ArgumentParser):
+    """Argument parser that preserves --help and defers errors to JSON output."""
+
+    def error(self, message: str) -> None:
+        field = None
+        if message.startswith("argument --"):
+            field = message.split(":", 1)[0].removeprefix("argument --").replace("-", "_")
+        raise InvalidArgsError(message, field)
+
+
 def envelope(ok: bool, mode: str, result: dict[str, Any] | None = None, errors: list[dict[str, str]] | None = None, warnings: list[Any] | None = None) -> dict[str, Any]:
     return {"ok": ok, "mode": mode, "warnings": warnings or [], "errors": errors or [], "result": result or {}}
 
@@ -41,6 +60,13 @@ def normalize_base_url(value: str) -> str:
     return value[:-1] if value.endswith("/") else value
 
 
+def http_error_result(exc: urllib.error.HTTPError) -> dict[str, Any]:
+    result: dict[str, Any] = {"status": exc.code}
+    if exc.reason:
+        result["reason"] = str(exc.reason)[:120]
+    return result
+
+
 def resolve_timeout(value: float | None) -> tuple[float, dict[str, str] | None]:
     if value is not None:
         return value, None
@@ -52,7 +78,7 @@ def resolve_timeout(value: float | None) -> tuple[float, dict[str, str] | None]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Read CogniRelay startup continuity and optional bounded context.")
+    parser = HookArgumentParser(description="Read CogniRelay startup continuity and optional bounded context.")
     parser.add_argument("--base-url")
     parser.add_argument("--token")
     parser.add_argument("--subject-kind", choices=["thread", "task", "user", "peer"])
@@ -66,7 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except InvalidArgsError as exc:
+        error = {"code": "invalid_args", "message": exc.message}
+        if exc.field:
+            error["field"] = exc.field
+        return emit(envelope(False, "retrieval", errors=[error]), 2)
     base_url = normalize_base_url(args.base_url or os.getenv("COGNIRELAY_BASE_URL") or "")
     token = args.token or os.getenv("COGNIRELAY_TOKEN") or ""
     subject_kind = args.subject_kind or os.getenv("COGNIRELAY_SUBJECT_KIND") or ""
@@ -107,11 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             result["context"] = context
         return emit(envelope(True, "retrieval", result=result), 0)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        result = {"status": exc.code}
-        if body:
-            result["body"] = body
-        return emit(envelope(False, "retrieval", result=result, errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status."}]), 4)
+        return emit(envelope(False, "retrieval", result=http_error_result(exc), errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status. Response body omitted."}]), 4)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         print(f"CogniRelay retrieval transport failure: {exc.__class__.__name__}", file=sys.stderr)
         return emit(envelope(False, "retrieval", errors=[{"code": "transport_failure", "message": "No usable HTTP response was received."}]), 3)
