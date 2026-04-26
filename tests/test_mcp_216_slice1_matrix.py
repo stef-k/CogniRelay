@@ -147,8 +147,9 @@ EXPECTED_MATRIX = [
         "converged",
         (
             "`/.well-known/mcp.json` remains supplemental metadata only and now "
-            "accurately describes `/v1/mcp`, bearer auth, the `2025-11-25` target, "
-            "and the deferred GET posture."
+            "accurately describes `/v1/mcp`, bearer auth, the preferred/latest "
+            "`2025-11-25` target, supported initialize versions `2025-06-18` "
+            "and `2025-11-25`, and the deferred GET posture."
         ),
         "`/.well-known/mcp.json` must remain supplemental metadata only and accurately describe the narrowed `#216` posture instead of implying a broader MCP bridge.",
         "none",
@@ -181,8 +182,17 @@ EXPECTED_MATRIX = [
         "bootstrap.protocol_version_negotiation",
         "slice_2",
         "converged",
-        "`initialize` now supports only `protocolVersion = \"2025-11-25\"` and rejects every other value with the exact unsupported-version error without advancing bootstrap state.",
-        "Support only `protocolVersion = \"2025-11-25\"` and reject every other value with the exact unsupported-version error.",
+        (
+            "`initialize` now supports `protocolVersion = \"2025-06-18\"` and "
+            "`protocolVersion = \"2025-11-25\"`, echoes the accepted version in "
+            "successful responses, and rejects every other value with the exact "
+            "unsupported-version error without advancing bootstrap state."
+        ),
+        (
+            "Support `protocolVersion = \"2025-06-18\"` and "
+            "`protocolVersion = \"2025-11-25\"` only, echo the accepted version, "
+            "and reject every other value with the exact unsupported-version error."
+        ),
         "none",
         "implemented",
     ),

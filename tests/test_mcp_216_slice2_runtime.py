@@ -316,8 +316,44 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
             },
         )
 
+    def test_initialize_accepts_legacy_compat_protocol_and_tools_list(self) -> None:
+        """The bounded MCP surface should accept the 2025-06-18 startup version."""
+        headers = {"authorization": self._CALLER_A_AUTH}
+        initialize = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18"},
+            },
+            headers=headers,
+        )
+        self.assertEqual(initialize.status_code, 200)
+        payload = initialize.json()
+        self.assertEqual(payload["result"]["protocolVersion"], "2025-06-18")
+
+        notify = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            headers=headers,
+        )
+        self.assertEqual(notify.status_code, 204)
+
+        tools_list = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}},
+            headers=headers,
+        )
+        self.assertEqual(tools_list.status_code, 200)
+        tools_payload = tools_list.json()
+        self.assertEqual(tools_payload["jsonrpc"], "2.0")
+        self.assertEqual(tools_payload["id"], 6)
+        self.assertIn("tools", tools_payload["result"])
+
     def test_initialize_rejects_unsupported_protocol_without_advancing_state(self) -> None:
         """Unsupported protocol versions must not advance bootstrap state."""
+        headers = {"authorization": self._CALLER_A_AUTH}
         rejected = self.client.post(
             "/v1/mcp",
             json={
@@ -326,6 +362,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 "method": "initialize",
                 "params": {"protocolVersion": "2024-01-01"},
             },
+            headers=headers,
         )
         self.assertEqual(rejected.status_code, 200)
         self.assertEqual(
@@ -336,7 +373,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 "error": {
                     "code": -32602,
                     "message": "Unsupported protocol version",
-                    "data": {"supported": ["2025-11-25"], "requested": "2024-01-01"},
+                    "data": {"supported": ["2025-06-18", "2025-11-25"], "requested": "2024-01-01"},
                 },
             },
         )
@@ -344,6 +381,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         gated = self.client.post(
             "/v1/mcp",
             json={"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}},
+            headers=headers,
         )
         self.assertEqual(gated.status_code, 200)
         self.assertEqual(gated.json()["error"]["data"], {"required_step": "initialize"})

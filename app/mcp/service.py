@@ -16,7 +16,8 @@ from app.help import is_mcp_help_method, resolve_mcp_help_method
 from app.schedule import validate_schedule_mcp_arguments
 from app.timestamps import format_iso, iso_now
 
-SUPPORTED_PROTOCOL_VERSION = "2025-11-25"
+PREFERRED_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", PREFERRED_PROTOCOL_VERSION)
 
 _RECOGNIZED_METHODS = {
     "initialize",
@@ -407,13 +408,13 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
     protocol_version = params["protocolVersion"]
     if not isinstance(protocol_version, str):
         return _invalid_params(request_id, "protocolVersion must be a string")
-    if protocol_version != SUPPORTED_PROTOCOL_VERSION:
+    if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
         return _jsonrpc_error(
             200,
             request_id,
             -32602,
             "Unsupported protocol version",
-            {"supported": [SUPPORTED_PROTOCOL_VERSION], "requested": protocol_version},
+            {"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "requested": protocol_version},
         )
 
     if "capabilities" in params and not isinstance(params["capabilities"], dict):
@@ -436,7 +437,7 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
             return _invalid_params(request_id, "clientInfo.version must be a non-empty string")
 
     return {
-        "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
+        "protocolVersion": protocol_version,
         "capabilities": {"tools": {"listChanged": False}},
         "serverInfo": {"name": "cognirelay", "version": server_version},
     }

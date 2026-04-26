@@ -9,7 +9,7 @@ CogniRelay exposes two machine-oriented integration styles:
 - HTTP-native discovery via `GET /v1/discovery`, `GET /v1/discovery/tools`, and `GET /v1/discovery/workflows`
 - MCP JSON-RPC via `GET /.well-known/mcp.json` and `POST /v1/mcp`
 
-The `#216` runtime target is MCP `2025-11-25` Streamable HTTP with a temporary bounded posture:
+The `#216` runtime target is MCP `2025-11-25` Streamable HTTP with a temporary bounded posture. For startup compatibility, `initialize` accepts both MCP protocol versions `2025-06-18` and `2025-11-25`; `2025-11-25` remains the preferred/latest version in examples and descriptor metadata.
 
 - `POST /v1/mcp` is the only MCP request endpoint that may succeed
 - `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
@@ -35,7 +35,8 @@ The well-known descriptor advertises:
 
 - endpoint: `/v1/mcp`
 - transport posture: `streamable-http`
-- protocol target: MCP `2025-11-25`
+- preferred/latest protocol target: MCP `2025-11-25`
+- supported initialize protocol versions: MCP `2025-06-18` and `2025-11-25`
 - methods: base `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, plus post-bootstrap help/reference request methods
 - auth: bearer token in `Authorization`
 - supplemental metadata only: `true`
