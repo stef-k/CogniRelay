@@ -37,7 +37,8 @@ the [README](../README.md).
 
 ## Releases
 
-- [Latest release notes: v1.4.1](releases/v1.4.1.md)
+- [Latest release notes: v1.4.2](releases/v1.4.2.md)
+- [v1.4.1 release notes](releases/v1.4.1.md)
 - [v1.4.0 release notes](releases/v1.4.0.md)
 - [Changelog](../CHANGELOG.md)
 - [GitHub releases](https://github.com/stef-k/CogniRelay/releases)

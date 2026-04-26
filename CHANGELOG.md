@@ -7,6 +7,18 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-04-26
+
+### Fixed
+
+- Redacted raw `context.retrieve` task text from durable `context_retrieve`
+  audit events. Audit rows now keep deterministic `task_hash` and
+  `task_length_bytes` metadata while preserving `count` and
+  `continuity_selectors`.
+- Fixed the `/ui/docs` browser so it reads shipped application documentation
+  from the application source/docs root instead of the configured data repo
+  root.
+
 ## [1.4.1] - 2026-04-26
 
 ### Fixed
