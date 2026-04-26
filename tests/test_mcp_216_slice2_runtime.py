@@ -340,6 +340,61 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         self.assertEqual(tools_payload["id"], 6)
         self.assertIn("tools", tools_payload["result"])
 
+    def test_initialize_accepts_standard_client_info_metadata_and_tools_list(self) -> None:
+        """Implementation metadata from standards-compliant MCP clients must not block startup."""
+        cases = [
+            (
+                "2025-11-25",
+                {
+                    "name": "codex",
+                    "version": "test",
+                    "title": "Codex",
+                },
+            ),
+            (
+                "2025-06-18",
+                {
+                    "name": "claude",
+                    "version": "1.0.0",
+                    "title": "Claude Desktop",
+                    "description": "MCP client",
+                    "websiteUrl": "https://example.invalid/agent",
+                    "icons": [],
+                },
+            ),
+        ]
+
+        for index, (protocol_version, client_info) in enumerate(cases, start=1):
+            with self.subTest(protocol_version=protocol_version, client_info=client_info):
+                reset_bootstrap_state()
+                headers = {"authorization": f"Bearer client-info-{index}"}
+                initialize = self.client.post(
+                    "/v1/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 80 + index,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": protocol_version,
+                            "capabilities": {},
+                            "clientInfo": client_info,
+                        },
+                    },
+                    headers=headers,
+                )
+                self.assertEqual(initialize.status_code, 200)
+                initialize_payload = initialize.json()
+                self.assertEqual(initialize_payload["result"]["protocolVersion"], protocol_version)
+                self.assertEqual(list(initialize_payload["result"].keys()), ["protocolVersion", "capabilities", "serverInfo"])
+
+                tools_list = self.client.post(
+                    "/v1/mcp",
+                    json={"jsonrpc": "2.0", "id": 90 + index, "method": "tools/list", "params": {}},
+                    headers=headers,
+                )
+                self.assertEqual(tools_list.status_code, 200)
+                self.assertIn("tools", tools_list.json()["result"])
+
     def test_initialize_rejects_unsupported_protocol_without_advancing_state(self) -> None:
         """Unsupported protocol versions must not advance bootstrap state."""
         headers = {"authorization": self._CALLER_A_AUTH}
@@ -662,13 +717,47 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 {"protocolVersion": "2025-11-25", "clientInfo": None},
                 {"reason": "clientInfo must be an object"},
             ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"version": "1"}},
+                {"reason": "clientInfo.name is required"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "", "version": "1"}},
+                {"reason": "clientInfo.name must be a non-empty string"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent", "version": ""}},
+                {"reason": "clientInfo.version must be a non-empty string"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent", "version": "1", "title": 7}},
+                {"reason": "clientInfo.title must be a string"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent", "version": "1", "description": 7}},
+                {"reason": "clientInfo.description must be a string"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent", "version": "1", "websiteUrl": 7}},
+                {"reason": "clientInfo.websiteUrl must be a string"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent", "version": "1", "icons": {}}},
+                {"reason": "clientInfo.icons must be an array"},
+            ),
+            (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent", "version": "1", "vendor": "x"}},
+                {"reason": "unexpected clientInfo field", "field": "vendor"},
+            ),
         ]
 
         for request_id, (params, error_data) in enumerate(cases, start=40):
             with self.subTest(params=params):
+                headers = {"authorization": f"Bearer invalid-client-info-{request_id}"}
                 response = self.client.post(
                     "/v1/mcp",
                     json={"jsonrpc": "2.0", "id": request_id, "method": "initialize", "params": params},
+                    headers=headers,
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(
@@ -683,6 +772,13 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                         },
                     },
                 )
+                gated = self.client.post(
+                    "/v1/mcp",
+                    json={"jsonrpc": "2.0", "id": request_id + 100, "method": "tools/list", "params": {}},
+                    headers=headers,
+                )
+                self.assertEqual(gated.status_code, 200)
+                self.assertEqual(gated.json()["error"]["data"], {"required_step": "initialize"})
 
     def test_tools_list_params_null_is_invalid_params(self) -> None:
         """Explicit null params for tools/list must not be treated as omitted."""
