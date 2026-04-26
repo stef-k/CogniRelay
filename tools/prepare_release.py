@@ -27,6 +27,7 @@ CONTENT_ERROR_CODES = {
     "version_mismatch",
     "changelog_release_missing",
     "changelog_date_mismatch",
+    "changelog_release_duplicate",
     "changelog_release_out_of_order",
     "release_notes_missing",
     "release_notes_conflict",
@@ -194,12 +195,19 @@ def write_text(path: Path, root: Path, surface: str, content: str) -> None:
         raise SurfaceError("write_failed", f"cannot write {rel_path(path, root)}: {exc}", surface, rel_path(path, root)) from exc
 
 
-def ensure_parent(path: Path, root: Path, surface: str) -> None:
+def ensure_parent(path: Path, root: Path, surface: str) -> list[Path]:
     """Create a file parent directory when the contract allows it."""
+    parent = path.parent
+    missing: list[Path] = []
+    current = parent
+    while current != root and not current.exists():
+        missing.append(current)
+        current = current.parent
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise SurfaceError("write_failed", f"cannot create {rel_path(path.parent, root)}: {exc}", surface, rel_path(path.parent, root)) from exc
+        raise SurfaceError("write_failed", f"cannot create {rel_path(parent, root)}: {exc}", surface, rel_path(parent, root)) from exc
+    return missing
 
 
 def check_app_version(root: Path, version: str) -> dict[str, Any] | SurfaceError:
@@ -260,9 +268,12 @@ def check_changelog(root: Path, version: str, date: str) -> dict[str, Any] | Sur
     """Validate the requested changelog release heading."""
     path = root / "CHANGELOG.md"
     text = read_text(path, root, "changelog")
-    _unreleased, first_release = changelog_sections(text, root, path)
+    unreleased, first_release = changelog_sections(text, root, path)
+    release_headings = changelog_release_headings(text, unreleased.end())
     heading = f"## [{version}] - {date}"
     if first_release.version == version and first_release.date == date:
+        if any(release.version == version for release in release_headings[1:]):
+            return SurfaceError("changelog_release_duplicate", f"changelog release {version} appears more than once", "changelog", rel_path(path, root))
         return {"surface": "changelog", "path": rel_path(path, root), "ok": True}
     if first_release.version == version:
         return SurfaceError("changelog_date_mismatch", f"changelog release {version} has date {first_release.date}, expected {date}", "changelog", rel_path(path, root))
@@ -278,7 +289,7 @@ def update_changelog(root: Path, version: str, date: str, title: str, *, dry_run
     existing = check_changelog(root, version, date)
     if isinstance(existing, dict):
         return existing, update_entry("changelog", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False), None
-    if existing.code == "changelog_date_mismatch":
+    if existing.code in {"changelog_date_mismatch", "changelog_release_duplicate"}:
         return {"surface": "changelog", "path": rel_path(path, root), "ok": False}, existing, None
     if any(heading.version == version for heading in release_headings[1:]):
         return {"surface": "changelog", "path": rel_path(path, root), "ok": False}, SurfaceError(
@@ -542,12 +553,14 @@ def update_release(root: Path, version: str, date: str, title: str, *, dry_run: 
         errors.append(exc.as_dict())
         return standard_result(ok=False, mode="update", version=version, date=date, dry_run=dry_run, checked=checked, updated=updated, errors=errors)
     written_paths: list[Path] = []
+    created_dirs: list[Path] = []
     for planned_write in planned_writes:
         try:
-            ensure_parent(planned_write.path, root, planned_write.surface)
+            created_dirs.extend(ensure_parent(planned_write.path, root, planned_write.surface))
             write_text(planned_write.path, root, planned_write.surface, planned_write.content)
         except SurfaceError as exc:
             rollback_written_targets([*written_paths, planned_write.path], snapshots)
+            remove_created_dirs(created_dirs)
             errors.append(exc.as_dict())
             return standard_result(ok=False, mode="update", version=version, date=date, dry_run=dry_run, checked=checked, updated=updated, errors=errors)
         written_paths.append(planned_write.path)
@@ -582,6 +595,19 @@ def rollback_written_targets(written_paths: list[Path], snapshots: dict[Path, Wr
                 path.write_text(snapshot.content or "", encoding="utf-8")
             elif path.exists():
                 path.unlink()
+        except OSError:
+            continue
+
+
+def remove_created_dirs(created_dirs: list[Path]) -> None:
+    """Remove newly-created empty directories deepest first."""
+    removed: set[Path] = set()
+    for path in sorted(created_dirs, key=lambda item: len(item.parts), reverse=True):
+        if path in removed:
+            continue
+        removed.add(path)
+        try:
+            path.rmdir()
         except OSError:
             continue
 
