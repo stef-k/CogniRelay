@@ -276,6 +276,10 @@ class TestMcp216Slice3Help(unittest.TestCase):
         self.assertEqual(empty_object.status_code, 200)
         self.assertEqual(empty_object.json()["result"]["structuredContent"]["surface"], "hook_guide")
 
+        request_meta = self._request(74, "system.help", params={"_meta": {"request_id": "help-1"}})
+        self.assertEqual(request_meta.status_code, 200)
+        self.assertEqual(request_meta.json()["result"]["structuredContent"]["surface"], "help_index")
+
         non_object = self._request(72, "system.help", params=[])
         self.assertEqual(
             non_object.json(),
@@ -303,6 +307,40 @@ class TestMcp216Slice3Help(unittest.TestCase):
                 },
             },
         )
+
+        invalid_meta = self._request(75, "system.help", params={"_meta": []})
+        self.assertEqual(
+            invalid_meta.json(),
+            {
+                "jsonrpc": "2.0",
+                "id": 75,
+                "error": {
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": {"reason": "_meta must be an object"},
+                },
+            },
+        )
+
+    def test_targeted_help_methods_accept_request_meta(self) -> None:
+        """Targeted MCP help methods should ignore standard request _meta metadata."""
+        self._bootstrap()
+
+        tool_usage = self._request(
+            76,
+            "system.tool_usage",
+            params={"name": "continuity.read", "_meta": {"request_id": "usage-1"}},
+        )
+        self.assertEqual(tool_usage.status_code, 200)
+        self.assertEqual(tool_usage.json()["result"]["structuredContent"]["name"], "continuity.read")
+
+        error_guide = self._request(
+            77,
+            "system.error_guide",
+            params={"code": -32602, "_meta": {"request_id": "error-guide-1"}},
+        )
+        self.assertEqual(error_guide.status_code, 200)
+        self.assertEqual(error_guide.json()["result"]["structuredContent"]["code"], -32602)
 
     def test_targeted_help_methods_use_exact_invalid_params_mappings(self) -> None:
         """Targeted slice-3 methods must use exact invalid-target mappings."""

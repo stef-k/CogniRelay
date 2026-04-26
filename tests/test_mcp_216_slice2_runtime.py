@@ -504,6 +504,62 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         self.assertEqual(list(payload["result"].keys()), ["tools"])
         self.assertNotIn("nextCursor", payload["result"])
 
+    def test_mcp_request_meta_is_accepted_across_startup_and_tool_requests(self) -> None:
+        """MCP request params may carry reserved _meta metadata without changing execution."""
+        headers = {"authorization": "Bearer request-meta-startup"}
+
+        initialize = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 201,
+                "method": "initialize",
+                "params": {
+                    "_meta": {"request_id": "init-1"},
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "codex", "version": "test", "title": "Codex"},
+                },
+            },
+            headers=headers,
+        )
+        self.assertEqual(initialize.status_code, 200)
+        self.assertEqual(initialize.json()["result"]["protocolVersion"], "2025-11-25")
+
+        tools_list = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 202,
+                "method": "tools/list",
+                "params": {"_meta": {"request_id": "tools-list-1"}},
+            },
+            headers=headers,
+        )
+        self.assertEqual(tools_list.status_code, 200)
+        self.assertEqual(list(tools_list.json()["result"].keys()), ["tools"])
+
+        tools_call = self.client.post(
+            "/v1/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 203,
+                "method": "tools/call",
+                "params": {
+                    "_meta": {"request_id": "tools-call-1"},
+                    "name": "system.manifest",
+                    "arguments": {},
+                },
+            },
+            headers=headers,
+        )
+        self.assertEqual(tools_call.status_code, 200)
+        payload = tools_call.json()
+        # Reaching auth means request-level _meta was accepted and ignored before
+        # normal tool execution. It must not fail as Invalid params.
+        self.assertEqual(payload["error"]["code"], -32001)
+        self.assertEqual(payload["error"]["message"], "Unauthorized")
+
     def test_tools_list_metadata_matches_callable_runtime_contract(self) -> None:
         """tools/list metadata must mirror the exact callable MCP tool contract."""
         headers = {"authorization": self._CALLER_A_AUTH}
@@ -749,6 +805,10 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 {"protocolVersion": "2025-11-25", "clientInfo": {"name": "agent", "version": "1", "vendor": "x"}},
                 {"reason": "unexpected clientInfo field", "field": "vendor"},
             ),
+            (
+                {"protocolVersion": "2025-11-25", "_meta": []},
+                {"reason": "_meta must be an object"},
+            ),
         ]
 
         for request_id, (params, error_data) in enumerate(cases, start=40):
@@ -958,6 +1018,28 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
                 },
                 {"authorization": self._CALLER_A_AUTH},
                 {"reason": "arguments must be an object"},
+            ),
+            (
+                83,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 83,
+                    "method": "tools/list",
+                    "params": {"_meta": []},
+                },
+                {"authorization": self._CALLER_A_AUTH},
+                {"reason": "_meta must be an object"},
+            ),
+            (
+                84,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 84,
+                    "method": "tools/call",
+                    "params": {"_meta": [], "name": "system.manifest", "arguments": {}},
+                },
+                {"authorization": self._CALLER_A_AUTH},
+                {"reason": "_meta must be an object"},
             ),
         ]
 
