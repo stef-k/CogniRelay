@@ -53,7 +53,7 @@ def post_json(base_url: str, token: str, path: str, payload: dict[str, Any], tim
 
 
 def env_bool(value: str | None) -> bool:
-    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+    return value is not None and value.strip() == "1"
 
 
 def normalize_base_url(value: str) -> str:

@@ -267,7 +267,55 @@ class TestAgentAssets289(unittest.TestCase):
         self.assertEqual(hook.normalize_base_url("http://example.test/"), "http://example.test")
         self.assertEqual(hook.normalize_base_url("http://example.test//"), "http://example.test/")
 
-    def test_no_context_retrieve_suppresses_env_enabled_context(self) -> None:
+    def test_context_retrieve_env_true_with_task_reads_only_startup(self) -> None:
+        with RecordingHTTPServer([(200, {"capsule": {"subject_id": "issue-289"}})]) as server:
+            completed = run_hook(
+                RETRIEVAL_HOOK,
+                "--base-url",
+                server.url,
+                "--token",
+                "secret-token",
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+                "--task",
+                "retrieve context",
+                env={"COGNIRELAY_CONTEXT_RETRIEVE": "true"},
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual([request["path"] for request in server.requests], ["/v1/continuity/read"])
+        self.assertNotIn("context", json.loads(completed.stdout)["result"])
+
+    def test_context_retrieve_env_one_with_task_reads_startup_then_context(self) -> None:
+        with RecordingHTTPServer(
+            [
+                (200, {"capsule": {"subject_id": "issue-289"}}),
+                (200, {"items": [{"text": "context"}]}),
+            ]
+        ) as server:
+            completed = run_hook(
+                RETRIEVAL_HOOK,
+                "--base-url",
+                server.url,
+                "--token",
+                "secret-token",
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+                "--task",
+                "retrieve context",
+                env={"COGNIRELAY_CONTEXT_RETRIEVE": "1"},
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual([request["path"] for request in server.requests], ["/v1/continuity/read", "/v1/context/retrieve"])
+        self.assertEqual(
+            server.requests[1]["body"],
+            {"task": "retrieve context", "subject_kind": "thread", "subject_id": "issue-289"},
+        )
+
+    def test_no_context_retrieve_suppresses_env_one_context(self) -> None:
         with RecordingHTTPServer([(200, {"capsule": {"subject_id": "issue-289"}})]) as server:
             completed = run_hook(
                 RETRIEVAL_HOOK,
@@ -282,7 +330,7 @@ class TestAgentAssets289(unittest.TestCase):
                 "--task",
                 "retrieve context",
                 "--no-context-retrieve",
-                env={"COGNIRELAY_CONTEXT_RETRIEVE": "true"},
+                env={"COGNIRELAY_CONTEXT_RETRIEVE": "1"},
             )
         self.assertEqual(completed.returncode, 0)
         self.assertEqual([request["path"] for request in server.requests], ["/v1/continuity/read"])
