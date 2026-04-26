@@ -143,6 +143,41 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual(result["errors"][0]["code"], "changelog_date_mismatch")
             self.assertEqual(changelog.read_text(encoding="utf-8").count("## [1.4.9]"), 1)
 
+    def test_update_rejects_out_of_order_existing_changelog_release_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            changelog = root / "CHANGELOG.md"
+            changelog.write_text(
+                "# Changelog\n\n"
+                "## [Unreleased]\n\n"
+                "## [1.4.8] - 2026-04-26\n\n"
+                "### Fixed\n\n"
+                "- Previous release.\n\n"
+                "## [1.4.9] - 2026-04-27\n\n"
+                "### Changed\n\n"
+                "- Current release in the wrong position.\n",
+                encoding="utf-8",
+            )
+            tracked_paths = [
+                root / "app" / "main.py",
+                root / "CHANGELOG.md",
+                root / "docs" / "index.md",
+                root / "docs" / "releases" / "v1.4.8.md",
+            ]
+            before = {path: path.read_bytes() for path in tracked_paths}
+            new_notes = root / "docs" / "releases" / "v1.4.9.md"
+
+            result = prepare_release.update_release(root, "1.4.9", "2026-04-27", "Release helper", dry_run=False)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+            self.assertIn("changelog_release_out_of_order", {error["code"] for error in result["errors"]})
+            self.assertEqual({path: path.read_bytes() for path in tracked_paths}, before)
+            self.assertFalse(new_notes.exists())
+            text = changelog.read_text(encoding="utf-8")
+            self.assertEqual(text.count("## [1.4.9]"), 1)
+
     def test_update_conflict_writes_no_release_surfaces(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

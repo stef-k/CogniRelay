@@ -27,6 +27,7 @@ CONTENT_ERROR_CODES = {
     "version_mismatch",
     "changelog_release_missing",
     "changelog_date_mismatch",
+    "changelog_release_out_of_order",
     "release_notes_missing",
     "release_notes_conflict",
     "docs_latest_mismatch",
@@ -273,11 +274,19 @@ def update_changelog(root: Path, version: str, date: str, title: str, *, dry_run
     path = root / "CHANGELOG.md"
     text = read_text(path, root, "changelog")
     unreleased, older = changelog_sections(text, root, path)
+    release_headings = changelog_release_headings(text, unreleased.end())
     existing = check_changelog(root, version, date)
     if isinstance(existing, dict):
         return existing, update_entry("changelog", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False), None
     if existing.code == "changelog_date_mismatch":
         return {"surface": "changelog", "path": rel_path(path, root), "ok": False}, existing, None
+    if any(heading.version == version for heading in release_headings[1:]):
+        return {"surface": "changelog", "path": rel_path(path, root), "ok": False}, SurfaceError(
+            "changelog_release_out_of_order",
+            f"changelog release {version} exists after an older release heading",
+            "changelog",
+            rel_path(path, root),
+        ), None
 
     section = f"## [{version}] - {date}\n\n### Changed\n\n- {title}\n\n"
     unreleased_body = text[unreleased.end() : older.start]
