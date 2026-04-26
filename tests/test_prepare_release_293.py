@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -205,6 +206,38 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("changelog_release_missing", {error["code"] for error in result["errors"]})
 
+    def test_changelog_check_requires_requested_release_before_older_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root, version="1.4.9", latest="1.4.9")
+            (root / "CHANGELOG.md").write_text(
+                "# Changelog\n\n"
+                "## [Unreleased]\n\n"
+                "## [1.4.8] - 2026-04-26\n\n"
+                "### Fixed\n\n"
+                "- Previous release.\n\n"
+                "## [1.4.9] - 2026-04-27\n\n"
+                "### Changed\n\n"
+                "- Current release in the wrong position.\n",
+                encoding="utf-8",
+            )
+            (root / "docs" / "releases" / "v1.4.9.md").write_text(
+                "# CogniRelay v1.4.9 Release Notes\n\nRelease date: 2026-04-27\n",
+                encoding="utf-8",
+            )
+            (root / "docs" / "index.md").write_text(
+                "# CogniRelay Documentation\n\n"
+                "## Releases\n\n"
+                "- [Latest release notes: v1.4.9](releases/v1.4.9.md)\n"
+                "- [v1.4.8 release notes](releases/v1.4.8.md)\n",
+                encoding="utf-8",
+            )
+
+            result = prepare_release.check_release(root, "1.4.9", "2026-04-27")
+
+            self.assertFalse(result["ok"])
+            self.assertIn("changelog_release_missing", {error["code"] for error in result["errors"]})
+
     def test_docs_index_check_requires_exact_previous_latest_from_changelog(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -337,6 +370,33 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual((root / "app" / "main.py").read_text(encoding="utf-8"), before)
             self.assertTrue(all("would_write" in entry for entry in result["updated"]))
             self.assertFalse((root / "docs" / "releases" / "v1.4.9.md").exists())
+
+    def test_update_rolls_back_earlier_writes_when_later_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            tracked_paths = [
+                root / "app" / "main.py",
+                root / "CHANGELOG.md",
+                root / "docs" / "index.md",
+            ]
+            before = {path: path.read_bytes() for path in tracked_paths}
+            notes = root / "docs" / "releases" / "v1.4.9.md"
+            original_write_text = prepare_release.write_text
+
+            def fail_docs_index(path: Path, root: Path, surface: str, content: str) -> None:
+                if surface == "docs_index":
+                    raise prepare_release.SurfaceError("write_failed", "cannot write docs/index.md", surface, "docs/index.md")
+                original_write_text(path, root, surface, content)
+
+            with mock.patch.object(prepare_release, "write_text", side_effect=fail_docs_index):
+                result = prepare_release.update_release(root, "1.4.9", "2026-04-27", "Release helper", dry_run=False)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(prepare_release.exit_code_for(result), 3)
+            self.assertEqual(result["errors"][0]["code"], "write_failed")
+            self.assertEqual({path: path.read_bytes() for path in tracked_paths}, before)
+            self.assertFalse(notes.exists())
 
 
 class PrepareReleaseCliTests(unittest.TestCase):

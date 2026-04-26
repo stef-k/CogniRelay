@@ -67,6 +67,14 @@ class PlannedWrite:
 
 
 @dataclass(frozen=True)
+class WriteSnapshot:
+    """Prior file state captured before applying planned writes."""
+
+    existed: bool
+    content: str | None
+
+
+@dataclass(frozen=True)
 class ChangelogReleaseHeading:
     """A changelog release heading outside fenced code blocks."""
 
@@ -251,18 +259,12 @@ def check_changelog(root: Path, version: str, date: str) -> dict[str, Any] | Sur
     """Validate the requested changelog release heading."""
     path = root / "CHANGELOG.md"
     text = read_text(path, root, "changelog")
-    unreleased, _older = changelog_sections(text, root, path)
+    _unreleased, first_release = changelog_sections(text, root, path)
     heading = f"## [{version}] - {date}"
-    headings = changelog_release_headings(text, unreleased.end())
-    boundary = headings[1].start if len(headings) > 1 else len(text)
-    bounded_text = text[unreleased.end() : boundary]
-    bounded_headings = changelog_release_headings(bounded_text)
-    exact_heading = next((item for item in bounded_headings if f"## [{item.version}] - {item.date}" == heading), None)
-    if exact_heading:
+    if first_release.version == version and first_release.date == date:
         return {"surface": "changelog", "path": rel_path(path, root), "ok": True}
-    version_heading = next((item for item in bounded_headings if item.version == version), None)
-    if version_heading:
-        return SurfaceError("changelog_date_mismatch", f"changelog release {version} has date {version_heading.date}, expected {date}", "changelog", rel_path(path, root))
+    if first_release.version == version:
+        return SurfaceError("changelog_date_mismatch", f"changelog release {version} has date {first_release.date}, expected {date}", "changelog", rel_path(path, root))
     return SurfaceError("changelog_release_missing", f"changelog release heading {heading} is missing", "changelog", rel_path(path, root))
 
 
@@ -525,10 +527,54 @@ def update_release(root: Path, version: str, date: str, title: str, *, dry_run: 
             planned_writes.append(planned_write)
     if errors or dry_run:
         return standard_result(ok=not errors, mode="update", version=version, date=date, dry_run=dry_run, checked=checked, updated=updated, errors=errors)
+    try:
+        snapshots = snapshot_write_targets(planned_writes, root)
+    except SurfaceError as exc:
+        errors.append(exc.as_dict())
+        return standard_result(ok=False, mode="update", version=version, date=date, dry_run=dry_run, checked=checked, updated=updated, errors=errors)
+    written_paths: list[Path] = []
     for planned_write in planned_writes:
-        ensure_parent(planned_write.path, root, planned_write.surface)
-        write_text(planned_write.path, root, planned_write.surface, planned_write.content)
+        try:
+            ensure_parent(planned_write.path, root, planned_write.surface)
+            write_text(planned_write.path, root, planned_write.surface, planned_write.content)
+        except SurfaceError as exc:
+            rollback_written_targets([*written_paths, planned_write.path], snapshots)
+            errors.append(exc.as_dict())
+            return standard_result(ok=False, mode="update", version=version, date=date, dry_run=dry_run, checked=checked, updated=updated, errors=errors)
+        written_paths.append(planned_write.path)
     return standard_result(ok=not errors, mode="update", version=version, date=date, dry_run=dry_run, checked=checked, updated=updated, errors=errors)
+
+
+def snapshot_write_targets(planned_writes: list[PlannedWrite], root: Path) -> dict[Path, WriteSnapshot]:
+    """Capture existing target file state before the write phase."""
+    snapshots: dict[Path, WriteSnapshot] = {}
+    for planned_write in planned_writes:
+        path = planned_write.path
+        if path in snapshots:
+            continue
+        try:
+            existed = path.exists()
+            snapshots[path] = WriteSnapshot(existed, path.read_text(encoding="utf-8") if existed else None)
+        except OSError as exc:
+            raise SurfaceError("read_failed", f"cannot snapshot {rel_path(path, root)}: {exc}", planned_write.surface, rel_path(path, root)) from exc
+    return snapshots
+
+
+def rollback_written_targets(written_paths: list[Path], snapshots: dict[Path, WriteSnapshot]) -> None:
+    """Restore targets already changed by a failed write phase."""
+    restored: set[Path] = set()
+    for path in reversed(written_paths):
+        if path in restored:
+            continue
+        restored.add(path)
+        snapshot = snapshots[path]
+        try:
+            if snapshot.existed:
+                path.write_text(snapshot.content or "", encoding="utf-8")
+            elif path.exists():
+                path.unlink()
+        except OSError:
+            continue
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
