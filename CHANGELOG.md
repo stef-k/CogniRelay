@@ -7,6 +7,19 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-04-26
+
+### Fixed
+
+- Fixed standards-compatible MCP request metadata handling. CogniRelay now
+  accepts and ignores object-valued `params._meta` on `initialize`,
+  `tools/list`, `tools/call`, and runtime MCP help/reference request methods,
+  while preserving strict validation for actual tool `arguments` and domain
+  payloads.
+- Added an end-to-end MCP startup regression covering `clientInfo.title`
+  followed by `tools/list` with `params._meta`, plus runtime-help `_meta`
+  coverage and documentation updates.
+
 ## [1.4.5] - 2026-04-26
 
 ### Fixed
