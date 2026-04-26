@@ -455,6 +455,7 @@ class PrepareReleaseCliTests(unittest.TestCase):
         self.assertEqual(payload["checked"], [])
         self.assertEqual(payload["updated"], [])
         self.assertEqual(len(payload["errors"]), 1)
+        self.assertFalse(payload["dry_run"])
 
     def test_invalid_version_date_and_title_exit_2(self) -> None:
         cases = [
@@ -467,6 +468,20 @@ class PrepareReleaseCliTests(unittest.TestCase):
                 proc = self._run_cli(*args)
                 self.assertEqual(proc.returncode, 2)
                 self.assertFalse(json.loads(proc.stdout)["ok"])
+
+    def test_update_dry_run_validation_failures_preserve_dry_run_flag(self) -> None:
+        cases = [
+            ("update", "--version", "bad", "--title", "T", "--dry-run"),
+            ("update", "--version", "1.4.9", "--title", "T", "--date", "bad-date", "--dry-run"),
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                proc = self._run_cli(*args)
+                payload = json.loads(proc.stdout)
+
+                self.assertEqual(proc.returncode, 2)
+                self.assertFalse(payload["ok"])
+                self.assertTrue(payload["dry_run"])
 
     def test_dirty_worktree_exits_2_unless_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as td:

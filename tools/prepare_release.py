@@ -632,9 +632,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
         mode = args.mode
+        dry_run = bool(getattr(args, "dry_run", False))
         version = validate_version(args.version)
         date = validate_date(args.date)
-        dry_run = bool(getattr(args, "dry_run", False))
         title = validate_title(getattr(args, "title", None)) if mode == "update" else None
         root = resolve_repo_root()
         if not args.allow_dirty:
