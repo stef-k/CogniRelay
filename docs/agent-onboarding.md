@@ -54,6 +54,22 @@ Map runtime-specific hook names to these four canonical hooks. `startup` and `pr
 - Reminder orientation is also read-only. `schedule.list` supports explicit `thread_id` filtering and subject tuple filtering; `schedule_context` also appears in startup/context orientation for matching thread, task, or subject scopes. Use `schedule.acknowledge` with `status="done"` for completion, or `schedule.retire` when a reminder is no longer relevant.
 - Use deeper references only for exact hook matrix details after this mapping is clear.
 
+## Last-mile Adapter Kit
+
+CogniRelay ships copyable agent assets under [`agent-assets/README.md`](../agent-assets/README.md), including [`agent-assets/skills/cognirelay-continuity-authoring/SKILL.md`](../agent-assets/skills/cognirelay-continuity-authoring/SKILL.md), [`agent-assets/hooks/cognirelay_retrieval_hook.py`](../agent-assets/hooks/cognirelay_retrieval_hook.py), and [`agent-assets/hooks/cognirelay_continuity_save_hook.py`](../agent-assets/hooks/cognirelay_continuity_save_hook.py).
+
+Use this safe sequence for generic runtime glue:
+
+1. Run the retrieval hook at startup/pre-prompt for read-only orientation.
+2. Run save hook `facts` mode for mechanical context.
+3. Run save hook `template` mode for a semantic skeleton.
+4. Have the agent author semantic fields explicitly.
+5. Run save hook `dry-run` for placeholder rejection and deterministic diff.
+6. Run save hook `write` only after an explicit agent-authored payload exists.
+7. Run save hook `readback` or `doctor` for verification.
+
+The hooks do not infer semantic continuity and do not turn graph or schedule orientation into capsule fields.
+
 ## How To Ask CogniRelay For Help
 
 Use built-in help/reference lookup for exact route, tool, topic, hook, and error guidance instead of guessing. Use HTTP help surfaces as the runtime lookup path, MCP help/reference methods as the JSON-RPC lookup path, and `GET /v1/capabilities` only when instance support is uncertain.

@@ -48,6 +48,7 @@ EXPECTED_ROOT = {
         "continuity.read.startup_view",
         "continuity.read.trust_signals",
         "continuity.upsert.session_end_snapshot",
+        "last-mile-adapter",
     ],
     "hook_ids": [
         "startup",
@@ -292,6 +293,43 @@ EXPECTED_TOPICS = {
         "correction_hints": [
             "Include the base capsule and then provide session_end_snapshot as a bounded helper.",
             "Use only open_loops, top_priorities, active_constraints, stance_summary, negative_decisions, session_trajectory, and rationale_entries in session_end_snapshot.",
+        ],
+    },
+    "last-mile-adapter": {
+        "kind": "topic",
+        "id": "last-mile-adapter",
+        "purpose": (
+            "Explain the shipped last-mile adapter kit for agent-authored continuity: CogniRelay is the substrate, "
+            "the agent authors semantic fields, and adapters do no semantic inference."
+        ),
+        "when_to_use": [
+            "Use when wiring a cold-start agent runtime to CogniRelay without project-specific glue.",
+            "Use when an adapter needs the facts/template/dry-run/write/readback flow for explicit agent-authored continuity.",
+        ],
+        "read_operations": [
+            "agent-assets/hooks/cognirelay_retrieval_hook.py",
+            "POST /v1/continuity/read",
+            "POST /v1/context/retrieve",
+        ],
+        "write_operations": [
+            "agent-assets/hooks/cognirelay_continuity_save_hook.py",
+            "POST /v1/continuity/upsert",
+        ],
+        "minimal_payload": {
+            "skill_path": "agent-assets/skills/cognirelay-continuity-authoring/SKILL.md",
+            "retrieval_hook_path": "agent-assets/hooks/cognirelay_retrieval_hook.py",
+            "save_hook_path": "agent-assets/hooks/cognirelay_continuity_save_hook.py",
+            "flow": ["facts", "template", "agent-authors-semantic-fields", "dry-run", "write", "readback"],
+        },
+        "common_mistakes": [
+            "Making CogniRelay or an adapter infer stance, priorities, open loops, rationale, or next steps.",
+            "Using the read-only retrieval hook as a write path.",
+            "Turning graph_summary or schedule_context orientation into automatic continuity fields.",
+        ],
+        "correction_hints": [
+            "Treat CogniRelay as substrate and the running agent as the semantic author.",
+            "Use the shipped skill path, retrieval hook path, and continuity save hook path as copyable integration assets.",
+            "Run facts/template/dry-run/write/readback only around an explicit agent-authored continuity.upsert payload.",
         ],
     },
 }
@@ -683,8 +721,9 @@ class TestHelp214Slice1Validation(HelpHttpTestCase):
                                 "continuity.read.startup_view",
                                 "continuity.read.trust_signals",
                                 "continuity.upsert.session_end_snapshot",
+                                "last-mile-adapter",
                             ],
-                            "correction_hint": "Use one of: continuity.read.startup_view, continuity.read.trust_signals, continuity.upsert.session_end_snapshot.",
+                            "correction_hint": "Use one of: continuity.read.startup_view, continuity.read.trust_signals, continuity.upsert.session_end_snapshot, last-mile-adapter.",
                         }
                     ],
                 }
