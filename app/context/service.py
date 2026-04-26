@@ -735,7 +735,7 @@ def context_retrieve_service(
         auth,
         "context_retrieve",
         {
-            "task_hash": sha256(task_bytes).hexdigest(),
+            "task_hash": f"sha256:{sha256(task_bytes).hexdigest()}",
             "task_length_bytes": len(task_bytes),
             "count": len(recent),
             "continuity_selectors": continuity_selectors,

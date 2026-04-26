@@ -666,7 +666,10 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
             self.assertNotIn(sensitive_task, detail_json)
             self.assertNotIn(sensitive_task[:24], detail_json)
             self.assertNotIn("κλειδί", detail_json)
-            self.assertEqual(detail["task_hash"], sha256(sensitive_task.encode("utf-8")).hexdigest())
+            self.assertEqual(
+                detail["task_hash"],
+                f"sha256:{sha256(sensitive_task.encode('utf-8')).hexdigest()}",
+            )
             self.assertEqual(detail["task_length_bytes"], len(sensitive_task.encode("utf-8")))
             self.assertIn("count", detail)
             self.assertIn("continuity_selectors", detail)
