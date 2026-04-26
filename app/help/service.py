@@ -1638,7 +1638,7 @@ _MCP_ERROR_GUIDES = {
     },
     -32000: {
         "title": "Server not initialized",
-        "summary": "Bootstrap is incomplete; complete `initialize` and then `notifications/initialized` before calling normal-operation methods.",
+        "summary": "Bootstrap is incomplete; complete `initialize` before calling normal-operation methods. `notifications/initialized` remains an optional compatibility notification.",
     },
     -32001: {
         "title": "Unauthorized",

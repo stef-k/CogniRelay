@@ -23,13 +23,16 @@ For an MCP-oriented client, the canonical slice-2 bootstrap sequence is exactly:
 
 1. `GET /.well-known/mcp.json`
 2. `POST /v1/mcp` with `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`
-3. `POST /v1/mcp` with `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
 
-After bootstrap is complete, post-bootstrap usage may call:
+After `initialize` succeeds, normal MCP usage may call:
 
 - `POST /v1/mcp` with `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
 - `POST /v1/mcp` with `tools/call` requests as needed
 - `POST /v1/mcp` with request methods `system.help`, `system.tool_usage`, `system.topic_help`, `system.hook_guide`, `system.error_guide`, `system.onboarding_index`, `system.onboarding_bootstrap`, `system.onboarding_section`, `system.validation_limits`, and `system.validation_limit`
+
+Clients may still send `POST /v1/mcp` with
+`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`; CogniRelay
+accepts it as a notification-only compatibility call and returns `204`.
 
 The well-known descriptor advertises:
 

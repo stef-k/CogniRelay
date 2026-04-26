@@ -245,8 +245,8 @@ EXPECTED_MATRIX = [
         "bootstrap.post_initialize_pre_initialized_ping",
         "slice_2",
         "converged",
-        "Bootstrap state is now tracked after `initialize`; during the post-initialize and pre-notification phase, `ping` continues to succeed.",
-        "After successful `initialize` and before `notifications/initialized`, `ping` must succeed while that intermediate bootstrap phase remains active.",
+        "Successful `initialize` now marks the caller ready; `ping` continues to succeed.",
+        "After successful `initialize`, `ping` must succeed.",
         "none",
         "implemented",
     ),
@@ -254,8 +254,8 @@ EXPECTED_MATRIX = [
         "bootstrap.post_initialize_pre_initialized_tools_list",
         "slice_2",
         "converged",
-        "After successful `initialize` and before `notifications/initialized`, `tools/list` now returns `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
-        "After successful `initialize` and before `notifications/initialized`, `tools/list` must return `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
+        "After successful `initialize`, `tools/list` now succeeds even if the client does not send `notifications/initialized`.",
+        "After successful `initialize`, `tools/list` must be available.",
         "none",
         "implemented",
     ),
@@ -263,8 +263,8 @@ EXPECTED_MATRIX = [
         "bootstrap.post_initialize_pre_initialized_tools_call",
         "slice_2",
         "converged",
-        "After successful `initialize` and before `notifications/initialized`, `tools/call` now returns `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
-        "After successful `initialize` and before `notifications/initialized`, `tools/call` must return `-32000` with `{\"required_step\":\"notifications/initialized\"}`.",
+        "After successful `initialize`, `tools/call` now reaches normal tool dispatch even if the client does not send `notifications/initialized`.",
+        "After successful `initialize`, `tools/call` must be available.",
         "none",
         "implemented",
     ),
@@ -274,10 +274,9 @@ EXPECTED_MATRIX = [
         "converged",
         (
             "Unknown methods already return method-not-found, and authenticated "
-            "callers retain bootstrap state between calls during the "
-            "post-initialize phase."
+            "callers are ready immediately after successful `initialize`."
         ),
-        "After successful `initialize` and before `notifications/initialized`, unknown methods must still use method-not-found.",
+        "After successful `initialize`, unknown methods must still use method-not-found.",
         "none",
         "implemented",
     ),

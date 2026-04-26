@@ -297,24 +297,13 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
         self.assertEqual(payload["result"]["serverInfo"]["name"], "cognirelay")
         self.assertTrue(payload["result"]["serverInfo"]["version"])
 
-        pre_notify = self.client.post(
+        tools_list = self.client.post(
             "/v1/mcp",
             json={"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}},
             headers=headers,
         )
-        self.assertEqual(pre_notify.status_code, 200)
-        self.assertEqual(
-            pre_notify.json(),
-            {
-                "jsonrpc": "2.0",
-                "id": 4,
-                "error": {
-                    "code": -32000,
-                    "message": "Server not initialized",
-                    "data": {"required_step": "notifications/initialized"},
-                },
-            },
-        )
+        self.assertEqual(tools_list.status_code, 200)
+        self.assertIn("result", tools_list.json())
 
     def test_initialize_accepts_legacy_compat_protocol_and_tools_list(self) -> None:
         """The bounded MCP surface should accept the 2025-06-18 startup version."""
@@ -826,18 +815,7 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
             headers=headers,
         )
         self.assertEqual(reinitialize.status_code, 200)
-        self.assertEqual(
-            reinitialize.json(),
-            {
-                "jsonrpc": "2.0",
-                "id": 70,
-                "error": {
-                    "code": -32000,
-                    "message": "Server not initialized",
-                    "data": {"required_step": "notifications/initialized"},
-                },
-            },
-        )
+        self.assertIn("result", reinitialize.json())
 
         tools_list = self.client.post(
             "/v1/mcp",

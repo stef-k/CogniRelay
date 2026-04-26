@@ -1165,7 +1165,6 @@ def discovery_payload(contract_version: str, *, tools: list[dict[str, Any]], wor
                     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
                     f"\"params\":{{\"protocolVersion\":\"{PREFERRED_PROTOCOL_VERSION}\"}}}}"
                 ),
-                "POST /v1/mcp {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}",
             ],
             "loop_hint": "Prefer /v1/index/rebuild-incremental over full rebuild in frequent loops.",
             "write_hint": "Prefer append-only JSONL for events/messages and frequent commits.",

@@ -436,9 +436,9 @@ For an agent cold start, the full recommended sequence is:
 11. `GET /v1/metrics` for backlog, check, and replication health
 12. `POST /v1/context/snapshot` when reproducible continuation context is needed
 
-If the runtime prefers MCP-style JSON-RPC, the canonical slice-2 bootstrap sequence is `GET /.well-known/mcp.json`, then `POST /v1/mcp` for `initialize` with required `protocolVersion`, then `POST /v1/mcp` for `notifications/initialized`.
+If the runtime prefers MCP-style JSON-RPC, the canonical slice-2 bootstrap sequence is `GET /.well-known/mcp.json`, then `POST /v1/mcp` for `initialize` with required `protocolVersion`. `notifications/initialized` remains accepted as an optional notification-only compatibility call.
 
-After bootstrap is complete, normal MCP usage may proceed with methods such as `tools/list` and `tools/call`.
+After `initialize` succeeds, normal MCP usage may proceed with methods such as `tools/list` and `tools/call`.
 
 For the complete MCP integration notes, including what is and is not mirrored through the tool catalog, see `docs/mcp.md`.
 
