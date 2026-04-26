@@ -56,6 +56,30 @@ body {
   color: inherit;
 }
 
+.markdown-body .highlight .p {
+  color: rgb(151, 157, 180);
+}
+
+.markdown-body .highlight .w {
+  color: #8b949e;
+}
+
+.markdown-body .highlight .nl {
+  color: rgb(61, 143, 209);
+}
+
+.markdown-body .highlight .s,
+.markdown-body .highlight .s1,
+.markdown-body .highlight .s2 {
+  color: rgb(199, 107, 41);
+}
+
+.markdown-body .highlight .mi,
+.markdown-body .highlight .mf,
+.markdown-body .highlight .kc {
+  color: #d29922;
+}
+
 .markdown-body table tr {
   background: #0d1117;
   border-top-color: #30363d;
