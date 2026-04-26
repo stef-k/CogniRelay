@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from fastapi import HTTPException
 from app.config import Settings
 from app.continuity.service import continuity_refresh_plan_service
 from app.context.service import context_retrieve_service
-from app.main import continuity_refresh_plan
+from app.main import context_retrieve, continuity_refresh_plan
 from app.models import ContinuityRefreshPlanRequest, ContextRetrieveRequest
 from tests.helpers import AllowAllAuthStub, SimpleGitManagerStub
 
@@ -638,5 +639,100 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
             self.assertEqual(audit_rows[-1][0], "context_retrieve")
             self.assertEqual(
                 audit_rows[-1][1]["continuity_selectors"],
+                [{"subject_kind": "user", "subject_id": "stef", "source_state": "active"}],
+            )
+
+    def test_context_retrieve_audit_redacts_task_text_with_stable_metadata(self) -> None:
+        """Context retrieval audit detail should not persist raw task text."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            sensitive_task = "Investigate private prompt: résumé=alpha café\nKeep exact spacing."
+            audit_rows: list[tuple[str, dict]] = []
+
+            out = context_retrieve_service(
+                repo_root=repo_root,
+                auth=_AuthStub(),
+                req=ContextRetrieveRequest(task=sensitive_task, limit=3),
+                now=now,
+                audit=lambda _auth, event, detail: audit_rows.append((event, detail)),
+            )
+
+            self.assertTrue(out["ok"])
+            self.assertEqual(audit_rows[-1][0], "context_retrieve")
+            detail = audit_rows[-1][1]
+            detail_json = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+            self.assertNotIn("task", detail)
+            self.assertNotIn(sensitive_task, detail_json)
+            self.assertNotIn(sensitive_task[:24], detail_json)
+            self.assertNotIn("résumé=alpha", detail_json)
+            self.assertEqual(
+                detail["task_hash"],
+                f"sha256:{sha256(sensitive_task.encode('utf-8')).hexdigest()}",
+            )
+            self.assertEqual(detail["task_length_bytes"], len(sensitive_task.encode("utf-8")))
+            self.assertIn("count", detail)
+            self.assertIn("continuity_selectors", detail)
+
+    def test_context_retrieve_persisted_audit_redacts_task_text_with_stable_metadata(self) -> None:
+        """Persisted context retrieval audit rows should not include raw task text."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            recent_iso = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            self._write_capsule(
+                repo_root,
+                subject_kind="user",
+                subject_id="stef",
+                payload=self._capsule_payload(
+                    subject_kind="user",
+                    subject_id="stef",
+                    updated_at=recent_iso,
+                    verified_at=recent_iso,
+                    verification_status="system_confirmed",
+                    health_status="healthy",
+                ),
+            )
+            sensitive_task = "Confidential task: résumé token=Café-42\nDo not log verbatim."
+            settings = Settings(
+                repo_root=repo_root,
+                auto_init_git=False,
+                git_author_name="n/a",
+                git_author_email="n/a",
+                tokens={},
+                audit_log_enabled=True,
+            )
+
+            with patch("app.main._services", return_value=(settings, SimpleGitManagerStub(repo_root))):
+                out = context_retrieve(
+                    req=ContextRetrieveRequest(task=sensitive_task, subject_kind="user", subject_id="stef", limit=3),
+                    auth=_AuthStub(),
+                )
+
+            self.assertTrue(out["ok"])
+            audit_path = repo_root / "logs" / "api_audit.jsonl"
+            self.assertTrue(audit_path.exists())
+            rows = [
+                json.loads(line)
+                for line in audit_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            context_rows = [row for row in rows if row.get("event") == "context_retrieve"]
+            self.assertEqual(len(context_rows), 1)
+            row = context_rows[0]
+            row_json = json.dumps(row, ensure_ascii=False, sort_keys=True)
+            detail = row["detail"]
+            expected_hash = f"sha256:{sha256(sensitive_task.encode('utf-8')).hexdigest()}"
+
+            self.assertNotIn(sensitive_task, row_json)
+            self.assertNotIn(sensitive_task[:24], row_json)
+            self.assertNotIn("résumé token=Café", row_json)
+            self.assertNotIn("task", detail)
+            self.assertRegex(detail["task_hash"], r"^sha256:[0-9a-f]{64}$")
+            self.assertEqual(detail["task_hash"], expected_hash)
+            self.assertEqual(detail["task_length_bytes"], len(sensitive_task.encode("utf-8")))
+            self.assertIn("count", detail)
+            self.assertEqual(
+                detail["continuity_selectors"],
                 [{"subject_kind": "user", "subject_id": "stef", "source_state": "active"}],
             )
