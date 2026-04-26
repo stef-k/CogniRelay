@@ -425,7 +425,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         """Render the fixed read-only documentation index."""
         settings = get_settings()
         _enforce_ui_access(request, settings)
-        return _docs_index_page(settings.repo_root)
+        return _docs_index_page(settings.docs_source_root)
 
     @router.get("/docs/{doc_id}", response_class=HTMLResponse)
     def ui_doc_detail(request: Request, doc_id: str) -> HTMLResponse:
@@ -435,7 +435,7 @@ def build_ui_router(*, app_version: str) -> APIRouter:
         doc = UI_DOCS_BY_ID.get(doc_id)
         if doc is None:
             return _docs_not_found_page()
-        return _docs_detail_page(settings.repo_root, doc)
+        return _docs_detail_page(settings.docs_source_root, doc)
 
     @router.get("/events")
     async def ui_events(
