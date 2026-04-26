@@ -37,7 +37,8 @@ the [README](../README.md).
 
 ## Releases
 
-- [Latest release notes: v1.4.3](releases/v1.4.3.md)
+- [Latest release notes: v1.4.4](releases/v1.4.4.md)
+- [v1.4.3 release notes](releases/v1.4.3.md)
 - [v1.4.2 release notes](releases/v1.4.2.md)
 - [v1.4.1 release notes](releases/v1.4.1.md)
 - [v1.4.0 release notes](releases/v1.4.0.md)
