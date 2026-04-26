@@ -161,6 +161,23 @@ class TestAgentAssets289(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
+    def test_skill_has_valid_frontmatter(self) -> None:
+        text = SKILL.read_text(encoding="utf-8")
+        lines = text.splitlines()
+
+        self.assertGreaterEqual(len(lines), 4)
+        self.assertEqual(lines[0], "---")
+        self.assertEqual(lines[4], "---")
+
+        frontmatter = "\n".join(lines[1:4])
+        self.assertIn("name: cognirelay-continuity-authoring", frontmatter)
+
+        description_lines = [
+            line for line in lines[1:4] if line.startswith("description:") or line.startswith("  ")
+        ]
+        description = " ".join(line.removeprefix("description:").strip() for line in description_lines).strip()
+        self.assertTrue(description)
+
     def test_retrieval_hook_help_and_no_write_modes(self) -> None:
         completed = run_hook(RETRIEVAL_HOOK, "--help")
         self.assertEqual(completed.returncode, 0)
