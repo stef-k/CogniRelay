@@ -15,7 +15,7 @@ Collaborating peers can receive narrower API tokens and interact through
 coordination surfaces without access to the owner's continuity capsules.
 
 For the full product introduction, installation notes, and feature summary, see
-the [README](../README.md).
+the [README](https://github.com/stef-k/CogniRelay/blob/main/README.md).
 
 ## Documentation
 
