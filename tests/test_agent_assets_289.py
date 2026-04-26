@@ -37,7 +37,7 @@ REQUIRED_HELP_LINKS = {
 class RecordingHTTPServer:
     """Small local JSON server for hook subprocess tests."""
 
-    def __init__(self, responses: list[tuple[int, dict[str, Any] | str]]) -> None:
+    def __init__(self, responses: list[tuple[int, dict[str, Any] | str] | tuple[int, dict[str, Any] | str, str]]) -> None:
         self.requests: list[dict[str, Any]] = []
         self._responses = list(responses)
         owner = self
@@ -53,9 +53,11 @@ class RecordingHTTPServer:
                         "body": json.loads(raw_body) if raw_body else {},
                     }
                 )
-                status, body = owner._responses.pop(0) if owner._responses else (200, {})
+                response = owner._responses.pop(0) if owner._responses else (200, {})
+                status, body = response[:2]
+                reason = response[2] if len(response) == 3 else None
                 encoded = body if isinstance(body, str) else json.dumps(body)
-                self.send_response(status)
+                self.send_response(status, reason)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded.encode("utf-8"))))
                 self.end_headers()
@@ -214,6 +216,27 @@ class TestAgentAssets289(unittest.TestCase):
         self.assertEqual(payload["errors"][0]["code"], "http_error")
         self.assertNotIn("body", payload["result"])
 
+    def test_retrieval_http_error_reason_phrase_does_not_print_token(self) -> None:
+        token = "secret-token-289"
+        with RecordingHTTPServer([(500, {"error": "omitted"}, f"reflected {token}")]) as server:
+            completed = run_hook(
+                RETRIEVAL_HOOK,
+                "--base-url",
+                server.url,
+                "--token",
+                token,
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+            )
+        self.assertEqual(completed.returncode, 4)
+        self.assertNotIn(token, completed.stdout)
+        self.assertNotIn(token, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["errors"], [{"code": "http_error", "message": "HTTP request failed."}])
+        self.assertEqual(payload["result"], {"status": 500})
+
     def test_cli_overrides_env_for_retrieval_request_construction(self) -> None:
         with RecordingHTTPServer([(200, {"capsule": {"subject_id": "cli-subject"}})]) as server:
             completed = run_hook(
@@ -270,6 +293,52 @@ class TestAgentAssets289(unittest.TestCase):
             completed = run_hook(RETRIEVAL_HOOK, "--base-url", server.url, "--token", "secret-token")
         self.assertEqual(completed.returncode, 2)
         self.assertEqual(server.requests, [])
+
+    def test_context_retrieve_with_task_reads_startup_then_context(self) -> None:
+        with RecordingHTTPServer(
+            [
+                (200, {"capsule": {"subject_id": "issue-289"}}),
+                (200, {"items": [{"text": "context"}]}),
+            ]
+        ) as server:
+            completed = run_hook(
+                RETRIEVAL_HOOK,
+                "--base-url",
+                server.url,
+                "--token",
+                "secret-token",
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+                "--context-retrieve",
+                "--task",
+                "retrieve context",
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual([request["path"] for request in server.requests], ["/v1/continuity/read", "/v1/context/retrieve"])
+        self.assertEqual(
+            server.requests[1]["body"],
+            {"task": "retrieve context", "subject_kind": "thread", "subject_id": "issue-289"},
+        )
+
+    def test_context_retrieve_without_task_reads_only_startup(self) -> None:
+        with RecordingHTTPServer([(200, {"capsule": {"subject_id": "issue-289"}})]) as server:
+            completed = run_hook(
+                RETRIEVAL_HOOK,
+                "--base-url",
+                server.url,
+                "--token",
+                "secret-token",
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+                "--context-retrieve",
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual([request["path"] for request in server.requests], ["/v1/continuity/read"])
+        self.assertNotIn("context", json.loads(completed.stdout)["result"])
 
     def test_save_hook_help_exposes_required_modes(self) -> None:
         completed = run_hook(SAVE_HOOK, "--help")
@@ -343,6 +412,68 @@ class TestAgentAssets289(unittest.TestCase):
         self.assertEqual(payload["warnings"][0]["code"], "current_state_unavailable")
         self.assertNotIn("current_state", payload["result"])
 
+    def test_save_http_error_reason_phrase_does_not_print_token(self) -> None:
+        token = "secret-token-289"
+        with RecordingHTTPServer([(500, {"error": "omitted"}, f"reflected {token}")]) as server:
+            completed = run_hook(
+                SAVE_HOOK,
+                "readback",
+                "--base-url",
+                server.url,
+                "--token",
+                token,
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+            )
+        self.assertEqual(completed.returncode, 4)
+        self.assertNotIn(token, completed.stdout)
+        self.assertNotIn(token, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["errors"], [{"code": "http_error", "message": "HTTP request failed."}])
+        self.assertEqual(payload["result"], {"status": 500})
+
+    def test_readback_reports_expected_subject_match_when_returned_subject_matches(self) -> None:
+        with RecordingHTTPServer([(200, {"subject_kind": "thread", "subject_id": "issue-289"})]) as server:
+            completed = run_hook(
+                SAVE_HOOK,
+                "readback",
+                "--base-url",
+                server.url,
+                "--token",
+                "secret-token",
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+            )
+        self.assertEqual(completed.returncode, 0)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["mode"], "readback")
+        self.assertEqual(payload["warnings"], [])
+        self.assertIs(payload["result"]["expected_subject_matched"], True)
+
+    def test_doctor_preserves_mode_and_reports_expected_subject_match(self) -> None:
+        with RecordingHTTPServer([(200, {"subject": {"kind": "thread", "id": "issue-289"}})]) as server:
+            completed = run_hook(
+                SAVE_HOOK,
+                "doctor",
+                "--base-url",
+                server.url,
+                "--token",
+                "secret-token",
+                "--subject-kind",
+                "thread",
+                "--subject-id",
+                "issue-289",
+            )
+        self.assertEqual(completed.returncode, 0)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["mode"], "doctor")
+        self.assertEqual(payload["warnings"], [])
+        self.assertIs(payload["result"]["expected_subject_matched"], True)
+
     def test_template_emits_schema_aligned_skeleton(self) -> None:
         completed = run_hook(SAVE_HOOK, "template", "--subject-kind", "thread", "--subject-id", "issue-289")
         self.assertEqual(completed.returncode, 0)
@@ -380,6 +511,26 @@ class TestAgentAssets289(unittest.TestCase):
         self.assertEqual([item["path"] for item in diff["added"]], sorted(item["path"] for item in diff["added"]))
         self.assertIn("/capsule/continuity/stance_summary", {item["path"] for item in diff["added"]})
         self.assertNotIn("/subject_kind", {item["path"] for item in diff["added"]})
+
+    def test_write_posts_exact_full_input_payload_to_upsert(self) -> None:
+        payload = valid_payload()
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as handle:
+            json.dump(payload, handle)
+            handle.flush()
+            with RecordingHTTPServer([(200, {"ok": True})]) as server:
+                completed = run_hook(
+                    SAVE_HOOK,
+                    "write",
+                    "--input",
+                    handle.name,
+                    "--base-url",
+                    server.url,
+                    "--token",
+                    "secret-token",
+                )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual([request["path"] for request in server.requests], ["/v1/continuity/upsert"])
+        self.assertEqual(server.requests[0]["body"], payload)
 
     def test_server_compare_not_implemented_without_contacting_server(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as handle:

@@ -127,10 +127,23 @@ def bounded_current_state(value: dict[str, Any], token: str, max_chars: int = 60
 
 
 def http_error_result(exc: urllib.error.HTTPError) -> dict[str, Any]:
-    result: dict[str, Any] = {"status": exc.code}
-    if exc.reason:
-        result["reason"] = str(exc.reason)[:120]
-    return result
+    return {"status": exc.code}
+
+
+def response_subject_match(response: dict[str, Any], subject_kind: str, subject_id: str) -> tuple[bool | None, dict[str, str] | None]:
+    response_kind = response.get("subject_kind")
+    response_id = response.get("subject_id")
+    subject = response.get("subject")
+    if isinstance(subject, dict):
+        response_kind = response_kind if isinstance(response_kind, str) else subject.get("kind")
+        response_id = response_id if isinstance(response_id, str) else subject.get("id")
+    capsule = response.get("capsule")
+    if isinstance(capsule, dict):
+        response_kind = response_kind if isinstance(response_kind, str) else capsule.get("subject_kind")
+        response_id = response_id if isinstance(response_id, str) else capsule.get("subject_id")
+    if not isinstance(response_kind, str) or not isinstance(response_id, str):
+        return None, {"code": "expected_subject_match_unavailable", "message": "Readback response did not include enough subject information."}
+    return response_kind == subject_kind and response_id == subject_id, None
 
 
 def current_git_facts() -> dict[str, str]:
@@ -332,9 +345,24 @@ def readback(mode: str, args: argparse.Namespace) -> int:
         status, response = post_json(base_url, token, "/v1/continuity/read", {"subject_kind": subject_kind, "subject_id": subject_id, "view": "startup", "allow_fallback": True}, timeout)
         if status < 200 or status >= 300:
             return emit(envelope(False, mode, result={"status": status}, errors=[{"code": "http_error", "message": "Continuity read returned an unsuccessful status."}]), 4)
-        return emit(envelope(True, mode, result={"readback": response, "trust_signals": response.get("trust_signals", {}), "recovery_warnings": response.get("recovery_warnings", [])}), 0)
+        expected_subject_matched, match_warning = response_subject_match(response, subject_kind, subject_id)
+        warnings = [match_warning] if match_warning is not None else []
+        return emit(
+            envelope(
+                True,
+                mode,
+                result={
+                    "readback": response,
+                    "trust_signals": response.get("trust_signals", {}),
+                    "recovery_warnings": response.get("recovery_warnings", []),
+                    "expected_subject_matched": expected_subject_matched,
+                },
+                warnings=warnings,
+            ),
+            0,
+        )
     except urllib.error.HTTPError as exc:
-        return emit(envelope(False, mode, result=http_error_result(exc), errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status. Response body omitted."}]), 4)
+        return emit(envelope(False, mode, result=http_error_result(exc), errors=[{"code": "http_error", "message": "HTTP request failed."}]), 4)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         print(f"CogniRelay save-hook transport failure: {exc.__class__.__name__}", file=sys.stderr)
         return emit(envelope(False, mode, errors=[{"code": "transport_failure", "message": "No usable HTTP response was received."}]), 3)
@@ -438,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
             result = {"upsert_response": response}
             return emit(envelope(True, mode, result=result), 0)
         except urllib.error.HTTPError as exc:
-            return emit(envelope(False, mode, result=http_error_result(exc), errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status. Response body omitted."}]), 4)
+            return emit(envelope(False, mode, result=http_error_result(exc), errors=[{"code": "http_error", "message": "HTTP request failed."}]), 4)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             print(f"CogniRelay write transport failure: {exc.__class__.__name__}", file=sys.stderr)
             return emit(envelope(False, mode, errors=[{"code": "transport_failure", "message": "No usable HTTP response was received."}]), 3)

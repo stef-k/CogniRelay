@@ -61,10 +61,7 @@ def normalize_base_url(value: str) -> str:
 
 
 def http_error_result(exc: urllib.error.HTTPError) -> dict[str, Any]:
-    result: dict[str, Any] = {"status": exc.code}
-    if exc.reason:
-        result["reason"] = str(exc.reason)[:120]
-    return result
+    return {"status": exc.code}
 
 
 def resolve_timeout(value: float | None) -> tuple[float, dict[str, str] | None]:
@@ -139,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             result["context"] = context
         return emit(envelope(True, "retrieval", result=result), 0)
     except urllib.error.HTTPError as exc:
-        return emit(envelope(False, "retrieval", result=http_error_result(exc), errors=[{"code": "http_error", "message": "CogniRelay returned an unsuccessful status. Response body omitted."}]), 4)
+        return emit(envelope(False, "retrieval", result=http_error_result(exc), errors=[{"code": "http_error", "message": "HTTP request failed."}]), 4)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         print(f"CogniRelay retrieval transport failure: {exc.__class__.__name__}", file=sys.stderr)
         return emit(envelope(False, "retrieval", errors=[{"code": "transport_failure", "message": "No usable HTTP response was received."}]), 3)
