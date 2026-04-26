@@ -240,6 +240,57 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("docs_previous_latest_missing", {error["code"] for error in result["errors"]})
 
+    def test_docs_index_update_repairs_current_latest_with_wrong_previous_link(self) -> None:
+        cases = {
+            "missing": "",
+            "wrong": "- [v1.4.7 release notes](releases/v1.4.7.md)\n",
+        }
+        for name, existing_previous in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _write_fixture(root, version="1.4.9", latest="1.4.9")
+                (root / "CHANGELOG.md").write_text(
+                    "# Changelog\n\n"
+                    "## [Unreleased]\n\n"
+                    "## [1.4.9] - 2026-04-27\n\n"
+                    "### Changed\n\n"
+                    "- Current release.\n\n"
+                    "## [1.4.8] - 2026-04-26\n\n"
+                    "### Fixed\n\n"
+                    "- Previous release.\n\n"
+                    "## [1.4.7] - 2026-04-25\n\n"
+                    "### Fixed\n\n"
+                    "- Older release.\n",
+                    encoding="utf-8",
+                )
+                (root / "docs" / "releases" / "v1.4.9.md").write_text(
+                    "# CogniRelay v1.4.9 Release Notes\n\nRelease date: 2026-04-27\n",
+                    encoding="utf-8",
+                )
+                (root / "docs" / "index.md").write_text(
+                    "# CogniRelay Documentation\n\n"
+                    "## Releases\n\n"
+                    "- [Latest release notes: v1.4.9](releases/v1.4.9.md)\n"
+                    f"{existing_previous}"
+                    "- [v1.4.9 release notes](releases/v1.4.9.md)\n"
+                    "- [Changelog](https://github.com/stef-k/CogniRelay/blob/main/CHANGELOG.md)\n\n"
+                    "## Other Links\n\n"
+                    "- [Latest release notes: v1.4.9](releases/v1.4.9.md)\n",
+                    encoding="utf-8",
+                )
+
+                result = prepare_release.update_release(root, "1.4.9", "2026-04-27", "Release helper", dry_run=False)
+
+                self.assertTrue(result["ok"], result["errors"])
+                text = (root / "docs" / "index.md").read_text(encoding="utf-8")
+                releases_block = text.split("## Releases", 1)[1].split("## Other Links", 1)[0]
+                release_lines = releases_block.strip().splitlines()
+                self.assertEqual(release_lines[0], "- [Latest release notes: v1.4.9](releases/v1.4.9.md)")
+                self.assertEqual(release_lines[1], "- [v1.4.8 release notes](releases/v1.4.8.md)")
+                self.assertNotIn("- [v1.4.9 release notes](releases/v1.4.9.md)", releases_block)
+                check = prepare_release.check_release(root, "1.4.9", "2026-04-27")
+                self.assertTrue(check["ok"], check["errors"])
+
     def test_existing_matching_release_notes_are_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

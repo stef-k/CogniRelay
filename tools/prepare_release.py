@@ -438,7 +438,7 @@ def update_docs_index(root: Path, version: str, *, dry_run: bool) -> tuple[dict[
     latest_match = LATEST_RE.fullmatch(lines[0])
     if not latest_match:
         raise SurfaceError("docs_index_parse_failed", "first release list item must be the latest release pointer", "docs_index", rel_path(path, root))
-    previous_latest = latest_match.group(1)
+    existing_latest = latest_match.group(1)
     checked = {"surface": "docs_index", "path": rel_path(path, root), "ok": lines[0] == f"- [Latest release notes: v{version}](releases/v{version}.md)"}
     if checked["ok"]:
         checked_result = check_docs_index(root, version)
@@ -447,12 +447,24 @@ def update_docs_index(root: Path, version: str, *, dry_run: bool) -> tuple[dict[
         checked = {"surface": "docs_index", "path": rel_path(path, root), "ok": False}
 
     new_latest = f"- [Latest release notes: v{version}](releases/v{version}.md)"
+    previous_latest = previous_release_from_changelog(root, version) if existing_latest == version else existing_latest
+    if previous_latest is None or previous_latest == version:
+        return checked, SurfaceError(
+            "docs_previous_latest_missing",
+            "previous latest release link must be available from CHANGELOG.md before updating docs/index.md",
+            "docs_index",
+            rel_path(path, root),
+        ), None
     previous_normal = f"- [v{previous_latest} release notes](releases/v{previous_latest}.md)"
     remaining: list[str] = []
+    seen_normal_versions = {previous_latest}
     for line in lines[1:]:
         normal = NORMAL_RELEASE_RE.fullmatch(line)
-        if normal and normal.group(1) in {version, previous_latest}:
-            continue
+        if normal:
+            release_version = normal.group(1)
+            if release_version == version or release_version in seen_normal_versions:
+                continue
+            seen_normal_versions.add(release_version)
         remaining.append(line)
     new_lines = [new_latest, previous_normal, *remaining]
     new_block = "\n".join(new_lines) + "\n"
