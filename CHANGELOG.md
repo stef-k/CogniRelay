@@ -7,6 +7,26 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-04-26
+
+### Added
+
+- Added a shipped last-mile adapter kit under `agent-assets/` for
+  agent-authored continuity integration, including a copyable
+  continuity-authoring skill and real stdlib-only Python retrieval/save hooks.
+- Added runtime help topic coverage for `last-mile-adapter`, with MCP
+  `system.topic_help` parity while preserving the compact structuredContent
+  shape.
+- Added documentation links from onboarding and the GitHub Pages documentation
+  index so cold-start agents can discover the adapter kit without loading the
+  full repository.
+
+### Changed
+
+- Documented and tested the responsibility split between CogniRelay, local
+  adapters, and the running agent: hooks gather facts, template, validate, diff,
+  write, and read back, while semantic continuity fields remain agent-authored.
+
 ## [1.4.6] - 2026-04-26
 
 ### Fixed
