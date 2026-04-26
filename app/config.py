@@ -73,6 +73,7 @@ class Settings:
     git_author_email: str
     tokens: Dict[str, PeerToken]
     audit_log_enabled: bool
+    docs_source_root: Path = Path(__file__).resolve().parents[1]
     require_signed_ingress: bool = False
     ui_enabled: bool = False
     ui_require_localhost: bool = True
@@ -193,6 +194,11 @@ def _env_first(*names: str, default: str | None = None) -> str | None:
         if value is not None:
             return value
     return default
+
+
+def _default_docs_source_root() -> Path:
+    """Return the application checkout root that contains shipped UI docs."""
+    return Path(__file__).resolve().parents[1]
 
 
 def sha256_token(token: str) -> str:
@@ -425,6 +431,13 @@ def get_settings(force_reload: bool = False) -> Settings:
             repo_root,
         )
 
+    docs_source_root_raw = _env_first("COGNIRELAY_DOCS_SOURCE_ROOT")
+    docs_source_root = (
+        Path(docs_source_root_raw).expanduser().resolve()
+        if docs_source_root_raw
+        else _default_docs_source_root()
+    )
+
     key_store_raw = _env_first(
         "COGNIRELAY_KEY_STORE_PATH",
         "AMR_KEY_STORE_PATH",
@@ -438,6 +451,7 @@ def get_settings(force_reload: bool = False) -> Settings:
         git_author_email=_env_first("COGNIRELAY_GIT_AUTHOR_EMAIL", "AMR_GIT_AUTHOR_EMAIL", default="bot@example.local") or "bot@example.local",
         tokens=_merge_tokens(repo_root),
         audit_log_enabled=_parse_bool(_env_first("COGNIRELAY_AUDIT_LOG_ENABLED", "AMR_AUDIT_LOG_ENABLED"), True),
+        docs_source_root=docs_source_root,
         require_signed_ingress=_parse_bool(_env_first("COGNIRELAY_REQUIRE_SIGNED_INGRESS", "AMR_REQUIRE_SIGNED_INGRESS"), False),
         ui_enabled=_parse_bool(_env_first("COGNIRELAY_UI_ENABLED"), False),
         ui_require_localhost=_parse_bool(_env_first("COGNIRELAY_UI_REQUIRE_LOCALHOST"), True),

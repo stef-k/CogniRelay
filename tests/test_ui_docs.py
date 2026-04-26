@@ -64,18 +64,18 @@ def _ui_response(
     *,
     route_path: str,
     request_path: str,
+    docs_source_root: Path | None = None,
     endpoint_kwargs: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
     """Render one UI docs route directly for deterministic assertions."""
-    with patch.dict(
-        os.environ,
-        {
-            "COGNIRELAY_REPO_ROOT": str(repo_root),
-            "COGNIRELAY_AUTO_INIT_GIT": "true",
-            "COGNIRELAY_AUDIT_LOG_ENABLED": "false",
-        },
-        clear=False,
-    ):
+    env = {
+        "COGNIRELAY_REPO_ROOT": str(repo_root),
+        "COGNIRELAY_AUTO_INIT_GIT": "true",
+        "COGNIRELAY_AUDIT_LOG_ENABLED": "false",
+    }
+    if docs_source_root is not None:
+        env["COGNIRELAY_DOCS_SOURCE_ROOT"] = str(docs_source_root)
+    with patch.dict(os.environ, env, clear=False):
         ui_router = _reload_ui_router()
         router = ui_router.build_ui_router(app_version="test-version")
         endpoint = next(route.endpoint for route in router.routes if route.path == route_path)
@@ -93,12 +93,45 @@ def _write_allowlisted_docs(repo_root: Path, *, readme: str | None = None) -> No
 
 
 class UiDocsTests(unittest.TestCase):
+    def test_docs_use_default_app_source_root_when_data_repo_is_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            env = {
+                "COGNIRELAY_REPO_ROOT": str(repo_root),
+                "COGNIRELAY_AUTO_INIT_GIT": "true",
+                "COGNIRELAY_AUDIT_LOG_ENABLED": "false",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("COGNIRELAY_DOCS_SOURCE_ROOT", None)
+                ui_router = _reload_ui_router()
+                router = ui_router.build_ui_router(app_version="test-version")
+                index_endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/docs")
+                detail_endpoint = next(route.endpoint for route in router.routes if route.path == "/ui/docs/{doc_id}")
+
+                index = index_endpoint(_request("/ui/docs"))
+                detail = detail_endpoint(_request("/ui/docs/readme"), doc_id="readme")
+
+        index_text = index.body.decode("utf-8")
+        detail_text = detail.body.decode("utf-8")
+        self.assertEqual(index.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertNotIn("doc_missing:readme", index_text)
+        self.assertIn('href="/ui/docs/readme"', index_text)
+        self.assertIn('<h1 id="cognirelay">CogniRelay</h1>', detail_text)
+        self.assertIn("Self-hosted continuity", detail_text)
+
     def test_docs_index_renders_allowlist_in_exact_order_and_runtime_help(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            _write_allowlisted_docs(repo_root)
+            docs_source_root = repo_root / "app"
+            _write_allowlisted_docs(docs_source_root)
 
-            response = _ui_response(repo_root, route_path="/ui/docs", request_path="/ui/docs")
+            response = _ui_response(
+                repo_root,
+                route_path="/ui/docs",
+                request_path="/ui/docs",
+                docs_source_root=docs_source_root,
+            )
 
         self.assertEqual(response.status_code, 200)
         positions = [response.text.index(f"/ui/docs/{doc.doc_id}") for doc in UI_DOCS]
@@ -111,7 +144,8 @@ class UiDocsTests(unittest.TestCase):
     def test_each_allowlisted_doc_id_renders(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            _write_allowlisted_docs(repo_root)
+            docs_source_root = repo_root / "app"
+            _write_allowlisted_docs(docs_source_root)
 
             for doc in UI_DOCS:
                 with self.subTest(doc_id=doc.doc_id):
@@ -119,6 +153,7 @@ class UiDocsTests(unittest.TestCase):
                         repo_root,
                         route_path="/ui/docs/{doc_id}",
                         request_path=f"/ui/docs/{doc.doc_id}",
+                        docs_source_root=docs_source_root,
                         endpoint_kwargs={"doc_id": doc.doc_id},
                     )
                     self.assertEqual(response.status_code, 200)
@@ -129,17 +164,20 @@ class UiDocsTests(unittest.TestCase):
     def test_unknown_and_path_like_doc_ids_do_not_render_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            _write_allowlisted_docs(repo_root)
+            docs_source_root = repo_root / "app"
+            _write_allowlisted_docs(docs_source_root)
             unknown = _ui_response(
                 repo_root,
                 route_path="/ui/docs/{doc_id}",
                 request_path="/ui/docs/not-allowed",
+                docs_source_root=docs_source_root,
                 endpoint_kwargs={"doc_id": "not-allowed"},
             )
             traversal = _ui_response(
                 repo_root,
                 route_path="/ui/docs/{doc_id}",
                 request_path="/ui/docs/..%2FREADME.md",
+                docs_source_root=docs_source_root,
                 endpoint_kwargs={"doc_id": "../README.md"},
             )
 
@@ -147,6 +185,7 @@ class UiDocsTests(unittest.TestCase):
                 os.environ,
                 {
                     "COGNIRELAY_REPO_ROOT": str(repo_root),
+                    "COGNIRELAY_DOCS_SOURCE_ROOT": str(docs_source_root),
                     "COGNIRELAY_AUTO_INIT_GIT": "true",
                     "COGNIRELAY_AUDIT_LOG_ENABLED": "false",
                     "COGNIRELAY_UI_ENABLED": "true",
@@ -166,14 +205,21 @@ class UiDocsTests(unittest.TestCase):
     def test_missing_allowlisted_file_degrades_on_index_and_detail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            _write_allowlisted_docs(repo_root)
-            (repo_root / "docs" / "mcp.md").unlink()
+            docs_source_root = repo_root / "app"
+            _write_allowlisted_docs(docs_source_root)
+            (docs_source_root / "docs" / "mcp.md").unlink()
 
-            index = _ui_response(repo_root, route_path="/ui/docs", request_path="/ui/docs")
+            index = _ui_response(
+                repo_root,
+                route_path="/ui/docs",
+                request_path="/ui/docs",
+                docs_source_root=docs_source_root,
+            )
             detail = _ui_response(
                 repo_root,
                 route_path="/ui/docs/{doc_id}",
                 request_path="/ui/docs/mcp",
+                docs_source_root=docs_source_root,
                 endpoint_kwargs={"doc_id": "mcp"},
             )
 
@@ -220,11 +266,13 @@ class UiDocsTests(unittest.TestCase):
 """
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            _write_allowlisted_docs(repo_root, readme=markdown_source)
+            docs_source_root = repo_root / "app"
+            _write_allowlisted_docs(docs_source_root, readme=markdown_source)
             response = _ui_response(
                 repo_root,
                 route_path="/ui/docs/{doc_id}",
                 request_path="/ui/docs/readme",
+                docs_source_root=docs_source_root,
                 endpoint_kwargs={"doc_id": "readme"},
             )
 
@@ -264,11 +312,13 @@ class UiDocsTests(unittest.TestCase):
 """
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            _write_allowlisted_docs(repo_root, readme=markdown_source)
+            docs_source_root = repo_root / "app"
+            _write_allowlisted_docs(docs_source_root, readme=markdown_source)
             response = _ui_response(
                 repo_root,
                 route_path="/ui/docs/{doc_id}",
                 request_path="/ui/docs/readme",
+                docs_source_root=docs_source_root,
                 endpoint_kwargs={"doc_id": "readme"},
             )
 
