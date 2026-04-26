@@ -7,6 +7,16 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.8] - 2026-04-26
+
+### Fixed
+
+- Added YAML frontmatter to the shipped
+  `cognirelay-continuity-authoring` skill so common skill loaders accept the
+  asset copied from `agent-assets/`.
+- Added flexible regression coverage that validates the skill frontmatter block
+  without depending on hard-coded line positions.
+
 ## [1.4.7] - 2026-04-26
 
 ### Added
