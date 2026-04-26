@@ -7,6 +7,17 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-04-26
+
+### Fixed
+
+- Restored MCP startup compatibility for Codex clients that initialize with
+  protocol version `2025-06-18` while preserving support for the preferred
+  `2025-11-25` MCP protocol version.
+- Updated MCP descriptors and documentation to advertise both supported
+  initialize protocol versions and keep `2025-11-25` as the preferred/latest
+  version.
+
 ## [1.4.2] - 2026-04-26
 
 ### Fixed
