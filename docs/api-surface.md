@@ -26,7 +26,7 @@ This document covers the machine-facing HTTP contract. The optional `/ui` operat
 - `GET /.well-known/cognirelay.json`: well-known discovery entrypoint
 - `GET /.well-known/mcp.json`: bounded MCP supplemental descriptor advertising preferred/latest `2025-11-25` and initialize compatibility for `2025-06-18` plus `2025-11-25`
 - `GET /v1/mcp`: deferred in slice 2; returns `405` with `Allow: POST`
-- `POST /v1/mcp`: bounded MCP Streamable HTTP posture for the base methods `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`, plus post-bootstrap help/reference request methods including onboarding and validation-limit lookup. `initialize` accepts protocol versions `2025-06-18` and `2025-11-25`; `2025-11-25` remains preferred/latest. `clientInfo` follows the MCP `Implementation` metadata shape for the supported protocol versions, including standard optional fields such as `title`, `description`, `websiteUrl`, and `icons`.
+- `POST /v1/mcp`: bounded MCP Streamable HTTP posture for the base methods `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`, plus post-bootstrap help/reference request methods including onboarding and validation-limit lookup. `initialize` accepts protocol versions `2025-06-18` and `2025-11-25`; `2025-11-25` remains preferred/latest. `clientInfo` follows the MCP `Implementation` metadata shape for the supported protocol versions, including standard optional fields such as `title`, `description`, `websiteUrl`, and `icons`. Standard request-level `params._meta` is accepted and ignored as MCP metadata on initialize, tools/list, tools/call, and runtime help/reference request methods.
 
 ## Runtime help
 

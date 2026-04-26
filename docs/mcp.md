@@ -15,11 +15,15 @@ The `#216` runtime target is MCP `2025-11-25` Streamable HTTP with a temporary b
 - `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
 - `GET /.well-known/mcp.json` is supplemental metadata only
 - `initialize.params` is closed to `protocolVersion`, `capabilities`, and
-  `clientInfo`; `clientInfo` follows the MCP `Implementation` metadata shape
-  for the supported protocol versions. CogniRelay validates required
-  client identity fields and accepts standard optional metadata such as
-  `title`, `description`, `websiteUrl`, and `icons` without echoing or storing
-  it.
+  `clientInfo`, plus standard request metadata `_meta`; `clientInfo` follows
+  the MCP `Implementation` metadata shape for the supported protocol versions.
+  CogniRelay validates required client identity fields and accepts standard
+  optional metadata such as `title`, `description`, `websiteUrl`, and `icons`
+  without echoing or storing it.
+- MCP request-level `params._meta` is accepted and ignored when present as an
+  object on `initialize`, `tools/list`, `tools/call`, and the runtime
+  help/reference request methods. Tool `arguments` remain schema-validated
+  application payloads; `_meta` inside tool arguments is not special-cased.
 
 The base posture remains tools-first. It does not add MCP resources, MCP prompts, SSE, or a broader compatibility transport. Runtime help/reference surfaces are post-bootstrap request methods, not tools.
 
@@ -135,6 +139,8 @@ That metadata lets an agent understand both the MCP entrypoint and the underlyin
 Slice 2 supports only the first `tools/list` page:
 
 - omitted `params`, `{}`, `{"cursor": null}`, and `{"cursor": ""}` all return the first page
+- `{"_meta": {...}}` and `{"cursor": null, "_meta": {...}}` also return the
+  first page; request metadata is ignored for execution
 - non-empty cursor strings are rejected
 - `nextCursor` is absent in slice 2
 

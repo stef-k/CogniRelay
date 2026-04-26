@@ -1637,7 +1637,8 @@ _MCP_ERROR_GUIDES = {
         "summary": (
             "The method name is recognized, but the params shape or target value is invalid for that specific request. "
             "For MCP initialize, keep top-level params limited to protocolVersion, capabilities, and clientInfo; "
-            "clientInfo accepts standard MCP Implementation metadata."
+            "clientInfo accepts standard MCP Implementation metadata. Request-level params._meta is accepted as "
+            "standard MCP metadata when it is an object, then ignored for execution."
         ),
     },
     -32000: {
@@ -1693,13 +1694,26 @@ def _ascii_whitespace_only(value: str) -> bool:
     return bool(value) and all(ch in {" ", "\t", "\n", "\r"} for ch in value)
 
 
+_REQUEST_META_KEY = "_meta"
+
+
+def _validate_request_meta(params: dict[str, Any]) -> dict[str, Any] | None:
+    if _REQUEST_META_KEY in params and not isinstance(params[_REQUEST_META_KEY], dict):
+        return _mcp_invalid_params("_meta must be an object")
+    return None
+
+
 def _validate_zero_param_method(name: str, params_present: bool, params: Any) -> dict[str, Any] | None:
     if not params_present:
         return None
     if not isinstance(params, dict):
         return _mcp_invalid_params("params must be an object")
+    meta_error = _validate_request_meta(params)
+    if meta_error is not None:
+        return meta_error
     for key in params:
-        return _mcp_invalid_params(f"unexpected {name} param", field=key)
+        if key != _REQUEST_META_KEY:
+            return _mcp_invalid_params(f"unexpected {name} param", field=key)
     return None
 
 
@@ -1711,8 +1725,11 @@ def _validate_targeted_string_param(
 ) -> tuple[str | None, dict[str, Any] | None]:
     if not params_present or not isinstance(params, dict):
         return None, _mcp_invalid_params("params must be an object")
+    meta_error = _validate_request_meta(params)
+    if meta_error is not None:
+        return None, meta_error
     for key in params:
-        if key != field_name:
+        if key not in {field_name, _REQUEST_META_KEY}:
             return None, _mcp_invalid_params(f"unexpected {method} param", field=key)
     if field_name not in params:
         return None, _mcp_invalid_params(f"{field_name} is required")
@@ -1727,8 +1744,11 @@ def _validate_targeted_string_param(
 def _validate_error_code_param(params_present: bool, params: Any) -> tuple[int | None, dict[str, Any] | None]:
     if not params_present or not isinstance(params, dict):
         return None, _mcp_invalid_params("params must be an object")
+    meta_error = _validate_request_meta(params)
+    if meta_error is not None:
+        return None, meta_error
     for key in params:
-        if key != "code":
+        if key not in {"code", _REQUEST_META_KEY}:
             return None, _mcp_invalid_params("unexpected system.error_guide param", field=key)
     if "code" not in params:
         return None, _mcp_invalid_params("code is required")

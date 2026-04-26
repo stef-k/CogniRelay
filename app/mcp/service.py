@@ -57,6 +57,7 @@ _BOOTSTRAP_LOCK = threading.Lock()
 _BOOTSTRAP_NONE = "pre_initialize"
 _BOOTSTRAP_INITIALIZED = "post_initialize_pre_notification"
 _BOOTSTRAP_READY = "ready"
+_REQUEST_META_KEY = "_meta"
 _bootstrap_state: dict[str, str] = {}
 
 
@@ -398,10 +399,12 @@ def _validate_initialize(request_id: Any, params: Any, server_version: str) -> M
     if not isinstance(params, dict):
         return _invalid_params(request_id, "params must be an object")
 
-    allowed_keys = {"protocolVersion", "capabilities", "clientInfo"}
+    allowed_keys = {"protocolVersion", "capabilities", "clientInfo", _REQUEST_META_KEY}
     for key in params:
         if key not in allowed_keys:
             return _invalid_params(request_id, "unexpected initialize param", field=key)
+    if _REQUEST_META_KEY in params and not isinstance(params[_REQUEST_META_KEY], dict):
+        return _invalid_params(request_id, "_meta must be an object")
 
     if "protocolVersion" not in params:
         return _invalid_params(request_id, "protocolVersion is required")
@@ -462,8 +465,10 @@ def _validate_tools_list_params(request_id: Any, params: Any, *, params_present:
     if not isinstance(effective, dict):
         return _invalid_params(request_id, "params must be an object")
     for key in effective:
-        if key != "cursor":
+        if key not in {"cursor", _REQUEST_META_KEY}:
             return _invalid_params(request_id, "unexpected tools/list param", field=key)
+    if _REQUEST_META_KEY in effective and not isinstance(effective[_REQUEST_META_KEY], dict):
+        return _invalid_params(request_id, "_meta must be an object")
     cursor = effective.get("cursor")
     if cursor is None or cursor == "":
         return {}
@@ -476,8 +481,10 @@ def _validate_tools_call_params(request_id: Any, params: Any) -> McpHttpResponse
     if not isinstance(params, dict):
         return _invalid_params(request_id, "params must be an object")
     for key in params:
-        if key not in {"name", "arguments"}:
+        if key not in {"name", "arguments", _REQUEST_META_KEY}:
             return _invalid_params(request_id, "unexpected tools/call param", field=key)
+    if _REQUEST_META_KEY in params and not isinstance(params[_REQUEST_META_KEY], dict):
+        return _invalid_params(request_id, "_meta must be an object")
     if "name" not in params:
         return _invalid_params(request_id, "name is required")
     name = params.get("name")

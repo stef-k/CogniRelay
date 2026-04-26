@@ -161,16 +161,17 @@ EXPECTED_MATRIX = [
         "converged",
         (
             "`initialize` now requires a request id plus a params object containing "
-            "only `protocolVersion`, optional object `capabilities`, and optional "
-            "well-formed `clientInfo`. `clientInfo` accepts MCP `Implementation` "
-            "metadata for the supported protocol versions, including `title`, "
-            "`description`, `websiteUrl`, and `icons`, while preserving exact "
+            "only `protocolVersion`, optional object `capabilities`, optional "
+            "well-formed `clientInfo`, and optional object `_meta`. `clientInfo` "
+            "accepts MCP `Implementation` metadata for the supported protocol "
+            "versions, including `title`, `description`, `websiteUrl`, and "
+            "`icons`, while preserving exact "
             "invalid-params mappings for missing, extra, null, and wrong-type fields."
         ),
         (
-            "Accept only the `#216` `initialize` request shape, require a params object with the allowed keys only, "
-            "and use the exact invalid-params mappings while treating `clientInfo` as MCP implementation metadata "
-            "rather than a Codex-only shape."
+            "Accept only the `#216` `initialize` request shape plus standard MCP request metadata `_meta`, "
+            "require a params object with the allowed keys only, and use the exact invalid-params mappings while "
+            "treating `clientInfo` as MCP implementation metadata rather than a Codex-only shape."
         ),
         "none",
         "implemented",
