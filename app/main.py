@@ -283,7 +283,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         set_coordination_index(None)
 
 
-app = FastAPI(title="CogniRelay", version="1.4.4", lifespan=_lifespan)
+app = FastAPI(title="CogniRelay", version="1.4.5", lifespan=_lifespan)
 
 if get_settings().ui_enabled:
     app.include_router(build_ui_router(app_version=app.version))
