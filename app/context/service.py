@@ -7,6 +7,7 @@ import logging
 import re
 import subprocess
 from datetime import datetime, timezone
+from hashlib import sha256
 from heapq import nsmallest
 from pathlib import Path
 from typing import Any, Callable
@@ -729,11 +730,13 @@ def context_retrieve_service(
         for item in continuity_state.get("capsules", [])
         if isinstance(item, dict) and item.get("subject_kind") and item.get("subject_id")
     ]
+    task_bytes = req.task.encode("utf-8")
     audit(
         auth,
         "context_retrieve",
         {
-            "task": req.task[:120],
+            "task_hash": sha256(task_bytes).hexdigest(),
+            "task_length_bytes": len(task_bytes),
             "count": len(recent),
             "continuity_selectors": continuity_selectors,
         },

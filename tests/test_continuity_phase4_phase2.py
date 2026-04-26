@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -640,3 +641,32 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
                 audit_rows[-1][1]["continuity_selectors"],
                 [{"subject_kind": "user", "subject_id": "stef", "source_state": "active"}],
             )
+
+    def test_context_retrieve_audit_redacts_task_text_with_stable_metadata(self) -> None:
+        """Context retrieval audit detail should not persist raw task text."""
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            now = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+            sensitive_task = "Investigate private prompt: κλειδί=alpha βeta\nKeep exact spacing."
+            audit_rows: list[tuple[str, dict]] = []
+
+            out = context_retrieve_service(
+                repo_root=repo_root,
+                auth=_AuthStub(),
+                req=ContextRetrieveRequest(task=sensitive_task, limit=3),
+                now=now,
+                audit=lambda _auth, event, detail: audit_rows.append((event, detail)),
+            )
+
+            self.assertTrue(out["ok"])
+            self.assertEqual(audit_rows[-1][0], "context_retrieve")
+            detail = audit_rows[-1][1]
+            detail_json = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+            self.assertNotIn("task", detail)
+            self.assertNotIn(sensitive_task, detail_json)
+            self.assertNotIn(sensitive_task[:24], detail_json)
+            self.assertNotIn("κλειδί", detail_json)
+            self.assertEqual(detail["task_hash"], sha256(sensitive_task.encode("utf-8")).hexdigest())
+            self.assertEqual(detail["task_length_bytes"], len(sensitive_task.encode("utf-8")))
+            self.assertIn("count", detail)
+            self.assertIn("continuity_selectors", detail)
