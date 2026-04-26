@@ -7,6 +7,8 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-04-26
+
 ### Fixed
 
 - Fixed Codex MCP startup compatibility when clients call `tools/list`
