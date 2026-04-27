@@ -168,6 +168,104 @@ class PrepareReleaseTests(unittest.TestCase):
             )
             self.assertEqual(result["updated"], [])
 
+    def test_mcp_marker_uses_pyproject_readme_target(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            (root / "README.md").write_text("# CogniRelay\n\nOperational docs only.\n", encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertTrue(result["ok"], result["errors"])
+            marker_checks = [entry for entry in result["checked"] if entry["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(marker_checks, [{"surface": "mcp_ownership_marker", "path": "README-PYPI.md", "ok": True}])
+
+    def test_mcp_marker_missing_in_pyproject_readme_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            (root / "README-PYPI.md").write_text("# CogniRelay\n", encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertFalse(result["ok"])
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "MCP ownership marker is missing", "surface": "mcp_ownership_marker", "path": "README-PYPI.md"}])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+
+    def test_mcp_marker_rejects_traversal_readme_path_with_safe_json(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "repo"
+            root.mkdir()
+            _write_fixture(root)
+            secret = "outside-readme-secret"
+            outside = root.parent / "outside-readme.md"
+            outside.write_text(secret, encoding="utf-8")
+            text = (root / "pyproject.toml").read_text(encoding="utf-8").replace('readme = "README-PYPI.md"', 'readme = "../outside-readme.md"')
+            (root / "pyproject.toml").write_text(text, encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+
+            proc = subprocess.run(
+                [sys.executable, str(_helper_path), "check", "--version", "1.4.8", "--date", "2026-04-26", "--allow-dirty"],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            result = json.loads(proc.stdout)
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "invalid PyPI long-description source", "surface": "mcp_ownership_marker", "path": "pyproject.toml"}])
+            encoded = json.dumps(result, sort_keys=True)
+            self.assertNotIn(str(root), encoded)
+            self.assertNotIn(str(outside), encoded)
+            self.assertNotIn("../outside-readme.md", encoded)
+            self.assertNotIn(secret, encoded)
+
+    def test_mcp_marker_rejects_absolute_readme_path_with_safe_json(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "repo"
+            root.mkdir()
+            _write_fixture(root)
+            secret = "absolute-readme-secret"
+            outside = root.parent / "outside-readme.md"
+            outside.write_text(secret, encoding="utf-8")
+            text = (root / "pyproject.toml").read_text(encoding="utf-8").replace('readme = "README-PYPI.md"', f'readme = "{outside.as_posix()}"')
+            (root / "pyproject.toml").write_text(text, encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+
+            proc = subprocess.run(
+                [sys.executable, str(_helper_path), "check", "--version", "1.4.8", "--date", "2026-04-26", "--allow-dirty"],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            result = json.loads(proc.stdout)
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "invalid PyPI long-description source", "surface": "mcp_ownership_marker", "path": "pyproject.toml"}])
+            encoded = json.dumps(result, sort_keys=True)
+            self.assertNotIn(str(root), encoded)
+            self.assertNotIn(str(outside), encoded)
+            self.assertNotIn(secret, encoded)
+
+    def test_mcp_marker_rejects_readme_table_form(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            text = (root / "pyproject.toml").read_text(encoding="utf-8").replace('readme = "README-PYPI.md"', 'readme = {file = "README-PYPI.md", content-type = "text/markdown"}')
+            (root / "pyproject.toml").write_text(text, encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertFalse(result["ok"])
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "invalid PyPI long-description source", "surface": "mcp_ownership_marker", "path": "pyproject.toml"}])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+
     def test_publishable_tree_safety_allows_only_exact_env_templates(self) -> None:
         allowed = [".env.example", "deploy/systemd/cognirelay.env.example"]
         forbidden = [

@@ -337,12 +337,21 @@ def pyproject_project(root: Path) -> tuple[Path, dict[str, Any]]:
 
 
 def pyproject_readme_path(root: Path) -> Path:
-    """Return the project.readme file path from pyproject.toml."""
+    """Return the validated project.readme file path from pyproject.toml."""
     path, project = pyproject_project(root)
     readme = project.get("readme")
     if not isinstance(readme, str) or not readme:
-        raise SurfaceError("mcp_ownership_marker_missing", "pyproject project.readme must name the PyPI long-description source", "mcp_ownership_marker", rel_path(path, root))
-    return root / readme
+        raise SurfaceError("mcp_ownership_marker_missing", "invalid PyPI long-description source", "mcp_ownership_marker", rel_path(path, root))
+    readme_path = Path(readme)
+    if readme_path.is_absolute():
+        raise SurfaceError("mcp_ownership_marker_missing", "invalid PyPI long-description source", "mcp_ownership_marker", rel_path(path, root))
+    root_resolved = root.resolve()
+    resolved = (root_resolved / readme_path).resolve()
+    try:
+        normalized_readme = resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise SurfaceError("mcp_ownership_marker_missing", "invalid PyPI long-description source", "mcp_ownership_marker", rel_path(path, root)) from exc
+    return root / normalized_readme
 
 
 def check_pyproject_version(root: Path, version: str) -> dict[str, Any] | SurfaceError:
