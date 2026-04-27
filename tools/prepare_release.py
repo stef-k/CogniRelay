@@ -39,7 +39,7 @@ APP_VERSION_RE = re.compile(r"(FastAPI\([^)]*\bversion=)([\"'])([^\"']+)(\2)", r
 PROJECT_VERSION_RE = re.compile(r"(^\[project\]\s*?.*?^version\s*=\s*)([\"'])([^\"']+)(\2)", re.MULTILINE | re.DOTALL)
 LATEST_RE = re.compile(r"^- \[Latest release notes: v([0-9]+\.[0-9]+\.[0-9]+)\]\(releases/v\1\.md\)$")
 NORMAL_RELEASE_RE = re.compile(r"^- \[v([0-9]+\.[0-9]+\.[0-9]+) release notes\]\(releases/v\1\.md\)$")
-SERVER_JSON_DESCRIPTION = "Self-hosted continuity and collaboration substrate for autonomous agents."
+SERVER_JSON_DESCRIPTION = "Self-hosted agent continuity server with bounded, recoverable memory and restart orientation."
 SERVER_JSON_PACKAGE_IDENTIFIER = "cognirelay"
 SERVER_JSON_PACKAGE_ARGUMENTS = [{"type": "positional", "value": "serve"}]
 SERVER_JSON_TRANSPORT = {"type": "streamable-http", "url": "http://127.0.0.1:8080/v1/mcp"}

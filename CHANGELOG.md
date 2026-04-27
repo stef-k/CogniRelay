@@ -7,6 +7,12 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.10] - 2026-04-27
+
+### Changed
+
+- Improve public package discovery metadata
+
 ## [1.4.9] - 2026-04-27
 
 ### Changed

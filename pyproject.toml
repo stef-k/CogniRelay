@@ -4,10 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cognirelay"
-version = "1.4.9"
-description = "Self-hosted continuity and collaboration substrate for autonomous agents."
+version = "1.4.10"
+description = "Self-hosted continuity and collaboration substrate for autonomous agents with bounded, recoverable memory and explicit restart orientation"
 readme = "README-PYPI.md"
 requires-python = ">=3.12"
+keywords = [
+    "mcp",
+    "ai-collaboration",
+    "agent-infrastructure",
+    "continuity",
+    "agent-memory",
+    "autonomous-agents",
+    "context-recovery",
+    "fastapi",
+    "long-horizon-agents",
+    "multi-agent-systems",
+    "self-hosted",
+    "session-recovery",
+    "agent-continuity",
+    "continuity-infrastructure",
+    "recoverable-memory",
+]
 dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.30,<1",
