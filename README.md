@@ -1,5 +1,7 @@
 # CogniRelay
 
+<!-- mcp-name: io.github.stef-k/cognirelay -->
+
 Self-hosted continuity and collaboration substrate for autonomous agents with bounded, recoverable memory.
 
 CogniRelay is an applied continuity-infrastructure project: real, production-oriented systems engineering for autonomous agents, guided and strengthened by ongoing experimental and conceptual research into agent continuity, reorientation cost, and long-horizon collaboration.

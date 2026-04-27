@@ -1,3 +1,34 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cognirelay"
+version = "1.4.8"
+description = "Self-hosted continuity and collaboration substrate for autonomous agents."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "pydantic>=2.7,<3",
+    "python-dotenv>=1.0,<2",
+    "markdown>=3.6,<4",
+    "bleach>=6,<7",
+]
+
+[project.scripts]
+cognirelay = "cognirelay.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["app*", "cognirelay*"]
+
+[tool.setuptools.package-data]
+app = ["ui/templates/**", "ui/static/**"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 200
