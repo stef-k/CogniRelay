@@ -196,6 +196,46 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertNotIn(secret_text, encoded)
             self.assertNotIn(str(root), encoded)
 
+    def test_publishable_tree_safety_rejects_untracked_build_residue_path_only(self) -> None:
+        cases = (
+            ("dist", "dist"),
+            ("build", "build"),
+            ("cognirelay.egg-info", "cognirelay.egg-info"),
+            ("nested/package.egg-info", "nested/package.egg-info"),
+        )
+        for relative, expected_path in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _write_fixture(root)
+                residue = root / relative
+                residue.mkdir(parents=True)
+                secret_text = "super-secret-build-residue"
+                (residue / "artifact.txt").write_text(secret_text, encoding="utf-8")
+
+                result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(prepare_release.exit_code_for(result), 1)
+                errors = [error for error in result["errors"] if error["surface"] == "publishable_tree_safety"]
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(errors[0]["code"], "publishable_tree_forbidden_file")
+                self.assertEqual(errors[0]["path"], expected_path)
+                encoded = json.dumps(result, sort_keys=True)
+                self.assertNotIn(secret_text, encoded)
+                self.assertNotIn(str(root), encoded)
+
+    def test_publishable_tree_safety_ignores_virtualenv_package_names(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            ignored = root / ".venv" / "lib" / "python3.12" / "site-packages" / "build"
+            ignored.mkdir(parents=True)
+            (ignored / "__init__.py").write_text("package fixture\n", encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertTrue(result["ok"], result["errors"])
+
     def test_check_mode_reports_content_mismatch_as_exit_1_class(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -738,6 +778,26 @@ class PrepareReleaseCliTests(unittest.TestCase):
             self.assertEqual(dirty.returncode, 2)
             self.assertEqual(json.loads(dirty.stdout)["errors"][0]["code"], "dirty_worktree")
             self.assertEqual(allowed.returncode, 0)
+
+    def test_check_allow_dirty_still_rejects_untracked_build_residue(self) -> None:
+        cases = ("dist", "build", "cognirelay.egg-info")
+        for relative in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _write_fixture(root)
+                _init_git_repo(root)
+                residue = root / relative
+                residue.mkdir()
+                (residue / "artifact.txt").write_text("build residue\n", encoding="utf-8")
+
+                proc = self._run_cli("check", "--version", "1.4.8", "--date", "2026-04-26", "--allow-dirty", cwd=root)
+                payload = json.loads(proc.stdout)
+
+                self.assertEqual(proc.returncode, 1)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["errors"][0]["code"], "publishable_tree_forbidden_file")
+                self.assertEqual(payload["errors"][0]["surface"], "publishable_tree_safety")
+                self.assertEqual(payload["errors"][0]["path"], relative)
 
 
 if __name__ == "__main__":

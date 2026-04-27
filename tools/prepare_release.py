@@ -72,6 +72,8 @@ FORBIDDEN_DB_SUFFIXES = (
 FORBIDDEN_RUNTIME_SUFFIXES = (".log", ".jsonl", ".bak", ".tmp")
 FORBIDDEN_SECRET_SUFFIXES = (".pem", ".key", ".token")
 FORBIDDEN_RUNTIME_FILENAMES = {"api_audit.jsonl", "peer_tokens.json"}
+FORBIDDEN_BUILD_RESIDUE_NAMES = {"dist", "build"}
+RESIDUE_SCAN_PRUNE_DIRS = {".git", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache", "__pycache__"}
 
 
 CONTENT_ERROR_CODES = {
@@ -784,11 +786,38 @@ def git_tracked_paths(root: Path) -> list[str] | None:
     return [item.decode("utf-8", errors="replace") for item in proc.stdout.split(b"\0") if item]
 
 
+def publishable_tree_residue_paths(root: Path) -> list[str]:
+    """Return release/build residue paths from the filesystem without reading contents."""
+    residue: list[str] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            continue
+        for path in children:
+            name = path.name
+            if path.is_dir() and name in RESIDUE_SCAN_PRUNE_DIRS:
+                continue
+            try:
+                relative = rel_path(path, root)
+            except ValueError:
+                continue
+            if name in FORBIDDEN_BUILD_RESIDUE_NAMES or name.endswith(".egg-info"):
+                residue.append(relative)
+                continue
+            if path.is_dir():
+                stack.append(path)
+    priority = {"dist": 0, "build": 1}
+    return sorted(residue, key=lambda path: (priority.get(path, 2), path))
+
+
 def check_publishable_tree_safety(root: Path) -> dict[str, Any] | SurfaceError:
-    """Validate that tracked files contain no runtime, private, or build state."""
+    """Validate that tracked files and local residue contain no publish-blocking state."""
     tracked = git_tracked_paths(root)
     if tracked is None:
-        return {"surface": "publishable_tree_safety", "path": ".", "ok": True}
+        tracked = []
     for path in sorted(tracked):
         if is_forbidden_publishable_path(path):
             return SurfaceError(
@@ -797,6 +826,13 @@ def check_publishable_tree_safety(root: Path) -> dict[str, Any] | SurfaceError:
                 "publishable_tree_safety",
                 path,
             )
+    for path in publishable_tree_residue_paths(root):
+        return SurfaceError(
+            "publishable_tree_forbidden_file",
+            "release/build residue is not allowed in publishable tree",
+            "publishable_tree_safety",
+            path,
+        )
     return {"surface": "publishable_tree_safety", "path": ".", "ok": True}
 
 

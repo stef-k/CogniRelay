@@ -53,8 +53,6 @@ ALLOWED_ENV_TEMPLATE_ARTIFACTS = {
 def _forbidden_artifact_name(name: str) -> bool:
     parts = name.split("/")
     basename = parts[-1]
-    if name.startswith("cognirelay-1.4.8/cognirelay.egg-info/") or name == "cognirelay-1.4.8/cognirelay.egg-info":
-        return False
     return (
         any(part in {".git", ".venv", "memory", "logs", "dist", "build", "data_repo", ".locks", ".pytest_cache", ".ruff_cache", ".mypy_cache", "__pycache__"} for part in parts)
         or any(part.endswith(".egg-info") for part in parts)
