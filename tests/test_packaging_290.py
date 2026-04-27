@@ -83,6 +83,7 @@ class Packaging290Tests(unittest.TestCase):
         self.assertNotIn("twine", "\n".join(pyproject["project"]["dependencies"]))
         self.assertIn("build", (ROOT / "requirements-dev.txt").read_text(encoding="utf-8"))
         self.assertIn("twine", (ROOT / "requirements-dev.txt").read_text(encoding="utf-8"))
+        self.assertIn("jsonschema", (ROOT / "requirements-dev.txt").read_text(encoding="utf-8"))
 
     def test_pypi_readme_is_sanitized_and_carries_mcp_marker(self) -> None:
         text = (ROOT / "README-PYPI.md").read_text(encoding="utf-8")
@@ -108,6 +109,65 @@ class Packaging290Tests(unittest.TestCase):
         self.assertEqual(package["transport"], {"type": "streamable-http", "url": "http://127.0.0.1:8080/v1/mcp"})
         self.assertEqual(package["environmentVariables"], prepare_release.SERVER_JSON_ENVIRONMENT_VARIABLES)
         self.assertEqual(SUPPORTED_PROTOCOL_VERSIONS, ("2025-06-18", "2025-11-25"))
+
+    def test_server_json_schema_validator_supports_local_schema_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            schema = {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["$schema", "name"],
+                "properties": {
+                    "$schema": {"type": "string"},
+                    "name": {"type": "string", "const": "io.github.stef-k/cognirelay"},
+                },
+                "additionalProperties": True,
+            }
+            (root / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
+            shutil.copy2(ROOT / "server.json", root / "server.json")
+
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "validate_server_json.py"), "--root", str(root), "--schema", "schema.json"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(proc.stderr, "")
+
+    def test_server_json_schema_validator_reports_path_only_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            schema = {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["$schema", "name"],
+                "properties": {
+                    "$schema": {"type": "string"},
+                    "name": {"type": "string", "const": "io.github.stef-k/cognirelay"},
+                },
+                "additionalProperties": True,
+            }
+            payload = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+            payload["name"] = "private-wrong-name"
+            (root / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
+            (root / "server.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "validate_server_json.py"), "--root", str(root), "--schema", "schema.json"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn("server.json: schema validation failed at /name", proc.stderr)
+        self.assertNotIn("private-wrong-name", proc.stderr)
 
     def test_built_wheel_and_sdist_contents_are_publishable(self) -> None:
         with tempfile.TemporaryDirectory() as td:

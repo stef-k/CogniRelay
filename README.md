@@ -140,6 +140,12 @@ For agent integration details, including the MCP bootstrap flow and tool mapping
 
 PyPI and MCP Registry metadata provide discoverability and a runnable local install path. This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. Maintainers must verify the `cognirelay` PyPI package name before the first upload.
 
+Validate `server.json` against the MCP Registry schema before publication:
+
+```bash
+./.venv/bin/python tools/validate_server_json.py
+```
+
 ## Development
 
 Tests are in `tests/`. Discovery and manifest behavior are covered in `tests/test_discovery.py`.
@@ -155,4 +161,5 @@ Local quality commands:
 ```bash
 ./.venv/bin/python -m unittest discover -s tests -v
 ./.venv/bin/python -m ruff check app tests tools
+./.venv/bin/python tools/validate_server_json.py
 ```
