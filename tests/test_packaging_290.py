@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -22,6 +21,33 @@ from tools import prepare_release
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FORBIDDEN_ARTIFACT_SUFFIXES = (
+    ".pyc",
+    ".pyo",
+    ".db",
+    ".db-wal",
+    ".db-shm",
+    ".db-journal",
+    ".sqlite",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite-journal",
+    ".sqlite3",
+    ".sqlite3-wal",
+    ".sqlite3-shm",
+    ".sqlite3-journal",
+    ".pem",
+    ".key",
+    ".token",
+    ".log",
+    ".jsonl",
+    ".bak",
+    ".tmp",
+)
+ALLOWED_ENV_TEMPLATE_ARTIFACTS = {
+    "cognirelay-1.4.8/.env.example",
+    "cognirelay-1.4.8/deploy/systemd/cognirelay.env.example",
+}
 
 
 def _forbidden_artifact_name(name: str) -> bool:
@@ -32,9 +58,9 @@ def _forbidden_artifact_name(name: str) -> bool:
     return (
         any(part in {".git", ".venv", "memory", "logs", "dist", "build", "data_repo", ".locks", ".pytest_cache", ".ruff_cache", ".mypy_cache", "__pycache__"} for part in parts)
         or any(part.endswith(".egg-info") for part in parts)
-        or basename.endswith((".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal", ".pem", ".key", ".token", ".log", ".jsonl", ".bak", ".tmp"))
+        or basename.endswith(FORBIDDEN_ARTIFACT_SUFFIXES)
         or basename in {"api_audit.jsonl", "peer_tokens.json"}
-        or ((basename == ".env" or basename.startswith(".env.") or basename.endswith(".env.example")) and name not in {"cognirelay-1.4.8/.env.example", "cognirelay-1.4.8/deploy/systemd/cognirelay.env.example"})
+        or ((basename == ".env" or basename.startswith(".env.") or basename.endswith(".env.example")) and name not in ALLOWED_ENV_TEMPLATE_ARTIFACTS)
     )
 
 
