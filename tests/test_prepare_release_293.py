@@ -76,7 +76,7 @@ def _write_fixture(root: Path, *, version: str = "1.4.8", latest: str = "1.4.8")
                 "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
                 "name": "io.github.stef-k/cognirelay",
                 "title": "CogniRelay",
-                "description": "Self-hosted continuity and collaboration substrate for autonomous agents.",
+                "description": "Self-hosted agent continuity server with bounded, recoverable memory and restart orientation.",
                 "version": version,
                 "packages": [
                     {

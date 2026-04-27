@@ -2,7 +2,7 @@
 
 <!-- mcp-name: io.github.stef-k/cognirelay -->
 
-CogniRelay is a self-hosted continuity and collaboration substrate for autonomous agents. It provides a local FastAPI and MCP-facing service for bounded agent orientation, retrieval, coordination, and recovery across context resets.
+CogniRelay is a self-hosted continuity and collaboration substrate for autonomous agents with bounded, recoverable memory and explicit restart orientation. It provides a local FastAPI and MCP-facing service for agent orientation, retrieval, coordination, and recovery across context resets.
 
 ## Install
 

@@ -21,6 +21,25 @@ from tools import prepare_release
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+SDIST_PREFIX = f"cognirelay-{PACKAGE_VERSION}/"
+GITHUB_REPOSITORY_TOPICS = [
+    "mcp",
+    "ai-collaboration",
+    "agent-infrastructure",
+    "continuity",
+    "agent-memory",
+    "autonomous-agents",
+    "context-recovery",
+    "fastapi",
+    "long-horizon-agents",
+    "multi-agent-systems",
+    "self-hosted",
+    "session-recovery",
+    "agent-continuity",
+    "continuity-infrastructure",
+    "recoverable-memory",
+]
 FORBIDDEN_ARTIFACT_SUFFIXES = (
     ".pyc",
     ".pyo",
@@ -45,8 +64,8 @@ FORBIDDEN_ARTIFACT_SUFFIXES = (
     ".tmp",
 )
 ALLOWED_ENV_TEMPLATE_ARTIFACTS = {
-    "cognirelay-1.4.9/.env.example",
-    "cognirelay-1.4.9/deploy/systemd/cognirelay.env.example",
+    f"{SDIST_PREFIX}.env.example",
+    f"{SDIST_PREFIX}deploy/systemd/cognirelay.env.example",
 }
 FORBIDDEN_METADATA_TOKENS = (
     "data_repo/",
@@ -78,6 +97,7 @@ class Packaging290Tests(unittest.TestCase):
         expected = prepare_release.runtime_requirements(ROOT)
 
         self.assertEqual(pyproject["project"]["readme"], "README-PYPI.md")
+        self.assertEqual(pyproject["project"]["keywords"], GITHUB_REPOSITORY_TOPICS)
         self.assertEqual(pyproject["project"]["dependencies"], expected)
         self.assertNotIn("build", "\n".join(pyproject["project"]["dependencies"]))
         self.assertNotIn("twine", "\n".join(pyproject["project"]["dependencies"]))
@@ -195,10 +215,9 @@ class Packaging290Tests(unittest.TestCase):
 
             with tarfile.open(sdist) as archive:
                 sdist_names = set(archive.getnames())
-                pkg_info = archive.extractfile("cognirelay-1.4.9/PKG-INFO")
+                pkg_info = archive.extractfile(f"{SDIST_PREFIX}PKG-INFO")
                 self.assertIsNotNone(pkg_info)
                 sdist_metadata = pkg_info.read().decode("utf-8")  # type: ignore[union-attr]
-            prefix = "cognirelay-1.4.9/"
             for expected in (
                 "README.md",
                 "README-PYPI.md",
@@ -208,7 +227,7 @@ class Packaging290Tests(unittest.TestCase):
                 "agent-assets/README.md",
                 "deploy/systemd/cognirelay.env.example",
             ):
-                self.assertIn(prefix + expected, sdist_names)
+                self.assertIn(SDIST_PREFIX + expected, sdist_names)
             self.assertFalse(any(_forbidden_artifact_name(name) for name in sdist_names))
             self.assertIn("<!-- mcp-name: io.github.stef-k/cognirelay -->", sdist_metadata)
             for token in FORBIDDEN_METADATA_TOKENS:

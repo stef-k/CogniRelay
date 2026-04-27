@@ -2,13 +2,13 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.stef-k/cognirelay",
   "title": "CogniRelay",
-  "description": "Self-hosted continuity and collaboration substrate for autonomous agents.",
-  "version": "1.4.9",
+  "description": "Self-hosted agent continuity server with bounded, recoverable memory and restart orientation.",
+  "version": "1.4.10",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "cognirelay",
-      "version": "1.4.9",
+      "version": "1.4.10",
       "packageArguments": [
         {
           "type": "positional",
