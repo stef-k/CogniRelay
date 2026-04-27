@@ -21,3 +21,5 @@ exclude .env .env.*
 recursive-exclude * .env .env.*
 global-exclude *.pem *.key *.token
 global-exclude *.log *.jsonl *.bak *.tmp api_audit.jsonl peer_tokens.json
+include .env.example
+include deploy/systemd/cognirelay.env.example

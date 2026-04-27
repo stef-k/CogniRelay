@@ -89,6 +89,8 @@ For the full cold-start endpoint sequence, see [System Overview: Agent Usage](do
 
 ## Quick Start
 
+Source or GitHub release installs keep the existing deployment model:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -96,6 +98,16 @@ pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --host 127.0.0.1 --port 8080 --reload
 ```
+
+PyPI installs use the thin package wrapper and the same `app.main:app` runtime:
+
+```bash
+pip install cognirelay
+export COGNIRELAY_REPO_ROOT=/var/lib/cognirelay/data_repo
+cognirelay serve --host 127.0.0.1 --port 8080
+```
+
+`COGNIRELAY_REPO_ROOT` must point to a durable writable directory outside `site-packages` and outside installed package files for PyPI or MCP Registry starts. The default `./data_repo` is for local/manual development only.
 
 If you want git history under `data_repo/` and it is not already initialized:
 
@@ -123,6 +135,8 @@ For shell-based agent hooks, the [CLI client](docs/cognirelay-client.md) (`tools
 - Machine discoverability: `/v1/manifest`, `/v1/discovery/*`, and `POST /v1/mcp`
 
 For agent integration details, including the MCP bootstrap flow and tool mapping, see [docs/mcp.md](docs/mcp.md).
+
+PyPI and MCP Registry metadata provide discoverability and a runnable local install path. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. Maintainers must verify the `cognirelay` PyPI package name before the first upload.
 
 ## Development
 

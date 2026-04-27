@@ -11,6 +11,11 @@ CogniRelay exposes two machine-oriented integration styles:
 
 The `#216` runtime target is MCP `2025-11-25` Streamable HTTP with a temporary bounded posture. For startup compatibility, `initialize` accepts both MCP protocol versions `2025-06-18` and `2025-11-25`; `2025-11-25` remains the preferred/latest version in examples and descriptor metadata.
 
+The root `server.json` file uses the MCP Registry metadata schema URI
+`2025-12-11`. That schema version is not a CogniRelay runtime MCP protocol
+version; runtime `initialize` support remains limited to `2025-06-18` and
+`2025-11-25`.
+
 - `POST /v1/mcp` is the only MCP request endpoint that may succeed
 - `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
 - `GET /.well-known/mcp.json` is supplemental metadata only
