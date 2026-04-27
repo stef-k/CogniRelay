@@ -23,6 +23,10 @@ This package starts a local Streamable HTTP server only; it does not provide std
 
 ## Documentation
 
-Project source, full documentation, and release notes are available at:
+Documentation and release notes are available at:
+
+https://stef-k.github.io/CogniRelay/
+
+Project source is available at:
 
 https://github.com/stef-k/CogniRelay
