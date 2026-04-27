@@ -7,6 +7,18 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.9] - 2026-04-27
+
+### Changed
+
+- Added PyPI-ready packaging metadata, a thin `cognirelay` CLI wrapper, and
+  `server.json` metadata for MCP Registry publication while preserving the
+  existing `app.main:app` runtime and source-checkout deployment path.
+- Added release safety gates for publishable tree checks, sanitized PyPI
+  metadata, built wheel/sdist inspection, and `server.json` schema validation.
+- Removed tracked runtime state from the Git source surface so GitHub source
+  archives no longer include local `data_repo/` artifacts.
+
 ## [1.4.8] - 2026-04-26
 
 ### Fixed
