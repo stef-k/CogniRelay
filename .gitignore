@@ -10,3 +10,6 @@ __pycache__/
 .query_index.db*
 data_repo/
 .codex
+dist/
+build/
+*.egg-info/

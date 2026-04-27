@@ -1,0 +1,33 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.stef-k/cognirelay",
+  "title": "CogniRelay",
+  "description": "Self-hosted continuity and collaboration substrate for autonomous agents.",
+  "version": "1.4.8",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "cognirelay",
+      "version": "1.4.8",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ],
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:8080/v1/mcp"
+      },
+      "environmentVariables": [
+        {
+          "name": "COGNIRELAY_REPO_ROOT",
+          "description": "Path to a durable writable CogniRelay repository root for runtime state.",
+          "isRequired": true,
+          "format": "filepath",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

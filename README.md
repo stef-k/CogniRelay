@@ -1,5 +1,7 @@
 # CogniRelay
 
+<!-- mcp-name: io.github.stef-k/cognirelay -->
+
 Self-hosted continuity and collaboration substrate for autonomous agents with bounded, recoverable memory.
 
 CogniRelay is an applied continuity-infrastructure project: real, production-oriented systems engineering for autonomous agents, guided and strengthened by ongoing experimental and conceptual research into agent continuity, reorientation cost, and long-horizon collaboration.
@@ -87,6 +89,8 @@ For the full cold-start endpoint sequence, see [System Overview: Agent Usage](do
 
 ## Quick Start
 
+Source or GitHub release installs keep the existing deployment model:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -94,6 +98,18 @@ pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --host 127.0.0.1 --port 8080 --reload
 ```
+
+PyPI installs use the thin package wrapper and the same `app.main:app` runtime:
+
+```bash
+pip install cognirelay
+export COGNIRELAY_REPO_ROOT=/var/lib/cognirelay/data_repo
+cognirelay serve --host 127.0.0.1 --port 8080
+```
+
+`COGNIRELAY_REPO_ROOT` must point to a durable writable directory outside `site-packages` and outside installed package files for PyPI or MCP Registry starts. The default `./data_repo` is for local/manual development only.
+
+Wheel installs do not bundle the full source documentation in this slice. The `/ui/docs` page may show degraded or unavailable doc entries unless `COGNIRELAY_DOCS_SOURCE_ROOT` points at a source checkout.
 
 If you want git history under `data_repo/` and it is not already initialized:
 
@@ -122,6 +138,14 @@ For shell-based agent hooks, the [CLI client](docs/cognirelay-client.md) (`tools
 
 For agent integration details, including the MCP bootstrap flow and tool mapping, see [docs/mcp.md](docs/mcp.md).
 
+PyPI and MCP Registry metadata provide discoverability and a runnable local install path. This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. Maintainers must verify the `cognirelay` PyPI package name before the first upload.
+
+Validate `server.json` against the MCP Registry schema before publication:
+
+```bash
+./.venv/bin/python tools/validate_server_json.py
+```
+
 ## Development
 
 Tests are in `tests/`. Discovery and manifest behavior are covered in `tests/test_discovery.py`.
@@ -137,4 +161,5 @@ Local quality commands:
 ```bash
 ./.venv/bin/python -m unittest discover -s tests -v
 ./.venv/bin/python -m ruff check app tests tools
+./.venv/bin/python tools/validate_server_json.py
 ```

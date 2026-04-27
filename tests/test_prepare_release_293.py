@@ -54,9 +54,90 @@ def _write_fixture(root: Path, *, version: str = "1.4.8", latest: str = "1.4.8")
         f"# CogniRelay v{latest} Release Notes\n\nRelease date: 2026-04-26\n",
         encoding="utf-8",
     )
+    (root / "requirements.txt").write_text(
+        "fastapi>=0.115,<1\n"
+        "uvicorn>=0.30,<1\n",
+        encoding="utf-8",
+    )
+    (root / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "cognirelay"\n'
+        f'version = "{version}"\n'
+        'readme = "README-PYPI.md"\n'
+        "dependencies = [\n"
+        '    "fastapi>=0.115,<1",\n'
+        '    "uvicorn>=0.30,<1",\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    (root / "server.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+                "name": "io.github.stef-k/cognirelay",
+                "title": "CogniRelay",
+                "description": "Self-hosted continuity and collaboration substrate for autonomous agents.",
+                "version": version,
+                "packages": [
+                    {
+                        "registryType": "pypi",
+                        "identifier": "cognirelay",
+                        "version": version,
+                        "packageArguments": [{"type": "positional", "value": "serve"}],
+                        "transport": {"type": "streamable-http", "url": "http://127.0.0.1:8080/v1/mcp"},
+                        "environmentVariables": [
+                            {
+                                "name": "COGNIRELAY_REPO_ROOT",
+                                "description": "Path to a durable writable CogniRelay repository root for runtime state.",
+                                "isRequired": True,
+                                "format": "filepath",
+                                "isSecret": False,
+                            }
+                        ],
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text(
+        "# CogniRelay\n\n<!-- mcp-name: io.github.stef-k/cognirelay -->\n",
+        encoding="utf-8",
+    )
+    (root / "README-PYPI.md").write_text(
+        "# CogniRelay\n\n<!-- mcp-name: io.github.stef-k/cognirelay -->\n",
+        encoding="utf-8",
+    )
+
+
+def _git_env() -> dict[str, str]:
+    """Return deterministic git identity for temporary repositories."""
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+
+
+def _init_git_repo(root: Path) -> None:
+    """Initialize and commit a temporary git repository."""
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=root, check=True, capture_output=True, text=True, env=_git_env())
 
 
 class PrepareReleaseTests(unittest.TestCase):
+    def assert_path_only_error(self, error: dict[str, object], root: Path, secret: str, expected_path: str) -> None:
+        encoded = json.dumps(error, sort_keys=True)
+
+        self.assertEqual(error["path"], expected_path)
+        self.assertNotIn(str(root), encoded)
+        self.assertNotIn(secret, encoded)
+
     def test_check_mode_passes_on_matching_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -65,8 +146,205 @@ class PrepareReleaseTests(unittest.TestCase):
             result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
 
             self.assertTrue(result["ok"])
-            self.assertEqual([entry["surface"] for entry in result["checked"]], ["app_version", "changelog", "release_notes", "docs_index"])
+            self.assertEqual(
+                [entry["surface"] for entry in result["checked"]],
+                [
+                    "app_version",
+                    "pyproject_version",
+                    "pyproject_dependencies",
+                    "server_json_version",
+                    "server_json_description",
+                    "server_json_package_version",
+                    "server_json_package_identifier",
+                    "server_json_package_arguments",
+                    "server_json_transport",
+                    "server_json_environment_variables",
+                    "mcp_ownership_marker",
+                    "changelog",
+                    "release_notes",
+                    "docs_index",
+                    "publishable_tree_safety",
+                ],
+            )
             self.assertEqual(result["updated"], [])
+
+    def test_mcp_marker_uses_pyproject_readme_target(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            (root / "README.md").write_text("# CogniRelay\n\nOperational docs only.\n", encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertTrue(result["ok"], result["errors"])
+            marker_checks = [entry for entry in result["checked"] if entry["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(marker_checks, [{"surface": "mcp_ownership_marker", "path": "README-PYPI.md", "ok": True}])
+
+    def test_mcp_marker_missing_in_pyproject_readme_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            (root / "README-PYPI.md").write_text("# CogniRelay\n", encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertFalse(result["ok"])
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "MCP ownership marker is missing", "surface": "mcp_ownership_marker", "path": "README-PYPI.md"}])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+
+    def test_mcp_marker_rejects_traversal_readme_path_with_safe_json(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "repo"
+            root.mkdir()
+            _write_fixture(root)
+            secret = "outside-readme-secret"
+            outside = root.parent / "outside-readme.md"
+            outside.write_text(secret, encoding="utf-8")
+            text = (root / "pyproject.toml").read_text(encoding="utf-8").replace('readme = "README-PYPI.md"', 'readme = "../outside-readme.md"')
+            (root / "pyproject.toml").write_text(text, encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+
+            proc = subprocess.run(
+                [sys.executable, str(_helper_path), "check", "--version", "1.4.8", "--date", "2026-04-26", "--allow-dirty"],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            result = json.loads(proc.stdout)
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "invalid PyPI long-description source", "surface": "mcp_ownership_marker", "path": "pyproject.toml"}])
+            encoded = json.dumps(result, sort_keys=True)
+            self.assertNotIn(str(root), encoded)
+            self.assertNotIn(str(outside), encoded)
+            self.assertNotIn("../outside-readme.md", encoded)
+            self.assertNotIn(secret, encoded)
+
+    def test_mcp_marker_rejects_absolute_readme_path_with_safe_json(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "repo"
+            root.mkdir()
+            _write_fixture(root)
+            secret = "absolute-readme-secret"
+            outside = root.parent / "outside-readme.md"
+            outside.write_text(secret, encoding="utf-8")
+            text = (root / "pyproject.toml").read_text(encoding="utf-8").replace('readme = "README-PYPI.md"', f'readme = "{outside.as_posix()}"')
+            (root / "pyproject.toml").write_text(text, encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+
+            proc = subprocess.run(
+                [sys.executable, str(_helper_path), "check", "--version", "1.4.8", "--date", "2026-04-26", "--allow-dirty"],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            result = json.loads(proc.stdout)
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "invalid PyPI long-description source", "surface": "mcp_ownership_marker", "path": "pyproject.toml"}])
+            encoded = json.dumps(result, sort_keys=True)
+            self.assertNotIn(str(root), encoded)
+            self.assertNotIn(str(outside), encoded)
+            self.assertNotIn(secret, encoded)
+
+    def test_mcp_marker_rejects_readme_table_form(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            text = (root / "pyproject.toml").read_text(encoding="utf-8").replace('readme = "README-PYPI.md"', 'readme = {file = "README-PYPI.md", content-type = "text/markdown"}')
+            (root / "pyproject.toml").write_text(text, encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertFalse(result["ok"])
+            errors = [error for error in result["errors"] if error["surface"] == "mcp_ownership_marker"]
+            self.assertEqual(errors, [{"code": "mcp_ownership_marker_missing", "message": "invalid PyPI long-description source", "surface": "mcp_ownership_marker", "path": "pyproject.toml"}])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+
+    def test_publishable_tree_safety_allows_only_exact_env_templates(self) -> None:
+        allowed = [".env.example", "deploy/systemd/cognirelay.env.example"]
+        forbidden = [
+            "foo.env.example",
+            "docs/foo.env.example",
+            ".env.local",
+            "nested/.env",
+            "foo.token",
+            "api_audit.jsonl",
+            "data_repo/x",
+        ]
+
+        for path in allowed:
+            with self.subTest(path=path):
+                self.assertFalse(prepare_release.is_forbidden_publishable_path(path))
+        for path in forbidden:
+            with self.subTest(path=path):
+                self.assertTrue(prepare_release.is_forbidden_publishable_path(path))
+
+    def test_publishable_tree_safety_rejects_tracked_runtime_state_path_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            secret_text = "super-secret-token-value"
+            (root / "data_repo").mkdir()
+            (root / "data_repo" / "x").write_text(secret_text, encoding="utf-8")
+            _init_git_repo(root)
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+            errors = [error for error in result["errors"] if error["surface"] == "publishable_tree_safety"]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["code"], "publishable_tree_forbidden_file")
+            self.assertEqual(errors[0]["path"], "data_repo/x")
+            encoded = json.dumps(result, sort_keys=True)
+            self.assertNotIn(secret_text, encoded)
+            self.assertNotIn(str(root), encoded)
+
+    def test_publishable_tree_safety_rejects_untracked_build_residue_path_only(self) -> None:
+        cases = (
+            ("dist", "dist"),
+            ("build", "build"),
+            ("cognirelay.egg-info", "cognirelay.egg-info"),
+            ("nested/package.egg-info", "nested/package.egg-info"),
+        )
+        for relative, expected_path in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _write_fixture(root)
+                residue = root / relative
+                residue.mkdir(parents=True)
+                secret_text = "super-secret-build-residue"
+                (residue / "artifact.txt").write_text(secret_text, encoding="utf-8")
+
+                result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(prepare_release.exit_code_for(result), 1)
+                errors = [error for error in result["errors"] if error["surface"] == "publishable_tree_safety"]
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(errors[0]["code"], "publishable_tree_forbidden_file")
+                self.assertEqual(errors[0]["path"], expected_path)
+                encoded = json.dumps(result, sort_keys=True)
+                self.assertNotIn(secret_text, encoded)
+                self.assertNotIn(str(root), encoded)
+
+    def test_publishable_tree_safety_ignores_virtualenv_package_names(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            ignored = root / ".venv" / "lib" / "python3.12" / "site-packages" / "build"
+            ignored.mkdir(parents=True)
+            (ignored / "__init__.py").write_text("package fixture\n", encoding="utf-8")
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertTrue(result["ok"], result["errors"])
 
     def test_check_mode_reports_content_mismatch_as_exit_1_class(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -79,6 +357,65 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual(prepare_release.exit_code_for(result), 1)
             self.assertEqual(result["errors"][0]["code"], "version_mismatch")
             self.assertEqual(result["errors"][0]["surface"], "app_version")
+
+    def test_read_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state.txt"
+            secret = "private-state-token"
+
+            with self.assertRaises(prepare_release.SurfaceError) as raised:
+                prepare_release.read_text(path, root, "release_notes")
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "read_failed")
+            self.assertEqual(error["message"], "cannot read required file")
+            self.assert_path_only_error(error, root, secret, "private-state.txt")
+
+    def test_write_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state-output"
+            path.mkdir()
+            secret = "private-state-content"
+
+            with self.assertRaises(prepare_release.SurfaceError) as raised:
+                prepare_release.write_text(path, root, "release_notes", secret)
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "write_failed")
+            self.assertEqual(error["message"], "cannot write required file")
+            self.assert_path_only_error(error, root, secret, "private-state-output")
+
+    def test_snapshot_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state-snapshot"
+            path.mkdir()
+            secret = "private-state-planned-content"
+
+            with self.assertRaises(prepare_release.SurfaceError) as raised:
+                prepare_release.snapshot_write_targets([prepare_release.PlannedWrite(path, "release_notes", secret)], root)
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "read_failed")
+            self.assertEqual(error["message"], "cannot snapshot planned write target")
+            self.assert_path_only_error(error, root, secret, "private-state-snapshot")
+
+    def test_ensure_parent_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state-parent" / "notes.md"
+            secret = "private-state-mkdir-secret"
+
+            with mock.patch.object(Path, "mkdir", side_effect=OSError(f"{root}/{secret}")):
+                with self.assertRaises(prepare_release.SurfaceError) as raised:
+                    prepare_release.ensure_parent(path, root, "release_notes")
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "write_failed")
+            self.assertEqual(error["message"], "cannot create required parent directory")
+            self.assert_path_only_error(error, root, secret, "private-state-parent")
 
     def test_update_mode_edits_only_allowed_surfaces(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -94,7 +431,7 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertIn('version="1.4.9"', (root / "app" / "main.py").read_text(encoding="utf-8"))
             self.assertTrue((root / "docs" / "releases" / "v1.4.9.md").exists())
             paths = {entry["path"] for entry in result["updated"]}
-            self.assertEqual(paths, {"app/main.py", "CHANGELOG.md", "docs/releases/v1.4.9.md", "docs/index.md"})
+            self.assertEqual(paths, {"app/main.py", "pyproject.toml", "server.json", "CHANGELOG.md", "docs/releases/v1.4.9.md", "docs/index.md"})
 
     def test_update_preserves_non_empty_unreleased_content(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -610,6 +947,26 @@ class PrepareReleaseCliTests(unittest.TestCase):
             self.assertEqual(dirty.returncode, 2)
             self.assertEqual(json.loads(dirty.stdout)["errors"][0]["code"], "dirty_worktree")
             self.assertEqual(allowed.returncode, 0)
+
+    def test_check_allow_dirty_still_rejects_untracked_build_residue(self) -> None:
+        cases = ("dist", "build", "cognirelay.egg-info")
+        for relative in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _write_fixture(root)
+                _init_git_repo(root)
+                residue = root / relative
+                residue.mkdir()
+                (residue / "artifact.txt").write_text("build residue\n", encoding="utf-8")
+
+                proc = self._run_cli("check", "--version", "1.4.8", "--date", "2026-04-26", "--allow-dirty", cwd=root)
+                payload = json.loads(proc.stdout)
+
+                self.assertEqual(proc.returncode, 1)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["errors"][0]["code"], "publishable_tree_forbidden_file")
+                self.assertEqual(payload["errors"][0]["surface"], "publishable_tree_safety")
+                self.assertEqual(payload["errors"][0]["path"], relative)
 
 
 if __name__ == "__main__":

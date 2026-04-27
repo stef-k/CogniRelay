@@ -1,3 +1,6 @@
 -r requirements.txt
 httpx>=0.27,<1
 ruff>=0.11,<1
+build>=1.2,<2
+twine>=5,<7
+jsonschema>=4,<5

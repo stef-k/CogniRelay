@@ -1,0 +1,26 @@
+include README.md
+include README-PYPI.md
+include server.json
+recursive-include docs *
+recursive-include agent-assets *
+recursive-include deploy *
+prune .git
+prune .venv
+prune memory
+prune logs
+prune dist
+prune build
+prune *.egg-info
+prune data_repo
+prune .locks
+prune .pytest_cache
+prune .ruff_cache
+prune .mypy_cache
+global-exclude __pycache__ *.py[cod]
+global-exclude *.db *.db-wal *.db-shm *.db-journal *.sqlite *.sqlite-wal *.sqlite-shm *.sqlite-journal *.sqlite3 *.sqlite3-wal *.sqlite3-shm *.sqlite3-journal
+exclude .env .env.*
+recursive-exclude * .env .env.*
+global-exclude *.pem *.key *.token
+global-exclude *.log *.jsonl *.bak *.tmp api_audit.jsonl peer_tokens.json
+include .env.example
+include deploy/systemd/cognirelay.env.example

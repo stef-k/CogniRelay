@@ -9,18 +9,71 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
-SURFACES = ("app_version", "changelog", "release_notes", "docs_index")
+SURFACES = (
+    "app_version",
+    "pyproject_version",
+    "pyproject_dependencies",
+    "server_json_version",
+    "server_json_description",
+    "server_json_package_version",
+    "server_json_package_identifier",
+    "server_json_package_arguments",
+    "server_json_transport",
+    "server_json_environment_variables",
+    "mcp_ownership_marker",
+    "changelog",
+    "release_notes",
+    "docs_index",
+    "publishable_tree_safety",
+)
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 CHANGELOG_HEADING_RE = re.compile(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$", re.MULTILINE)
 APP_VERSION_RE = re.compile(r"(FastAPI\([^)]*\bversion=)([\"'])([^\"']+)(\2)", re.DOTALL)
+PROJECT_VERSION_RE = re.compile(r"(^\[project\]\s*?.*?^version\s*=\s*)([\"'])([^\"']+)(\2)", re.MULTILINE | re.DOTALL)
 LATEST_RE = re.compile(r"^- \[Latest release notes: v([0-9]+\.[0-9]+\.[0-9]+)\]\(releases/v\1\.md\)$")
 NORMAL_RELEASE_RE = re.compile(r"^- \[v([0-9]+\.[0-9]+\.[0-9]+) release notes\]\(releases/v\1\.md\)$")
+SERVER_JSON_DESCRIPTION = "Self-hosted continuity and collaboration substrate for autonomous agents."
+SERVER_JSON_PACKAGE_IDENTIFIER = "cognirelay"
+SERVER_JSON_PACKAGE_ARGUMENTS = [{"type": "positional", "value": "serve"}]
+SERVER_JSON_TRANSPORT = {"type": "streamable-http", "url": "http://127.0.0.1:8080/v1/mcp"}
+SERVER_JSON_ENVIRONMENT_VARIABLES = [
+    {
+        "name": "COGNIRELAY_REPO_ROOT",
+        "description": "Path to a durable writable CogniRelay repository root for runtime state.",
+        "isRequired": True,
+        "format": "filepath",
+        "isSecret": False,
+    }
+]
+MCP_OWNERSHIP_MARKER = "mcp-name: io.github.stef-k/cognirelay"
+ALLOWED_ENV_TEMPLATES = {".env.example", "deploy/systemd/cognirelay.env.example"}
+FORBIDDEN_DIR_PREFIXES = ("data_repo/", "memory/", "logs/", ".locks/", "dist/", "build/")
+FORBIDDEN_DB_SUFFIXES = (
+    ".db",
+    ".db-wal",
+    ".db-shm",
+    ".db-journal",
+    ".sqlite",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite-journal",
+    ".sqlite3",
+    ".sqlite3-wal",
+    ".sqlite3-shm",
+    ".sqlite3-journal",
+)
+FORBIDDEN_RUNTIME_SUFFIXES = (".log", ".jsonl", ".bak", ".tmp")
+FORBIDDEN_SECRET_SUFFIXES = (".pem", ".key", ".token")
+FORBIDDEN_RUNTIME_FILENAMES = {"api_audit.jsonl", "peer_tokens.json"}
+FORBIDDEN_BUILD_RESIDUE_NAMES = {"dist", "build"}
+RESIDUE_SCAN_PRUNE_DIRS = {".git", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache", "__pycache__"}
 
 
 CONTENT_ERROR_CODES = {
@@ -35,6 +88,17 @@ CONTENT_ERROR_CODES = {
     "docs_previous_latest_missing",
     "docs_duplicate_release_link",
     "docs_release_link_order",
+    "pyproject_version_mismatch",
+    "pyproject_dependency_mismatch",
+    "server_json_version_mismatch",
+    "server_json_package_version_mismatch",
+    "server_json_package_identifier_mismatch",
+    "server_json_transport_mismatch",
+    "server_json_package_arguments_mismatch",
+    "server_json_environment_variables_mismatch",
+    "server_json_description_mismatch",
+    "mcp_ownership_marker_missing",
+    "publishable_tree_forbidden_file",
 }
 VALIDATION_ERROR_CODES = {
     "invalid_args",
@@ -184,7 +248,7 @@ def read_text(path: Path, root: Path, surface: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise SurfaceError("read_failed", f"cannot read {rel_path(path, root)}: {exc}", surface, rel_path(path, root)) from exc
+        raise SurfaceError("read_failed", "cannot read required file", surface, rel_path(path, root)) from exc
 
 
 def write_text(path: Path, root: Path, surface: str, content: str) -> None:
@@ -192,7 +256,7 @@ def write_text(path: Path, root: Path, surface: str, content: str) -> None:
     try:
         path.write_text(content, encoding="utf-8")
     except OSError as exc:
-        raise SurfaceError("write_failed", f"cannot write {rel_path(path, root)}: {exc}", surface, rel_path(path, root)) from exc
+        raise SurfaceError("write_failed", "cannot write required file", surface, rel_path(path, root)) from exc
 
 
 def ensure_parent(path: Path, root: Path, surface: str) -> list[Path]:
@@ -206,7 +270,7 @@ def ensure_parent(path: Path, root: Path, surface: str) -> list[Path]:
     try:
         parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise SurfaceError("write_failed", f"cannot create {rel_path(parent, root)}: {exc}", surface, rel_path(parent, root)) from exc
+        raise SurfaceError("write_failed", "cannot create required parent directory", surface, rel_path(parent, root)) from exc
     return missing
 
 
@@ -234,6 +298,208 @@ def update_app_version(root: Path, version: str, *, dry_run: bool) -> tuple[dict
         return checked, update_entry("app_version", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False), None
     updated_text = text[: match.start(3)] + version + text[match.end(3) :]
     return checked, update_entry("app_version", rel_path(path, root), "updated", dry_run=dry_run, would_write=True), PlannedWrite(path, "app_version", updated_text)
+
+
+def read_toml(path: Path, root: Path, surface: str) -> dict[str, Any]:
+    """Read a TOML file or raise a structured surface error."""
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SurfaceError("read_failed", f"cannot read {rel_path(path, root)}", surface, rel_path(path, root)) from exc
+
+
+def runtime_requirements(root: Path) -> list[str] | SurfaceError:
+    """Return runtime dependencies from requirements.txt using the #290 sync rule."""
+    path = root / "requirements.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SurfaceError("read_failed", f"cannot read {rel_path(path, root)}", "pyproject_dependencies", rel_path(path, root)) from exc
+    dependencies: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith(("-r", "--", "-e")) or "#" in stripped:
+            return SurfaceError("pyproject_dependency_mismatch", "runtime requirements contain unsupported packaging syntax", "pyproject_dependencies", rel_path(path, root))
+        dependencies.append(stripped)
+    return dependencies
+
+
+def pyproject_project(root: Path) -> tuple[Path, dict[str, Any]]:
+    """Return the pyproject path and parsed project table."""
+    path = root / "pyproject.toml"
+    data = read_toml(path, root, "pyproject_version")
+    project = data.get("project")
+    if not isinstance(project, dict):
+        raise SurfaceError("pyproject_version_mismatch", "pyproject project metadata is missing", "pyproject_version", rel_path(path, root))
+    return path, project
+
+
+def pyproject_readme_path(root: Path) -> Path:
+    """Return the validated project.readme file path from pyproject.toml."""
+    path, project = pyproject_project(root)
+    readme = project.get("readme")
+    if not isinstance(readme, str) or not readme:
+        raise SurfaceError("mcp_ownership_marker_missing", "invalid PyPI long-description source", "mcp_ownership_marker", rel_path(path, root))
+    readme_path = Path(readme)
+    if readme_path.is_absolute():
+        raise SurfaceError("mcp_ownership_marker_missing", "invalid PyPI long-description source", "mcp_ownership_marker", rel_path(path, root))
+    root_resolved = root.resolve()
+    resolved = (root_resolved / readme_path).resolve()
+    try:
+        normalized_readme = resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise SurfaceError("mcp_ownership_marker_missing", "invalid PyPI long-description source", "mcp_ownership_marker", rel_path(path, root)) from exc
+    return root / normalized_readme
+
+
+def check_pyproject_version(root: Path, version: str) -> dict[str, Any] | SurfaceError:
+    """Validate pyproject project.version."""
+    path, project = pyproject_project(root)
+    if project.get("version") != version:
+        return SurfaceError("pyproject_version_mismatch", "pyproject version does not match requested version", "pyproject_version", rel_path(path, root))
+    return {"surface": "pyproject_version", "path": rel_path(path, root), "ok": True}
+
+
+def check_pyproject_dependencies(root: Path) -> dict[str, Any] | SurfaceError:
+    """Validate pyproject dependencies against requirements.txt."""
+    path, project = pyproject_project(root)
+    expected = runtime_requirements(root)
+    if isinstance(expected, SurfaceError):
+        return expected
+    actual = project.get("dependencies")
+    if actual != expected:
+        return SurfaceError("pyproject_dependency_mismatch", "pyproject dependencies do not match runtime requirements", "pyproject_dependencies", rel_path(path, root))
+    return {"surface": "pyproject_dependencies", "path": rel_path(path, root), "ok": True}
+
+
+def update_pyproject_version(root: Path, version: str, *, dry_run: bool) -> tuple[dict[str, Any], dict[str, Any] | SurfaceError, PlannedWrite | None]:
+    """Plan a pyproject project.version update if needed."""
+    path = root / "pyproject.toml"
+    text = read_text(path, root, "pyproject_version")
+    match = PROJECT_VERSION_RE.search(text)
+    if not match:
+        raise SurfaceError("pyproject_version_mismatch", "pyproject version assignment was not found", "pyproject_version", rel_path(path, root))
+    checked = {"surface": "pyproject_version", "path": rel_path(path, root), "ok": match.group(3) == version}
+    if match.group(3) == version:
+        return checked, update_entry("pyproject_version", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False), None
+    updated_text = text[: match.start(3)] + version + text[match.end(3) :]
+    return checked, update_entry("pyproject_version", rel_path(path, root), "updated", dry_run=dry_run, would_write=True), PlannedWrite(path, "pyproject_version", updated_text)
+
+
+def read_server_json(root: Path) -> tuple[Path, dict[str, Any]]:
+    """Return server.json path and parsed payload."""
+    path = root / "server.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SurfaceError("read_failed", f"cannot read {rel_path(path, root)}", "server_json_version", rel_path(path, root)) from exc
+    if not isinstance(data, dict):
+        raise SurfaceError("server_json_version_mismatch", "server.json root object is invalid", "server_json_version", rel_path(path, root))
+    return path, data
+
+
+def server_json_package(data: dict[str, Any], root: Path, path: Path, surface: str, code: str) -> dict[str, Any] | SurfaceError:
+    """Return the single PyPI package entry from server.json."""
+    packages = data.get("packages")
+    if not isinstance(packages, list) or len(packages) != 1 or not isinstance(packages[0], dict):
+        return SurfaceError(code, "server.json package metadata is invalid", surface, rel_path(path, root))
+    return packages[0]
+
+
+def check_server_json_version(root: Path, version: str) -> dict[str, Any] | SurfaceError:
+    path, data = read_server_json(root)
+    if data.get("version") != version:
+        return SurfaceError("server_json_version_mismatch", "server.json version does not match requested version", "server_json_version", rel_path(path, root))
+    return {"surface": "server_json_version", "path": rel_path(path, root), "ok": True}
+
+
+def check_server_json_description(root: Path) -> dict[str, Any] | SurfaceError:
+    path, data = read_server_json(root)
+    if data.get("description") != SERVER_JSON_DESCRIPTION:
+        return SurfaceError("server_json_description_mismatch", "server.json description is not the expected public value", "server_json_description", rel_path(path, root))
+    return {"surface": "server_json_description", "path": rel_path(path, root), "ok": True}
+
+
+def check_server_json_package_version(root: Path, version: str) -> dict[str, Any] | SurfaceError:
+    path, data = read_server_json(root)
+    package = server_json_package(data, root, path, "server_json_package_version", "server_json_package_version_mismatch")
+    if isinstance(package, SurfaceError):
+        return package
+    if package.get("version") != version:
+        return SurfaceError("server_json_package_version_mismatch", "server.json package version does not match requested version", "server_json_package_version", rel_path(path, root))
+    return {"surface": "server_json_package_version", "path": rel_path(path, root), "ok": True}
+
+
+def check_server_json_package_identifier(root: Path) -> dict[str, Any] | SurfaceError:
+    path, data = read_server_json(root)
+    package = server_json_package(data, root, path, "server_json_package_identifier", "server_json_package_identifier_mismatch")
+    if isinstance(package, SurfaceError):
+        return package
+    if package.get("identifier") != SERVER_JSON_PACKAGE_IDENTIFIER:
+        return SurfaceError("server_json_package_identifier_mismatch", "server.json package identifier is not expected", "server_json_package_identifier", rel_path(path, root))
+    return {"surface": "server_json_package_identifier", "path": rel_path(path, root), "ok": True}
+
+
+def check_server_json_package_arguments(root: Path) -> dict[str, Any] | SurfaceError:
+    path, data = read_server_json(root)
+    package = server_json_package(data, root, path, "server_json_package_arguments", "server_json_package_arguments_mismatch")
+    if isinstance(package, SurfaceError):
+        return package
+    if package.get("packageArguments") != SERVER_JSON_PACKAGE_ARGUMENTS:
+        return SurfaceError("server_json_package_arguments_mismatch", "server.json package arguments are not expected", "server_json_package_arguments", rel_path(path, root))
+    return {"surface": "server_json_package_arguments", "path": rel_path(path, root), "ok": True}
+
+
+def check_server_json_transport(root: Path) -> dict[str, Any] | SurfaceError:
+    path, data = read_server_json(root)
+    package = server_json_package(data, root, path, "server_json_transport", "server_json_transport_mismatch")
+    if isinstance(package, SurfaceError):
+        return package
+    if package.get("transport") != SERVER_JSON_TRANSPORT:
+        return SurfaceError("server_json_transport_mismatch", "server.json transport is not expected", "server_json_transport", rel_path(path, root))
+    return {"surface": "server_json_transport", "path": rel_path(path, root), "ok": True}
+
+
+def check_server_json_environment_variables(root: Path) -> dict[str, Any] | SurfaceError:
+    path, data = read_server_json(root)
+    package = server_json_package(data, root, path, "server_json_environment_variables", "server_json_environment_variables_mismatch")
+    if isinstance(package, SurfaceError):
+        return package
+    if package.get("environmentVariables") != SERVER_JSON_ENVIRONMENT_VARIABLES:
+        return SurfaceError("server_json_environment_variables_mismatch", "server.json environment variables are not expected", "server_json_environment_variables", rel_path(path, root))
+    return {"surface": "server_json_environment_variables", "path": rel_path(path, root), "ok": True}
+
+
+def check_mcp_ownership_marker(root: Path) -> dict[str, Any] | SurfaceError:
+    """Validate the public MCP ownership marker in the PyPI long description."""
+    path = pyproject_readme_path(root)
+    text = read_text(path, root, "mcp_ownership_marker")
+    if MCP_OWNERSHIP_MARKER not in text:
+        return SurfaceError("mcp_ownership_marker_missing", "MCP ownership marker is missing", "mcp_ownership_marker", rel_path(path, root))
+    return {"surface": "mcp_ownership_marker", "path": rel_path(path, root), "ok": True}
+
+
+def update_server_json_versions(root: Path, version: str, *, dry_run: bool) -> tuple[dict[str, Any], dict[str, Any] | SurfaceError, PlannedWrite | None]:
+    """Plan server.json top-level and package version updates if needed."""
+    path, data = read_server_json(root)
+    package = server_json_package(data, root, path, "server_json_version", "server_json_version_mismatch")
+    if isinstance(package, SurfaceError):
+        return {"surface": "server_json_version", "path": rel_path(path, root), "ok": False}, package, None
+    ok = data.get("version") == version and package.get("version") == version
+    checked = {"surface": "server_json_version", "path": rel_path(path, root), "ok": ok}
+    if ok:
+        return checked, update_entry("server_json_version", rel_path(path, root), "unchanged", dry_run=dry_run, would_write=False), None
+    updated = dict(data)
+    updated["version"] = version
+    updated_packages = list(updated["packages"])
+    updated_package = dict(updated_packages[0])
+    updated_package["version"] = version
+    updated_packages[0] = updated_package
+    updated["packages"] = updated_packages
+    content = json.dumps(updated, indent=2) + "\n"
+    return checked, update_entry("server_json_version", rel_path(path, root), "updated", dry_run=dry_run, would_write=True), PlannedWrite(path, "server_json_version", content)
 
 
 def changelog_release_headings(text: str, start: int = 0) -> list[ChangelogReleaseHeading]:
@@ -500,15 +766,114 @@ def update_docs_index(root: Path, version: str, *, dry_run: bool) -> tuple[dict[
     ), PlannedWrite(path, "docs_index", new_text)
 
 
+def is_forbidden_publishable_path(path: str) -> bool:
+    """Return whether a tracked repo-relative path is forbidden for publication."""
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized or normalized in ALLOWED_ENV_TEMPLATES:
+        return False
+    name = normalized.rsplit("/", 1)[-1]
+    if normalized.startswith(FORBIDDEN_DIR_PREFIXES):
+        return True
+    if any(part.endswith(".egg-info") for part in normalized.split("/")[:-1]):
+        return True
+    if normalized.endswith(FORBIDDEN_DB_SUFFIXES):
+        return True
+    if normalized.endswith(FORBIDDEN_RUNTIME_SUFFIXES):
+        return True
+    if normalized.endswith(FORBIDDEN_SECRET_SUFFIXES):
+        return True
+    if name in FORBIDDEN_RUNTIME_FILENAMES:
+        return True
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name.endswith(".env.example"):
+        return True
+    return False
+
+
+def git_tracked_paths(root: Path) -> list[str] | None:
+    """Return git tracked paths for root, or None when root is not a git worktree."""
+    try:
+        proc = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=False, capture_output=True)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return [item.decode("utf-8", errors="replace") for item in proc.stdout.split(b"\0") if item]
+
+
+def publishable_tree_residue_paths(root: Path) -> list[str]:
+    """Return release/build residue paths from the filesystem without reading contents."""
+    residue: list[str] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            continue
+        for path in children:
+            name = path.name
+            if path.is_dir() and name in RESIDUE_SCAN_PRUNE_DIRS:
+                continue
+            try:
+                relative = rel_path(path, root)
+            except ValueError:
+                continue
+            if name in FORBIDDEN_BUILD_RESIDUE_NAMES or name.endswith(".egg-info"):
+                residue.append(relative)
+                continue
+            if path.is_dir():
+                stack.append(path)
+    priority = {"dist": 0, "build": 1}
+    return sorted(residue, key=lambda path: (priority.get(path, 2), path))
+
+
+def check_publishable_tree_safety(root: Path) -> dict[str, Any] | SurfaceError:
+    """Validate that tracked files and local residue contain no publish-blocking state."""
+    tracked = git_tracked_paths(root)
+    if tracked is None:
+        tracked = []
+    for path in sorted(tracked):
+        if is_forbidden_publishable_path(path):
+            return SurfaceError(
+                "publishable_tree_forbidden_file",
+                "tracked file is not allowed in publishable tree",
+                "publishable_tree_safety",
+                path,
+            )
+    for path in publishable_tree_residue_paths(root):
+        return SurfaceError(
+            "publishable_tree_forbidden_file",
+            "release/build residue is not allowed in publishable tree",
+            "publishable_tree_safety",
+            path,
+        )
+    return {"surface": "publishable_tree_safety", "path": ".", "ok": True}
+
+
 def check_release(root: Path, version: str, date: str) -> dict[str, Any]:
     """Check local release surfaces for a requested version."""
     checked: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     checks = (
         lambda: check_app_version(root, version),
+        lambda: check_pyproject_version(root, version),
+        lambda: check_pyproject_dependencies(root),
+        lambda: check_server_json_version(root, version),
+        lambda: check_server_json_description(root),
+        lambda: check_server_json_package_version(root, version),
+        lambda: check_server_json_package_identifier(root),
+        lambda: check_server_json_package_arguments(root),
+        lambda: check_server_json_transport(root),
+        lambda: check_server_json_environment_variables(root),
+        lambda: check_mcp_ownership_marker(root),
         lambda: check_changelog(root, version, date),
         lambda: check_release_notes(root, version, date),
         lambda: check_docs_index(root, version),
+        lambda: check_publishable_tree_safety(root),
     )
     for func in checks:
         try:
@@ -529,9 +894,9 @@ def update_release(root: Path, version: str, date: str, title: str, *, dry_run: 
     updated: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     planned_writes: list[PlannedWrite] = []
-    for func in (update_app_version, update_changelog, update_release_notes, update_docs_index):
+    for func in (update_app_version, update_pyproject_version, update_server_json_versions, update_changelog, update_release_notes, update_docs_index):
         try:
-            if func is update_app_version or func is update_docs_index:
+            if func in {update_app_version, update_pyproject_version, update_server_json_versions, update_docs_index}:
                 check_entry, update_result, planned_write = func(root, version, dry_run=dry_run)
             else:
                 check_entry, update_result, planned_write = func(root, version, date, title, dry_run=dry_run)
@@ -578,7 +943,7 @@ def snapshot_write_targets(planned_writes: list[PlannedWrite], root: Path) -> di
             existed = path.exists()
             snapshots[path] = WriteSnapshot(existed, path.read_text(encoding="utf-8") if existed else None)
         except OSError as exc:
-            raise SurfaceError("read_failed", f"cannot snapshot {rel_path(path, root)}: {exc}", planned_write.surface, rel_path(path, root)) from exc
+            raise SurfaceError("read_failed", "cannot snapshot planned write target", planned_write.surface, rel_path(path, root)) from exc
     return snapshots
 
 

@@ -17,6 +17,25 @@ coordination surfaces without access to the owner's continuity capsules.
 For the full product introduction, installation notes, and feature summary, see
 the [README](https://github.com/stef-k/CogniRelay/blob/main/README.md).
 
+## Installation Paths
+
+Source and GitHub release installs use a virtual environment, `pip install -r
+requirements.txt`, and `python -m uvicorn app.main:app --host 127.0.0.1 --port
+8080`.
+
+PyPI installs use `pip install cognirelay` and `cognirelay serve --host
+127.0.0.1 --port 8080`. Set `COGNIRELAY_REPO_ROOT` to a durable writable
+runtime-state directory outside `site-packages`; the default `./data_repo` is
+only for local/manual development.
+
+Wheel installs do not bundle the full source documentation in this slice. The
+`/ui/docs` page may show degraded or unavailable doc entries unless
+`COGNIRELAY_DOCS_SOURCE_ROOT` points at a source checkout.
+
+Production deployments can use the templates under `deploy/` with either a
+source checkout or an installed package. Docker is not the default deployment
+path.
+
 ## Documentation
 
 - [System Overview](system-overview.md): implemented product shape, runtime
