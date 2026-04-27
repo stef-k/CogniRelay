@@ -28,6 +28,10 @@ PyPI installs use `pip install cognirelay` and `cognirelay serve --host
 runtime-state directory outside `site-packages`; the default `./data_repo` is
 only for local/manual development.
 
+Wheel installs do not bundle the full source documentation in this slice. The
+`/ui/docs` page may show degraded or unavailable doc entries unless
+`COGNIRELAY_DOCS_SOURCE_ROOT` points at a source checkout.
+
 Production deployments can use the templates under `deploy/` with either a
 source checkout or an installed package. Docker is not the default deployment
 path.

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "cognirelay"
 version = "1.4.8"
 description = "Self-hosted continuity and collaboration substrate for autonomous agents."
-readme = "README.md"
+readme = "README-PYPI.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115,<1",

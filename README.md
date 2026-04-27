@@ -109,6 +109,8 @@ cognirelay serve --host 127.0.0.1 --port 8080
 
 `COGNIRELAY_REPO_ROOT` must point to a durable writable directory outside `site-packages` and outside installed package files for PyPI or MCP Registry starts. The default `./data_repo` is for local/manual development only.
 
+Wheel installs do not bundle the full source documentation in this slice. The `/ui/docs` page may show degraded or unavailable doc entries unless `COGNIRELAY_DOCS_SOURCE_ROOT` points at a source checkout.
+
 If you want git history under `data_repo/` and it is not already initialized:
 
 ```bash
@@ -136,7 +138,7 @@ For shell-based agent hooks, the [CLI client](docs/cognirelay-client.md) (`tools
 
 For agent integration details, including the MCP bootstrap flow and tool mapping, see [docs/mcp.md](docs/mcp.md).
 
-PyPI and MCP Registry metadata provide discoverability and a runnable local install path. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. Maintainers must verify the `cognirelay` PyPI package name before the first upload.
+PyPI and MCP Registry metadata provide discoverability and a runnable local install path. This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. Maintainers must verify the `cognirelay` PyPI package name before the first upload.
 
 ## Development
 

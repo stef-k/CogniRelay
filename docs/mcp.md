@@ -16,6 +16,9 @@ The root `server.json` file uses the MCP Registry metadata schema URI
 version; runtime `initialize` support remains limited to `2025-06-18` and
 `2025-11-25`.
 
+The PyPI package starts a local Streamable HTTP server only; it does not provide
+stdio transport or a hosted default CogniRelay service.
+
 - `POST /v1/mcp` is the only MCP request endpoint that may succeed
 - `GET /v1/mcp` remains deferred as `405 Method Not Allowed` with `Allow: POST`
 - `GET /.well-known/mcp.json` is supplemental metadata only

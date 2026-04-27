@@ -48,6 +48,16 @@ ALLOWED_ENV_TEMPLATE_ARTIFACTS = {
     "cognirelay-1.4.8/.env.example",
     "cognirelay-1.4.8/deploy/systemd/cognirelay.env.example",
 }
+FORBIDDEN_METADATA_TOKENS = (
+    "data_repo/",
+    "peer_tokens.json",
+    "api_audit.jsonl",
+    ".env",
+    ".token",
+    "*.token",
+    "/home/",
+    "/Users/",
+)
 
 
 def _forbidden_artifact_name(name: str) -> bool:
@@ -67,11 +77,24 @@ class Packaging290Tests(unittest.TestCase):
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         expected = prepare_release.runtime_requirements(ROOT)
 
+        self.assertEqual(pyproject["project"]["readme"], "README-PYPI.md")
         self.assertEqual(pyproject["project"]["dependencies"], expected)
         self.assertNotIn("build", "\n".join(pyproject["project"]["dependencies"]))
         self.assertNotIn("twine", "\n".join(pyproject["project"]["dependencies"]))
         self.assertIn("build", (ROOT / "requirements-dev.txt").read_text(encoding="utf-8"))
         self.assertIn("twine", (ROOT / "requirements-dev.txt").read_text(encoding="utf-8"))
+
+    def test_pypi_readme_is_sanitized_and_carries_mcp_marker(self) -> None:
+        text = (ROOT / "README-PYPI.md").read_text(encoding="utf-8")
+
+        self.assertIn("self-hosted", text)
+        self.assertIn("pip install cognirelay", text)
+        self.assertIn("cognirelay serve", text)
+        self.assertIn("COGNIRELAY_REPO_ROOT", text)
+        self.assertIn("https://github.com/stef-k/CogniRelay", text)
+        self.assertIn("<!-- mcp-name: io.github.stef-k/cognirelay -->", text)
+        for token in FORBIDDEN_METADATA_TOKENS:
+            self.assertNotIn(token, text)
 
     def test_server_json_shape_and_runtime_protocol_versions(self) -> None:
         payload = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
@@ -95,6 +118,8 @@ class Packaging290Tests(unittest.TestCase):
 
             with zipfile.ZipFile(wheel) as archive:
                 wheel_names = set(archive.namelist())
+                metadata_name = next(name for name in wheel_names if name.endswith(".dist-info/METADATA"))
+                wheel_metadata = archive.read(metadata_name).decode("utf-8")
             self.assertIn("app/main.py", wheel_names)
             self.assertIn("cognirelay/cli.py", wheel_names)
             for source in (ROOT / "app" / "ui" / "templates").glob("*.html"):
@@ -104,12 +129,19 @@ class Packaging290Tests(unittest.TestCase):
                     self.assertIn(source.relative_to(ROOT).as_posix(), wheel_names)
             self.assertFalse(any(name.startswith(("docs/", "agent-assets/", "deploy/", "data_repo/")) for name in wheel_names))
             self.assertFalse(any(_forbidden_artifact_name(name) for name in wheel_names))
+            self.assertIn("<!-- mcp-name: io.github.stef-k/cognirelay -->", wheel_metadata)
+            for token in FORBIDDEN_METADATA_TOKENS:
+                self.assertNotIn(token, wheel_metadata)
 
             with tarfile.open(sdist) as archive:
                 sdist_names = set(archive.getnames())
+                pkg_info = archive.extractfile("cognirelay-1.4.8/PKG-INFO")
+                self.assertIsNotNone(pkg_info)
+                sdist_metadata = pkg_info.read().decode("utf-8")  # type: ignore[union-attr]
             prefix = "cognirelay-1.4.8/"
             for expected in (
                 "README.md",
+                "README-PYPI.md",
                 ".env.example",
                 "server.json",
                 "docs/index.md",
@@ -118,6 +150,9 @@ class Packaging290Tests(unittest.TestCase):
             ):
                 self.assertIn(prefix + expected, sdist_names)
             self.assertFalse(any(_forbidden_artifact_name(name) for name in sdist_names))
+            self.assertIn("<!-- mcp-name: io.github.stef-k/cognirelay -->", sdist_metadata)
+            for token in FORBIDDEN_METADATA_TOKENS:
+                self.assertNotIn(token, sdist_metadata)
 
     def test_sdist_prunes_temp_only_runtime_fixture_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -149,7 +184,7 @@ class Packaging290Tests(unittest.TestCase):
             server = json.loads((root / "server.json").read_text(encoding="utf-8"))
             server["packages"][0]["identifier"] = "wrong"
             (root / "server.json").write_text(json.dumps(server, indent=2) + "\n", encoding="utf-8")
-            (root / "README.md").write_text("# CogniRelay\n", encoding="utf-8")
+            (root / "README-PYPI.md").write_text("# CogniRelay\n", encoding="utf-8")
             with mock.patch.object(prepare_release, "git_tracked_paths", return_value=["data_repo/x"]):
                 result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
 
@@ -175,6 +210,16 @@ class Packaging290Tests(unittest.TestCase):
         self.assertIn("doc_missing:readme", detail.text)
         for doc in UI_DOCS:
             self.assertIn(doc.title, index.text)
+
+    def test_source_and_deploy_docs_do_not_contain_private_state_or_operator_paths(self) -> None:
+        proc = subprocess.run(["git", "ls-files", "README.md", "README-PYPI.md", "docs", "deploy"], cwd=ROOT, check=True, capture_output=True, text=True)
+        scanned = "\n".join((ROOT / path).read_text(encoding="utf-8", errors="replace") for path in proc.stdout.splitlines() if (ROOT / path).is_file())
+
+        self.assertNotIn("/home/", scanned)
+        self.assertNotIn("/Users/", scanned)
+        self.assertNotIn("super-secret", scanned)
+        self.assertNotIn("private-fixture", scanned)
+        self.assertNotIn("BEGIN PRIVATE KEY", scanned)
 
 
 if __name__ == "__main__":

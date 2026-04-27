@@ -63,6 +63,7 @@ def _write_fixture(root: Path, *, version: str = "1.4.8", latest: str = "1.4.8")
         "[project]\n"
         'name = "cognirelay"\n'
         f'version = "{version}"\n'
+        'readme = "README-PYPI.md"\n'
         "dependencies = [\n"
         '    "fastapi>=0.115,<1",\n'
         '    "uvicorn>=0.30,<1",\n'
@@ -105,6 +106,10 @@ def _write_fixture(root: Path, *, version: str = "1.4.8", latest: str = "1.4.8")
         "# CogniRelay\n\n<!-- mcp-name: io.github.stef-k/cognirelay -->\n",
         encoding="utf-8",
     )
+    (root / "README-PYPI.md").write_text(
+        "# CogniRelay\n\n<!-- mcp-name: io.github.stef-k/cognirelay -->\n",
+        encoding="utf-8",
+    )
 
 
 def _git_env() -> dict[str, str]:
@@ -126,6 +131,13 @@ def _init_git_repo(root: Path) -> None:
 
 
 class PrepareReleaseTests(unittest.TestCase):
+    def assert_path_only_error(self, error: dict[str, object], root: Path, secret: str, expected_path: str) -> None:
+        encoded = json.dumps(error, sort_keys=True)
+
+        self.assertEqual(error["path"], expected_path)
+        self.assertNotIn(str(root), encoded)
+        self.assertNotIn(secret, encoded)
+
     def test_check_mode_passes_on_matching_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -247,6 +259,65 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual(prepare_release.exit_code_for(result), 1)
             self.assertEqual(result["errors"][0]["code"], "version_mismatch")
             self.assertEqual(result["errors"][0]["surface"], "app_version")
+
+    def test_read_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state.txt"
+            secret = "private-state-token"
+
+            with self.assertRaises(prepare_release.SurfaceError) as raised:
+                prepare_release.read_text(path, root, "release_notes")
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "read_failed")
+            self.assertEqual(error["message"], "cannot read required file")
+            self.assert_path_only_error(error, root, secret, "private-state.txt")
+
+    def test_write_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state-output"
+            path.mkdir()
+            secret = "private-state-content"
+
+            with self.assertRaises(prepare_release.SurfaceError) as raised:
+                prepare_release.write_text(path, root, "release_notes", secret)
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "write_failed")
+            self.assertEqual(error["message"], "cannot write required file")
+            self.assert_path_only_error(error, root, secret, "private-state-output")
+
+    def test_snapshot_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state-snapshot"
+            path.mkdir()
+            secret = "private-state-planned-content"
+
+            with self.assertRaises(prepare_release.SurfaceError) as raised:
+                prepare_release.snapshot_write_targets([prepare_release.PlannedWrite(path, "release_notes", secret)], root)
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "read_failed")
+            self.assertEqual(error["message"], "cannot snapshot planned write target")
+            self.assert_path_only_error(error, root, secret, "private-state-snapshot")
+
+    def test_ensure_parent_failure_reports_path_only_without_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private-state-parent" / "notes.md"
+            secret = "private-state-mkdir-secret"
+
+            with mock.patch.object(Path, "mkdir", side_effect=OSError(f"{root}/{secret}")):
+                with self.assertRaises(prepare_release.SurfaceError) as raised:
+                    prepare_release.ensure_parent(path, root, "release_notes")
+
+            error = raised.exception.as_dict()
+            self.assertEqual(error["code"], "write_failed")
+            self.assertEqual(error["message"], "cannot create required parent directory")
+            self.assert_path_only_error(error, root, secret, "private-state-parent")
 
     def test_update_mode_edits_only_allowed_surfaces(self) -> None:
         with tempfile.TemporaryDirectory() as td:

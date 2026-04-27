@@ -248,7 +248,7 @@ def read_text(path: Path, root: Path, surface: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise SurfaceError("read_failed", f"cannot read {rel_path(path, root)}: {exc}", surface, rel_path(path, root)) from exc
+        raise SurfaceError("read_failed", "cannot read required file", surface, rel_path(path, root)) from exc
 
 
 def write_text(path: Path, root: Path, surface: str, content: str) -> None:
@@ -256,7 +256,7 @@ def write_text(path: Path, root: Path, surface: str, content: str) -> None:
     try:
         path.write_text(content, encoding="utf-8")
     except OSError as exc:
-        raise SurfaceError("write_failed", f"cannot write {rel_path(path, root)}: {exc}", surface, rel_path(path, root)) from exc
+        raise SurfaceError("write_failed", "cannot write required file", surface, rel_path(path, root)) from exc
 
 
 def ensure_parent(path: Path, root: Path, surface: str) -> list[Path]:
@@ -270,7 +270,7 @@ def ensure_parent(path: Path, root: Path, surface: str) -> list[Path]:
     try:
         parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise SurfaceError("write_failed", f"cannot create {rel_path(parent, root)}: {exc}", surface, rel_path(parent, root)) from exc
+        raise SurfaceError("write_failed", "cannot create required parent directory", surface, rel_path(parent, root)) from exc
     return missing
 
 
@@ -334,6 +334,15 @@ def pyproject_project(root: Path) -> tuple[Path, dict[str, Any]]:
     if not isinstance(project, dict):
         raise SurfaceError("pyproject_version_mismatch", "pyproject project metadata is missing", "pyproject_version", rel_path(path, root))
     return path, project
+
+
+def pyproject_readme_path(root: Path) -> Path:
+    """Return the project.readme file path from pyproject.toml."""
+    path, project = pyproject_project(root)
+    readme = project.get("readme")
+    if not isinstance(readme, str) or not readme:
+        raise SurfaceError("mcp_ownership_marker_missing", "pyproject project.readme must name the PyPI long-description source", "mcp_ownership_marker", rel_path(path, root))
+    return root / readme
 
 
 def check_pyproject_version(root: Path, version: str) -> dict[str, Any] | SurfaceError:
@@ -455,8 +464,8 @@ def check_server_json_environment_variables(root: Path) -> dict[str, Any] | Surf
 
 
 def check_mcp_ownership_marker(root: Path) -> dict[str, Any] | SurfaceError:
-    """Validate the public MCP ownership marker in README.md."""
-    path = root / "README.md"
+    """Validate the public MCP ownership marker in the PyPI long description."""
+    path = pyproject_readme_path(root)
     text = read_text(path, root, "mcp_ownership_marker")
     if MCP_OWNERSHIP_MARKER not in text:
         return SurfaceError("mcp_ownership_marker_missing", "MCP ownership marker is missing", "mcp_ownership_marker", rel_path(path, root))
@@ -925,7 +934,7 @@ def snapshot_write_targets(planned_writes: list[PlannedWrite], root: Path) -> di
             existed = path.exists()
             snapshots[path] = WriteSnapshot(existed, path.read_text(encoding="utf-8") if existed else None)
         except OSError as exc:
-            raise SurfaceError("read_failed", f"cannot snapshot {rel_path(path, root)}: {exc}", planned_write.surface, rel_path(path, root)) from exc
+            raise SurfaceError("read_failed", "cannot snapshot planned write target", planned_write.surface, rel_path(path, root)) from exc
     return snapshots
 
 
