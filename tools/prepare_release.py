@@ -14,13 +14,32 @@ from pathlib import Path
 from typing import Any
 
 
-SURFACES = ("app_version", "changelog", "release_notes", "docs_index")
+SURFACES = ("app_version", "changelog", "release_notes", "docs_index", "publishable_tree_safety")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 CHANGELOG_HEADING_RE = re.compile(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$", re.MULTILINE)
 APP_VERSION_RE = re.compile(r"(FastAPI\([^)]*\bversion=)([\"'])([^\"']+)(\2)", re.DOTALL)
 LATEST_RE = re.compile(r"^- \[Latest release notes: v([0-9]+\.[0-9]+\.[0-9]+)\]\(releases/v\1\.md\)$")
 NORMAL_RELEASE_RE = re.compile(r"^- \[v([0-9]+\.[0-9]+\.[0-9]+) release notes\]\(releases/v\1\.md\)$")
+ALLOWED_ENV_TEMPLATES = {".env.example", "deploy/systemd/cognirelay.env.example"}
+FORBIDDEN_DIR_PREFIXES = ("data_repo/", "memory/", "logs/", ".locks/", "dist/", "build/")
+FORBIDDEN_DB_SUFFIXES = (
+    ".db",
+    ".db-wal",
+    ".db-shm",
+    ".db-journal",
+    ".sqlite",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite-journal",
+    ".sqlite3",
+    ".sqlite3-wal",
+    ".sqlite3-shm",
+    ".sqlite3-journal",
+)
+FORBIDDEN_RUNTIME_SUFFIXES = (".log", ".jsonl", ".bak", ".tmp")
+FORBIDDEN_SECRET_SUFFIXES = (".pem", ".key", ".token")
+FORBIDDEN_RUNTIME_FILENAMES = {"api_audit.jsonl", "peer_tokens.json"}
 
 
 CONTENT_ERROR_CODES = {
@@ -35,6 +54,7 @@ CONTENT_ERROR_CODES = {
     "docs_previous_latest_missing",
     "docs_duplicate_release_link",
     "docs_release_link_order",
+    "publishable_tree_forbidden_file",
 }
 VALIDATION_ERROR_CODES = {
     "invalid_args",
@@ -500,6 +520,60 @@ def update_docs_index(root: Path, version: str, *, dry_run: bool) -> tuple[dict[
     ), PlannedWrite(path, "docs_index", new_text)
 
 
+def is_forbidden_publishable_path(path: str) -> bool:
+    """Return whether a tracked repo-relative path is forbidden for publication."""
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized or normalized in ALLOWED_ENV_TEMPLATES:
+        return False
+    name = normalized.rsplit("/", 1)[-1]
+    if normalized.startswith(FORBIDDEN_DIR_PREFIXES):
+        return True
+    if any(part.endswith(".egg-info") for part in normalized.split("/")[:-1]):
+        return True
+    if normalized.endswith(FORBIDDEN_DB_SUFFIXES):
+        return True
+    if normalized.endswith(FORBIDDEN_RUNTIME_SUFFIXES):
+        return True
+    if normalized.endswith(FORBIDDEN_SECRET_SUFFIXES):
+        return True
+    if name in FORBIDDEN_RUNTIME_FILENAMES:
+        return True
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name.endswith(".env.example"):
+        return True
+    return False
+
+
+def git_tracked_paths(root: Path) -> list[str] | None:
+    """Return git tracked paths for root, or None when root is not a git worktree."""
+    try:
+        proc = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=False, capture_output=True)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return [item.decode("utf-8", errors="replace") for item in proc.stdout.split(b"\0") if item]
+
+
+def check_publishable_tree_safety(root: Path) -> dict[str, Any] | SurfaceError:
+    """Validate that tracked files contain no runtime, private, or build state."""
+    tracked = git_tracked_paths(root)
+    if tracked is None:
+        return {"surface": "publishable_tree_safety", "path": ".", "ok": True}
+    for path in sorted(tracked):
+        if is_forbidden_publishable_path(path):
+            return SurfaceError(
+                "publishable_tree_forbidden_file",
+                "tracked file is not allowed in publishable tree",
+                "publishable_tree_safety",
+                path,
+            )
+    return {"surface": "publishable_tree_safety", "path": ".", "ok": True}
+
+
 def check_release(root: Path, version: str, date: str) -> dict[str, Any]:
     """Check local release surfaces for a requested version."""
     checked: list[dict[str, Any]] = []
@@ -509,6 +583,7 @@ def check_release(root: Path, version: str, date: str) -> dict[str, Any]:
         lambda: check_changelog(root, version, date),
         lambda: check_release_notes(root, version, date),
         lambda: check_docs_index(root, version),
+        lambda: check_publishable_tree_safety(root),
     )
     for func in checks:
         try:

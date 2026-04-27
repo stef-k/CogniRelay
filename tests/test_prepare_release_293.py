@@ -56,6 +56,24 @@ def _write_fixture(root: Path, *, version: str = "1.4.8", latest: str = "1.4.8")
     )
 
 
+def _git_env() -> dict[str, str]:
+    """Return deterministic git identity for temporary repositories."""
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+
+
+def _init_git_repo(root: Path) -> None:
+    """Initialize and commit a temporary git repository."""
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=root, check=True, capture_output=True, text=True, env=_git_env())
+
+
 class PrepareReleaseTests(unittest.TestCase):
     def test_check_mode_passes_on_matching_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -65,8 +83,51 @@ class PrepareReleaseTests(unittest.TestCase):
             result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
 
             self.assertTrue(result["ok"])
-            self.assertEqual([entry["surface"] for entry in result["checked"]], ["app_version", "changelog", "release_notes", "docs_index"])
+            self.assertEqual(
+                [entry["surface"] for entry in result["checked"]],
+                ["app_version", "changelog", "release_notes", "docs_index", "publishable_tree_safety"],
+            )
             self.assertEqual(result["updated"], [])
+
+    def test_publishable_tree_safety_allows_only_exact_env_templates(self) -> None:
+        allowed = [".env.example", "deploy/systemd/cognirelay.env.example"]
+        forbidden = [
+            "foo.env.example",
+            "docs/foo.env.example",
+            ".env.local",
+            "nested/.env",
+            "foo.token",
+            "api_audit.jsonl",
+            "data_repo/x",
+        ]
+
+        for path in allowed:
+            with self.subTest(path=path):
+                self.assertFalse(prepare_release.is_forbidden_publishable_path(path))
+        for path in forbidden:
+            with self.subTest(path=path):
+                self.assertTrue(prepare_release.is_forbidden_publishable_path(path))
+
+    def test_publishable_tree_safety_rejects_tracked_runtime_state_path_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_fixture(root)
+            secret_text = "super-secret-token-value"
+            (root / "data_repo").mkdir()
+            (root / "data_repo" / "x").write_text(secret_text, encoding="utf-8")
+            _init_git_repo(root)
+
+            result = prepare_release.check_release(root, "1.4.8", "2026-04-26")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(prepare_release.exit_code_for(result), 1)
+            errors = [error for error in result["errors"] if error["surface"] == "publishable_tree_safety"]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["code"], "publishable_tree_forbidden_file")
+            self.assertEqual(errors[0]["path"], "data_repo/x")
+            encoded = json.dumps(result, sort_keys=True)
+            self.assertNotIn(secret_text, encoded)
+            self.assertNotIn(str(root), encoded)
 
     def test_check_mode_reports_content_mismatch_as_exit_1_class(self) -> None:
         with tempfile.TemporaryDirectory() as td:
