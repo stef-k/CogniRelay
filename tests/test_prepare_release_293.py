@@ -54,6 +54,57 @@ def _write_fixture(root: Path, *, version: str = "1.4.8", latest: str = "1.4.8")
         f"# CogniRelay v{latest} Release Notes\n\nRelease date: 2026-04-26\n",
         encoding="utf-8",
     )
+    (root / "requirements.txt").write_text(
+        "fastapi>=0.115,<1\n"
+        "uvicorn>=0.30,<1\n",
+        encoding="utf-8",
+    )
+    (root / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "cognirelay"\n'
+        f'version = "{version}"\n'
+        "dependencies = [\n"
+        '    "fastapi>=0.115,<1",\n'
+        '    "uvicorn>=0.30,<1",\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    (root / "server.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+                "name": "io.github.stef-k/cognirelay",
+                "title": "CogniRelay",
+                "description": "Self-hosted continuity and collaboration substrate for autonomous agents.",
+                "version": version,
+                "packages": [
+                    {
+                        "registryType": "pypi",
+                        "identifier": "cognirelay",
+                        "version": version,
+                        "packageArguments": [{"type": "positional", "value": "serve"}],
+                        "transport": {"type": "streamable-http", "url": "http://127.0.0.1:8080/v1/mcp"},
+                        "environmentVariables": [
+                            {
+                                "name": "COGNIRELAY_REPO_ROOT",
+                                "description": "Path to a durable writable CogniRelay repository root for runtime state.",
+                                "isRequired": True,
+                                "format": "filepath",
+                                "isSecret": False,
+                            }
+                        ],
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text(
+        "# CogniRelay\n\n<!-- mcp-name: io.github.stef-k/cognirelay -->\n",
+        encoding="utf-8",
+    )
 
 
 def _git_env() -> dict[str, str]:
@@ -85,7 +136,23 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(
                 [entry["surface"] for entry in result["checked"]],
-                ["app_version", "changelog", "release_notes", "docs_index", "publishable_tree_safety"],
+                [
+                    "app_version",
+                    "pyproject_version",
+                    "pyproject_dependencies",
+                    "server_json_version",
+                    "server_json_description",
+                    "server_json_package_version",
+                    "server_json_package_identifier",
+                    "server_json_package_arguments",
+                    "server_json_transport",
+                    "server_json_environment_variables",
+                    "mcp_ownership_marker",
+                    "changelog",
+                    "release_notes",
+                    "docs_index",
+                    "publishable_tree_safety",
+                ],
             )
             self.assertEqual(result["updated"], [])
 
@@ -155,7 +222,7 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertIn('version="1.4.9"', (root / "app" / "main.py").read_text(encoding="utf-8"))
             self.assertTrue((root / "docs" / "releases" / "v1.4.9.md").exists())
             paths = {entry["path"] for entry in result["updated"]}
-            self.assertEqual(paths, {"app/main.py", "CHANGELOG.md", "docs/releases/v1.4.9.md", "docs/index.md"})
+            self.assertEqual(paths, {"app/main.py", "pyproject.toml", "server.json", "CHANGELOG.md", "docs/releases/v1.4.9.md", "docs/index.md"})
 
     def test_update_preserves_non_empty_unreleased_content(self) -> None:
         with tempfile.TemporaryDirectory() as td:
