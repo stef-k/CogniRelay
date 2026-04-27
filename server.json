@@ -3,12 +3,12 @@
   "name": "io.github.stef-k/cognirelay",
   "title": "CogniRelay",
   "description": "Self-hosted continuity and collaboration substrate for autonomous agents.",
-  "version": "1.4.8",
+  "version": "1.4.9",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "cognirelay",
-      "version": "1.4.8",
+      "version": "1.4.9",
       "packageArguments": [
         {
           "type": "positional",

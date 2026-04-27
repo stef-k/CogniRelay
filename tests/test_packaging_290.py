@@ -45,8 +45,8 @@ FORBIDDEN_ARTIFACT_SUFFIXES = (
     ".tmp",
 )
 ALLOWED_ENV_TEMPLATE_ARTIFACTS = {
-    "cognirelay-1.4.8/.env.example",
-    "cognirelay-1.4.8/deploy/systemd/cognirelay.env.example",
+    "cognirelay-1.4.9/.env.example",
+    "cognirelay-1.4.9/deploy/systemd/cognirelay.env.example",
 }
 FORBIDDEN_METADATA_TOKENS = (
     "data_repo/",
@@ -195,10 +195,10 @@ class Packaging290Tests(unittest.TestCase):
 
             with tarfile.open(sdist) as archive:
                 sdist_names = set(archive.getnames())
-                pkg_info = archive.extractfile("cognirelay-1.4.8/PKG-INFO")
+                pkg_info = archive.extractfile("cognirelay-1.4.9/PKG-INFO")
                 self.assertIsNotNone(pkg_info)
                 sdist_metadata = pkg_info.read().decode("utf-8")  # type: ignore[union-attr]
-            prefix = "cognirelay-1.4.8/"
+            prefix = "cognirelay-1.4.9/"
             for expected in (
                 "README.md",
                 "README-PYPI.md",
