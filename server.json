@@ -3,12 +3,12 @@
   "name": "io.github.stef-k/cognirelay",
   "title": "CogniRelay",
   "description": "Self-hosted agent continuity server with bounded, recoverable memory and restart orientation.",
-  "version": "1.4.11",
+  "version": "1.4.12",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "cognirelay",
-      "version": "1.4.11",
+      "version": "1.4.12",
       "packageArguments": [
         {
           "type": "positional",
