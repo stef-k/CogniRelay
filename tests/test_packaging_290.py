@@ -244,6 +244,25 @@ class Packaging290Tests(unittest.TestCase):
                 self.assertNotIn(token, sdist_metadata)
             self.assertFalse((ROOT / "cognirelay" / "agent_assets").exists())
 
+    def test_built_wheel_prunes_stale_agent_asset_build_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            copied = root / "copy"
+            shutil.copytree(ROOT, copied, ignore=shutil.ignore_patterns(".git", ".venv", "dist", "*.egg-info", ".pytest_cache", ".ruff_cache", ".mypy_cache"))
+            stale = copied / "build" / "lib" / "cognirelay" / "agent_assets" / "leak.token"
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("private-token\n", encoding="utf-8")
+            dist = root / "dist"
+
+            subprocess.run([sys.executable, "-m", "build", "--wheel", "--outdir", str(dist)], cwd=copied, check=True, capture_output=True, text=True, timeout=120)
+
+            wheel = next(dist.glob("*.whl"))
+            with zipfile.ZipFile(wheel) as archive:
+                wheel_names = set(archive.namelist())
+            self.assertEqual({name for name in wheel_names if name.startswith("cognirelay/agent_assets/")}, WHEEL_AGENT_ASSET_FILES)
+            self.assertNotIn("cognirelay/agent_assets/leak.token", wheel_names)
+            self.assertFalse((ROOT / "cognirelay" / "agent_assets").exists())
+
     def test_built_wheel_installed_cli_can_manage_agent_assets(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -253,7 +272,7 @@ class Packaging290Tests(unittest.TestCase):
             venv_dir = root / "venv"
             venv.EnvBuilder(with_pip=True).create(venv_dir)
             venv_python = venv_dir / "bin" / "python"
-            subprocess.run([str(venv_python), "-m", "pip", "install", "--no-deps", str(wheel)], check=True, capture_output=True, text=True, timeout=120)
+            subprocess.run([str(venv_python), "-m", "pip", "install", "--no-deps", "--no-compile", str(wheel)], check=True, capture_output=True, text=True, timeout=120)
             console_script = venv_dir / "bin" / "cognirelay"
 
             path_proc = subprocess.run([str(console_script), "assets", "path"], cwd=root, check=False, capture_output=True, text=True, timeout=30)

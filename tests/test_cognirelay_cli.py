@@ -212,19 +212,36 @@ class CogniRelayCliTests(unittest.TestCase):
                         self.assertEqual(stdout, "")
                         self.assertIn("installed agent assets are unavailable", stderr)
 
-    def test_assets_validation_rejects_extra_files(self) -> None:
+    def test_assets_commands_reject_extra_installed_bytecode_and_cache_entries(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            assets_root = Path(td) / "site-packages" / "cognirelay" / "agent_assets"
-            _write_installed_assets(assets_root)
-            (assets_root / "hooks" / "__pycache__").mkdir()
-            (assets_root / "hooks" / "__pycache__" / "extra.pyc").write_bytes(b"cache")
+            root = Path(td)
+            cases = {
+                "hook-name-pyc": ("hooks/cognirelay_retrieval_hook.pyc", b"cache"),
+                "pycache-directory": ("hooks/__pycache__", None),
+            }
+            commands = (
+                ["assets", "path"],
+                ["assets", "list"],
+                ["assets", "copy", "--to", str(root / "out")],
+            )
+            for case, (extra_relative, payload) in cases.items():
+                for argv in commands:
+                    with self.subTest(case=case, argv=argv):
+                        assets_root = root / case / "-".join(argv[:2]) / "site-packages" / "cognirelay" / "agent_assets"
+                        _write_installed_assets(assets_root)
+                        extra = assets_root / extra_relative
+                        if payload is None:
+                            extra.mkdir(parents=True)
+                        else:
+                            extra.parent.mkdir(parents=True, exist_ok=True)
+                            extra.write_bytes(payload)
 
-            with mock.patch.object(cli, "_installed_agent_assets_root", return_value=assets_root):
-                result, stdout, stderr = _run_cli(["assets", "list"])
+                        with mock.patch.object(cli, "_installed_agent_assets_root", return_value=assets_root):
+                            result, stdout, stderr = _run_cli(argv)
 
-            self.assertEqual(result, 1)
-            self.assertEqual(stdout, "")
-            self.assertIn("unexpected entries", stderr)
+                        self.assertEqual(result, 1)
+                        self.assertEqual(stdout, "")
+                        self.assertIn("unexpected entries", stderr)
 
     def test_assets_copy_from_source_tree_does_not_create_package_mirror(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

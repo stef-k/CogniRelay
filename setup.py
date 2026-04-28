@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from pathlib import PurePosixPath
 
 from setuptools import setup
@@ -30,6 +31,7 @@ class build_py(_build_py):
         super().run()
         source_root = PurePosixPath("agent-assets")
         target_root = PurePosixPath("cognirelay") / "agent_assets"
+        shutil.rmtree(Path(self.build_lib) / target_root, ignore_errors=True)
         for relative in AGENT_ASSET_FILES:
             source = source_root / relative
             target = PurePosixPath(self.build_lib) / target_root / relative

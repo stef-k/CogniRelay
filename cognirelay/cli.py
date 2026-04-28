@@ -21,14 +21,9 @@ AGENT_ASSET_FILES = (
 )
 AGENT_ASSET_DIRS = {
     "hooks",
-    "hooks/__pycache__",
     "skills",
     "skills/cognirelay-continuity-authoring",
 }
-AGENT_ASSET_INSTALLER_CACHE_PREFIXES = (
-    "hooks/__pycache__/cognirelay_continuity_save_hook.",
-    "hooks/__pycache__/cognirelay_retrieval_hook.",
-)
 
 
 class RuntimeStateError(Exception):
@@ -123,8 +118,6 @@ def validate_installed_agent_assets(*, package_file: Path | None = None) -> Path
     for relative in discovered:
         path = root / relative
         if relative in allowed:
-            continue
-        if relative.endswith(".pyc") and any(relative.startswith(prefix) for prefix in AGENT_ASSET_INSTALLER_CACHE_PREFIXES):
             continue
         if relative in AGENT_ASSET_DIRS and path.is_dir():
             continue
