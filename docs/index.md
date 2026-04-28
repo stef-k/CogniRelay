@@ -28,6 +28,12 @@ PyPI installs use `pip install cognirelay` and `cognirelay serve --host
 runtime-state directory outside `site-packages`; the default `./data_repo` is
 only for local/manual development.
 
+PyPI installs also include the last-mile agent assets under the installed
+`cognirelay/agent_assets` package-data directory. Use `cognirelay assets path`
+to print that installed path, `cognirelay assets list` to inspect the bundled
+allowlist, or `cognirelay assets copy --to <dir>` to write `<dir>/agent-assets`
+for local agent configuration.
+
 Wheel installs do not bundle the full source documentation in this slice. The
 `/ui/docs` page may show degraded or unavailable doc entries unless
 `COGNIRELAY_DOCS_SOURCE_ROOT` points at a source checkout.

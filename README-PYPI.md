@@ -21,6 +21,23 @@ cognirelay serve --host 127.0.0.1 --port 8080
 
 This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service.
 
+## Agent assets
+
+PyPI installs include the last-mile agent assets needed to integrate CogniRelay continuity hooks and the continuity-authoring skill. To inspect the installed assets:
+
+```bash
+cognirelay assets path
+cognirelay assets list
+```
+
+To materialize them into a workspace, run:
+
+```bash
+cognirelay assets copy --to /path/to/workspace
+```
+
+The copy command writes `/path/to/workspace/agent-assets`. The full last-mile guide remains in the project documentation on GitHub Pages.
+
 ## Documentation
 
 Documentation and release notes are available at:
