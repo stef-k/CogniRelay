@@ -7,6 +7,12 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.11] - 2026-04-28
+
+### Changed
+
+- Ship last-mile agent assets in PyPI wheel
+
 ## [1.4.10] - 2026-04-27
 
 ### Changed
