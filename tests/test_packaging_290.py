@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import tomllib
 import unittest
+import venv
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -77,6 +78,14 @@ FORBIDDEN_METADATA_TOKENS = (
     "/home/",
     "/Users/",
 )
+WHEEL_AGENT_ASSET_FILES = {
+    "cognirelay/agent_assets/README.md",
+    "cognirelay/agent_assets/hooks/README.md",
+    "cognirelay/agent_assets/hooks/cognirelay_continuity_save_hook.py",
+    "cognirelay/agent_assets/hooks/cognirelay_retrieval_hook.py",
+    "cognirelay/agent_assets/skills/cognirelay-continuity-authoring/SKILL.md",
+}
+CLI_AGENT_ASSET_FILES = sorted(name.removeprefix("cognirelay/agent_assets/") for name in WHEEL_AGENT_ASSET_FILES)
 
 
 def _forbidden_artifact_name(name: str) -> bool:
@@ -207,7 +216,8 @@ class Packaging290Tests(unittest.TestCase):
             for source in (ROOT / "app" / "ui" / "static").rglob("*"):
                 if source.is_file():
                     self.assertIn(source.relative_to(ROOT).as_posix(), wheel_names)
-            self.assertFalse(any(name.startswith(("docs/", "agent-assets/", "deploy/", "data_repo/")) for name in wheel_names))
+            self.assertEqual({name for name in wheel_names if name.startswith("cognirelay/agent_assets/")}, WHEEL_AGENT_ASSET_FILES)
+            self.assertFalse(any(name.startswith(("docs/", "agent-assets/", "deploy/", "tests/", "data_repo/", "dist/", "build/")) for name in wheel_names))
             self.assertFalse(any(_forbidden_artifact_name(name) for name in wheel_names))
             self.assertIn("<!-- mcp-name: io.github.stef-k/cognirelay -->", wheel_metadata)
             for token in FORBIDDEN_METADATA_TOKENS:
@@ -232,6 +242,66 @@ class Packaging290Tests(unittest.TestCase):
             self.assertIn("<!-- mcp-name: io.github.stef-k/cognirelay -->", sdist_metadata)
             for token in FORBIDDEN_METADATA_TOKENS:
                 self.assertNotIn(token, sdist_metadata)
+            self.assertFalse((ROOT / "cognirelay" / "agent_assets").exists())
+
+    def test_built_wheel_prunes_stale_agent_asset_build_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            copied = root / "copy"
+            shutil.copytree(ROOT, copied, ignore=shutil.ignore_patterns(".git", ".venv", "dist", "*.egg-info", ".pytest_cache", ".ruff_cache", ".mypy_cache"))
+            stale = copied / "build" / "lib" / "cognirelay" / "agent_assets" / "leak.token"
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("private-token\n", encoding="utf-8")
+            dist = root / "dist"
+
+            subprocess.run([sys.executable, "-m", "build", "--wheel", "--outdir", str(dist)], cwd=copied, check=True, capture_output=True, text=True, timeout=120)
+
+            wheel = next(dist.glob("*.whl"))
+            with zipfile.ZipFile(wheel) as archive:
+                wheel_names = set(archive.namelist())
+            self.assertEqual({name for name in wheel_names if name.startswith("cognirelay/agent_assets/")}, WHEEL_AGENT_ASSET_FILES)
+            self.assertNotIn("cognirelay/agent_assets/leak.token", wheel_names)
+            self.assertFalse((ROOT / "cognirelay" / "agent_assets").exists())
+
+    def test_built_wheel_installed_cli_can_manage_agent_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dist = root / "dist"
+            subprocess.run([sys.executable, "-m", "build", "--wheel", "--outdir", str(dist)], cwd=ROOT, check=True, capture_output=True, text=True, timeout=120)
+            wheel = next(dist.glob("*.whl"))
+            venv_dir = root / "venv"
+            venv.EnvBuilder(with_pip=True).create(venv_dir)
+            venv_python = venv_dir / "bin" / "python"
+            subprocess.run([str(venv_python), "-m", "pip", "install", "--no-deps", "--no-compile", str(wheel)], check=True, capture_output=True, text=True, timeout=120)
+            console_script = venv_dir / "bin" / "cognirelay"
+
+            path_proc = subprocess.run([str(console_script), "assets", "path"], cwd=root, check=False, capture_output=True, text=True, timeout=30)
+            list_proc = subprocess.run([str(console_script), "assets", "list"], cwd=root, check=False, capture_output=True, text=True, timeout=30)
+            copy_parent = root / "copied"
+            copy_proc = subprocess.run([str(console_script), "assets", "copy", "--to", str(copy_parent)], cwd=root, check=False, capture_output=True, text=True, timeout=30)
+            module_proc = subprocess.run([str(venv_python), "-m", "cognirelay", "assets", "path"], cwd=root, check=False, capture_output=True, text=True, timeout=30)
+
+            self.assertEqual(path_proc.returncode, 0, path_proc.stderr)
+            self.assertEqual(path_proc.stderr, "")
+            installed_assets = Path(path_proc.stdout.strip())
+            self.assertTrue(installed_assets.is_dir())
+            self.assertTrue(installed_assets.is_absolute())
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertEqual(list_proc.stdout.splitlines(), CLI_AGENT_ASSET_FILES)
+            self.assertEqual(list_proc.stderr, "")
+            self.assertEqual(copy_proc.returncode, 0, copy_proc.stderr)
+            self.assertEqual(copy_proc.stderr, "")
+            copied_assets = copy_parent / "agent-assets"
+            self.assertEqual(Path(copy_proc.stdout.strip()), copied_assets.resolve())
+            for relative in CLI_AGENT_ASSET_FILES:
+                self.assertTrue((copied_assets / relative).is_file())
+            self.assertTrue((copied_assets / "hooks" / "cognirelay_retrieval_hook.py").is_file())
+            self.assertTrue((copied_assets / "hooks" / "cognirelay_continuity_save_hook.py").is_file())
+            self.assertTrue((copied_assets / "skills" / "cognirelay-continuity-authoring" / "SKILL.md").is_file())
+            self.assertEqual(module_proc.returncode, 0, module_proc.stderr)
+            self.assertEqual(module_proc.stdout, path_proc.stdout)
+            self.assertEqual(module_proc.stderr, "")
+            self.assertFalse((ROOT / "cognirelay" / "agent_assets").exists())
 
     def test_sdist_prunes_temp_only_runtime_fixture_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
