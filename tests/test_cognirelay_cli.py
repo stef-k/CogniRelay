@@ -212,12 +212,37 @@ class CogniRelayCliTests(unittest.TestCase):
                         self.assertEqual(stdout, "")
                         self.assertIn("installed agent assets are unavailable", stderr)
 
-    def test_assets_commands_reject_extra_installed_bytecode_and_cache_entries(self) -> None:
+    def test_assets_commands_allow_pip_generated_hook_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            assets_root = root / "site-packages" / "cognirelay" / "agent_assets"
+            _write_installed_assets(assets_root)
+            pycache = assets_root / "hooks" / "__pycache__"
+            pycache.mkdir()
+            (pycache / "cognirelay_retrieval_hook.cpython-312.pyc").write_bytes(b"cache")
+            (pycache / "cognirelay_continuity_save_hook.cpython-312.pyc").write_bytes(b"cache")
+
+            with mock.patch.object(cli, "_installed_agent_assets_root", return_value=assets_root):
+                path_result, path_stdout, path_stderr = _run_cli(["assets", "path"])
+                list_result, list_stdout, list_stderr = _run_cli(["assets", "list"])
+                copy_result, copy_stdout, copy_stderr = _run_cli(["assets", "copy", "--to", str(root / "out")])
+
+            self.assertEqual(path_result, 0)
+            self.assertEqual(path_stdout, f"{assets_root}\n")
+            self.assertEqual(path_stderr, "")
+            self.assertEqual(list_result, 0)
+            self.assertEqual(list_stdout.splitlines(), sorted(cli.AGENT_ASSET_FILES))
+            self.assertEqual(list_stderr, "")
+            self.assertEqual(copy_result, 0)
+            self.assertEqual(copy_stdout, f"{(root / 'out' / 'agent-assets').resolve()}\n")
+            self.assertEqual(copy_stderr, "")
+
+    def test_assets_commands_reject_extra_installed_asset_entries(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cases = {
                 "hook-name-pyc": ("hooks/cognirelay_retrieval_hook.pyc", b"cache"),
-                "pycache-directory": ("hooks/__pycache__", None),
+                "unrelated-pycache-file": ("hooks/__pycache__/unexpected.cpython-312.pyc", b"cache"),
             }
             commands = (
                 ["assets", "path"],

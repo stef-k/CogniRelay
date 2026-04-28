@@ -7,6 +7,12 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.12] - 2026-04-28
+
+### Changed
+
+- Fix installed agent asset validation for pip bytecode
+
 ## [1.4.11] - 2026-04-28
 
 ### Changed
