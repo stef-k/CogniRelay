@@ -7,6 +7,12 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.13] - 2026-05-02
+
+### Changed
+
+- Fix MCP structured tool schemas
+
 ## [1.4.12] - 2026-04-28
 
 ### Changed
