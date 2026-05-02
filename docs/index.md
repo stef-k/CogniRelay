@@ -64,7 +64,8 @@ path.
 
 ## Releases
 
-- [Latest release notes: v1.4.12](releases/v1.4.12.md)
+- [Latest release notes: v1.4.13](releases/v1.4.13.md)
+- [v1.4.12 release notes](releases/v1.4.12.md)
 - [v1.4.11 release notes](releases/v1.4.11.md)
 - [v1.4.10 release notes](releases/v1.4.10.md)
 - [v1.4.9 release notes](releases/v1.4.9.md)
