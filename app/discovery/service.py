@@ -146,6 +146,50 @@ def _schedule_retire_schema() -> dict[str, Any]:
     }
 
 
+def _resolve_schema_ref(schema: dict[str, Any], root_schema: dict[str, Any]) -> dict[str, Any]:
+    """Resolve one local ``#/$defs`` reference for MCP clients that do not dereference."""
+    ref = schema.get("$ref")
+    if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+        return dict(schema)
+    defs = root_schema.get("$defs", {})
+    name = ref[len("#/$defs/") :]
+    if isinstance(defs, dict) and isinstance(defs.get(name), dict):
+        return dict(defs[name])
+    return dict(schema)
+
+
+def _inline_top_level_object_ref(schema: dict[str, Any], field_name: str) -> None:
+    """Inline top-level object refs while keeping nested ``$defs`` available."""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    field_schema = properties.get(field_name)
+    if not isinstance(field_schema, dict):
+        return
+    if "$ref" in field_schema:
+        properties[field_name] = _resolve_schema_ref(field_schema, schema)
+        return
+    any_of = field_schema.get("anyOf")
+    if isinstance(any_of, list):
+        updated = []
+        for variant in any_of:
+            if isinstance(variant, dict):
+                updated.append(_resolve_schema_ref(variant, schema))
+            else:
+                updated.append(variant)
+        properties[field_name] = {**field_schema, "anyOf": updated}
+
+
+def _schema_for_tool(schema_for_model: Callable[[Any], dict[str, Any]], model_cls: Any) -> dict[str, Any]:
+    """Return a tool schema with top-level structured fields explicit for MCP clients."""
+    schema = schema_for_model(model_cls)
+    properties = schema.get("properties", {})
+    if isinstance(properties, dict):
+        for field_name in list(properties):
+            _inline_top_level_object_ref(schema, field_name)
+    return schema
+
+
 def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict[str, Any]]:
     """Return the machine-readable tool catalog exposed by the service."""
     return [
@@ -237,7 +281,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/write",
             "scopes": ["write:journal|write:messages|write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(WriteRequest),
+            "input_schema": _schema_for_tool(schema_for_model, WriteRequest),
         },
         {
             "name": "memory.append_jsonl",
@@ -246,7 +290,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/append",
             "scopes": ["write:journal|write:messages|write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(AppendRequest),
+            "input_schema": _schema_for_tool(schema_for_model, AppendRequest),
         },
         {
             "name": "memory.read",
@@ -305,7 +349,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/peers/register",
             "scopes": ["admin:peers", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(PeerRegisterRequest),
+            "input_schema": _schema_for_tool(schema_for_model, PeerRegisterRequest),
         },
         {
             "name": "peers.trust_transition",
@@ -318,7 +362,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
                 "type": "object",
                 "properties": {
                     "peer_id": {"type": "string"},
-                    **schema_for_model(PeerTrustTransitionRequest).get("properties", {}),
+                    **_schema_for_tool(schema_for_model, PeerTrustTransitionRequest).get("properties", {}),
                 },
                 "required": ["peer_id", "trust_level", "reason"],
                 "additionalProperties": False,
@@ -345,7 +389,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/search",
             "scopes": ["search", "read_namespaces"],
             "idempotent": True,
-            "input_schema": schema_for_model(SearchRequest),
+            "input_schema": _schema_for_tool(schema_for_model, SearchRequest),
         },
         {
             "name": "recent.list",
@@ -354,7 +398,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/recent",
             "scopes": ["search", "read_namespaces"],
             "idempotent": True,
-            "input_schema": schema_for_model(RecentRequest),
+            "input_schema": _schema_for_tool(schema_for_model, RecentRequest),
         },
         {
             "name": "schedule.create",
@@ -421,7 +465,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/context/retrieve",
             "scopes": ["search", "read_namespaces"],
             "idempotent": True,
-            "input_schema": schema_for_model(ContextRetrieveRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContextRetrieveRequest),
         },
         {
             "name": "continuity.upsert",
@@ -430,7 +474,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/upsert",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityUpsertRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityUpsertRequest),
         },
         {
             "name": "continuity.read",
@@ -443,7 +487,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/read",
             "scopes": ["read:files", "read_namespaces"],
             "idempotent": True,
-            "input_schema": schema_for_model(ContinuityReadRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityReadRequest),
         },
         {
             "name": "continuity.compare",
@@ -452,7 +496,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/compare",
             "scopes": ["read:files", "read_namespaces"],
             "idempotent": True,
-            "input_schema": schema_for_model(ContinuityCompareRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityCompareRequest),
         },
         {
             "name": "continuity.revalidate",
@@ -461,7 +505,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/revalidate",
             "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityRevalidateRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityRevalidateRequest),
         },
         {
             "name": "continuity.refresh_plan",
@@ -470,7 +514,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/refresh/plan",
             "scopes": ["read:files", "write:projects", "read_namespaces", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityRefreshPlanRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityRefreshPlanRequest),
         },
         {
             "name": "continuity.retention_plan",
@@ -479,7 +523,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/retention/plan",
             "scopes": ["read:files", "write:projects", "read_namespaces", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityRetentionPlanRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityRetentionPlanRequest),
         },
         {
             "name": "continuity.list",
@@ -488,7 +532,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/list",
             "scopes": ["read:files", "read_namespaces"],
             "idempotent": True,
-            "input_schema": schema_for_model(ContinuityListRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityListRequest),
         },
         {
             "name": "continuity.archive",
@@ -497,7 +541,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/archive",
             "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityArchiveRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityArchiveRequest),
         },
         {
             "name": "continuity.delete",
@@ -506,7 +550,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/delete",
             "scopes": ["write:projects", "write_namespaces", "read_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityDeleteRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityDeleteRequest),
         },
         {
             "name": "continuity.patch",
@@ -515,7 +559,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/patch",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityPatchRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityPatchRequest),
         },
         {
             "name": "continuity.lifecycle",
@@ -524,7 +568,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/continuity/lifecycle",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContinuityLifecycleRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContinuityLifecycleRequest),
         },
         {
             "name": "coordination.handoff_create",
@@ -533,7 +577,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/coordination/handoff/create",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(CoordinationHandoffCreateRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CoordinationHandoffCreateRequest),
         },
         {
             "name": "coordination.handoff_read",
@@ -556,7 +600,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/coordination/handoffs/query",
             "scopes": ["read:files"],
             "idempotent": True,
-            "input_schema": schema_for_model(CoordinationHandoffQueryRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CoordinationHandoffQueryRequest),
         },
         {
             "name": "coordination.handoff_consume",
@@ -569,7 +613,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
                 "type": "object",
                 "properties": {
                     "handoff_id": {"type": "string"},
-                    **schema_for_model(CoordinationHandoffConsumeRequest).get("properties", {}),
+                    **_schema_for_tool(schema_for_model, CoordinationHandoffConsumeRequest).get("properties", {}),
                 },
                 "required": ["handoff_id", "status"],
                 "additionalProperties": False,
@@ -582,7 +626,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/coordination/shared/create",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(CoordinationSharedCreateRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CoordinationSharedCreateRequest),
         },
         {
             "name": "coordination.shared_read",
@@ -605,7 +649,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/coordination/shared/query",
             "scopes": ["read:files"],
             "idempotent": True,
-            "input_schema": schema_for_model(CoordinationSharedQueryRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CoordinationSharedQueryRequest),
         },
         {
             "name": "coordination.shared_update",
@@ -618,7 +662,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
                 "type": "object",
                 "properties": {
                     "shared_id": {"type": "string"},
-                    **schema_for_model(CoordinationSharedUpdateRequest).get("properties", {}),
+                    **_schema_for_tool(schema_for_model, CoordinationSharedUpdateRequest).get("properties", {}),
                 },
                 "required": ["shared_id", "expected_version", "title"],
                 "additionalProperties": False,
@@ -631,7 +675,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/coordination/reconciliation/open",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(CoordinationReconciliationOpenRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CoordinationReconciliationOpenRequest),
         },
         {
             "name": "coordination.reconciliation_read",
@@ -654,7 +698,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/coordination/reconciliations/query",
             "scopes": ["read:files"],
             "idempotent": True,
-            "input_schema": schema_for_model(CoordinationReconciliationQueryRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CoordinationReconciliationQueryRequest),
         },
         {
             "name": "coordination.reconciliation_resolve",
@@ -667,7 +711,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
                 "type": "object",
                 "properties": {
                     "reconciliation_id": {"type": "string"},
-                    **schema_for_model(CoordinationReconciliationResolveRequest).get("properties", {}),
+                    **_schema_for_tool(schema_for_model, CoordinationReconciliationResolveRequest).get("properties", {}),
                 },
                 "required": ["reconciliation_id", "expected_version", "outcome"],
                 "additionalProperties": False,
@@ -680,7 +724,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/context/snapshot",
             "scopes": ["search", "write:projects", "write_namespaces", "read_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ContextSnapshotRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ContextSnapshotRequest),
         },
         {
             "name": "context.snapshot_get",
@@ -703,7 +747,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/tasks",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(TaskCreateRequest),
+            "input_schema": _schema_for_tool(schema_for_model, TaskCreateRequest),
         },
         {
             "name": "tasks.update",
@@ -714,7 +758,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "idempotent": False,
             "input_schema": {
                 "type": "object",
-                "properties": {"task_id": {"type": "string"}, **schema_for_model(TaskUpdateRequest).get("properties", {})},
+                "properties": {"task_id": {"type": "string"}, **_schema_for_tool(schema_for_model, TaskUpdateRequest).get("properties", {})},
                 "required": ["task_id"],
                 "additionalProperties": False,
             },
@@ -745,7 +789,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/docs/patch/propose",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(PatchProposeRequest),
+            "input_schema": _schema_for_tool(schema_for_model, PatchProposeRequest),
         },
         {
             "name": "docs.patch_apply",
@@ -754,7 +798,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/docs/patch/apply",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(PatchApplyRequest),
+            "input_schema": _schema_for_tool(schema_for_model, PatchApplyRequest),
         },
         {
             "name": "code.patch_propose",
@@ -763,7 +807,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/code/patch/propose",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(PatchProposeRequest),
+            "input_schema": _schema_for_tool(schema_for_model, PatchProposeRequest),
         },
         {
             "name": "code.checks_run",
@@ -772,7 +816,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/code/checks/run",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(CodeCheckRunRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CodeCheckRunRequest),
         },
         {
             "name": "code.merge",
@@ -781,7 +825,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/code/merge",
             "scopes": ["write:projects", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(CodeMergeRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CodeMergeRequest),
         },
         {
             "name": "security.tokens_list",
@@ -807,7 +851,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/security/tokens/issue",
             "scopes": ["admin:peers", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(SecurityTokenIssueRequest),
+            "input_schema": _schema_for_tool(schema_for_model, SecurityTokenIssueRequest),
         },
         {
             "name": "security.tokens_revoke",
@@ -816,7 +860,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/security/tokens/revoke",
             "scopes": ["admin:peers", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(SecurityTokenRevokeRequest),
+            "input_schema": _schema_for_tool(schema_for_model, SecurityTokenRevokeRequest),
         },
         {
             "name": "security.tokens_rotate",
@@ -825,7 +869,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/security/tokens/rotate",
             "scopes": ["admin:peers", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(SecurityTokenRotateRequest),
+            "input_schema": _schema_for_tool(schema_for_model, SecurityTokenRotateRequest),
         },
         {
             "name": "security.keys_rotate",
@@ -834,7 +878,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/security/keys/rotate",
             "scopes": ["admin:peers", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(SecurityKeysRotateRequest),
+            "input_schema": _schema_for_tool(schema_for_model, SecurityKeysRotateRequest),
         },
         {
             "name": "messages.verify",
@@ -843,7 +887,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/messages/verify",
             "scopes": ["write:messages", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(MessageVerifyRequest),
+            "input_schema": _schema_for_tool(schema_for_model, MessageVerifyRequest),
         },
         {
             "name": "metrics.get",
@@ -861,7 +905,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/replay/messages",
             "scopes": ["write:messages", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(MessageReplayRequest),
+            "input_schema": _schema_for_tool(schema_for_model, MessageReplayRequest),
         },
         {
             "name": "replication.pull",
@@ -870,7 +914,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/replication/pull",
             "scopes": ["replication:sync", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ReplicationPullRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ReplicationPullRequest),
         },
         {
             "name": "replication.push",
@@ -879,7 +923,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/replication/push",
             "scopes": ["replication:sync", "read_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(ReplicationPushRequest),
+            "input_schema": _schema_for_tool(schema_for_model, ReplicationPushRequest),
         },
         {
             "name": "messages.send",
@@ -888,7 +932,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/messages/send",
             "scopes": ["write:messages", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(MessageSendRequest),
+            "input_schema": _schema_for_tool(schema_for_model, MessageSendRequest),
         },
         {
             "name": "messages.ack",
@@ -897,7 +941,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/messages/ack",
             "scopes": ["write:messages", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(MessageAckRequest),
+            "input_schema": _schema_for_tool(schema_for_model, MessageAckRequest),
         },
         {
             "name": "messages.pending",
@@ -958,7 +1002,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/relay/forward",
             "scopes": ["write:messages", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(RelayForwardRequest),
+            "input_schema": _schema_for_tool(schema_for_model, RelayForwardRequest),
         },
         {
             "name": "memory.compaction_plan",
@@ -967,7 +1011,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/compact/run",
             "scopes": ["compact:trigger", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(CompactRequest),
+            "input_schema": _schema_for_tool(schema_for_model, CompactRequest),
         },
         {
             "name": "backup.create",
@@ -976,7 +1020,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/backup/create",
             "scopes": ["admin:peers", "write_namespaces"],
             "idempotent": False,
-            "input_schema": schema_for_model(BackupCreateRequest),
+            "input_schema": _schema_for_tool(schema_for_model, BackupCreateRequest),
         },
         {
             "name": "backup.restore_test",
@@ -985,7 +1029,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "path": "/v1/backup/restore-test",
             "scopes": ["admin:peers", "read_namespaces"],
             "idempotent": True,
-            "input_schema": schema_for_model(BackupRestoreTestRequest),
+            "input_schema": _schema_for_tool(schema_for_model, BackupRestoreTestRequest),
         },
         {
             "name": "ops.catalog",
@@ -1019,7 +1063,7 @@ def tool_catalog(schema_for_model: Callable[[Any], dict[str, Any]]) -> list[dict
             "scopes": ["admin:peers"],
             "idempotent": False,
             "local_only": True,
-            "input_schema": schema_for_model(OpsRunRequest),
+            "input_schema": _schema_for_tool(schema_for_model, OpsRunRequest),
         },
         {
             "name": "ops.schedule_export",
