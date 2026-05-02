@@ -597,6 +597,40 @@ class TestMcp216Slice2Runtime(unittest.TestCase):
 
         self.assertEqual(set(seen_names), set(expected_by_name))
 
+    def test_tools_list_inlines_top_level_structured_fields(self) -> None:
+        """MCP metadata must advertise structured payload fields as objects, not refs or strings."""
+        headers = {"authorization": self._CALLER_A_AUTH}
+        self._bootstrap(headers=headers)
+
+        response = self.client.post(
+            "/v1/mcp",
+            json={"jsonrpc": "2.0", "id": 1406, "method": "tools/list", "params": {}},
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        tools = response.json()["result"]["tools"]
+        by_name = {tool["name"]: tool for tool in tools}
+
+        upsert_schema = by_name["continuity.upsert"]["inputSchema"]
+        upsert_props = upsert_schema["properties"]
+        self.assertEqual(upsert_props["capsule"].get("type"), "object")
+        self.assertNotIn("$ref", upsert_props["capsule"])
+        snapshot_variants = upsert_props["session_end_snapshot"].get("anyOf", [])
+        self.assertEqual([variant.get("type") for variant in snapshot_variants], ["object", "null"])
+        self.assertTrue(all("$ref" not in variant for variant in snapshot_variants if isinstance(variant, dict)))
+
+        for tool in tools:
+            for field_name, field_schema in tool["inputSchema"].get("properties", {}).items():
+                if not isinstance(field_schema, dict):
+                    continue
+                self.assertNotIn("$ref", field_schema, f"{tool['name']}.{field_name}")
+                for keyword in ("anyOf", "oneOf", "allOf"):
+                    variants = field_schema.get(keyword)
+                    if isinstance(variants, list):
+                        for variant in variants:
+                            if isinstance(variant, dict):
+                                self.assertNotIn("$ref", variant, f"{tool['name']}.{field_name}.{keyword}")
+
     def test_tools_call_uses_exact_success_shape(self) -> None:
         """Successful non-help tools/call responses must expose only content and structuredContent."""
         headers = {"authorization": self._CALLER_A_AUTH}

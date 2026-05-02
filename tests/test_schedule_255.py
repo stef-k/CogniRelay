@@ -31,6 +31,13 @@ from tests.helpers import AllowAllAuthStub
 from tests.helpers import SimpleGitManagerStub
 
 
+FUTURE_DUE_AT = "2099-05-01T12:00:00Z"
+FUTURE_DUE_AT_TS = 4081320000
+FUTURE_DUE_AT_SECOND = "2099-05-02T12:00:00Z"
+FUTURE_DUE_AT_WITH_OFFSET = "2099-05-01T12:00:00+00:00"
+FUTURE_DUE_AT_CONFLICT = "2099-06-01T00:00:00Z"
+
+
 class _Row(dict):
     def keys(self):
         return super().keys()
@@ -55,8 +62,8 @@ def _valid_row(**overrides):
         status="pending",
         title="Existing",
         note=None,
-        due_at="2026-05-01T12:00:00Z",
-        due_at_ts=1777636800,
+        due_at=FUTURE_DUE_AT,
+        due_at_ts=FUTURE_DUE_AT_TS,
         created_at="2026-04-25T09:00:00Z",
         updated_at="2026-04-25T09:00:00Z",
         created_by="peer-alpha",
@@ -153,7 +160,7 @@ class Schedule255Tests(unittest.TestCase):
         payload = {
             "kind": "reminder",
             "title": "Check build",
-            "due_at": "2026-05-01T12:00:00Z",
+            "due_at": FUTURE_DUE_AT,
             "thread_id": "thread-1",
             "subject_kind": "thread",
             "subject_id": "thread-1",
@@ -206,7 +213,7 @@ class Schedule255Tests(unittest.TestCase):
         self.assertEqual(ctx.exception.detail["code"], "due_at_not_future")
 
         with self.assertRaises(HTTPException) as ctx2:
-            self._create(schedule_id="sched_conflict1", idempotency_key="idem-b", due_at="2026-06-01T00:00:00Z")
+            self._create(schedule_id="sched_conflict1", idempotency_key="idem-b", due_at=FUTURE_DUE_AT_CONFLICT)
         self.assertEqual(ctx2.exception.status_code, 409)
         self.assertEqual(ctx2.exception.detail["code"], "idempotency_key_conflict")
 
@@ -355,7 +362,7 @@ class Schedule255Tests(unittest.TestCase):
     def test_mcp_validation_returns_single_schedule_detail(self) -> None:
         detail = validate_schedule_mcp_arguments(
             "schedule.create",
-            {"kind": "reminder", "title": "ok", "due_at": "2026-05-01T12:00:00+00:00"},
+            {"kind": "reminder", "title": "ok", "due_at": FUTURE_DUE_AT_WITH_OFFSET},
         )
         self.assertEqual(detail["code"], "invalid_schedule_due_at")
         self.assertEqual(detail["field"], "due_at")
@@ -379,7 +386,7 @@ class Schedule255Tests(unittest.TestCase):
             ("INSERT", lambda fake: schedule_create_service(repo_root=self.repo_root, auth=self.auth, payload={
                 "kind": "reminder",
                 "title": "Check build",
-                "due_at": "2026-05-01T12:00:00Z",
+                "due_at": FUTURE_DUE_AT,
             })),
             ("UPDATE", lambda fake: schedule_update_service(
                 repo_root=self.repo_root,
@@ -423,7 +430,7 @@ class Schedule255Tests(unittest.TestCase):
                 payload={
                     "kind": "reminder",
                     "title": "Check build",
-                    "due_at": "2026-05-01T12:00:00Z",
+                    "due_at": FUTURE_DUE_AT,
                     "thread_id": "thread-1",
                 },
             )
@@ -498,17 +505,18 @@ class Schedule255Tests(unittest.TestCase):
         self.assertIn("schedule_row_invalid:sched_bad_actor", listed["warnings"])
         self.assertIn("schedule_row_invalid:sched_bad_link", listed["warnings"])
 
-        context = schedule_context_for_context_retrieve(
-            repo_root=self.repo_root,
-            auth=self.auth,
-            req=ContextRetrieveRequest(
-                task="resume",
-                continuity_selectors=[ContinuitySelector(subject_kind="thread", subject_id="thread-1")],
-            ),
-            due_limit=10,
-            upcoming_limit=5,
-            upcoming_window_hours=200,
-        )
+        with patch("app.schedule.service.iso_now", return_value=datetime(2099, 4, 25, 9, 0, 0, tzinfo=timezone.utc)):
+            context = schedule_context_for_context_retrieve(
+                repo_root=self.repo_root,
+                auth=self.auth,
+                req=ContextRetrieveRequest(
+                    task="resume",
+                    continuity_selectors=[ContinuitySelector(subject_kind="thread", subject_id="thread-1")],
+                ),
+                due_limit=10,
+                upcoming_limit=5,
+                upcoming_window_hours=200,
+            )
         self.assertEqual(context["upcoming"]["count"], 1)
         self.assertIn("schedule_rows_skipped", context["warnings"])
         self.assertIn("schedule_row_invalid:sched_bad_actor", context["warnings"])
@@ -609,7 +617,7 @@ class Schedule255Tests(unittest.TestCase):
             schedule_create_service(
                 repo_root=self.repo_root,
                 auth=_DenyAuth(deny_write=True),
-                payload={"kind": "reminder", "title": "Check", "due_at": "2026-05-01T12:00:00Z"},
+                payload={"kind": "reminder", "title": "Check", "due_at": FUTURE_DUE_AT},
             )
 
     def test_all_six_service_success_paths(self) -> None:
@@ -725,7 +733,7 @@ class Schedule255McpRuntimeTests(unittest.TestCase):
                     "schedule_id": "sched_mcp_success",
                     "kind": "reminder",
                     "title": "Check build",
-                    "due_at": "2026-05-01T12:00:00Z",
+                    "due_at": FUTURE_DUE_AT,
                     "thread_id": "thread-1",
                 },
             )["result"]["structuredContent"]
@@ -761,7 +769,7 @@ class Schedule255McpRuntimeTests(unittest.TestCase):
                     "schedule_id": "sched_mcp_retire",
                     "kind": "task_nudge",
                     "title": "Review task",
-                    "due_at": "2026-05-02T12:00:00Z",
+                    "due_at": FUTURE_DUE_AT_SECOND,
                     "task_id": "task-1",
                 },
             )
@@ -778,7 +786,7 @@ class Schedule255McpRuntimeTests(unittest.TestCase):
             self._bootstrap()
             malformed_due = self._call(
                 "schedule.create",
-                {"kind": "reminder", "title": "Check", "due_at": "2026-05-01T12:00:00+00:00"},
+                {"kind": "reminder", "title": "Check", "due_at": FUTURE_DUE_AT_WITH_OFFSET},
             )
             self.assertEqual(malformed_due["error"]["code"], -32602)
             self.assertEqual(malformed_due["error"]["data"]["reason"], "schema validation failed")
@@ -789,7 +797,7 @@ class Schedule255McpRuntimeTests(unittest.TestCase):
                 {
                     "kind": "reminder",
                     "title": "Check",
-                    "due_at": "2026-05-01T12:00:00Z",
+                    "due_at": FUTURE_DUE_AT,
                     "metadata": {"nested": {"bad": True}},
                 },
             )
@@ -806,7 +814,7 @@ class Schedule255McpRuntimeTests(unittest.TestCase):
                     "schedule_id": "sched_mcp_conflict",
                     "kind": "reminder",
                     "title": "Check",
-                    "due_at": "2026-05-01T12:00:00Z",
+                    "due_at": FUTURE_DUE_AT,
                 },
             )
 
@@ -823,7 +831,7 @@ class Schedule255McpRuntimeTests(unittest.TestCase):
                     "schedule_id": "sched_mcp_conflict",
                     "kind": "reminder",
                     "title": "Different",
-                    "due_at": "2026-05-02T12:00:00Z",
+                    "due_at": FUTURE_DUE_AT_SECOND,
                 },
             )
             self.assertEqual(conflict["error"]["code"], -32003)
@@ -838,7 +846,7 @@ class Schedule255McpRuntimeTests(unittest.TestCase):
             self._bootstrap()
             storage = self._call(
                 "schedule.create",
-                {"kind": "reminder", "title": "Check", "due_at": "2026-05-01T12:00:00Z"},
+                {"kind": "reminder", "title": "Check", "due_at": FUTURE_DUE_AT},
             )
             self.assertEqual(storage["error"]["code"], -32003)
             self.assertEqual(storage["error"]["data"]["detail"]["code"], "schedule_db_locked")

@@ -220,8 +220,7 @@ class TestContinuity217Slice3Limits(unittest.TestCase):
         continuity_schema = schema["$defs"][continuity_ref]
         rationale_ref = continuity_schema["properties"]["rationale_entries"]["items"]["$ref"].split("/")[-1]
         rationale_schema = schema["$defs"][rationale_ref]
-        snapshot_ref = schema["properties"]["session_end_snapshot"]["anyOf"][0]["$ref"].split("/")[-1]
-        snapshot_schema = schema["$defs"][snapshot_ref]
+        snapshot_schema = schema["properties"]["session_end_snapshot"]["anyOf"][0]
 
         self.assertEqual(continuity_schema["properties"]["top_priorities"]["maxItems"], 8)
         self.assertEqual(continuity_schema["properties"]["open_loops"]["maxItems"], 8)
