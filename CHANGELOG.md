@@ -7,6 +7,12 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.14] - 2026-05-08
+
+### Changed
+
+- Enforce continuity help before mutation
+
 ## [1.4.13] - 2026-05-02
 
 ### Changed
