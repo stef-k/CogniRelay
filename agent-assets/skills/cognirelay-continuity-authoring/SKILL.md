@@ -1,6 +1,6 @@
 ---
 name: cognirelay-continuity-authoring
-description: Use when maintaining CogniRelay continuity responsibly from an agent runtime. The agent authors semantic capsule meaning; hooks and adapters only read, gather facts, template, validate, diff,
+description: Use when maintaining CogniRelay continuity responsibly from an agent runtime. The agent authors semantic capsule meaning; hooks and adapters only read, gather facts, query runtime help, template, dry-run, diff,
   write, and read back.
 ---
 
@@ -24,21 +24,134 @@ Do not use retrieval output as a continuity write. Do not persist prompt text, t
 
 Graph and schedule sections are read-only orientation adjuncts. They can help the agent decide what to do next, but they are not capsule fields to copy mechanically.
 
+## Runtime Help Gate
+
+Before every continuity-authoring mutation handled by this skill, consult the live runtime help contract for the exact write tool about to be called. This mandatory gate is limited to mutation tools that the shipped runtime help system currently exposes: `continuity.upsert`, `schedule.create`, `schedule.update`, `schedule.acknowledge`, and `schedule.retire`.
+
+If a mutation tool is not exposed by `system.tool_usage` or `GET /v1/help/tools/{name}`, do not call it from this skill. Stop and report that no shipped runtime-help contract exists for that mutation. Proceed only if the user explicitly approves that specific unsupported-help mutation.
+
+For any mutation, first query exact tool usage:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"system.tool_usage","params":{"name":"<exact.mutation_tool>"}}
+```
+
+```http
+GET /v1/help/tools/<exact.mutation_tool>
+```
+
+Replace `<exact.mutation_tool>` with the exact shipped help tool name, for example `continuity.upsert` or `schedule.create`.
+
+For continuity payloads, also query the runtime limits index and targeted limits for every bounded or schema-sensitive field being authored or changed:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"system.validation_limits","params":{}}
+```
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"system.validation_limit","params":{"field_path":"continuity.session_trajectory"}}
+```
+
+```http
+GET /v1/help/limits
+GET /v1/help/limits/continuity.session_trajectory
+```
+
+Use MCP when operating through the runtime tool protocol:
+
+```json
+{"jsonrpc":"2.0","id":10,"method":"system.tool_usage","params":{"name":"continuity.upsert"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":11,"method":"system.tool_usage","params":{"name":"schedule.create"}}
+```
+
+Use HTTP when operating through REST:
+
+```http
+GET /v1/help/tools/continuity.upsert
+GET /v1/help/tools/schedule.create
+```
+
+Query targeted limits for every bounded field you plan to change. Common continuity authoring fields include:
+
+- `continuity.stance_summary`
+- `continuity.top_priorities`
+- `continuity.active_concerns`
+- `continuity.active_constraints`
+- `continuity.open_loops`
+- `continuity.drift_signals`
+- `continuity.session_trajectory`
+- `continuity.retrieval_hints.must_include`
+- `continuity.relationship_model.preferred_style`
+- `continuity.relationship_model.sensitivity_notes`
+- `continuity.attention_policy.presence_bias_overrides`
+- `continuity.capsule_serialized_utf8`
+
+If the runtime help lookup is unavailable or the target mutation is unsupported by shipped help, do not guess and do not mutate. Stop and report that runtime help is unavailable for that mutation. A degraded write is allowed only with explicit user approval for that specific mutation; when approved, name the skipped help calls, run the shipped hook `facts` output and local `dry-run` when applicable, then treat the mutation result as authoritative. If a mutation fails, query `system.error_guide` or `GET /v1/help/errors/{code}` before retrying.
+
 ## Save Flow
 
 Use `agent-assets/hooks/cognirelay_continuity_save_hook.py` after the agent has enough context to author a durable update.
 
 1. Run `facts` for mechanical subject/config/runtime facts and help links.
-2. Run `template` for a generic full `continuity.upsert` skeleton.
-3. Author semantic fields explicitly in the payload.
-4. Run `dry-run` to reject placeholders and inspect a candidate-only semantic diff.
-5. Run `write` only after the explicit agent-authored payload exists.
-6. Run `readback` or `doctor` to verify warnings, trust signals, and stored state.
+2. Query runtime help for `continuity.upsert` and runtime limits for every field you will author or mutate.
+3. Run `template` for a generic full `continuity.upsert` skeleton.
+4. Author semantic fields explicitly in the payload while staying inside the live field limits.
+5. Run `dry-run` to reject placeholders and inspect a candidate-only semantic diff.
+6. Run `write` only after the explicit agent-authored payload exists and the runtime help gate has been satisfied.
+7. Run `readback` or `doctor` to verify warnings, trust signals, and stored state.
+
+Example savepoint flow:
+
+```text
+system.tool_usage(name="continuity.upsert")
+system.validation_limits()
+system.validation_limit(field_path="continuity.stance_summary")
+system.validation_limit(field_path="continuity.active_concerns")
+system.validation_limit(field_path="continuity.session_trajectory")
+system.validation_limit(field_path="continuity.capsule_serialized_utf8")
+repeat system.validation_limit for every bounded or schema-sensitive field in the candidate payload
+agent-assets/hooks/cognirelay_continuity_save_hook.py template
+agent authors payload
+agent-assets/hooks/cognirelay_continuity_save_hook.py dry-run --input payload.json
+agent-assets/hooks/cognirelay_continuity_save_hook.py write --input payload.json
+agent-assets/hooks/cognirelay_continuity_save_hook.py readback
+```
+
+Example pre-compaction flow:
+
+```text
+GET /v1/help/tools/continuity.upsert
+GET /v1/help/limits
+GET /v1/help/limits/continuity.open_loops
+GET /v1/help/limits/continuity.top_priorities
+GET /v1/help/limits/continuity.active_constraints
+GET /v1/help/limits/continuity.stance_summary
+GET /v1/help/limits/continuity.capsule_serialized_utf8
+repeat GET /v1/help/limits/{field_path} for every bounded or schema-sensitive field in the candidate payload
+author compact payload from agent judgment
+dry-run
+write
+doctor
+```
+
+Unsupported mutation example:
+
+```text
+system.tool_usage(name="continuity.patch")
+runtime returns unsupported tool
+stop and report: no shipped runtime-help contract exists for continuity.patch
+do not call continuity.patch unless the user explicitly approves this unsupported-help mutation
+```
 
 ## Scheduling
 
 Agents may create one-shot reminders or task nudges through `schedule.create` or `POST /v1/schedule/items` only when the user or an explicit work plan needs future follow-up.
 
+- Before any schedule mutation, call `system.tool_usage` for the exact schedule tool or `GET /v1/help/tools/{name}` for the HTTP equivalent.
+- For schedule creation, query `schedule.create`; for changes, query `schedule.update`; for completion or acknowledgement, query `schedule.acknowledge`; for no-longer-relevant items, query `schedule.retire`.
 - Use UTC timestamps only.
 - Use `kind="reminder"` for general follow-up.
 - Use `kind="task_nudge"` only when linked to a task, thread, or subject.
@@ -49,4 +162,4 @@ Agents may create one-shot reminders or task nudges through `schedule.create` or
 
 ## Write Discipline
 
-Before saving, verify that the payload is bounded, durable, and agent-authored. Reject prompt dumping, transcript dumping, copied retrieval text, and automatic semantic inference. Treat warnings and degraded trust signals as operational input for the agent, not as hook-authored meaning.
+Before any mutation handled by this skill, verify through runtime help that the operation is allowed, bounded, durable, and agent-authored. Reject prompt dumping, transcript dumping, copied retrieval text, and automatic semantic inference. Treat warnings and degraded trust signals as operational input for the agent, not as hook-authored meaning. If a write fails, consult runtime error/help guidance before retrying; do not enter a blind edit/write loop.
