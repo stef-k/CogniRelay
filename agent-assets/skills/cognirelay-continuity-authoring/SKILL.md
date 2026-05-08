@@ -1,6 +1,6 @@
 ---
 name: cognirelay-continuity-authoring
-description: Use when maintaining CogniRelay continuity responsibly from an agent runtime. The agent authors semantic capsule meaning; hooks and adapters only read, gather facts, query runtime help, template, validate, diff,
+description: Use when maintaining CogniRelay continuity responsibly from an agent runtime. The agent authors semantic capsule meaning; hooks and adapters only read, gather facts, query runtime help, template, dry-run, diff,
   write, and read back.
 ---
 
@@ -162,4 +162,4 @@ Agents may create one-shot reminders or task nudges through `schedule.create` or
 
 ## Write Discipline
 
-Before any mutation, verify through runtime help that the operation is allowed, bounded, durable, and agent-authored. Reject prompt dumping, transcript dumping, copied retrieval text, and automatic semantic inference. Treat warnings and degraded trust signals as operational input for the agent, not as hook-authored meaning. If a write fails, consult runtime error/help guidance before retrying; do not enter a blind edit/write loop.
+Before any mutation handled by this skill, verify through runtime help that the operation is allowed, bounded, durable, and agent-authored. Reject prompt dumping, transcript dumping, copied retrieval text, and automatic semantic inference. Treat warnings and degraded trust signals as operational input for the agent, not as hook-authored meaning. If a write fails, consult runtime error/help guidance before retrying; do not enter a blind edit/write loop.
