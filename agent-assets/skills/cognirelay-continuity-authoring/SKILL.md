@@ -26,7 +26,9 @@ Graph and schedule sections are read-only orientation adjuncts. They can help th
 
 ## Runtime Help Gate
 
-Before every CogniRelay mutation, consult the live runtime help contract for the exact write tool or route about to be called. This is mandatory for `continuity.upsert`, `continuity.patch`, `continuity.lifecycle`, `continuity.revalidate`, `continuity.archive`, `continuity.delete`, `schedule.create`, `schedule.update`, `schedule.acknowledge`, `schedule.retire`, `coordination.handoff_create`, and any hook mode that will mutate CogniRelay state.
+Before every continuity-authoring mutation handled by this skill, consult the live runtime help contract for the exact write tool about to be called. This mandatory gate is limited to mutation tools that the shipped runtime help system currently exposes: `continuity.upsert`, `schedule.create`, `schedule.update`, `schedule.acknowledge`, and `schedule.retire`.
+
+If a mutation tool is not exposed by `system.tool_usage` or `GET /v1/help/tools/{name}`, do not call it from this skill. Stop and report that no shipped runtime-help contract exists for that mutation. Proceed only if the user explicitly approves that specific unsupported-help mutation.
 
 For any mutation, first query exact tool usage:
 
@@ -37,6 +39,8 @@ For any mutation, first query exact tool usage:
 ```http
 GET /v1/help/tools/<exact.mutation_tool>
 ```
+
+Replace `<exact.mutation_tool>` with the exact shipped help tool name, for example `continuity.upsert` or `schedule.create`.
 
 For continuity payloads, also query the runtime limits index and targeted limits for every bounded or schema-sensitive field being authored or changed:
 
@@ -60,24 +64,14 @@ Use MCP when operating through the runtime tool protocol:
 ```
 
 ```json
-{"jsonrpc":"2.0","id":11,"method":"system.tool_usage","params":{"name":"continuity.patch"}}
-```
-
-```json
-{"jsonrpc":"2.0","id":12,"method":"system.tool_usage","params":{"name":"schedule.create"}}
-```
-
-```json
-{"jsonrpc":"2.0","id":13,"method":"system.tool_usage","params":{"name":"coordination.handoff_create"}}
+{"jsonrpc":"2.0","id":11,"method":"system.tool_usage","params":{"name":"schedule.create"}}
 ```
 
 Use HTTP when operating through REST:
 
 ```http
 GET /v1/help/tools/continuity.upsert
-GET /v1/help/tools/continuity.patch
 GET /v1/help/tools/schedule.create
-GET /v1/help/tools/coordination.handoff_create
 ```
 
 Query targeted limits for every bounded field you plan to change. Common continuity authoring fields include:
@@ -95,7 +89,7 @@ Query targeted limits for every bounded field you plan to change. Common continu
 - `continuity.attention_policy.presence_bias_overrides`
 - `continuity.capsule_serialized_utf8`
 
-If the runtime help lookup is unavailable, do not guess and do not mutate. Stop and report that runtime help is unavailable. A degraded write is allowed only with explicit user approval for that specific mutation; when approved, name the skipped help calls, run the shipped hook `facts` output and local `dry-run` when applicable, then treat the mutation result as authoritative. If a mutation fails, query `system.error_guide` or `GET /v1/help/errors/{code}` before retrying.
+If the runtime help lookup is unavailable or the target mutation is unsupported by shipped help, do not guess and do not mutate. Stop and report that runtime help is unavailable for that mutation. A degraded write is allowed only with explicit user approval for that specific mutation; when approved, name the skipped help calls, run the shipped hook `facts` output and local `dry-run` when applicable, then treat the mutation result as authoritative. If a mutation fails, query `system.error_guide` or `GET /v1/help/errors/{code}` before retrying.
 
 ## Save Flow
 
@@ -143,37 +137,13 @@ write
 doctor
 ```
 
-Example patch flow:
+Unsupported mutation example:
 
 ```text
 system.tool_usage(name="continuity.patch")
-system.validation_limits()
-system.validation_limit(field_path="patch.operations")
-system.validation_limit(field_path="patch.target.continuity.open_loops")
-system.validation_limit(field_path="continuity.patch.updated_at")
-author patch operations from agent judgment
-call continuity.patch
-read back the patched subject
-```
-
-Example lifecycle flow:
-
-```text
-system.tool_usage(name="continuity.lifecycle")
-author lifecycle transition only when the existing thread or task identity should move state
-call continuity.lifecycle
-read back the subject lifecycle
-```
-
-Example handoff flow:
-
-```text
-system.tool_usage(name="continuity.upsert")
-system.validation_limits()
-targeted continuity limits for the local savepoint payload
-write/readback local continuity first
-system.tool_usage(name="coordination.handoff_create")
-call coordination.handoff_create only after the local continuity step succeeds
+runtime returns unsupported tool
+stop and report: no shipped runtime-help contract exists for continuity.patch
+do not call continuity.patch unless the user explicitly approves this unsupported-help mutation
 ```
 
 ## Scheduling
