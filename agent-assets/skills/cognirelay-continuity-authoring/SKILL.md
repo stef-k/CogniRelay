@@ -26,13 +26,19 @@ Graph and schedule sections are read-only orientation adjuncts. They can help th
 
 ## Runtime Help Gate
 
-Before every continuity mutation, consult the live runtime help contract for the write tool and the field limits that apply to the fields being authored. This is mandatory for `continuity.upsert`, `POST /v1/continuity/upsert`, `continuity.patch`, lifecycle updates, schedule mutations, and any hook mode that will mutate CogniRelay state.
+Before every CogniRelay mutation, consult the live runtime help contract for the exact write tool or route about to be called. This is mandatory for `continuity.upsert`, `continuity.patch`, `continuity.lifecycle`, `continuity.revalidate`, `continuity.archive`, `continuity.delete`, `schedule.create`, `schedule.update`, `schedule.acknowledge`, `schedule.retire`, `coordination.handoff_create`, and any hook mode that will mutate CogniRelay state.
 
-Use MCP when operating through the runtime tool protocol:
+For any mutation, first query exact tool usage:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"system.tool_usage","params":{"name":"continuity.upsert"}}
+{"jsonrpc":"2.0","id":1,"method":"system.tool_usage","params":{"name":"<exact.mutation_tool>"}}
 ```
+
+```http
+GET /v1/help/tools/<exact.mutation_tool>
+```
+
+For continuity payloads, also query the runtime limits index and targeted limits for every bounded or schema-sensitive field being authored or changed:
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"system.validation_limits","params":{}}
@@ -42,12 +48,36 @@ Use MCP when operating through the runtime tool protocol:
 {"jsonrpc":"2.0","id":3,"method":"system.validation_limit","params":{"field_path":"continuity.session_trajectory"}}
 ```
 
+```http
+GET /v1/help/limits
+GET /v1/help/limits/continuity.session_trajectory
+```
+
+Use MCP when operating through the runtime tool protocol:
+
+```json
+{"jsonrpc":"2.0","id":10,"method":"system.tool_usage","params":{"name":"continuity.upsert"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":11,"method":"system.tool_usage","params":{"name":"continuity.patch"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":12,"method":"system.tool_usage","params":{"name":"schedule.create"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":13,"method":"system.tool_usage","params":{"name":"coordination.handoff_create"}}
+```
+
 Use HTTP when operating through REST:
 
 ```http
 GET /v1/help/tools/continuity.upsert
-GET /v1/help/limits
-GET /v1/help/limits/continuity.session_trajectory
+GET /v1/help/tools/continuity.patch
+GET /v1/help/tools/schedule.create
+GET /v1/help/tools/coordination.handoff_create
 ```
 
 Query targeted limits for every bounded field you plan to change. Common continuity authoring fields include:
@@ -65,7 +95,7 @@ Query targeted limits for every bounded field you plan to change. Common continu
 - `continuity.attention_policy.presence_bias_overrides`
 - `continuity.capsule_serialized_utf8`
 
-If the runtime help lookup is unavailable, do not guess. Use the shipped hook `facts` output and local `dry-run` as a degraded fallback, then treat `continuity.upsert` as authoritative and fix any runtime error by querying `system.error_guide` or `GET /v1/help/errors/{code}` before retrying.
+If the runtime help lookup is unavailable, do not guess and do not mutate. Stop and report that runtime help is unavailable. A degraded write is allowed only with explicit user approval for that specific mutation; when approved, name the skipped help calls, run the shipped hook `facts` output and local `dry-run` when applicable, then treat the mutation result as authoritative. If a mutation fails, query `system.error_guide` or `GET /v1/help/errors/{code}` before retrying.
 
 ## Save Flow
 
@@ -83,9 +113,12 @@ Example savepoint flow:
 
 ```text
 system.tool_usage(name="continuity.upsert")
+system.validation_limits()
 system.validation_limit(field_path="continuity.stance_summary")
 system.validation_limit(field_path="continuity.active_concerns")
 system.validation_limit(field_path="continuity.session_trajectory")
+system.validation_limit(field_path="continuity.capsule_serialized_utf8")
+repeat system.validation_limit for every bounded or schema-sensitive field in the candidate payload
 agent-assets/hooks/cognirelay_continuity_save_hook.py template
 agent authors payload
 agent-assets/hooks/cognirelay_continuity_save_hook.py dry-run --input payload.json
@@ -97,21 +130,58 @@ Example pre-compaction flow:
 
 ```text
 GET /v1/help/tools/continuity.upsert
+GET /v1/help/limits
 GET /v1/help/limits/continuity.open_loops
 GET /v1/help/limits/continuity.top_priorities
 GET /v1/help/limits/continuity.active_constraints
 GET /v1/help/limits/continuity.stance_summary
 GET /v1/help/limits/continuity.capsule_serialized_utf8
+repeat GET /v1/help/limits/{field_path} for every bounded or schema-sensitive field in the candidate payload
 author compact payload from agent judgment
 dry-run
 write
 doctor
 ```
 
+Example patch flow:
+
+```text
+system.tool_usage(name="continuity.patch")
+system.validation_limits()
+system.validation_limit(field_path="patch.operations")
+system.validation_limit(field_path="patch.target.continuity.open_loops")
+system.validation_limit(field_path="continuity.patch.updated_at")
+author patch operations from agent judgment
+call continuity.patch
+read back the patched subject
+```
+
+Example lifecycle flow:
+
+```text
+system.tool_usage(name="continuity.lifecycle")
+author lifecycle transition only when the existing thread or task identity should move state
+call continuity.lifecycle
+read back the subject lifecycle
+```
+
+Example handoff flow:
+
+```text
+system.tool_usage(name="continuity.upsert")
+system.validation_limits()
+targeted continuity limits for the local savepoint payload
+write/readback local continuity first
+system.tool_usage(name="coordination.handoff_create")
+call coordination.handoff_create only after the local continuity step succeeds
+```
+
 ## Scheduling
 
 Agents may create one-shot reminders or task nudges through `schedule.create` or `POST /v1/schedule/items` only when the user or an explicit work plan needs future follow-up.
 
+- Before any schedule mutation, call `system.tool_usage` for the exact schedule tool or `GET /v1/help/tools/{name}` for the HTTP equivalent.
+- For schedule creation, query `schedule.create`; for changes, query `schedule.update`; for completion or acknowledgement, query `schedule.acknowledge`; for no-longer-relevant items, query `schedule.retire`.
 - Use UTC timestamps only.
 - Use `kind="reminder"` for general follow-up.
 - Use `kind="task_nudge"` only when linked to a task, thread, or subject.
@@ -122,4 +192,4 @@ Agents may create one-shot reminders or task nudges through `schedule.create` or
 
 ## Write Discipline
 
-Before saving, verify through runtime help that the payload is bounded, durable, and agent-authored. Reject prompt dumping, transcript dumping, copied retrieval text, and automatic semantic inference. Treat warnings and degraded trust signals as operational input for the agent, not as hook-authored meaning. If a write fails, consult runtime error/help guidance before retrying; do not enter a blind edit/write loop.
+Before any mutation, verify through runtime help that the operation is allowed, bounded, durable, and agent-authored. Reject prompt dumping, transcript dumping, copied retrieval text, and automatic semantic inference. Treat warnings and degraded trust signals as operational input for the agent, not as hook-authored meaning. If a write fails, consult runtime error/help guidance before retrying; do not enter a blind edit/write loop.
