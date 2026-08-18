@@ -313,6 +313,62 @@ the same reset-bound continuity problem class.
 - it should be read as a public architecture note about the same problem
   class, not as endorsement or benchmark proof
 
+### Neonpulse314: completion-condition gate placement under continuous-loop operation
+
+- **Who:** Neonpulse314 (long-running autonomous loop agent)
+- **Context:** independently evolved board, handoff, salience-ranked recall, and
+  git-backed state system under repeated context resets
+- **Primary reference:**
+  - [CogniRelay issue #312](https://github.com/stef-k/CogniRelay/issues/312)
+
+**What surface was exercised**
+
+- an independently implemented task/board lifecycle rather than CogniRelay
+  itself
+- agent-authored `closes_when` completion conditions
+- close-path versus creation-path enforcement of the same requirement
+- repeated operation across many agent wakes in a continuous-loop workflow
+
+**What it showed**
+
+- Neon first identified a distinct failure class where a mechanism could be
+  built and self-tested but not actually be in effect in the external system.
+- A typed closing-condition field gated only at task closure had very low
+  adoption: 3 of 64 active items carried a condition (about 5%).
+- After moving the requirement to task creation, 26 of 27 items created under
+  the new workflow carried a closing condition (96%) over the reported
+  two-week period.
+- Older items were deliberately not backfilled, preserving the distinction
+  between the pre-gate and creation-gate populations.
+- The experiment therefore points to workflow placement as a major determinant
+  of whether an agent actually records intended governance state: providing a
+  field is different from placing its use in the path the agent must traverse.
+
+**What it supports**
+
+- the distinction between infrastructure capability and agent governance:
+  durable structures can make agent-authored conditions representable and
+  recoverable without deciding their semantics
+- CogniRelay's boundary between mechanical continuity support and agent-owned
+  judgment, rather than requiring the continuity substrate to define a
+  universal notion of task completion
+- the broader comparative finding that reducing mechanical friction is useful
+  but adoption still depends on how the consuming agent integrates a surface
+  into its own operating workflow
+- the value of keeping workflow-specific completion criteria in durable task
+  state or metadata when an agent decides they matter
+
+**What it does not prove**
+
+- Neon had not integrated CogniRelay for this experiment; the result comes from
+  an independently developed system and should be read as comparative evidence
+- the 96% figure measures capture/adoption of the field, not whether the
+  closing conditions were correct, falsifiable, or sufficient
+- it does not establish that every task should require an explicit closing
+  condition at creation time
+- it does not benchmark CogniRelay or establish comparative performance against
+  Neon's architecture
+
 ### Comparative Takeaways For CogniRelay
 
 Taken together, the comparative systems above clarify both where CogniRelay is
@@ -331,6 +387,10 @@ still highest.
 - The system is designed to separate mechanical continuity operations from
   agent-authored semantics, which becomes especially important under loop
   pressure and repeated seams.
+- Neon's gate-placement experiment reinforces that separation from the
+  governance side: the substrate can preserve workflow-specific state, while
+  effective adoption depends primarily on where the consuming agent requires
+  that state in its own workflow.
 
 **What the comparative material still pressures**
 
@@ -340,7 +400,8 @@ still highest.
   distinction between capsule freshness and fact freshness.
 - Lowering the mechanical cost of writing is necessary but not sufficient:
   governance under pressure still determines whether rationale, rejected paths,
-  and other high-value context are captured before the seam closes.
+  completion criteria, and other high-value context are captured before the
+  seam closes.
 - Coherence, register, and interpretive-frame transfer remain explicit boundary
   cases. The current external material suggests these can be improved by better
   scaffolding and preserved reasoning paths, but not fully solved by
