@@ -1,3 +1,7 @@
-theme: jekyll-theme-primer
+remote_theme: stef-k/.github@main
+
+plugins:
+  - jekyll-remote-theme
+
 title: CogniRelay
 description: Self-hosted continuity and collaboration substrate for autonomous agents.
