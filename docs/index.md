@@ -19,6 +19,11 @@ the [README](https://github.com/stef-k/CogniRelay/blob/main/README.md).
 
 ## Installation Paths
 
+Before either install path, update host CA certificates and authenticate the
+venv's first pip download using the pinned bootstrap in the
+[Python TLS audit and recovery guide](python-tls-security.md). Apply the same
+bootstrap to existing venvs before upgrading packages.
+
 Source and GitHub release installs use a virtual environment, `pip install -r
 requirements.txt`, and `python -m uvicorn app.main:app --host 127.0.0.1 --port
 8080`.

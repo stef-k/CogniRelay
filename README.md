@@ -158,7 +158,7 @@ Validate `server.json` against the MCP Registry schema before publication:
 
 Tests are in `tests/`. Discovery and manifest behavior are covered in `tests/test_discovery.py`.
 
-Install development-only tooling with:
+After the pinned pip bootstrap in Quick Start, install development-only tooling with:
 
 ```bash
 python -m pip install -r requirements-dev.txt
