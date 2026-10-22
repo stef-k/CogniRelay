@@ -94,7 +94,9 @@ Source or GitHub release installs keep the existing deployment model:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -I -m pip --isolated --disable-pip-version-check install --no-index --no-deps --no-cache-dir --upgrade \
+  "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+python -m pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --host 127.0.0.1 --port 8080 --reload
 ```
@@ -102,10 +104,16 @@ uvicorn app.main:app --host 127.0.0.1 --port 8080 --reload
 PyPI installs use the thin package wrapper and the same `app.main:app` runtime:
 
 ```bash
-pip install cognirelay
+python3 -m venv .venv
+source .venv/bin/activate
+python -I -m pip --isolated --disable-pip-version-check install --no-index --no-deps --no-cache-dir --upgrade \
+  "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+python -m pip install cognirelay
 export COGNIRELAY_REPO_ROOT=/var/lib/cognirelay/data_repo
 cognirelay serve --host 127.0.0.1 --port 8080
 ```
+
+Update host CA certificates before installation. The pinned bootstrap authenticates pip's first download; normal dependency downloads then use patched pip. See the [Python TLS audit and recovery guidance](docs/python-tls-security.md) for existing environments and custom trust stores. Use a venv with Ubuntu-managed Python; do not replace the system pip.
 
 `COGNIRELAY_REPO_ROOT` must point to a durable writable directory outside `site-packages` and outside installed package files for PyPI or MCP Registry starts. The default `./data_repo` is for local/manual development only.
 
@@ -138,7 +146,7 @@ For shell-based agent hooks, the [CLI client](docs/cognirelay-client.md) (`tools
 
 For agent integration details, including the MCP bootstrap flow and tool mapping, see [docs/mcp.md](docs/mcp.md).
 
-PyPI and MCP Registry metadata provide discoverability and a runnable local install path. This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. Maintainers must verify the `cognirelay` PyPI package name before the first upload.
+PyPI and MCP Registry metadata provide discoverability and a runnable local install path. This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. The [release guide](docs/releasing.md) describes the manual GitHub Actions trusted-publishing workflow and its PyPI identity.
 
 Validate `server.json` against the MCP Registry schema before publication:
 
@@ -150,10 +158,10 @@ Validate `server.json` against the MCP Registry schema before publication:
 
 Tests are in `tests/`. Discovery and manifest behavior are covered in `tests/test_discovery.py`.
 
-Install development-only tooling with:
+After the pinned pip bootstrap in Quick Start, install development-only tooling with:
 
 ```bash
-pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt
 ```
 
 Local quality commands:

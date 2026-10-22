@@ -1,0 +1,110 @@
+# Manually publish a reviewed, merged release tag through PyPI's OIDC identity.
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v1.4.15
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize each release; never cancel an upload already in progress.
+concurrency:
+  group: pypi-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'stef-k/CogniRelay' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    outputs:
+      wheel_sha256: ${{ steps.distributions.outputs.wheel_sha256 }}
+      sdist_sha256: ${{ steps.distributions.outputs.sdist_sha256 }}
+    steps:
+      - name: Validate tag syntax
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a merged release
+        run: git merge-base --is-ancestor HEAD origin/main
+      - name: Bootstrap trusted build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates python3-venv
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/python -I -m pip --isolated --disable-pip-version-check install --no-index --no-deps --no-cache-dir --upgrade \
+            "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+          .venv/bin/python -m pip install -r requirements-dev.txt
+      - name: Verify release contract and run tests
+        run: |
+          release_date=$(sed -n 's/^Release date: //p' "docs/releases/$RELEASE_TAG.md")
+          .venv/bin/python tools/prepare_release.py check --version "${RELEASE_TAG#v}" --date "$release_date"
+          .venv/bin/python tools/validate_server_json.py
+          .venv/bin/python -m ruff check app tests tools agent-assets
+          .venv/bin/python -m unittest discover -s tests -v
+      - name: Build and check distributions
+        id: distributions
+        run: |
+          .venv/bin/python -m build --outdir "$RUNNER_TEMP/distributions"
+          .venv/bin/python -m twine check "$RUNNER_TEMP"/distributions/*
+          sha256sum "$RUNNER_TEMP"/distributions/*
+          wheel="$RUNNER_TEMP/distributions/cognirelay-${RELEASE_TAG#v}-py3-none-any.whl"
+          sdist="$RUNNER_TEMP/distributions/cognirelay-${RELEASE_TAG#v}.tar.gz"
+          echo "wheel_sha256=$(sha256sum "$wheel" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sdist_sha256=$(sha256sum "$sdist" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: distributions
+          path: ${{ runner.temp }}/distributions/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Isolate the short-lived publishing identity from source execution and tests.
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/cognirelay/
+    permissions:
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: distributions
+          path: ${{ runner.temp }}/distributions
+      - name: Require the exact distributions checked by the build job
+        env:
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel_sha256 }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist_sha256 }}
+        run: |
+          printf '%s  %s\n' \
+            "$WHEEL_SHA256" "$RUNNER_TEMP/distributions/cognirelay-${RELEASE_TAG#v}-py3-none-any.whl" \
+            "$SDIST_SHA256" "$RUNNER_TEMP/distributions/cognirelay-${RELEASE_TAG#v}.tar.gz" | sha256sum --check --strict
+      - name: Bootstrap trusted upload tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates python3-venv
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/publish-venv"
+          "$RUNNER_TEMP/publish-venv/bin/python" -I -m pip --isolated --disable-pip-version-check install --no-index --no-deps --no-cache-dir --upgrade \
+            "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+          "$RUNNER_TEMP/publish-venv/bin/python" -m pip install 'twine>=6.2,<7' 'certifi>=2026.10.19'
+      - name: Upload with Twine's native trusted publishing
+        env:
+          # No stored credentials; Twine exchanges the ambient GitHub OIDC token.
+          PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+        run: |
+          "$RUNNER_TEMP/publish-venv/bin/python" -m twine upload --non-interactive \
+            "$RUNNER_TEMP/distributions/cognirelay-${RELEASE_TAG#v}-py3-none-any.whl" \
+            "$RUNNER_TEMP/distributions/cognirelay-${RELEASE_TAG#v}.tar.gz"

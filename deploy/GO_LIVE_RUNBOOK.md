@@ -41,7 +41,7 @@ What it does:
 sudo apt-get update
 sudo apt-get install -y \
   python3 python3-venv python3-pip \
-  curl jq git rsync openssl ufw nginx \
+  ca-certificates curl jq git rsync openssl ufw nginx \
   certbot python3-certbot-nginx
 ```
 
@@ -62,9 +62,19 @@ sudo rsync -a --delete /path/to/CogniRelay/ /opt/cognirelay/
 sudo chown -R cognirelay:cognirelay /opt/cognirelay
 
 sudo -u cognirelay python3 -m venv /opt/cognirelay/.venv
-sudo -u cognirelay /opt/cognirelay/.venv/bin/pip install --upgrade pip
-sudo -u cognirelay /opt/cognirelay/.venv/bin/pip install -r /opt/cognirelay/requirements.txt
+sudo -u cognirelay /opt/cognirelay/.venv/bin/python -I -m pip --isolated --disable-pip-version-check install --no-index --no-deps --no-cache-dir --upgrade \
+  "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+sudo -u cognirelay /opt/cognirelay/.venv/bin/python -m pip install -r /opt/cognirelay/requirements.txt
 ```
+
+Apply distribution security updates to `ca-certificates` before installation.
+The first Python download is a SHA-256-authenticated pip 26.2.2 wheel, followed
+by dependency installation through patched pip. A failed hash check stops the
+automated script before requirements, credentials, or service activation.
+For an existing venv, run the same pinned command with its Python. Do not
+upgrade Ubuntu's system pip or use `--break-system-packages`. See the
+[TLS audit and recovery guide](../docs/python-tls-security.md) for host trust,
+release builds, custom CA overrides, and existing-environment maintenance.
 
 ### 3.4 Environment file
 

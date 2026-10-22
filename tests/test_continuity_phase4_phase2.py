@@ -703,7 +703,8 @@ class TestContinuityPhase4Phase2(unittest.TestCase):
                 audit_log_enabled=True,
             )
 
-            with patch("app.main._services", return_value=(settings, SimpleGitManagerStub(repo_root))):
+            with patch("app.main._services", return_value=(settings, SimpleGitManagerStub(repo_root))), patch("app.main.datetime") as route_clock:
+                route_clock.now.return_value = now
                 out = context_retrieve(
                     req=ContextRetrieveRequest(task=sensitive_task, subject_kind="user", subject_id="stef", limit=3),
                     auth=_AuthStub(),
