@@ -24,7 +24,10 @@ The corresponding GitHub environment is `pypi`. Restrict its deployment
 branches to `main`. No PyPI API token or repository secret is needed.
 The upload job alone has `id-token: write`; it does not check out or execute
 project source. Twine >=6.2 performs the OIDC exchange natively, using
-certifi >=2026.10.19. Both jobs authenticate their first pip wheel download
+certifi >=2026.10.19. The upload job verifies both distribution hashes against
+the build job's outputs and uploads only those two named files; an artifact
+download digest warning cannot bypass this check.
+Both jobs authenticate their first pip wheel download
 before installing tooling. The publisher setup itself requires PyPI project
 owner access; a GitHub credential cannot register it on PyPI.
 
