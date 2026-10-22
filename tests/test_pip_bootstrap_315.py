@@ -24,6 +24,7 @@ class PipBootstrap315Tests(unittest.TestCase):
         return shlex.split(line)[3:]
 
     def test_first_download_is_only_the_authenticated_pip_wheel(self) -> None:
+        """Keep the first install independent of package indexes and old CA trust."""
         command = self.bootstrap_command()
         self.assertTrue(command[0].endswith("/.venv/bin/python"))
         self.assertEqual(command[1:7], ["-I", "-m", "pip", "--isolated", "--disable-pip-version-check", "install"])
@@ -33,6 +34,7 @@ class PipBootstrap315Tests(unittest.TestCase):
                          f"pip-26.2.2-py3-none-any.whl#sha256={PIP_SHA256}")
 
     def test_tampered_bootstrap_aborts_before_next_install(self) -> None:
+        """Reject substituted wheel bytes before any subsequent installation."""
         command = self.bootstrap_command()
         self.assertIn(f"#sha256={PIP_SHA256}", command[-1])
         with tempfile.TemporaryDirectory() as td:

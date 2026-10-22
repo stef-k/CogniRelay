@@ -7,6 +7,8 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.15] - 2026-10-23
+
 ### Security
 
 - Authenticate the first deployment/install pip download with the advisory's
