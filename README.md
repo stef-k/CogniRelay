@@ -146,7 +146,7 @@ For shell-based agent hooks, the [CLI client](docs/cognirelay-client.md) (`tools
 
 For agent integration details, including the MCP bootstrap flow and tool mapping, see [docs/mcp.md](docs/mcp.md).
 
-PyPI and MCP Registry metadata provide discoverability and a runnable local install path. This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. Maintainers must verify the `cognirelay` PyPI package name before the first upload.
+PyPI and MCP Registry metadata provide discoverability and a runnable local install path. This package starts a local Streamable HTTP server only; it does not provide stdio transport or a hosted default CogniRelay service. GitHub Releases remain the canonical human release notes. Manual release publication order is: merge release prep, build, run `twine check`, upload to PyPI, publish or submit `server.json` to the MCP Registry, then create or update the GitHub Release as applicable. The [release guide](docs/releasing.md) describes the manual GitHub Actions trusted-publishing workflow and its PyPI identity.
 
 Validate `server.json` against the MCP Registry schema before publication:
 

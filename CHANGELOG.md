@@ -15,6 +15,8 @@ It follows the [Keep a Changelog](https://keepachangelog.com/) format.
   pinned pip 26.2.2 wheel and SHA-256 before fetching dependencies (#315).
 - Require incident-corrected certifi for development/release HTTP clients;
   document system-store runtime TLS, existing-venv recovery, and artifact scope.
+- Add a manually dispatched PyPI trusted-publishing workflow with authenticated
+  tooling bootstrap and separate build/upload jobs.
 
 ## [1.4.14] - 2026-05-08
 
