@@ -1,4 +1,6 @@
 -r requirements.txt
+# HTTPX and Twine use certifi; require the incident-corrected trust bundle.
+certifi>=2026.10.19
 httpx>=0.27,<1
 ruff>=0.11,<1
 build>=1.2,<2

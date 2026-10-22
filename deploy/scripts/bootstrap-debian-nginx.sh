@@ -104,7 +104,7 @@ echo "[1/9] Installing packages"
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3 python3-venv python3-pip \
-  curl jq git rsync openssl ufw nginx \
+  ca-certificates curl jq git rsync openssl ufw nginx \
   certbot python3-certbot-nginx
 
 echo "[2/9] Creating user and directories"
@@ -128,8 +128,11 @@ chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR"
 
 echo "[4/9] Creating virtualenv and installing requirements"
 sudo -u "$SERVICE_USER" python3 -m venv "$APP_DIR/.venv"
-sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --upgrade pip
-sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+# Authenticate the first Python download even when ensurepip seeded an old CA bundle.
+# Source and SHA-256: Python packaging's October 2026 eMudhra incident advisory.
+sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/python" -I -m pip --isolated --disable-pip-version-check install --no-index --no-deps --no-cache-dir --upgrade \
+  "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 
 echo "[5/9] Configuring environment"
 if [[ ! -f "$ENV_FILE" ]]; then
