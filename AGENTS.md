@@ -1,18 +1,14 @@
 # CogniRelay Repository Guidance
 
-This file captures repo-specific workflow and hygiene rules for changes in this codebase.
+This file adds CogniRelay-specific requirements and exceptions to the global development policy.
 
-## Branching and Git Safety
+## Additional Development Requirements
 
-- Never do feature work directly on `main`.
-- Start each non-trivial change on a dedicated branch.
 - Create an early safety checkpoint commit before multi-file work.
-- Keep branch history recoverable with small checkpoint commits during long refactors.
-- Use `gh` for GitHub issue and PR operations.
+- Add or update docstrings when touching public Python modules, classes, and functions.
 
 ## PR and Issue Hygiene
 
-- Keep refactors and features in small, reviewable PRs.
 - Use `Refs #<issue>` when the PR only tracks or partially addresses an issue.
 - Use `Closes #<issue>` or `Fixes #<issue>` when merging the PR should automatically close the issue.
 - Include the exact verification commands used in the PR body.
@@ -20,9 +16,8 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 
 ## Testing Expectations
 
-- Run targeted tests while implementing a slice.
 - Before merge, run the full suite:
-  - `./.venv/bin/python -m unittest discover -s tests -v`
+  `./.venv/bin/python -m unittest discover -s tests -v`.
 - If a refactor changes module boundaries, update tests that patch internal implementation points so they target the extracted module instead of `app.main`.
 
 ## Architecture Boundaries
@@ -31,25 +26,13 @@ This file captures repo-specific workflow and hygiene rules for changes in this 
 - Domain logic belongs in the extracted modules under `app/<domain>/service.py`.
 - Preserve the public API surface unless the issue explicitly allows API changes.
 - Prefer extracting existing logic over introducing new abstractions.
+- Behavior-preserving refactors should not intentionally change endpoint semantics.
 
 ## Tooling
 
 - The project currently uses `.venv` and `requirements.txt`.
 - Run the repo-standard Ruff command before each commit and again before opening a PR.
 - Do not mix broad tooling churn into feature or refactor PRs unless the issue is specifically about tooling.
-
-## Documentation
-
-- Add or update docstrings when touching public modules, classes, and functions.
-- Keep docstrings concise and aligned with actual behavior.
-- Do not add speculative comments about future behavior.
-
-## Change Discipline
-
-- Behavior-preserving refactors should not intentionally change endpoint semantics.
-- Keep changes scoped to the active issue.
-- Add targeted regression tests when moving risky logic.
-- Favor clarity and explicit wiring over clever indirection.
 
 ## Continuity Resilience
 
